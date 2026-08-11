@@ -1,0 +1,38 @@
+name: Release
+
+# release-please maintains a release PR on every push to main. When that PR is
+# merged, release-please creates the git tag + GitHub release, sets
+# release_created=true, and the image job then builds & pushes the release image.
+#
+# Why the image push is chained here (not a separate tag-triggered workflow):
+# release-please creates the tag with the default GITHUB_TOKEN, and tags pushed by
+# GITHUB_TOKEN do NOT trigger `on: push: tags` workflows (Actions recursion guard).
+# So the image push must run in THIS run, gated on release_created and fed tag_name.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Release Please
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
+
+  image:
+    name: Build and push release image
+    needs: [release-please]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@main
+    with:
+      image-name: ${{ github.repository }}
+      push-release: true
+      release-tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit

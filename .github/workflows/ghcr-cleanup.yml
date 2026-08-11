@@ -1,0 +1,17 @@
+name: GHCR Cleanup
+
+# Prune untagged (dangling) image versions weekly; keeps the most recent tagged
+# release versions. Also runnable on demand via the Actions tab.
+on:
+  schedule:
+    - cron: "0 4 * * 0" # weekly, Sunday 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    uses: s3ntin3l8/.github/.github/workflows/ghcr-cleanup.yml@main
+    with:
+      package-name: branchdam

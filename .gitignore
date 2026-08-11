@@ -1,0 +1,55 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.txt
+junit.xml
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Build output
+/dist/
+/out/
+/tmp/
+
+# Frontend
+/web/node_modules/
+/web/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config and data with secrets — use config.example.yaml / .env.example instead
+config.yaml
+.env
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Pre-commit
+.pre-commit-config.yaml.backup
+
+# Claude Code project state (plans, worktrees, local settings)
+.claude/

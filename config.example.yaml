@@ -1,0 +1,51 @@
+# branchDAM configuration — example.
+#
+# Copy to config.yaml and edit. Values may reference the environment with
+# ${VAR}; keep real secrets (BRANCHDAM_AGENT_API_KEY, etc.) in a gitignored
+# .env, never in this file. An unset ${VAR} is left as literal text rather
+# than silently emptied, so a typo'd variable name fails loudly.
+
+listenAddr: ":8080"
+logLevel: info
+
+database:
+  path: /data/branchdam.db
+
+http:
+  readTimeoutSecs: 15
+  writeTimeoutSecs: 15
+
+workers:
+  hashWorkers: 0                  # 0 = auto (min(4, NumCPU)); hashing is I/O
+                                   # bound on a NAS, going wide thrashes disks
+  fullHashPolicy: tier3_and_collision   # always | tier3_and_collision | never
+
+agent:
+  # Machine-principal key for /api/v1/agent/* routes, which bypass Authentik
+  # ForwardAuth at the Traefik layer (see docs/forward-auth.md). Must be at
+  # least 32 characters or agent routes fail closed with 503.
+  apiKey: ${BRANCHDAM_AGENT_API_KEY}
+
+# One entry per mounted storage tier. Tier must be one of:
+#   TIER0_LOCAL_STAGING, TIER1_LOCAL_SCRATCH, TIER2_EXPORTS,
+#   TIER3_MASTER_ARCHIVE, PROJECTS
+# storage.Guard (PR 2) reads tier/readOnly from the seeded storage_locations
+# table, never from a hardcoded path prefix — see docs/schema.md fix #1.
+storageLocations:
+  - name: archive
+    rootPath: /storage/archive
+    tier: TIER3_MASTER_ARCHIVE
+    readOnly: true                # enforced in the DB CHECK too; Tier 3 is always read-only
+
+  - name: exports
+    rootPath: /storage/exports
+    tier: TIER2_EXPORTS
+
+  - name: projects
+    rootPath: /storage/projects
+    tier: PROJECTS
+
+  - name: scratch
+    rootPath: /storage/scratch
+    tier: TIER1_LOCAL_SCRATCH
+    prunable: true                # only Tier 1 may be prunable

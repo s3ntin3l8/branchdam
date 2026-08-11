@@ -1,0 +1,59 @@
+# Standard Go pre-commit config (from s3ntin3l8/.github blueprints/go/pre-commit.yaml),
+# plus a schema-drift guard specific to this repo (see internal/db).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: gofmt
+        entry: bash -c 'test -z "$(gofmt -l $(git ls-files "*.go"))"'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'bash .github/ci-prebuild.sh && go vet ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy (check)
+        entry: bash -c 'go mod tidy -diff && git diff --exit-code go.mod go.sum'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: sqlc-diff
+        name: sqlc diff (generated code up to date)
+        entry: bash -c 'command -v sqlc >/dev/null 2>&1 && sqlc diff || true'
+        language: system
+        files: ^internal/db/(queries|migrations)/
+        pass_filenames: false
+
+      - id: go-test
+        name: go test (race + coverage)
+        entry: bash -c 'bash .github/ci-prebuild.sh && go test -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: govulncheck
+        name: govulncheck
+        entry: bash -c 'GOBIN="$(git rev-parse --show-toplevel)/.bin" go install golang.org/x/vuln/cmd/govulncheck@latest && "$(git rev-parse --show-toplevel)/.bin/govulncheck" ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]

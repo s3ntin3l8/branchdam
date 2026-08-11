@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Go (build · vet · test)
+    uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
+    secrets: inherit
+
+  frontend:
+    name: Web (typecheck · build)
+    uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
+    with:
+      node-version: '24'
+      working-directory: web
+      cache-dependency-path: web/package-lock.json
+      test-script: test:coverage
+    secrets: inherit
+
+  docker:
+    name: Docker image build
+    needs: [backend, frontend]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@main
+    with:
+      image-name: ${{ github.repository }}
+      # Build-only on PRs; build + push :edge (cosign-signed) on push to main.
+      push-edge: ${{ github.event_name == 'push' }}
+      # Keep PR validation fast (no arm64 emulation); full multi-arch only on edge push.
+      # CGO is on (mattn/go-sqlite3, see docs/schema.md), so the arm64 leg genuinely
+      # compiles C — deliberately excluded from the PR-fast lane, not just slow there.
+      platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+    secrets: inherit
