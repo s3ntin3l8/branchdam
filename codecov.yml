@@ -1,0 +1,31 @@
+# Codecov reads this file from the default branch (main), not from the PR
+# that introduces it -- a PR adding/editing this file is itself still
+# evaluated under whatever config is already on main.
+#
+# `informational` on both statuses: this repo doesn't have an agreed coverage
+# floor yet (frontend sits well under 50% statement coverage as of PR 16 --
+# see the CI audit), so a hard-failing patch/project gate would just be noise
+# until that's addressed deliberately. Flip to `default` (or set an explicit
+# `target:`) once coverage is somewhere intentional.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# Matches the `flags:` values the shared ci-go.yml / ci-node.yml reusable
+# workflows already upload coverage under (s3ntin3l8/.github).
+flags:
+  go:
+    paths:
+      - internal/
+      - cmd/
+  node:
+    paths:
+      - web/src/
+
+comment:
+  layout: "reach, diff, flags, files"

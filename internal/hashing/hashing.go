@@ -40,7 +40,7 @@ func FastHash(r io.ReaderAt, size int64) (string, error) {
 			continue
 		}
 		read, err := r.ReadAt(buf[:n], reg.start)
-		if err != nil && !(errors.Is(err, io.EOF) && int64(read) == n) {
+		if err != nil && (!errors.Is(err, io.EOF) || int64(read) != n) {
 			return "", fmt.Errorf("fast hash: read region [%d,%d): %w", reg.start, reg.end, err)
 		}
 		if _, err := h.Write(buf[:read]); err != nil {
