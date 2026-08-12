@@ -1,0 +1,238 @@
+package probe
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// requireTool skips the test with a clear message when the named binary
+// isn't installed, rather than failing -- neither exiftool nor ffprobe/
+// ffmpeg is present on every machine that runs `go test ./...` (notably,
+// the CI Go job doesn't install them), matching the graceful-degradation
+// requirement this whole package exists to satisfy.
+func requireTool(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s not installed, skipping (this package must still build and its pure-function tests must still pass without it)", name)
+	}
+	return path
+}
+
+// makeFixtureJPEG generates a tiny real JPEG via ffmpeg and tags it with
+// exiftool, so this test exercises the actual subprocess path end to end
+// rather than a canned fixture file checked into the repo.
+func makeFixtureJPEG(t *testing.T, dir string) string {
+	t.Helper()
+	requireTool(t, "ffmpeg")
+	exiftoolPath := requireTool(t, "exiftool")
+
+	path := filepath.Join(dir, "fixture.jpg")
+	ffmpeg := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64", "-frames:v", "1", path)
+	if out, err := ffmpeg.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture jpeg: %v\n%s", err, out)
+	}
+
+	tagArgs := []string{
+		"-overwrite_original",
+		"-EXIF:Make=SONY", "-EXIF:Model=ILCE-7M4", "-EXIF:LensModel=FE 24-70mm F2.8 GM",
+		"-EXIF:SerialNumber=1234567",
+		"-EXIF:DateTimeOriginal=2026:07:15 14:30:00", "-EXIF:OffsetTimeOriginal=+02:00",
+		"-GPSLatitude=33.9", "-GPSLatitudeRef=S", "-GPSLongitude=18.4", "-GPSLongitudeRef=W",
+		"-XMP-xmpMM:DocumentID=doc-abc-123", "-XMP-xmpMM:OriginalDocumentID=orig-doc-xyz",
+		path,
+	}
+	tagCmd := exec.Command(exiftoolPath, tagArgs...)
+	if out, err := tagCmd.CombinedOutput(); err != nil {
+		t.Fatalf("tag fixture jpeg: %v\n%s", err, out)
+	}
+	return path
+}
+
+func makeFixtureMP4(t *testing.T, dir string) string {
+	t.Helper()
+	requireTool(t, "ffmpeg")
+
+	path := filepath.Join(dir, "fixture.mp4")
+	cmd := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:duration=1",
+		"-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+		"-c:v", "libx264", "-c:a", "aac", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture mp4: %v\n%s", err, out)
+	}
+	return path
+}
+
+func TestExifRealFile(t *testing.T) {
+	requireTool(t, "exiftool")
+	path := makeFixtureJPEG(t, t.TempDir())
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := p.Exif(ctx, path)
+	if err != nil {
+		t.Fatalf("Exif: %v", err)
+	}
+
+	if result.Make != "SONY" || result.Model != "ILCE-7M4" {
+		t.Errorf("Make/Model = %q/%q, want SONY/ILCE-7M4", result.Make, result.Model)
+	}
+	if result.LensModel != "FE 24-70mm F2.8 GM" {
+		t.Errorf("LensModel = %q, want FE 24-70mm F2.8 GM", result.LensModel)
+	}
+	if result.OriginalDocumentID != "orig-doc-xyz" {
+		t.Errorf("OriginalDocumentID = %q, want orig-doc-xyz", result.OriginalDocumentID)
+	}
+	if result.DocumentID != "doc-abc-123" {
+		t.Errorf("DocumentID = %q, want doc-abc-123", result.DocumentID)
+	}
+
+	// The load-bearing assertion: GPS must come from the sign-corrected
+	// Composite group. S/W hemispheres, so both must be NEGATIVE -- the raw
+	// EXIF:GPSLatitude/Longitude tags stay positive (33.9, 18.4) regardless
+	// of hemisphere, which is exactly the bug using the wrong group would
+	// reproduce.
+	if result.GPSLatitude == nil || *result.GPSLatitude >= 0 {
+		t.Errorf("GPSLatitude = %v, want a negative value (S hemisphere)", result.GPSLatitude)
+	}
+	if result.GPSLongitude == nil || *result.GPSLongitude >= 0 {
+		t.Errorf("GPSLongitude = %v, want a negative value (W hemisphere)", result.GPSLongitude)
+	}
+
+	if result.CapturedAt == nil {
+		t.Fatal("CapturedAt is nil, want a parsed timestamp")
+	}
+	if result.CapturedAt.Year() != 2026 || result.CapturedAt.Month() != time.July || result.CapturedAt.Day() != 15 {
+		t.Errorf("CapturedAt = %v, want 2026-07-15", result.CapturedAt)
+	}
+	if _, offset := result.CapturedAt.Zone(); offset != 2*3600 {
+		t.Errorf("CapturedAt offset = %ds, want +02:00 (7200s)", offset)
+	}
+
+	if len(result.Raw) == 0 {
+		t.Error("Raw is empty, want the full flattened exiftool output for node_metadata overflow")
+	}
+}
+
+func TestFFProbeRealFile(t *testing.T) {
+	requireTool(t, "ffprobe")
+	path := makeFixtureMP4(t, t.TempDir())
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := p.FFProbe(ctx, path)
+	if err != nil {
+		t.Fatalf("FFProbe: %v", err)
+	}
+
+	if result.VideoCodec != "h264" {
+		t.Errorf("VideoCodec = %q, want h264", result.VideoCodec)
+	}
+	if result.AudioCodec != "aac" {
+		t.Errorf("AudioCodec = %q, want aac", result.AudioCodec)
+	}
+	if result.Width != 320 || result.Height != 240 {
+		t.Errorf("dimensions = %dx%d, want 320x240", result.Width, result.Height)
+	}
+	if result.DurationSeconds == nil || *result.DurationSeconds < 0.9 || *result.DurationSeconds > 1.1 {
+		t.Errorf("DurationSeconds = %v, want ~1.0", result.DurationSeconds)
+	}
+	if result.SizeBytes == nil || *result.SizeBytes <= 0 {
+		t.Errorf("SizeBytes = %v, want a positive value", result.SizeBytes)
+	}
+	if result.RawJSON == "" {
+		t.Error("RawJSON is empty, want the full ffprobe output for node_metadata overflow")
+	}
+}
+
+// TestToolUnavailableIsGraceful proves the core contract this package
+// exists to satisfy (spec directive 9.4's "fall back gracefully"): a Prober
+// constructed against binaries that don't exist returns a typed,
+// recognizable error rather than panicking or hanging.
+func TestToolUnavailableIsGraceful(t *testing.T) {
+	p := &Prober{} // deliberately empty -- as if New() found neither tool
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := p.Exif(ctx, "/nonexistent"); err == nil {
+		t.Error("Exif with no exiftool resolved succeeded, want ErrToolUnavailable")
+	} else if !errors.Is(err, ErrToolUnavailable) {
+		t.Errorf("Exif error = %v, want it to wrap ErrToolUnavailable", err)
+	}
+
+	if _, err := p.FFProbe(ctx, "/nonexistent"); err == nil {
+		t.Error("FFProbe with no ffprobe resolved succeeded, want ErrToolUnavailable")
+	} else if !errors.Is(err, ErrToolUnavailable) {
+		t.Errorf("FFProbe error = %v, want it to wrap ErrToolUnavailable", err)
+	}
+}
+
+func TestNewDetectsAbsentTools(t *testing.T) {
+	// Regardless of what's actually installed on this machine, New() must
+	// not panic and must produce a Prober whose HasX() methods are
+	// consistent with what it resolved.
+	p := New()
+	if p.HasExiftool() {
+		if _, err := exec.LookPath("exiftool"); err != nil {
+			t.Error("HasExiftool() = true but exiftool is not actually on PATH")
+		}
+	}
+	if p.HasFFProbe() {
+		if _, err := exec.LookPath("ffprobe"); err != nil {
+			t.Error("HasFFProbe() = true but ffprobe is not actually on PATH")
+		}
+	}
+}
+
+func TestExifMissingFilePropagatesError(t *testing.T) {
+	requireTool(t, "exiftool")
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := p.Exif(ctx, filepath.Join(t.TempDir(), "does-not-exist.jpg"))
+	if err == nil {
+		t.Fatal("Exif on a nonexistent file succeeded, want an error")
+	}
+}
+
+func TestExifRespectsContextTimeout(t *testing.T) {
+	requireTool(t, "exiftool")
+	path := makeFixtureJPEG(t, t.TempDir())
+	p := New()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond) // ensure the deadline has actually passed
+
+	_, err := p.Exif(ctx, path)
+	if err == nil {
+		t.Fatal("Exif with an already-expired context succeeded, want an error")
+	}
+}
+
+func TestMain(m *testing.M) {
+	// Fail fast with a clear signal if TMPDIR itself is unwritable, rather
+	// than every fixture-generating test failing with a confusing ffmpeg
+	// error.
+	f, err := os.CreateTemp("", "probe-smoke-*")
+	if err != nil {
+		panic("probe package tests require a writable temp dir: " + err.Error())
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+
+	os.Exit(m.Run())
+}
