@@ -26,6 +26,12 @@ updates:
       npm-deps:
         patterns:
           - "*"
+    ignore:
+      # typescript-eslint@8 peers `typescript >=4.8.4 <6.1.0`; TS 7 (and 6.1+)
+      # break `npm ci` at resolution. Lift when typescript-eslint ships TS 7
+      # support.
+      - dependency-name: "typescript"
+        versions: [">=6.1.0"]
 
   - package-ecosystem: "docker"
     directory: "/"
