@@ -21,7 +21,7 @@ jobs:
       has_web: ${{ steps.check.outputs.has_web }}
       has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: check
         run: |
           if [ -f web/package.json ]; then echo "has_web=true" >> "$GITHUB_OUTPUT"; else echo "has_web=false" >> "$GITHUB_OUTPUT"; fi
