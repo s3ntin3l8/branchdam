@@ -46,6 +46,29 @@ func (q *Queries) CreateStorageLocation(ctx context.Context, arg CreateStorageLo
 	return i, err
 }
 
+const getStorageLocationByID = `-- name: GetStorageLocationByID :one
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
+FROM storage_locations
+WHERE id = ?1
+`
+
+func (q *Queries) GetStorageLocationByID(ctx context.Context, id int64) (StorageLocation, error) {
+	row := q.db.QueryRowContext(ctx, getStorageLocationByID, id)
+	var i StorageLocation
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.RootPath,
+		&i.Tier,
+		&i.ReadOnly,
+		&i.Prunable,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getStorageLocationByPath = `-- name: GetStorageLocationByPath :one
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
 FROM storage_locations
@@ -109,4 +132,52 @@ func (q *Queries) ListStorageLocations(ctx context.Context) ([]StorageLocation, 
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertStorageLocation = `-- name: UpsertStorageLocation :one
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT (root_path) DO UPDATE SET
+    name = excluded.name,
+    tier = excluded.tier,
+    read_only = excluded.read_only,
+    prunable = excluded.prunable,
+    updated_at = unixepoch()
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
+`
+
+type UpsertStorageLocationParams struct {
+	Name     string
+	RootPath string
+	Tier     string
+	ReadOnly int64
+	Prunable int64
+}
+
+// Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
+// storageLocations list is applied idempotently on every restart, keyed on
+// root_path's UNIQUE constraint, so re-running it against an
+// already-seeded database updates tier/read_only/prunable in place rather
+// than failing on the second startup.
+func (q *Queries) UpsertStorageLocation(ctx context.Context, arg UpsertStorageLocationParams) (StorageLocation, error) {
+	row := q.db.QueryRowContext(ctx, upsertStorageLocation,
+		arg.Name,
+		arg.RootPath,
+		arg.Tier,
+		arg.ReadOnly,
+		arg.Prunable,
+	)
+	var i StorageLocation
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.RootPath,
+		&i.Tier,
+		&i.ReadOnly,
+		&i.Prunable,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

@@ -10,13 +10,20 @@ import (
 )
 
 // TestNoDirectAuthentikHeaderReads is the cheap, structural half of the
-// header-spoofing defense: BrowserChain (browser.go) is the only code
-// permitted to reference "X-Authentik" anywhere in the repo. This test
-// walks every .go file outside internal/auth and fails if any of them
-// mention it -- a future handler reading r.Header.Get("X-Authentik-...")
-// directly (bypassing auth.From) would reintroduce exactly the spoofing
-// risk AgentChain's header-stripping exists to close, and this test fails
-// loudly the day that happens rather than relying on code review to catch it.
+// header-spoofing defense: BrowserChain (browser.go) is the only
+// PRODUCTION code permitted to reference "X-Authentik" anywhere in the
+// repo. This test walks every non-test .go file outside internal/auth and
+// fails if any of them mention it -- a future handler reading
+// r.Header.Get("X-Authentik-...") directly (bypassing auth.From) would
+// reintroduce exactly the spoofing risk AgentChain's header-stripping
+// exists to close, and this test fails loudly the day that happens rather
+// than relying on code review to catch it.
+//
+// _test.go files are excluded repo-wide (not just in internal/auth): a
+// test constructing a request with req.Header.Set("X-Authentik-Username",
+// ...) to simulate what Traefik/Authentik would send is a normal,
+// necessary testing pattern (see internal/httpapi/routes_test.go), not the
+// production read-path this guard exists to catch.
 func TestNoDirectAuthentikHeaderReads(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -43,7 +50,7 @@ func TestNoDirectAuthentikHeaderReads(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		if strings.HasPrefix(path, authDir+string(filepath.Separator)) {

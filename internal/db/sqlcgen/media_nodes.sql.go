@@ -452,6 +452,76 @@ func (q *Queries) ListLiveNodesByFilenameStem(ctx context.Context, filenameStem 
 	return items, nil
 }
 
+const listMediaNodes = `-- name: ListMediaNodes :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+ORDER BY id DESC
+LIMIT ?1 OFFSET ?2
+`
+
+type ListMediaNodesParams struct {
+	Limit  int64
+	Offset int64
+}
+
+// Backs GET /api/v1/assets. Excludes archived rows by default -- an
+// archived node is reachable via its successor's superseded history, not
+// the main asset list.
+func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listMediaNodes, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markNodeMissing = `-- name: MarkNodeMissing :exec
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1
 `

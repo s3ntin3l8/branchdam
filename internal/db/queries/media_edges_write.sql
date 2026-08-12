@@ -28,3 +28,10 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        created_at, updated_at
 FROM media_edges
 WHERE source_node_id = ?1;
+
+-- name: ListEdgesByTarget :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE target_node_id = ?1;

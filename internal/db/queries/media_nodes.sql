@@ -1,3 +1,18 @@
+-- name: ListMediaNodes :many
+-- Backs GET /api/v1/assets. Excludes archived rows by default -- an
+-- archived node is reachable via its successor's superseded history, not
+-- the main asset list.
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+ORDER BY id DESC
+LIMIT ?1 OFFSET ?2;
+
 -- name: GetMediaNodeByID :one
 -- Includes archived rows, unlike GetLiveNodeByPath -- used to verify a
 -- superseded node's post-archive state (superseded_by, lifecycle_state).

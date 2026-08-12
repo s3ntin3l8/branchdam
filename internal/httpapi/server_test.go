@@ -1,21 +1,51 @@
 package httpapi
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
+	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/sse"
+	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
-func testServer() *Server {
-	return New(&config.Config{}, slog.New(slog.DiscardHandler))
+func testServer(t *testing.T) *Server {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "httpapi.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	log := slog.New(slog.DiscardHandler)
+	pool := workers.New[string](1, 4)
+
+	// SPA is deliberately left nil in this fixture -- TestNotFoundRoutesReturn404
+	// depends on spaHandler()'s nil-spa fallback being a plain 404, not the
+	// SPA shell PR 10 eventually embeds.
+	return New(Deps{
+		Config: &config.Config{}, Log: log, DB: database,
+		Prober: probe.New(), Pool: pool,
+		Engine: graph.NewEngine(database, log), Hub: sse.New(),
+		Version: "test",
+	})
 }
 
 func TestHealthHandler(t *testing.T) {
-	srv := testServer()
+	srv := testServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
@@ -30,7 +60,7 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestSecurityHeaders(t *testing.T) {
-	srv := testServer()
+	srv := testServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
@@ -65,14 +95,14 @@ func TestRecoveryMiddleware(t *testing.T) {
 }
 
 func TestNotFoundRoutesReturn404(t *testing.T) {
-	srv := testServer()
+	srv := testServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	// No SPA fallback is registered until PR 9/10; an unknown route is a
-	// plain 404 for now.
+	// spaHandler() falls back to a plain 404 when no SPA has been embedded
+	// -- this fixture deliberately leaves Deps.SPA nil (see testServer).
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (no SPA fallback registered yet)", rr.Code)
+		t.Fatalf("status = %d, want 404 (no SPA embedded in this test fixture)", rr.Code)
 	}
 }

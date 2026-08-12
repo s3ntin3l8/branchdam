@@ -8,6 +8,27 @@ SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, up
 FROM storage_locations
 ORDER BY id;
 
+-- name: UpsertStorageLocation :one
+-- Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
+-- storageLocations list is applied idempotently on every restart, keyed on
+-- root_path's UNIQUE constraint, so re-running it against an
+-- already-seeded database updates tier/read_only/prunable in place rather
+-- than failing on the second startup.
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT (root_path) DO UPDATE SET
+    name = excluded.name,
+    tier = excluded.tier,
+    read_only = excluded.read_only,
+    prunable = excluded.prunable,
+    updated_at = unixepoch()
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at;
+
+-- name: GetStorageLocationByID :one
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
+FROM storage_locations
+WHERE id = ?1;
+
 -- name: GetStorageLocationByPath :one
 -- Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 -- the single source of truth for tier is this table, never a hardcoded

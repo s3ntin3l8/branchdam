@@ -27,6 +27,11 @@ type Querier interface {
 	CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams) (MediaEdge, error)
 	CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error)
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
+	// Backs POST /api/v1/agent/events: persists and returns 202 in increment 1.
+	// Actually draining/processing these rows ships with the deferred
+	// workstation-agent increment -- this table and endpoint exist now so that
+	// increment is additive, not a schema migration.
+	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EventQueue, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
@@ -40,6 +45,7 @@ type Querier interface {
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
 	GetScanJob(ctx context.Context, id int64) (ScanJob, error)
+	GetStorageLocationByID(ctx context.Context, id int64) (StorageLocation, error)
 	// Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 	// the single source of truth for tier is this table, never a hardcoded
 	// prefix. See docs/schema.md fix #1.
@@ -51,6 +57,7 @@ type Querier interface {
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
 	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
+	ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
@@ -63,6 +70,10 @@ type Querier interface {
 	// filename stem with the child, scored further by capture day / camera /
 	// directory match in internal/graph.
 	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]MediaNode, error)
+	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
+	// archived node is reachable via its successor's superseded history, not
+	// the main asset list.
+	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	MarkNodeMissing(ctx context.Context, id int64) error
@@ -96,6 +107,12 @@ type Querier interface {
 	// same MAX'd confidence rather than trusting the just-inserted value, so
 	// the two can never disagree about which confidence they describe.
 	UpsertMediaEdge(ctx context.Context, arg UpsertMediaEdgeParams) (MediaEdge, error)
+	// Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
+	// storageLocations list is applied idempotently on every restart, keyed on
+	// root_path's UNIQUE constraint, so re-running it against an
+	// already-seeded database updates tier/read_only/prunable in place rather
+	// than failing on the second startup.
+	UpsertStorageLocation(ctx context.Context, arg UpsertStorageLocationParams) (StorageLocation, error)
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used
 	// by internal/graph (PR 7) inside the same write transaction as the edge

@@ -2,14 +2,17 @@ package graph
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
-	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 )
 
 func openTestDB(t *testing.T) *db.DB {
@@ -47,22 +50,96 @@ func seedLocation(t *testing.T, database *db.DB) int64 {
 	return id
 }
 
-// seedNode inserts a fixture node via pipeline.Commit -- reusing the
-// already-tested insert path (which also computes filename_stem) rather
-// than hand-rolling a parallel raw-SQL insert helper here.
-func seedNode(t *testing.T, database *db.DB, locationID int64, r pipeline.Result) sqlcgen.MediaNode {
+// nodeFixture is the subset of pipeline.Result's fields these tests need.
+// internal/pipeline imports internal/graph (to run edge resolution after
+// committing a node), so graph's tests can't import pipeline back --
+// that's a real import cycle, not just a style preference. seedNode
+// therefore inserts directly via sqlcgen rather than through
+// pipeline.Commit.
+type nodeFixture struct {
+	Path               string
+	FileName           string
+	FileExt            string
+	FastHash           string
+	OriginalDocumentID string
+	DocumentID         string
+	CapturedAt         *time.Time
+	CameraModel        string
+}
+
+// fixtureFilenameStem is a deliberate duplicate of pipeline's filenameStem
+// (internal/pipeline/commit.go) -- small enough that copying it here is
+// simpler and safer than restructuring package boundaries just to share it,
+// and it keeps these fixtures behaving exactly like real ingested nodes
+// without reintroducing the import cycle seedNode's doc comment explains.
+var fixtureVersionSuffixRe = regexp.MustCompile(`(?i)(_edit|_proxy|_v\d+|-\d+| copy|\(\d+\))+$`)
+
+func fixtureFilenameStem(fileName string) string {
+	stem := fileName
+	if i := strings.LastIndex(stem, "."); i > 0 {
+		stem = stem[:i]
+	}
+	stem = strings.ToLower(strings.TrimSpace(stem))
+	for {
+		stripped := fixtureVersionSuffixRe.ReplaceAllString(stem, "")
+		if stripped == stem {
+			break
+		}
+		stem = stripped
+	}
+	return stem
+}
+
+func seedNode(t *testing.T, database *db.DB, locationID int64, f nodeFixture) sqlcgen.MediaNode {
 	t.Helper()
-	if r.FastHash == "" {
-		r.FastHash = strings.Repeat("a", 16) // unique-enough per call site's distinct path; not asserted on
+	ctx := context.Background()
+
+	if f.FastHash == "" {
+		f.FastHash = strings.Repeat("a", 16) // unique-enough per call site's distinct path; not asserted on
 	}
-	if _, err := pipeline.Commit(context.Background(), database, locationID, []pipeline.Result{r}); err != nil {
-		t.Fatalf("seed node %s: %v", r.Path, err)
-	}
-	node, err := database.Reader.GetLiveNodeByPath(context.Background(), r.Path)
+	id, err := uuid.NewV7()
 	if err != nil {
-		t.Fatalf("get seeded node %s: %v", r.Path, err)
+		t.Fatalf("mint node_uuid: %v", err)
+	}
+
+	params := sqlcgen.InsertMediaNodeParams{
+		NodeUuid:           id.String(),
+		StorageLocationID:  locationID,
+		FilePath:           f.Path,
+		FileName:           f.FileName,
+		FileExt:            f.FileExt,
+		FastHash:           &f.FastHash,
+		IndexingStatus:     "INDEXED_SHALLOW",
+		GraphStatus:        "UNLINKED",
+		LifecycleState:     "ACTIVE",
+		OriginalDocumentID: nullString(f.OriginalDocumentID),
+		DocumentID:         nullString(f.DocumentID),
+		CameraModel:        nullString(f.CameraModel),
+		FilenameStem:       nullString(fixtureFilenameStem(f.FileName)),
+	}
+	if f.CapturedAt != nil {
+		params.CapturedAtUnix = sql.NullInt64{Int64: f.CapturedAt.Unix(), Valid: true}
+	}
+
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.InsertMediaNode(ctx, params)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed node %s: %v", f.Path, err)
+	}
+	node, err := database.Reader.GetLiveNodeByPath(ctx, f.Path)
+	if err != nil {
+		t.Fatalf("get seeded node %s: %v", f.Path, err)
 	}
 	return node
+}
+
+func nullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }
 
 func asGraphNode(row sqlcgen.MediaNode) Node {
@@ -80,12 +157,12 @@ func TestXMPOriginalDocumentIDMatch(t *testing.T) {
 	ctx := context.Background()
 	locationID := seedLocation(t, database)
 
-	parent := seedNode(t, database, locationID, pipeline.Result{
-		Path: "/raw/MASTER.ARW", FileName: "MASTER.ARW", FileExt: "arw", Size: 1, ModTime: time.Now(),
+	parent := seedNode(t, database, locationID, nodeFixture{
+		Path: "/raw/MASTER.ARW", FileName: "MASTER.ARW", FileExt: "arw",
 		DocumentID: "doc-xyz",
 	})
-	childRow := seedNode(t, database, locationID, pipeline.Result{
-		Path: "/exports/COMPLETELY_DIFFERENT_NAME.jpg", FileName: "COMPLETELY_DIFFERENT_NAME.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(),
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/exports/COMPLETELY_DIFFERENT_NAME.jpg", FileName: "COMPLETELY_DIFFERENT_NAME.jpg", FileExt: "jpg",
 		OriginalDocumentID: "doc-xyz",
 	})
 
@@ -130,12 +207,12 @@ func TestFilenameStemAllBoostsReachesAutoAccept(t *testing.T) {
 	locationID := seedLocation(t, database)
 
 	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
-	seedNode(t, database, locationID, pipeline.Result{
-		Path: "/2026-07-15/DSC01234.ARW", FileName: "DSC01234.ARW", FileExt: "arw", Size: 1, ModTime: time.Now(),
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/DSC01234.ARW", FileName: "DSC01234.ARW", FileExt: "arw",
 		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
 	})
-	childRow := seedNode(t, database, locationID, pipeline.Result{
-		Path: "/2026-07-15/DSC01234.jpg", FileName: "DSC01234.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(),
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/DSC01234.jpg", FileName: "DSC01234.jpg", FileExt: "jpg",
 		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
 	})
 
@@ -168,12 +245,12 @@ func TestFilenameStemWeakMatchNeedsReview(t *testing.T) {
 
 	oldDay := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
 	newDay := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
-	seedNode(t, database, locationID, pipeline.Result{
-		Path: "/archive/DSC0999.ARW", FileName: "DSC0999.ARW", FileExt: "arw", Size: 1, ModTime: time.Now(),
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/archive/DSC0999.ARW", FileName: "DSC0999.ARW", FileExt: "arw",
 		CapturedAt: &oldDay, CameraModel: "OLD-CAMERA",
 	})
-	childRow := seedNode(t, database, locationID, pipeline.Result{
-		Path: "/exports/DSC0999.jpg", FileName: "DSC0999.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(),
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/exports/DSC0999.jpg", FileName: "DSC0999.jpg", FileExt: "jpg",
 		CapturedAt: &newDay, CameraModel: "NEW-CAMERA",
 	})
 
@@ -214,8 +291,8 @@ func TestCycleRejected(t *testing.T) {
 	ctx := context.Background()
 	locationID := seedLocation(t, database)
 
-	a := seedNode(t, database, locationID, pipeline.Result{Path: "/a.jpg", FileName: "a.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: strings.Repeat("1", 16)})
-	b := seedNode(t, database, locationID, pipeline.Result{Path: "/b.jpg", FileName: "b.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: strings.Repeat("2", 16)})
+	a := seedNode(t, database, locationID, nodeFixture{Path: "/a.jpg", FileName: "a.jpg", FileExt: "jpg", FastHash: strings.Repeat("1", 16)})
+	b := seedNode(t, database, locationID, nodeFixture{Path: "/b.jpg", FileName: "b.jpg", FileExt: "jpg", FastHash: strings.Repeat("2", 16)})
 
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		_, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
@@ -268,7 +345,7 @@ func TestSelfEdgeRejectedByEngineCheck(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 	locationID := seedLocation(t, database)
-	node := seedNode(t, database, locationID, pipeline.Result{Path: "/self.jpg", FileName: "self.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now()})
+	node := seedNode(t, database, locationID, nodeFixture{Path: "/self.jpg", FileName: "self.jpg", FileExt: "jpg"})
 
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		_, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
@@ -294,8 +371,8 @@ func TestParentMissingPropagatesForEveryRelationshipType(t *testing.T) {
 	ctx := context.Background()
 	locationID := seedLocation(t, database)
 
-	parent := seedNode(t, database, locationID, pipeline.Result{Path: "/p.arw", FileName: "p.arw", FileExt: "arw", Size: 1, ModTime: time.Now()})
-	child := seedNode(t, database, locationID, pipeline.Result{Path: "/p_proxy.mov", FileName: "p_proxy.mov", FileExt: "mov", Size: 1, ModTime: time.Now()})
+	parent := seedNode(t, database, locationID, nodeFixture{Path: "/p.arw", FileName: "p.arw", FileExt: "arw"})
+	child := seedNode(t, database, locationID, nodeFixture{Path: "/p_proxy.mov", FileName: "p_proxy.mov", FileExt: "mov"})
 
 	var edgeID int64
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -361,8 +438,8 @@ func TestBelowFloorCandidatesNeverPersisted(t *testing.T) {
 	ctx := context.Background()
 	locationID := seedLocation(t, database)
 
-	a := seedNode(t, database, locationID, pipeline.Result{Path: "/weak-a.jpg", FileName: "weak-a.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now()})
-	b := seedNode(t, database, locationID, pipeline.Result{Path: "/weak-b.jpg", FileName: "weak-b.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now()})
+	a := seedNode(t, database, locationID, nodeFixture{Path: "/weak-a.jpg", FileName: "weak-a.jpg", FileExt: "jpg"})
+	b := seedNode(t, database, locationID, nodeFixture{Path: "/weak-b.jpg", FileName: "weak-b.jpg", FileExt: "jpg"})
 
 	engine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
 		ParentID: a.ID, ChildID: b.ID, Rel: "DERIVED_FROM", Confidence: 0.49, Tier: 3,
