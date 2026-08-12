@@ -102,7 +102,7 @@ func TestOpenReadAlwaysAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRead on Tier 3: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	got := make([]byte, 9)
 	if _, err := f.Read(got); err != nil {

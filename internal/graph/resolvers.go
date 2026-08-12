@@ -21,12 +21,14 @@ var exportExts = map[string]bool{
 
 // inferRelationship picks the relationship_type both Tier-2 resolvers use,
 // per the build plan's resolver table: PROXY_OF if the child's filename
-// says so, FINAL_EXPORT for raw-to-export pairs, DERIVED_FROM otherwise.
-func inferRelationship(childFileName, parentExt string) string {
+// says so, FINAL_EXPORT for raw-to-export pairs (both exts checked -- a raw
+// parent linked to a non-export child, e.g. a project-file sidecar, is not
+// a final export), DERIVED_FROM otherwise.
+func inferRelationship(childFileName, childExt, parentExt string) string {
 	if strings.Contains(strings.ToLower(childFileName), "_proxy") {
 		return "PROXY_OF"
 	}
-	if rawExts[strings.ToLower(parentExt)] {
+	if rawExts[strings.ToLower(parentExt)] && exportExts[strings.ToLower(childExt)] {
 		return "FINAL_EXPORT"
 	}
 	return "DERIVED_FROM"
@@ -58,7 +60,7 @@ func (XMPOriginalDocumentIDResolver) Resolve(ctx context.Context, child Node, lo
 		candidates = append(candidates, Candidate{
 			ParentID:   parent.ID,
 			ChildID:    child.ID,
-			Rel:        inferRelationship(child.FileName, parent.FileExt),
+			Rel:        inferRelationship(child.FileName, child.FileExt, parent.FileExt),
 			Confidence: 0.95,
 			Tier:       2,
 			Resolver:   "xmp_original_document_id",
@@ -121,7 +123,7 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 		candidates = append(candidates, Candidate{
 			ParentID:   parent.ID,
 			ChildID:    child.ID,
-			Rel:        inferRelationship(child.FileName, parent.FileExt),
+			Rel:        inferRelationship(child.FileName, child.FileExt, parent.FileExt),
 			Confidence: confidence,
 			Tier:       2,
 			Resolver:   "filename_stem",

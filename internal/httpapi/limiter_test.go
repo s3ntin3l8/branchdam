@@ -6,8 +6,11 @@ import "testing"
 // release, so a flood of long-lived connections can't exhaust goroutines.
 func TestLimiter(t *testing.T) {
 	l := newLimiter(2)
-	if !l.acquire() || !l.acquire() {
-		t.Fatal("first two acquires should succeed")
+	if !l.acquire() {
+		t.Fatal("first acquire should succeed")
+	}
+	if !l.acquire() {
+		t.Fatal("second acquire should succeed")
 	}
 	if l.acquire() {
 		t.Fatal("third acquire should fail at capacity")
