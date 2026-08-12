@@ -20,17 +20,53 @@ jobs:
     outputs:
       has_web: ${{ steps.check.outputs.has_web }}
       has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
+      docker_relevant: ${{ steps.docker-filter.outputs.docker }}
     steps:
       - uses: actions/checkout@v7
       - id: check
         run: |
           if [ -f web/package.json ]; then echo "has_web=true" >> "$GITHUB_OUTPUT"; else echo "has_web=false" >> "$GITHUB_OUTPUT"; fi
           if [ -f Dockerfile ]; then echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"; else echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"; fi
+      # Only consulted for pull_request events below -- push (merge to main)
+      # always builds the edge image regardless of this output. Scopes the
+      # PR-time Docker compile-check to PRs that could plausibly break the
+      # image, instead of running it on every PR.
+      - id: docker-filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'go.mod'
+              - 'go.sum'
+              - 'web/package-lock.json'
 
   backend:
     name: Go (build · vet · test)
     uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
     secrets: inherit
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # web.Dist() (//go:embed) needs a real web/dist to resolve when
+      # golangci-lint type-checks the package graph -- same stub ci-go.yml's
+      # reusable workflow runs, kept in sync via the shared script.
+      - run: bash .github/ci-prebuild.sh
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          # .golangci.yml declares `version: "2"`, which requires a v2.x
+          # binary -- pin explicitly rather than floating to "latest" so a
+          # future v3 release doesn't silently change what this job enforces.
+          version: v2.12.2
 
   frontend:
     name: Web (typecheck · build)
@@ -56,10 +92,17 @@ jobs:
     # 'success' -- only 'failure'/'cancelled' should block this job, so the
     # check is spelled out explicitly rather than relying on the default
     # `success()` job condition, which does NOT treat a skipped need as passing.
+    #
+    # The last clause is the PR-vs-merge split: push events (merge to main)
+    # always run this job -- that's what publishes :edge -- while pull_request
+    # events only run it when detect's paths-filter found a Docker-relevant
+    # change (Dockerfile, go.mod/go.sum, web/package-lock.json). Every other PR
+    # skips the image build entirely instead of compile-checking it on every push.
     if: |
       needs.backend.result == 'success' &&
       needs.frontend.result != 'failure' && needs.frontend.result != 'cancelled' &&
-      needs.detect.outputs.has_dockerfile == 'true'
+      needs.detect.outputs.has_dockerfile == 'true' &&
+      (github.event_name == 'push' || needs.detect.outputs.docker_relevant == 'true')
     permissions:
       contents: read
       packages: write
