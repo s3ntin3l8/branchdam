@@ -9,6 +9,43 @@ import (
 	"context"
 )
 
+const createStorageLocation = `-- name: CreateStorageLocation :one
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable)
+VALUES (?1, ?2, ?3, ?4, ?5)
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
+`
+
+type CreateStorageLocationParams struct {
+	Name     string
+	RootPath string
+	Tier     string
+	ReadOnly int64
+	Prunable int64
+}
+
+func (q *Queries) CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error) {
+	row := q.db.QueryRowContext(ctx, createStorageLocation,
+		arg.Name,
+		arg.RootPath,
+		arg.Tier,
+		arg.ReadOnly,
+		arg.Prunable,
+	)
+	var i StorageLocation
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.RootPath,
+		&i.Tier,
+		&i.ReadOnly,
+		&i.Prunable,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getStorageLocationByPath = `-- name: GetStorageLocationByPath :one
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
 FROM storage_locations
