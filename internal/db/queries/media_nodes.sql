@@ -49,6 +49,35 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED';
 
+-- name: ListLiveNodesByDocumentID :many
+-- Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
+-- matching a candidate parent's document_id is a near-certain lineage
+-- signal (confidence 0.95).
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at
+FROM media_nodes
+WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
+
+-- name: ListLiveNodesByFilenameStem :many
+-- Tier-2 filenameStem resolver: candidate parents sharing a normalized
+-- filename stem with the child, scored further by capture day / camera /
+-- directory match in internal/graph.
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at
+FROM media_nodes
+WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED';
+
+-- name: UpdateMediaNodeGraphStatus :exec
+UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1;
+
 -- name: InsertMediaNode :one
 INSERT INTO media_nodes (
     node_uuid, storage_location_id, file_path, file_name, file_ext,

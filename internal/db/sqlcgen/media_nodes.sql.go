@@ -263,6 +263,69 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 	return i, err
 }
 
+const listLiveNodesByDocumentID = `-- name: ListLiveNodesByDocumentID :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at
+FROM media_nodes
+WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED'
+`
+
+// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
+// matching a candidate parent's document_id is a near-certain lineage
+// signal (confidence 0.95).
+func (q *Queries) ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodesByDocumentID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveNodesByFastHash = `-- name: ListLiveNodesByFastHash :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -279,6 +342,69 @@ WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED'
 // sharing that fast_hash so it can escalate to full_hash and compare.
 func (q *Queries) ListLiveNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listLiveNodesByFastHash, fastHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLiveNodesByFilenameStem = `-- name: ListLiveNodesByFilenameStem :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at
+FROM media_nodes
+WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
+`
+
+// Tier-2 filenameStem resolver: candidate parents sharing a normalized
+// filename stem with the child, scored further by capture day / camera /
+// directory match in internal/graph.
+func (q *Queries) ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodesByFilenameStem, filenameStem)
 	if err != nil {
 		return nil, err
 	}
@@ -411,5 +537,19 @@ type UpdateMediaNodeFullHashParams struct {
 // location (docs/schema.md fix #8's full_hash policy).
 func (q *Queries) UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNodeFullHashParams) error {
 	_, err := q.db.ExecContext(ctx, updateMediaNodeFullHash, arg.ID, arg.FullHash)
+	return err
+}
+
+const updateMediaNodeGraphStatus = `-- name: UpdateMediaNodeGraphStatus :exec
+UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1
+`
+
+type UpdateMediaNodeGraphStatusParams struct {
+	ID          int64
+	GraphStatus string
+}
+
+func (q *Queries) UpdateMediaNodeGraphStatus(ctx context.Context, arg UpdateMediaNodeGraphStatusParams) error {
+	_, err := q.db.ExecContext(ctx, updateMediaNodeGraphStatus, arg.ID, arg.GraphStatus)
 	return err
 }

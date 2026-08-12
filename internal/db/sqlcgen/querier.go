@@ -6,6 +6,7 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Querier interface {
@@ -16,6 +17,7 @@ type Querier interface {
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
+	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) error
 	// Minimal edge insert, landed here because PR 6's own version-collision test
 	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
 	// source node (docs/schema.md fix #6: RESTRICT, never CASCADE). Full edge
@@ -49,10 +51,18 @@ type Querier interface {
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
 	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
+	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
+	// matching a candidate parent's document_id is a near-certain lineage
+	// signal (confidence 0.95).
+	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]MediaNode, error)
 	// T1 (spec 9.5): before assuming two same-fast_hash files at DIFFERENT live
 	// paths are the same content, the pipeline needs every other live node
 	// sharing that fast_hash so it can escalate to full_hash and compare.
 	ListLiveNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error)
+	// Tier-2 filenameStem resolver: candidate parents sharing a normalized
+	// filename stem with the child, scored further by capture day / camera /
+	// directory match in internal/graph.
+	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]MediaNode, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	MarkNodeMissing(ctx context.Context, id int64) error
@@ -60,6 +70,11 @@ type Querier interface {
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
+	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) error
+	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
+	// be true for every relationship_type, not just DERIVED_FROM -- the thing
+	// the spec's deleted trigger (docs/schema.md fix #4) never did.
+	ResolvedEdgeParentMissing(ctx context.Context, id int64) (bool, error)
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
@@ -70,7 +85,17 @@ type Querier interface {
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
 	// location (docs/schema.md fix #8's full_hash policy).
 	UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNodeFullHashParams) error
+	UpdateMediaNodeGraphStatus(ctx context.Context, arg UpdateMediaNodeGraphStatusParams) error
 	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
+	// A human decision outranks any resolver, permanently: the UPDATE branch is
+	// gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely
+	// (SQLite's upsert semantics: when the WHERE evaluates false, DO UPDATE is
+	// skipped and the pre-existing row is returned unmodified). confidence only
+	// ever increases (MAX), never regresses if a later resolve pass finds a
+	// weaker signal for the same edge; review_state is recomputed from that
+	// same MAX'd confidence rather than trusting the just-inserted value, so
+	// the two can never disagree about which confidence they describe.
+	UpsertMediaEdge(ctx context.Context, arg UpsertMediaEdgeParams) (MediaEdge, error)
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used
 	// by internal/graph (PR 7) inside the same write transaction as the edge

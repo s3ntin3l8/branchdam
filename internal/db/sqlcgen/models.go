@@ -125,6 +125,6 @@ type VMediaEdgesResolved struct {
 	UpdatedAt            int64
 	ParentLifecycleState string
 	ChildLifecycleState  string
-	ParentAlive          interface{}
-	ParentMissing        interface{}
+	ParentAlive          bool
+	ParentMissing        bool
 }
