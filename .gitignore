@@ -28,6 +28,8 @@ vendor/
 # Frontend
 /web/node_modules/
 /web/dist/
+/web/coverage/
+/web/*.tsbuildinfo
 
 # IDE
 .idea/
