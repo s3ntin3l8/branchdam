@@ -9,17 +9,68 @@ import (
 )
 
 type Querier interface {
+	// Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
+	// row FIRST, before inserting the new one. The partial unique index
+	// (WHERE lifecycle_state != 'ARCHIVED') means a live row and a new live
+	// row can never share file_path even for an instant within the
+	// transaction -- archiving first, not after, is what keeps that true.
+	ArchiveMediaNode(ctx context.Context, id int64) error
+	CompleteScanJob(ctx context.Context, id int64) error
+	// Minimal edge insert, landed here because PR 6's own version-collision test
+	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
+	// source node (docs/schema.md fix #6: RESTRICT, never CASCADE). Full edge
+	// resolution -- confidence scoring, cycle detection, upsert-without-
+	// downgrading-review_state -- is internal/graph's job (PR 7), built on top
+	// of this.
+	CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams) (MediaEdge, error)
+	CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error)
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
+	FailScanJob(ctx context.Context, arg FailScanJobParams) error
+	// The live-path lookup a scan does for every file: is there already a
+	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
+	// (docs/schema.md fix #3).
+	GetLiveNodeByPath(ctx context.Context, filePath string) (MediaNode, error)
+	GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
+	// Includes archived rows, unlike GetLiveNodeByPath -- used to verify a
+	// superseded node's post-archive state (superseded_by, lifecycle_state).
+	GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, error)
+	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
+	// a new file elsewhere hashes the same -- likely the same file, moved.
+	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
+	GetScanJob(ctx context.Context, id int64) (ScanJob, error)
 	// Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 	// the single source of truth for tier is this table, never a hardcoded
 	// prefix. See docs/schema.md fix #1.
 	GetStorageLocationByPath(ctx context.Context, rootPath string) (StorageLocation, error)
+	InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error)
 	// The audit queue (spec §7) is this query over review_state, not a second
 	// table. v_media_edges_resolved's parent_missing works for every
 	// relationship_type -- the spec's deleted trigger never did. See
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
+	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
+	// T1 (spec 9.5): before assuming two same-fast_hash files at DIFFERENT live
+	// paths are the same content, the pipeline needs every other live node
+	// sharing that fast_hash so it can escalate to full_hash and compare.
+	ListLiveNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error)
+	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
+	MarkNodeMissing(ctx context.Context, id int64) error
+	// Pillar 5 move detection, applied: the id and node_uuid never change, so
+	// every edge referencing this node (as parent or child) survives the move
+	// untouched -- no CASCADE, no rewrite needed.
+	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
+	// Step 3 of a version collision: link the archived row to its successor,
+	// once the successor's id is known (i.e. after InsertMediaNode).
+	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
+	// Same content at the same path, seen again on a later scan -- just record
+	// that, no new row.
+	TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error
+	// Escalation path for T1: computed lazily, only when fast_hash collides
+	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
+	// location (docs/schema.md fix #8's full_hash policy).
+	UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNodeFullHashParams) error
+	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used
 	// by internal/graph (PR 7) inside the same write transaction as the edge
