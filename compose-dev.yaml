@@ -1,0 +1,42 @@
+# Development: Go backend with live source mounted + Vite dev server with HMR.
+# Run:  docker compose -f compose-dev.yaml up --build
+# UI:   http://localhost:5173  (proxies /api to the backend)
+services:
+  backend:
+    image: golang:1.26-bookworm
+    working_dir: /src
+    # web/dist is gitignored and only exists after `npm run build` or (as
+    # here) .github/ci-prebuild.sh's stub -- a fresh checkout has neither,
+    # and web/embed.go's //go:embed fails to compile without at least the
+    # stub. The frontend service below serves the real app via Vite's dev
+    # server instead; this container's embedded copy is never used in dev.
+    command: sh -c "bash .github/ci-prebuild.sh && go run ./cmd/branchdam -config /config/config.yaml -debug"
+    env_file: .env
+    environment:
+      - BRANCHDAM_CONFIG=/config/config.yaml
+    volumes:
+      - ./:/src
+      - ./config.yaml:/config/config.yaml:ro
+      - branchdam-dev-data:/data
+      - go-mod:/go/pkg/mod
+    ports:
+      - "8080:8080"
+
+  frontend:
+    image: node:26-alpine
+    working_dir: /web
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      - BRANCHDAM_API_URL=http://backend:8080
+    volumes:
+      - ./web:/web
+      - web-node-modules:/web/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  go-mod:
+  web-node-modules:
+  branchdam-dev-data:

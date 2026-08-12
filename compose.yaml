@@ -1,0 +1,95 @@
+# Production-like compose (committed). Runs the published GHCR image and
+# registers it into your gateway Traefik.
+#
+# Edit this file for your deployment: set your real Host rule in the labels
+# below (replace dam.example.com), point the volumes at your real storage
+# tiers, and put BRANCHDAM_AGENT_API_KEY in a gitignored .env. For local
+# development with live reload, use compose-dev.yaml instead. For real
+# per-host overrides (real hostnames, ports, image tags) without editing this
+# file directly, create a gitignored compose.override.yaml -- `docker compose`
+# merges it automatically.
+services:
+  branchdam:
+    image: ghcr.io/s3ntin3l8/branchdam:latest
+    # Pin a specific tag instead of :latest, or build locally by replacing
+    # the image: line with `build: .`
+    container_name: branchdam
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file: .env
+    environment:
+      - TZ=UTC
+    volumes:
+      - branchdam-data:/data
+      - ./config.yaml:/config/config.yaml:ro
+      # One mount per storage tier declared in config.yaml's
+      # storageLocations. Tier 3 (the master archive) is ALWAYS :ro --
+      # storage.Guard enforces this at the application level too
+      # (docs/schema.md fix #1), but the mount itself is the first line of
+      # defense.
+      - /mnt/nas/staging:/storage/staging:rw # TIER0_LOCAL_STAGING
+      - /mnt/local/scratch:/storage/scratch:rw # TIER1_LOCAL_SCRATCH
+      - /mnt/nas/exports:/storage/exports:rw # TIER2_EXPORTS
+      - /mnt/nas/projects:/storage/projects:rw # PROJECTS
+      - /mnt/nas/archive:/storage/archive:ro # TIER3_MASTER_ARCHIVE — always read-only
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/branchdam", "-healthcheck", "-config", "/config/config.yaml"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    # No published ports: :8080 must only be reachable through Traefik (see
+    # docs/forward-auth.md). Everything else in this labels block is the fix
+    # for the original spec's compose defect -- two traefik.http.services.*
+    # blocks on one container while NEITHER router set .service=, which
+    # leaves Traefik unable to resolve either router to a backend. One
+    # service, three routers, each with an explicit .service= and an
+    # explicit priority (never rely on rule-length ordering).
+    labels:
+      traefik.enable: "true"
+      traefik.http.services.branchdam.loadbalancer.server.port: "8080"
+
+      # --- Router 1: agent API. Bypasses Authentik ForwardAuth by design
+      # (spec §5) -- authenticated via X-API-Key instead (internal/auth).
+      # strip-identity@file goes here TOO, not just on the browser router:
+      # this is exactly the router where a client could otherwise forge
+      # X-Authentik-* headers, since it never reaches the outpost that
+      # would normally set them for real.
+      traefik.http.routers.branchdam-agent.rule: "Host(`dam.example.com`) && PathPrefix(`/api/v1/agent`)"
+      traefik.http.routers.branchdam-agent.entrypoints: "websecure"
+      traefik.http.routers.branchdam-agent.tls: "true"
+      traefik.http.routers.branchdam-agent.priority: "100"
+      traefik.http.routers.branchdam-agent.service: "branchdam"
+      traefik.http.routers.branchdam-agent.middlewares: "strip-identity@file"
+
+      # --- Router 2: browser UI, behind Authentik ForwardAuth. Strip
+      # client-supplied identity headers FIRST, then let the outpost set
+      # the real ones -- see docs/forward-auth.md.
+      traefik.http.routers.branchdam.rule: "Host(`dam.example.com`)"
+      traefik.http.routers.branchdam.entrypoints: "websecure"
+      traefik.http.routers.branchdam.tls: "true"
+      traefik.http.routers.branchdam.priority: "10"
+      traefik.http.routers.branchdam.service: "branchdam"
+      traefik.http.routers.branchdam.middlewares: "strip-identity@file,authentik@file"
+
+      # --- Router 3: the outpost's own login-flow/logout path, routed to
+      # Authentik itself, not to this app. `service: authentik` assumes
+      # Authentik is discovered from its own compose stack's Traefik labels
+      # (the usual homelab shape -- Authentik runs as a separate service,
+      # not part of this one); adjust to match how your Traefik actually
+      # names that service if it differs.
+      traefik.http.routers.branchdam-outpost.rule: "Host(`dam.example.com`) && PathPrefix(`/outpost.goauthentik.io/`)"
+      traefik.http.routers.branchdam-outpost.entrypoints: "websecure"
+      traefik.http.routers.branchdam-outpost.tls: "true"
+      traefik.http.routers.branchdam-outpost.priority: "200"
+      traefik.http.routers.branchdam-outpost.service: "authentik"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  branchdam-data:
