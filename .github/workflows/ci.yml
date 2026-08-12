@@ -17,6 +17,11 @@ jobs:
 
   frontend:
     name: Web (typecheck · build)
+    # The SPA lands in PR 10 (see build plan). Until web/package.json exists,
+    # this job has nothing to check out and cache-dependency-path would fail
+    # the "Set up Node.js" step -- skip cleanly instead of going red on every
+    # PR between now and then. Self-activates the moment PR 10 adds the file.
+    if: ${{ hashFiles('web/package.json') != '' }}
     uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
     with:
       node-version: '24'
@@ -28,6 +33,10 @@ jobs:
   docker:
     name: Docker image build
     needs: [backend, frontend]
+    # Same reasoning as frontend's gate, for the Dockerfile PR 11 adds.
+    # `if:` on a job REPLACES the implicit `needs` success check rather than
+    # ANDing with it, so success() is spelled out explicitly here.
+    if: ${{ success() && hashFiles('Dockerfile') != '' }}
     permissions:
       contents: read
       packages: write
