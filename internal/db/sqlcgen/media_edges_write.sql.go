@@ -141,3 +141,48 @@ func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]
 	}
 	return items, nil
 }
+
+const listEdgesByTarget = `-- name: ListEdgesByTarget :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE target_node_id = ?1
+`
+
+func (q *Queries) ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByTarget, targetNodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaEdge{}
+	for rows.Next() {
+		var i MediaEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ReviewState,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

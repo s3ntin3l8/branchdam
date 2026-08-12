@@ -1,39 +1,88 @@
-// Package httpapi is branchDAM's HTTP surface: middleware chain, health,
-// and (from PR 9 onward) the Huma-generated API, SSE progress endpoint, and
-// the embedded SPA fallback.
-//
-// PR 0 wires up only the middleware chain and /healthz -- everything else
-// (auth.Route splitting browser vs. agent traffic, the route table, SSE) is
-// layered on top of this same Handler() in PR 8/9 without changing its shape.
+// Package httpapi is branchDAM's HTTP surface: middleware chain, the
+// Huma-generated REST API, the SSE progress stream, and the embedded SPA
+// fallback.
 package httpapi
 
 import (
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
+	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/sse"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
+	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
-// Server bundles the dependencies handlers need. Grows in later PRs (db
-// pools, storage.Guard, sse.Hub, auth chains) without changing this shape.
+// Deps bundles everything the HTTP layer needs. Built once at startup in
+// cmd/branchdam and handed to New.
+type Deps struct {
+	Config  *config.Config
+	Log     *slog.Logger
+	DB      *db.DB
+	Guard   *storage.Guard
+	Prober  *probe.Prober
+	Pool    *workers.Pool[string]
+	Engine  *graph.Engine
+	Hub     *sse.Hub
+	SPA     fs.FS
+	Version string
+}
+
+// Server bundles the dependencies handlers need.
 type Server struct {
-	cfg *config.Config
-	log *slog.Logger
+	cfg     *config.Config
+	log     *slog.Logger
+	db      *db.DB
+	guard   *storage.Guard
+	prober  *probe.Prober
+	pool    *workers.Pool[string]
+	engine  *graph.Engine
+	hub     *sse.Hub
+	sseSlot *limiter
+	spa     fs.FS
+	version string
 }
 
 // New builds the HTTP server handler set.
-func New(cfg *config.Config, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, log: log}
+func New(d Deps) *Server {
+	log := d.Log
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	version := d.Version
+	if version == "" {
+		version = "dev"
+	}
+	return &Server{
+		cfg:     d.Config,
+		log:     log,
+		db:      d.DB,
+		guard:   d.Guard,
+		prober:  d.Prober,
+		pool:    d.Pool,
+		engine:  d.Engine,
+		hub:     d.Hub,
+		sseSlot: newLimiter(maxSSEClients),
+		spa:     d.SPA,
+		version: version,
+	}
 }
 
-// contentSecurityPolicy is intentionally tighter than a typical SPA CSP: the
-// frontend build (PR 10) self-hosts its fonts via Tailwind rather than
-// pulling from a Google Fonts CDN, so there is no third-party style-src/
-// font-src to allow. img-src permits data: and blob: for inline thumbnail
-// previews rendered client-side; connect-src 'self' covers the SSE stream,
-// which is same-origin.
+// contentSecurityPolicy: the frontend build (PR 10) self-hosts its fonts
+// via Tailwind rather than pulling from a Google Fonts CDN, so there is no
+// third-party style-src/font-src to allow. img-src permits data: and
+// blob: for inline thumbnail previews rendered client-side; connect-src
+// 'self' covers the SSE stream, which is same-origin.
 const contentSecurityPolicy = "default-src 'self'; " +
 	"img-src 'self' data: blob:; " +
 	"style-src 'self' 'unsafe-inline'; " +
@@ -41,14 +90,33 @@ const contentSecurityPolicy = "default-src 'self'; " +
 	"connect-src 'self'; " +
 	"frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
 
-// Handler returns the root mux wrapped in the middleware chain.
+// Handler returns the root mux wrapped in the middleware chain: recover ->
+// securityHeaders -> log -> auth.Route -> mux. auth.Route is innermost,
+// closest to the mux, because it's the thing deciding WHICH identity
+// extraction runs before any handler -- everything outside it is
+// identity-agnostic.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	humaConfig := huma.DefaultConfig("branchDAM", s.version)
+	api := humago.New(mux, humaConfig)
+	s.registerRoutes(api)
+
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, mux)))
+	// SSE is registered directly on the mux, not through Huma -- Huma's
+	// response model fights a streaming text/event-stream handler.
+	mux.HandleFunc("GET /api/v1/events", s.handleEvents)
+	mux.Handle("GET /", s.spaHandler())
+
+	var apiKey string
+	if s.cfg != nil {
+		apiKey = s.cfg.Agent.APIKey
+	}
+	routed := auth.Route(apiKey, s.log, mux)
+
+	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))
 }
 
-// securityHeaders adds defense-in-depth response headers to every response.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -60,8 +128,6 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// recoverMiddleware turns a handler panic into a logged 500 instead of
-// letting it tear down the connection silently.
 func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -87,4 +153,28 @@ func logMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// spaHandler serves embedded assets, falling back to index.html for client
+// routes (so deep links work). Returns a 404 handler (not the SPA shell) if
+// no SPA has been embedded yet -- s.spa is nil until PR 10 lands
+// web/dist.
+func (s *Server) spaHandler() http.Handler {
+	if s.spa == nil {
+		return http.NotFoundHandler()
+	}
+	fileServer := http.FileServer(http.FS(s.spa))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			p = "index.html"
+		}
+		if _, err := fs.Stat(s.spa, p); err != nil {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/"
+			fileServer.ServeHTTP(w, r2)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }

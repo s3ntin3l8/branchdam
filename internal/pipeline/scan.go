@@ -14,6 +14,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/indexer"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
@@ -32,12 +33,15 @@ const (
 
 // ScanDeps bundles what a scan needs. Pool is expected to already be
 // running (Pool.Run called once at server startup, shared across scans) --
-// RunScan only submits to it, never starts or stops it.
+// RunScan only submits to it, never starts or stops it. Engine is optional:
+// nil skips edge resolution entirely, which existing tests use to isolate
+// node-commit behavior from internal/graph.
 type ScanDeps struct {
 	DB             *db.DB
 	Guard          *storage.Guard
 	Prober         *probe.Prober
 	Pool           *workers.Pool[string]
+	Engine         *graph.Engine
 	FullHashPolicy string // "always" | "tier3_and_collision" (default) | "never"
 	Log            *slog.Logger
 }
@@ -145,10 +149,12 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		total.Touched += stats.Touched
 		total.VersionCollisions += stats.VersionCollisions
 		total.Moved += stats.Moved
-		buf = buf[:0]
 		if err != nil {
 			log.Error("pipeline: commit batch", "err", err)
+		} else if deps.Engine != nil {
+			resolveEdgesForBatch(ctx, deps, buf, log)
 		}
+		buf = buf[:0]
 		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
 				ID:          jobID,
@@ -179,6 +185,52 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 			flush()
 		}
 	}
+}
+
+// resolveEdgesForBatch runs edge resolution for every node just committed
+// in buf. This is the join point between node ingestion (this package) and
+// lineage resolution (internal/graph) -- Commit only ever writes
+// media_nodes rows; nothing else in the scan flow would otherwise ever call
+// graph.Engine. One extra read per node (re-fetching the live row by path)
+// keeps this decoupled from Commit's internals rather than threading node
+// IDs back out of it.
+func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log *slog.Logger) {
+	for _, r := range buf {
+		node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, r.Path)
+		if err != nil {
+			log.Warn("pipeline: resolve edges: re-fetch node", "path", r.Path, "err", err)
+			continue
+		}
+		if _, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node)); err != nil {
+			log.Warn("pipeline: resolve edges", "path", r.Path, "err", err)
+		}
+	}
+}
+
+func toGraphNode(n sqlcgen.MediaNode) graph.Node {
+	gn := graph.Node{
+		ID:       n.ID,
+		FilePath: n.FilePath,
+		FileName: n.FileName,
+		FileExt:  n.FileExt,
+	}
+	if n.OriginalDocumentID.Valid {
+		gn.OriginalDocumentID = n.OriginalDocumentID.String
+	}
+	if n.DocumentID.Valid {
+		gn.DocumentID = n.DocumentID.String
+	}
+	if n.CameraModel.Valid {
+		gn.CameraModel = n.CameraModel.String
+	}
+	if n.FilenameStem.Valid {
+		gn.FilenameStem = n.FilenameStem.String
+	}
+	if n.CapturedAtUnix.Valid {
+		t := time.Unix(n.CapturedAtUnix.Int64, 0).UTC()
+		gn.CapturedAt = &t
+	}
+	return gn
 }
 
 // needsFullHash decides whether Result.FullHash should be computed for this
