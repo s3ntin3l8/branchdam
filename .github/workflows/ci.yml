@@ -10,6 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  # Detects whether the frontend (PR 10) and Dockerfile (PR 11) exist yet.
+  # hashFiles() is only callable from jobs.<id>.steps.*, not jobs.<id>.if
+  # directly, so a job's own `if:` can't gate on it -- this job's step does
+  # the check and publishes the result as an output the other jobs read.
+  detect:
+    name: Detect optional build inputs
+    runs-on: ubuntu-latest
+    outputs:
+      has_web: ${{ steps.check.outputs.has_web }}
+      has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: check
+        run: |
+          if [ -f web/package.json ]; then echo "has_web=true" >> "$GITHUB_OUTPUT"; else echo "has_web=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -f Dockerfile ]; then echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"; else echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"; fi
+
   backend:
     name: Go (build · vet · test)
     uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
@@ -17,6 +34,12 @@ jobs:
 
   frontend:
     name: Web (typecheck · build)
+    needs: [detect]
+    # The SPA lands in PR 10 (see build plan). Until web/package.json exists,
+    # this job has nothing to check out and cache-dependency-path would fail
+    # the "Set up Node.js" step -- skip cleanly instead of going red on every
+    # PR between now and then. Self-activates the moment PR 10 adds the file.
+    if: needs.detect.outputs.has_web == 'true'
     uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
     with:
       node-version: '24'
@@ -27,7 +50,16 @@ jobs:
 
   docker:
     name: Docker image build
-    needs: [backend, frontend]
+    needs: [detect, backend, frontend]
+    # Same reasoning as frontend's gate, for the Dockerfile PR 11 adds.
+    # frontend may legitimately be 'skipped' (not yet applicable) rather than
+    # 'success' -- only 'failure'/'cancelled' should block this job, so the
+    # check is spelled out explicitly rather than relying on the default
+    # `success()` job condition, which does NOT treat a skipped need as passing.
+    if: |
+      needs.backend.result == 'success' &&
+      needs.frontend.result != 'failure' && needs.frontend.result != 'cancelled' &&
+      needs.detect.outputs.has_dockerfile == 'true'
     permissions:
       contents: read
       packages: write

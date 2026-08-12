@@ -1,0 +1,17 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "internal/db/migrations"
+    queries: "internal/db/queries"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/db/sqlcgen"
+        emit_interface: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - column: "media_nodes.fast_hash"
+            go_type: { type: "string", pointer: true }
+          - column: "media_nodes.full_hash"
+            go_type: { type: "string", pointer: true }
