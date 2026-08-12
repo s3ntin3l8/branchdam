@@ -6,6 +6,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/corona10/goimagehash v1.1.0
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/zeebo/blake3 v0.2.4
