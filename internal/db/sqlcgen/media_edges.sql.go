@@ -31,8 +31,8 @@ type ListAuditQueueRow struct {
 	Confidence       float64
 	Resolver         string
 	EvidenceJson     string
-	ParentAlive      interface{}
-	ParentMissing    interface{}
+	ParentAlive      bool
+	ParentMissing    bool
 }
 
 // The audit queue (spec §7) is this query over review_state, not a second

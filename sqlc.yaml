@@ -15,3 +15,11 @@ sql:
             go_type: { type: "string", pointer: true }
           - column: "media_nodes.full_hash"
             go_type: { type: "string", pointer: true }
+          # v_media_edges_resolved's parent_alive/parent_missing are computed
+          # boolean expressions over a view -- sqlc can't infer a type for
+          # those (see docs/schema.md's sqlc risk note), so it's spelled out
+          # here rather than left as interface{}.
+          - column: "v_media_edges_resolved.parent_alive"
+            go_type: "bool"
+          - column: "v_media_edges_resolved.parent_missing"
+            go_type: "bool"
