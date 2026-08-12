@@ -1,0 +1,71 @@
+// Mirrors internal/httpapi/routes.go's DTOs exactly -- field names,
+// optionality, and shape. Keep in sync by hand until PR 10+ adds an
+// OpenAPI-generated client from Huma's /openapi.json.
+
+export type PrincipalKind = "user" | "machine";
+
+export interface Me {
+  kind: PrincipalKind;
+  name?: string;
+  email?: string;
+  groups?: string[];
+}
+
+export interface Config {
+  version: string;
+}
+
+export interface Asset {
+  id: number;
+  nodeUuid: string;
+  filePath: string;
+  fileName: string;
+  fileExt: string;
+  sizeBytes: number;
+  fastHash?: string;
+  fullHash?: string;
+  indexingStatus: "PENDING" | "INDEXED_SHALLOW" | "INDEXED_FULL" | "INDEX_FAILED";
+  graphStatus: "UNLINKED" | "LINKED" | "NEEDS_REVIEW" | "ROOT";
+  lifecycleState: "ACTIVE" | "MISSING" | "ARCHIVED" | "HIDDEN";
+  storageLocationId: number;
+  originalDocumentId?: string;
+  cameraModel?: string;
+}
+
+export interface Edge {
+  id: number;
+  sourceNodeId: number;
+  targetNodeId: number;
+  relationshipType: "DERIVED_FROM" | "FINAL_EXPORT" | "PROXY_OF" | "PROJECT_SIDECAR" | "DUPLICATE_OF";
+  confidence: number;
+  reviewState: "AUTO_ACCEPTED" | "NEEDS_REVIEW" | "CONFIRMED" | "REJECTED";
+  resolver: string;
+}
+
+export interface AssetGraph {
+  parents: Edge[];
+  children: Edge[];
+}
+
+export interface AuditEntry {
+  id: number;
+  sourceNodeId: number;
+  targetNodeId: number;
+  relationshipType: Edge["relationshipType"];
+  confidence: number;
+  resolver: string;
+  evidenceJson: string;
+  parentAlive: boolean;
+  parentMissing: boolean;
+}
+
+export interface ScanJob {
+  id: number;
+  kind: "FULL_SCAN" | "INCREMENTAL" | "WATCH";
+  state: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  filesSeen: number;
+  filesHashed: number;
+  filesFailed: number;
+  edgesCreated: number;
+  lastError?: string;
+}

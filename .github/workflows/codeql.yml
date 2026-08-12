@@ -11,11 +11,11 @@ jobs:
     name: Analyze
     uses: s3ntin3l8/.github/.github/workflows/codeql.yml@main
     with:
-      # javascript-typescript added back once PR 10 lands the SPA -- CodeQL
-      # hard-fails (exit 32, "could not process any code") rather than
-      # no-op'ing when a requested language has zero source files, unlike
-      # the frontend/docker jobs in ci.yml, which detect and skip cleanly.
-      languages: "go"
+      # javascript-typescript added back now that PR 10 has landed the SPA
+      # -- CodeQL hard-fails (exit 32, "could not process any code") rather
+      # than no-op'ing when a requested language has zero source files,
+      # which is why this was Go-only from PR 1 through PR 9.
+      languages: "go,javascript-typescript"
     permissions:
       actions: read
       contents: read
