@@ -14,12 +14,18 @@ ForwardAuth, on SQLite in WAL mode.
 
 ## Status
 
-Increment 1 (server + SPA) is under active development, built as a sequence
-of independently-green PRs — see `docs/schema.md` for the schema decisions
-and the deviation ledger against the original spec. The workstation agent
-(Tauri/Rust), DaVinci Resolve hook, Luminar catalog reader, Immich push, and
-Google Photos push are deferred to later increments against the schema and
-OpenAPI contract this one establishes.
+Increment 1 (server + SPA) is complete: a corrected schema, storage-tier write
+guard, dual-hash fingerprinting, directory indexing + fsnotify watching,
+EXIF/ffprobe extraction, the scan pipeline, Tier-2 lineage resolution,
+Authentik/API-key auth, the full REST + SSE API, the React dashboard, and a
+production Docker image are all built, tested, and CI-verified — see
+[`CLAUDE.md`](CLAUDE.md) for the architecture and package map, and
+`docs/schema.md` for the schema decisions and deviation ledger against the
+original spec.
+
+The workstation agent (Tauri/Rust), DaVinci Resolve hook, Luminar catalog
+reader, Immich push, and Google Photos push are deferred to later increments
+against the schema and OpenAPI contract this one establishes.
 
 ## Development
 
@@ -31,4 +37,7 @@ make lint            # pre-commit run --all-files
 make dev            # go run ./cmd/branchdam -config config.yaml
 ```
 
-Copy `config.example.yaml` to `config.yaml` before running locally.
+Copy `config.example.yaml` to `config.yaml` and `.env.example` to `.env`
+before running locally. See [`CLAUDE.md`](CLAUDE.md) for frontend and Docker
+commands, and [`docs/forward-auth.md`](docs/forward-auth.md) for the
+Authentik/Traefik setup.

@@ -1,0 +1,215 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+### Backend (Go)
+
+```sh
+# Build (stubs web/dist first if the SPA hasn't been built -- see below)
+make build
+go build ./...
+
+# Test (all packages, race detector)
+make test
+go test -race ./...
+
+# Test a single package
+go test -race ./internal/pipeline/...
+
+# Format check (CI enforces this)
+gofmt -l $(git ls-files '*.go')
+
+# Vet
+go vet ./...
+
+# Run the server
+make dev
+go run ./cmd/branchdam -config config.yaml -debug
+```
+
+> The Go binary embeds `web/dist` via `//go:embed` (`web/embed.go`). If `web/dist` doesn't
+> exist, backend builds/tests fail. `make build`/`make test`/`make dev` all depend on
+> `web-stub`, which runs `.github/ci-prebuild.sh` to create a placeholder if none exists yet --
+> the same script CI's Go-only lane uses. Run `npm run build` in `web/` first if you want the
+> real SPA embedded instead of the stub.
+
+Neither `exiftool` nor `ffprobe` is installed on every machine that runs these tests (notably:
+the CI Go job doesn't install them). `internal/probe`'s integration tests `t.Skip` cleanly when
+the binaries are absent rather than failing -- that's intentional, not a gap to fix.
+
+### Data layer (sqlc)
+
+```sh
+# After editing internal/db/migrations/*.sql or internal/db/queries/*.sql:
+sqlc generate
+
+# internal/db/sqlcgen/ is committed -- ci-go.yml has no codegen step, so
+# `go build ./...` in CI depends on the generated code already being current.
+```
+
+See `docs/schema.md`'s sqlc risk note before writing a recursive CTE query: sqlc's SQLite
+parser needs every column in a recursive CTE's anchor `SELECT` explicitly named or aliased
+(`SELECT sqlc.arg(x) AS id`, not `SELECT sqlc.arg(x)`) or it fails with `*ast.ResTarget has nil
+name`.
+
+### Frontend (Vite + React + TypeScript)
+
+```sh
+cd web
+npm ci             # install
+npm run build      # typecheck + production build -> web/dist/
+npm run dev         # HMR dev server on :5173, proxies /api -> localhost:8080
+npm run test        # vitest
+npm run test:coverage
+npm run lint         # eslint
+npm run typecheck    # tsc -b --noEmit
+```
+
+`web/src/api/types.ts` and `client.ts` are hand-kept in sync with `internal/httpapi/routes.go`'s
+DTOs -- there's no generated client yet (Huma emits `/openapi.json`; wiring a generator is a
+reasonable follow-up, not done in increment 1).
+
+### Docker
+
+```sh
+# Production-like (pulls GHCR image)
+docker compose up -d
+
+# Dev (live source mount + Vite HMR)
+docker compose -f compose-dev.yaml up --build
+
+# Build the image locally
+docker build -t branchdam:dev .
+```
+
+## Architecture
+
+### Data flow (a scan)
+
+```
+POST /api/v1/scan {storageLocationId}
+    │
+    ▼
+pipeline.RunScan -- creates a scan_jobs row, returns the job id immediately
+    │
+    ▼ (background goroutine)
+indexer.Walk(root)  -- Lstat only, never opens a file
+    │  submits one workers.Job per file
+    ▼
+workers.Pool  -- bounded goroutines, per-path dedup, backpressure via Submit returning false
+    │  each job, off the HTTP/watcher thread (spec directive 9.2):
+    ├── storage.Guard.OpenRead        -- refuses Tier 3 writes before any syscall
+    ├── hashing.FastHash              -- always
+    ├── hashing.FullHash              -- if needsFullHash(policy, tier3, collision)
+    ├── probe.Exif / probe.FFProbe    -- if the binaries are present; graceful skip if not
+    ▼
+pipeline.drainAndCommit  -- batches every 64 results or 250ms into one pipeline.Commit
+    │  (single write transaction, db.InTx -- see Key invariants)
+    ├── version collision  -> archive old node, insert new, link superseded_by
+    ├── move detection     -> MISSING node's fast_hash reappears elsewhere -> rebase in place
+    └── new/unchanged      -> insert / touch
+    │
+    ▼ (per committed node, same batch)
+graph.Engine.ResolveAndCommit
+    │  runs every registered Resolver, merges candidates, cycle-checks (WouldCreateCycle),
+    │  commits survivors -- never downgrades a human CONFIRMED/REJECTED review_state
+    ▼
+sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query, not
+                         by parsing the SSE payload (see internal/sse's package doc)
+```
+
+### Go packages (`internal/`)
+
+| Package | Responsibility |
+|---|---|
+| `config` | Load + env-expand `config.yaml`; `${VAR}` resolved at load time |
+| `db` | The two SQLite pools (single-conn writer, multi-conn read-only reader), `ConnectHook` pragmas, embedded goose migrations. Nothing outside this package gets a raw `*sql.DB` |
+| `db/sqlcgen` | Generated typed data layer. Never hand-edited |
+| `storage` | `Guard` -- the only place a filesystem write may originate; resolves tier from `storage_locations`, refuses Tier 3 before any syscall, defeats symlink escapes |
+| `hashing` | Pure functions: `FastHash` (xxHash64), `FullHash` (BLAKE3-256), `PerceptualHash`/`HammingDistance` (DCT). No file I/O |
+| `probe` | `exiftool`/`ffprobe` subprocess wrappers, fixed argv allowlist, graceful `ErrToolUnavailable` when a binary is missing |
+| `indexer` | `Walk` (directory scan) and `Watch` (fsnotify), both Lstat-level only |
+| `workers` | Generic bounded goroutine pool: fixed worker count, bounded queue, per-key dedup, non-blocking `Submit` |
+| `pipeline` | Owns the only write access to `media_nodes`: `Commit`'s collision/move/insert logic, `RunScan`'s orchestration, the join point that calls `graph.Engine` after each committed batch |
+| `graph` | Tier-2 edge resolvers (`XMPOriginalDocumentIDResolver`, `FilenameStemResolver`), `Engine` merges candidates and commits inside one transaction with a cycle guard |
+| `auth` | `Principal` + `BrowserChain`/`AgentChain`/`Route` -- the *only* code permitted to read `X-Authentik-*` (enforced by `TestNoDirectAuthentikHeaderReads`, not just convention) |
+| `sse` | Coalescing-nudge `Hub`, copied verbatim from `traefik-viewer/internal/sse/hub.go` |
+| `httpapi` | Huma v2 route registration, middleware chain, SSE handler (registered directly on the mux, not through Huma), SPA fallback |
+
+### Frontend (`web/src/`)
+
+- `api/client.ts`, `api/types.ts` -- thin fetch wrapper + hand-kept-in-sync DTOs
+- `hooks/queries.ts` -- TanStack Query hooks per endpoint
+- `hooks/useEventStream.ts` -- SSE subscription; invalidates query keys on every nudge, never parses the event payload
+- `pages/` -- `AssetListPage`, `AssetDetailPage` (metadata inspector + one-hop lineage graph), `AuditQueuePage` (Confirm/Reject)
+- `components/AssetGraphCanvas.tsx` -- `@xyflow/react` rendering of `/api/v1/assets/{id}/graph`'s one-hop response
+
+## Key invariants
+
+- **No triggers, no `ON DELETE CASCADE`, anywhere in the schema.** The original spec's DDL had
+  both, and both were unsound (see `docs/schema.md` fixes #4, #5, #6). Every FK is `RESTRICT`; a
+  vanished file sets `lifecycle_state = 'MISSING'`, rows are never deleted. `updated_at` is set
+  explicitly in every query, never by a trigger. Parent-liveness (`parent_missing` /
+  `parent_alive`) is a computed view column (`v_media_edges_resolved`), not a stored,
+  triggerinvalidated one.
+- **`PRAGMA foreign_keys = ON` is what makes the RESTRICT-not-CASCADE fix real.** It defaults
+  off in SQLite and is connection-scoped, not persisted in the DB header -- `internal/db`'s
+  `ConnectHook` sets it on *every* pooled connection, both writer and reader. Forgetting this on
+  a new connection path silently makes every FK a no-op.
+- **All filesystem writes go through `storage.Guard`.** No other package calls `os.Create`,
+  `os.WriteFile`, `os.MkdirAll`, or `os.Remove` on a path that could be under a configured
+  storage location. `Guard.CheckWrite` resolves the canonical (symlink-resolved) path against
+  `storage_locations` and refuses a read-only tier with a typed `*ErrReadOnlyTier` before any
+  syscall -- a `:ro` bind mount alone only surfaces `EROFS` at whatever call depth first happens
+  to touch it.
+- **Identity is read in exactly one place.** `internal/auth.BrowserChain` is the only code
+  permitted to reference `X-Authentik-*`. `AgentChain` deletes those headers unconditionally
+  (before even checking the API key) on the router that bypasses Authentik ForwardAuth by
+  design -- `TestNoDirectAuthentikHeaderReads` greps the rest of the repo and fails the build if
+  anything else reads them directly.
+- **The writer pool is a single connection, on purpose.** `db.DB`'s writer has
+  `SetMaxOpenConns(1)` -- that's what makes `graph.Engine`'s cycle-check-then-insert
+  (`WouldCreateCycle` inside the same transaction as the edge upsert) sound without any
+  additional application-level locking. Never raise this without re-deriving that invariant.
+- **A human review decision outranks any resolver, permanently.** `UpsertMediaEdge`'s `ON
+  CONFLICT ... DO UPDATE ... WHERE review_state NOT IN ('CONFIRMED', 'REJECTED')` means a
+  `CONFIRMED`/`REJECTED` edge is never touched by a later automated re-resolve, no matter how
+  confident the new candidate is.
+- **`fast_hash` (xxHash64, 16 hex) is a cheap remap key, never a duplicate-detection oracle by
+  itself.** `full_hash` (BLAKE3-256, 64 hex) is what backs real integrity verification. The
+  schema's own length `CHECK`s make it structurally impossible to write a 64-bit value into the
+  `full_hash` column -- this caught a real test-fixture bug during PR 6's development (a
+  placeholder `"aa"`/`"bb"` full_hash instead of a real 64-char value). If you see this
+  constraint fire, the fixture is wrong, not the constraint.
+- **Version collisions archive-then-insert, never insert-then-archive.** The partial unique
+  index on `media_nodes(file_path)` only excludes `ARCHIVED` rows -- archiving the old row
+  first is what keeps a live old row and a live new row from ever coexisting at the same path,
+  even for an instant within the transaction.
+- **The asset graph endpoint is one hop, deliberately.** `GET /api/v1/assets/{id}/graph`
+  returns direct parents/children only, not a bounded recursive traversal. This is a stated
+  scope line for increment 1, not a hidden gap -- see `internal/httpapi/routes.go`.
+
+## CI
+
+- **`ci.yml`**: the Go job runs unconditionally; a `detect` job's step computes `hashFiles()`
+  results and publishes them as outputs, which the frontend and Docker jobs' `if:` conditions
+  read -- `hashFiles()` is only callable from `jobs.<id>.steps.*`, not directly in a job-level
+  `if:`, which is why the detection is a separate job rather than inline. This is what lets both
+  jobs skip cleanly (not fail) until their inputs exist. Docker builds each platform natively
+  (no QEMU) per `docker-publish.yml`.
+- **`release.yml`**: `release-please` maintains a release PR on every push to `main`; merging it
+  cuts the tag and triggers the multi-arch release image push.
+- **`codeql.yml`**: scans `go,javascript-typescript` -- CodeQL hard-fails (not a graceful no-op)
+  if a requested language has zero source files, which is why this was Go-only until the SPA
+  (PR 10) landed real frontend source.
+
+## Documentation map
+
+- [`docs/spec/original-spec.md`](docs/spec/original-spec.md) -- the design spec as received,
+  committed verbatim. A historical input, not the live contract; where it disagrees with the
+  code, the code is right.
+- [`docs/schema.md`](docs/schema.md) -- the itemized deviation ledger against that spec (nine
+  numbered fixes) and the sqlc risk note.
+- [`docs/forward-auth.md`](docs/forward-auth.md) -- the Authentik/Traefik walkthrough.
