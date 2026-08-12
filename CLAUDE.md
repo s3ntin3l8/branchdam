@@ -198,12 +198,39 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   read -- `hashFiles()` is only callable from `jobs.<id>.steps.*`, not directly in a job-level
   `if:`, which is why the detection is a separate job rather than inline. This is what lets both
   jobs skip cleanly (not fail) until their inputs exist. Docker builds each platform natively
-  (no QEMU) per `docker-publish.yml`.
+  (no QEMU) per `docker-publish.yml`. On `pull_request` events the Docker job additionally only
+  runs when a `dorny/paths-filter` step in `detect` finds a Docker-relevant path changed
+  (`Dockerfile`, `.dockerignore`, `go.mod`, `go.sum`, `web/package-lock.json`) -- most PRs skip
+  the image compile-check entirely. `push` events (merge to main) are unaffected by that filter;
+  the edge build+push always runs there. `golangci-lint` runs as its own job (not inside the
+  shared `ci-go.yml`), pinned to a specific v2.x release matching `.golangci.yml`'s
+  `version: "2"` schema.
 - **`release.yml`**: `release-please` maintains a release PR on every push to `main`; merging it
-  cuts the tag and triggers the multi-arch release image push.
+  cuts the tag and triggers the multi-arch release image push. **Its PR never gets a CI check
+  reported** -- `release-please-action` opens/updates that PR using the default `GITHUB_TOKEN`,
+  and GitHub's Actions recursion guard means refs/PRs created by `GITHUB_TOKEN` don't trigger
+  `on: push`/`on: pull_request` workflows (the same mechanism that makes chaining
+  `docker-publish.yml` off `release-please`'s own tag impossible -- see the comment in
+  `release.yml`). With branch protection's required status checks in place (see below), that PR's
+  merge button reads as blocked/"Expected" forever, not just slow. This is expected, not a bug:
+  merge it via the "merge without waiting for requirements" path -- `enforce_admins: false` is
+  what makes that available to the repo owner. A real fix (passing an app/PAT token to
+  `release-please-action`, via `s3ntin3l8/.github`'s `scripts/app-token.sh`, so its PRs get a
+  real trigger) is a shared-workflow change, not something to work around per-repo.
 - **`codeql.yml`**: scans `go,javascript-typescript` -- CodeQL hard-fails (not a graceful no-op)
   if a requested language has zero source files, which is why this was Go-only until the SPA
   (PR 10) landed real frontend source.
+- **Branch protection on `main`**: required status checks (`Go (build · vet · test) /
+  lint-and-test`, `Web (typecheck · build) / lint-and-test`, `CodeQL`,
+  `review / dependency-review`, `golangci-lint`), no required reviews (solo repo),
+  `enforce_admins: false`, force-push and branch deletion both blocked. `strict` is `false`
+  (branches need not be up to date with `main` before merging) so Dependabot PRs don't need a
+  rebase on every `main` advance to merge.
+- **`codecov.yml`**: both `codecov/patch` and `codecov/project` are `informational` (no agreed
+  coverage floor yet), with `go`/`node` flags scoped by path matching what the shared
+  `ci-go.yml`/`ci-node.yml` workflows already upload coverage under. Codecov reads this file from
+  the default branch, not from whichever PR introduces it -- a PR editing `codecov.yml` is itself
+  still evaluated under whatever config was already on `main`.
 
 ## Documentation map
 
