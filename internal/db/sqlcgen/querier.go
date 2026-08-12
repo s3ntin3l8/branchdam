@@ -9,6 +9,7 @@ import (
 )
 
 type Querier interface {
+	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
 	// Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 	// the single source of truth for tier is this table, never a hardcoded
 	// prefix. See docs/schema.md fix #1.

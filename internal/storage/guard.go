@@ -1,0 +1,239 @@
+// Package storage is the single chokepoint every filesystem write in
+// branchDAM must pass through. Tier 3 (the master archive) is mounted
+// read-only in production, which surfaces as EROFS at whatever call depth
+// first happens to touch it -- Guard turns that into a typed error, returned
+// before any syscall, by resolving the write's target to a storage tier and
+// checking its read-only flag first.
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+)
+
+// Location mirrors one row of storage_locations (internal/db). RootPath is
+// always the fully symlink-resolved, absolute, no-trailing-slash form --
+// see loadLocations and canonicalize.
+type Location struct {
+	ID       int64
+	Name     string
+	RootPath string
+	Tier     string
+	ReadOnly bool
+}
+
+// ErrReadOnlyTier is returned by every write method when the resolved
+// location is read-only. Use errors.As to detect it.
+type ErrReadOnlyTier struct {
+	Path     string
+	Location string
+	Tier     string
+}
+
+func (e *ErrReadOnlyTier) Error() string {
+	return fmt.Sprintf("storage: %q resolves to read-only location %q (tier %s)", e.Path, e.Location, e.Tier)
+}
+
+// ErrUnknownLocation is returned when a path doesn't fall under any
+// configured storage location. Guard refuses these rather than guessing --
+// an unrecognized path is refused, not assumed writable.
+type ErrUnknownLocation struct {
+	Path string
+}
+
+func (e *ErrUnknownLocation) Error() string {
+	return fmt.Sprintf("storage: %q does not resolve under any configured storage location", e.Path)
+}
+
+// Guard resolves a filesystem path to its storage.Location and refuses
+// writes against read-only tiers before any syscall happens. Every method
+// that writes -- Create, WriteFile, MkdirAll, Remove -- calls CheckWrite
+// first, unconditionally. OpenRead does not check: reads are always
+// permitted, including against Tier 3.
+type Guard struct {
+	mu   sync.RWMutex
+	locs []Location // sorted by len(RootPath) descending: longest-prefix-first match
+}
+
+// NewGuard builds a Guard directly from a list of locations, already
+// resolved. Used by tests and by LoadGuard below; production startup should
+// prefer LoadGuard so the locations come from the same storage_locations
+// table storage.Guard is meant to be the single source of truth for
+// (docs/schema.md fix #1).
+func NewGuard(locs []Location) *Guard {
+	sorted := make([]Location, len(locs))
+	copy(sorted, locs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return len(sorted[i].RootPath) > len(sorted[j].RootPath)
+	})
+	return &Guard{locs: sorted}
+}
+
+// locationLister is the subset of sqlcgen.Querier LoadGuard needs. Declared
+// here (not imported from internal/db/sqlcgen) so this package doesn't take
+// a hard dependency on the generated code merely to load its own config --
+// any caller with a compatible method satisfies it, including a fake in
+// tests that never touches a real database.
+type locationLister interface {
+	ListStorageLocations(ctx context.Context) ([]StorageLocationRow, error)
+}
+
+// StorageLocationRow is the shape LoadGuard needs from each storage_locations
+// row. internal/db's caller adapts sqlcgen.StorageLocation into this with a
+// small conversion -- see cmd/branchdam (wired when a consumer needs it).
+type StorageLocationRow struct {
+	ID       int64
+	Name     string
+	RootPath string
+	Tier     string
+	ReadOnly bool
+}
+
+// LoadGuard reads storage_locations via lister and canonicalizes every
+// RootPath with EvalSymlinks. Root paths are operator-configured mount
+// points and are expected to exist at startup -- a missing or unresolvable
+// root is a configuration error, surfaced immediately rather than silently
+// producing a Guard that can't protect the path it claims to.
+func LoadGuard(ctx context.Context, lister locationLister) (*Guard, error) {
+	rows, err := lister.ListStorageLocations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list storage locations: %w", err)
+	}
+
+	locs := make([]Location, 0, len(rows))
+	for _, row := range rows {
+		resolved, err := filepath.EvalSymlinks(row.RootPath)
+		if err != nil {
+			return nil, fmt.Errorf("storage location %q root_path %q: %w", row.Name, row.RootPath, err)
+		}
+		locs = append(locs, Location{
+			ID:       row.ID,
+			Name:     row.Name,
+			RootPath: filepath.Clean(resolved),
+			Tier:     row.Tier,
+			ReadOnly: row.ReadOnly,
+		})
+	}
+	return NewGuard(locs), nil
+}
+
+// Resolve canonicalizes path and returns the Location it falls under.
+// Symlinks anywhere in path's existing ancestry are fully resolved before
+// the tier lookup runs -- a symlink sitting in a read-write Tier 2 directory
+// that points into the Tier 3 archive is resolved to its real target first,
+// so it cannot be used to route a write around the tier check.
+func (g *Guard) Resolve(path string) (Location, error) {
+	canon, err := canonicalize(path)
+	if err != nil {
+		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+	}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, loc := range g.locs {
+		if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
+			return loc, nil
+		}
+	}
+	return Location{}, &ErrUnknownLocation{Path: path}
+}
+
+// CheckWrite returns *ErrReadOnlyTier if path resolves to a read-only
+// location, or *ErrUnknownLocation if it resolves to none. Returns nil only
+// when the write is permitted. Call this before any write; Create,
+// WriteFile, MkdirAll and Remove already do.
+func (g *Guard) CheckWrite(path string) error {
+	loc, err := g.Resolve(path)
+	if err != nil {
+		return err
+	}
+	if loc.ReadOnly {
+		return &ErrReadOnlyTier{Path: path, Location: loc.Name, Tier: loc.Tier}
+	}
+	return nil
+}
+
+// Create is os.Create, gated by CheckWrite. No file is created if the check
+// fails.
+func (g *Guard) Create(path string) (*os.File, error) {
+	if err := g.CheckWrite(path); err != nil {
+		return nil, err
+	}
+	return os.Create(path)
+}
+
+// WriteFile is os.WriteFile, gated by CheckWrite.
+func (g *Guard) WriteFile(path string, data []byte, perm fs.FileMode) error {
+	if err := g.CheckWrite(path); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, perm)
+}
+
+// MkdirAll is os.MkdirAll, gated by CheckWrite against the target directory
+// itself (not each intermediate component -- if the deepest directory is
+// writable, so is everything MkdirAll would create above it, since they all
+// resolve under the same location).
+func (g *Guard) MkdirAll(path string, perm fs.FileMode) error {
+	if err := g.CheckWrite(path); err != nil {
+		return err
+	}
+	return os.MkdirAll(path, perm)
+}
+
+// Remove is os.Remove, gated by CheckWrite.
+func (g *Guard) Remove(path string) error {
+	if err := g.CheckWrite(path); err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
+
+// OpenRead is os.Open. Reads are always permitted, including against Tier 3
+// -- the archive is read-only, not unreadable.
+func (g *Guard) OpenRead(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
+// canonicalize resolves path to its real, symlink-free form. path need not
+// exist: canonicalize walks up to the deepest existing ancestor, resolves
+// that ancestor fully (EvalSymlinks), and rejoins the non-existent suffix
+// components literally -- they can't be symlinks if they don't exist yet.
+// A path that cannot be canonicalized at all (e.g. no existing ancestor
+// short of an unreadable point) is rejected, never passed through as-is.
+func canonicalize(path string) (string, error) {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path must be absolute: %s", path)
+	}
+
+	var suffix []string
+	cur := path
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			full := resolved
+			for i := len(suffix) - 1; i >= 0; i-- {
+				full = filepath.Join(full, suffix[i])
+			}
+			return filepath.Clean(full), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("no existing ancestor found while resolving %q", path)
+		}
+		suffix = append(suffix, filepath.Base(cur))
+		cur = parent
+	}
+}

@@ -1,3 +1,8 @@
+-- name: CreateStorageLocation :one
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable)
+VALUES (?1, ?2, ?3, ?4, ?5)
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at;
+
 -- name: ListStorageLocations :many
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
 FROM storage_locations
