@@ -240,3 +240,6 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 - [`docs/schema.md`](docs/schema.md) -- the itemized deviation ledger against that spec (nine
   numbered fixes) and the sqlc risk note.
 - [`docs/forward-auth.md`](docs/forward-auth.md) -- the Authentik/Traefik walkthrough.
+- [`docs/roadmap.md`](docs/roadmap.md) -- the phased plan for everything after increment 1: the
+  spec's remaining pillars plus the built-but-unwired surface increment 1 left connected to
+  nothing. Filed as GitHub issues per phase, worked through mullion task master.
