@@ -35,7 +35,7 @@ func testServer(t *testing.T) *Server {
 
 	// SPA is deliberately left nil in this fixture -- TestNotFoundRoutesReturn404
 	// depends on spaHandler()'s nil-spa fallback being a plain 404, not the
-	// SPA shell PR 10 eventually embeds.
+	// SPA shell web.Dist() provides.
 	return New(Deps{
 		Config: &config.Config{}, Log: log, DB: database,
 		Prober: probe.New(), Pool: pool,
