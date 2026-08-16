@@ -22,8 +22,12 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture and package tour.
 
 ```bash
 make lint && make test && make build
-golangci-lint run
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
 ```
+
+(The `/v2` module path and the version pin both matter -- `.golangci.yml` declares
+`version: "2"`, and a floating `@latest` install could resolve v3+ and fail against a v2
+config. CI pins the same version via `golangci/golangci-lint-action@v9`; bump both together.)
 
 Be precise about what each of these does and doesn't cover:
 
