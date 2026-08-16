@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
@@ -29,11 +30,23 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Post(api, "/api/v1/edges/{id}/confirm", s.handleConfirmEdge)
 	huma.Post(api, "/api/v1/edges/{id}/reject", s.handleRejectEdge)
 
-	huma.Post(api, "/api/v1/scan", s.handleStartScan)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
+		Path:          "/api/v1/scan",
+		OperationID:   "startScan",
+		Summary:       "Start a scan of a storage location",
+		DefaultStatus: http.StatusAccepted,
+	}, s.handleStartScan)
 	huma.Get(api, "/api/v1/progress", s.handleProgress)
 
 	huma.Post(api, "/api/v1/agent/hello", s.handleAgentHello)
-	huma.Post(api, "/api/v1/agent/events", s.handleAgentEvent)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
+		Path:          "/api/v1/agent/events",
+		OperationID:   "submitAgentEvent",
+		Summary:       "Accept a workstation agent event",
+		DefaultStatus: http.StatusAccepted,
+	}, s.handleAgentEvent)
 }
 
 // --- /api/v1/me ---
