@@ -439,6 +439,19 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		}
 	}
 
+	if deps.Prober != nil && deps.Prober.HasFFProbe() && isVideoExt(ext) {
+		// spec directive 9.4: ffprobe failure is logged and the file still
+		// indexes -- same graceful-degradation rule as the Exif call.
+		ffCtx, cancel := context.WithTimeout(ctx, exifTimeout)
+		ff, err := deps.Prober.FFProbe(ffCtx, rec.Path)
+		cancel()
+		if err != nil {
+			deps.logOrDiscard().Debug("pipeline: ffprobe probe failed, indexing without it", "path", rec.Path, "err", err)
+		} else {
+			result.FFProbe = ff
+		}
+	}
+
 	return result, nil
 }
 
