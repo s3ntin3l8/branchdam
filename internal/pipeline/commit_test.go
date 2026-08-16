@@ -310,6 +310,49 @@ func TestMissingNodeRebasesOnMove(t *testing.T) {
 	}
 }
 
+// TestMarkUnseenNodesMissingScopedToLocation: the set-based MISSING sweep is
+// scoped by storage_location_id -- a scan of one mount must never touch
+// another mount's nodes, even when both are stale.
+func TestMarkUnseenNodesMissingScopedToLocation(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	// Distinct tiers so the UNIQUE(name) constraint in storage_locations is
+	// satisfied -- seedLocation names rows "tier-" + test name.
+	locA := seedLocation(t, database, "TIER2_EXPORTS", false)
+	locB := seedLocation(t, database, "PROJECTS", false)
+	if _, err := Commit(ctx, database, locA, []Result{
+		{Path: "/a/node.jpg", FileName: "node.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
+	}); err != nil {
+		t.Fatalf("Commit A: %v", err)
+	}
+	if _, err := Commit(ctx, database, locB, []Result{
+		{Path: "/b/node.jpg", FileName: "node.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "bbbbbbbbbbbbbbbb"},
+	}); err != nil {
+		t.Fatalf("Commit B: %v", err)
+	}
+	// Backdate both nodes so a sweep at before_unix=9 would catch them.
+	if _, err := database.ExecInTx(ctx, "UPDATE media_nodes SET last_seen_at = 1"); err != nil {
+		t.Fatalf("backdate last_seen_at: %v", err)
+	}
+
+	n, err := db.InTxExclusive(database, ctx, func(q *sqlcgen.Queries) (int64, error) {
+		return q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{StorageLocationID: locA, BeforeUnix: 9})
+	})
+	if err != nil {
+		t.Fatalf("MarkUnseenNodesMissing: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("affected rows = %d, want 1 (only location A's stale node)", n)
+	}
+	if got := mustGetLiveNode(t, database, "/a/node.jpg"); got.LifecycleState != "MISSING" {
+		t.Errorf("A node = %q, want MISSING", got.LifecycleState)
+	}
+	if got := mustGetLiveNode(t, database, "/b/node.jpg"); got.LifecycleState != "ACTIVE" {
+		t.Errorf("B node = %q, want ACTIVE (untouched)", got.LifecycleState)
+	}
+}
+
 func TestFilenameStem(t *testing.T) {
 	cases := map[string]string{
 		"DSC01234.ARW":        "dsc01234",
