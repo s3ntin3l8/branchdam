@@ -19,6 +19,8 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/me", s.handleMe)
 	huma.Get(api, "/api/v1/config", s.handleConfig)
 
+	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
+
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
@@ -67,6 +69,39 @@ type ConfigOutput struct {
 func (s *Server) handleConfig(_ context.Context, _ *struct{}) (*ConfigOutput, error) {
 	out := &ConfigOutput{}
 	out.Body.Version = s.version
+	return out, nil
+}
+
+// --- /api/v1/storage-locations ---
+
+type StorageLocationDTO struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	RootPath string `json:"rootPath"`
+	Tier     string `json:"tier"`
+	ReadOnly bool   `json:"readOnly"`
+	Prunable bool   `json:"prunable"`
+}
+
+type ListStorageLocationsOutput struct {
+	Body struct {
+		Locations []StorageLocationDTO `json:"locations"`
+	}
+}
+
+func (s *Server) handleListStorageLocations(ctx context.Context, _ *struct{}) (*ListStorageLocationsOutput, error) {
+	rows, err := s.db.Reader.ListStorageLocations(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list storage locations", err)
+	}
+	out := &ListStorageLocationsOutput{}
+	out.Body.Locations = make([]StorageLocationDTO, len(rows))
+	for i, r := range rows {
+		out.Body.Locations[i] = StorageLocationDTO{
+			ID: r.ID, Name: r.Name, RootPath: r.RootPath, Tier: r.Tier,
+			ReadOnly: r.ReadOnly != 0, Prunable: r.Prunable != 0,
+		}
+	}
 	return out, nil
 }
 

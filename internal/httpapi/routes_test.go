@@ -164,6 +164,45 @@ func TestAuditQueueEmpty(t *testing.T) {
 	}
 }
 
+func TestListStorageLocations(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "archive", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/storage-locations", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/storage-locations status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Locations []StorageLocationDTO `json:"locations"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Locations) != 1 {
+		t.Fatalf("got %d locations, want 1: %+v", len(got.Locations), got.Locations)
+	}
+	loc := got.Locations[0]
+	if loc.Tier != "TIER3_MASTER_ARCHIVE" || !loc.ReadOnly {
+		t.Errorf("location = %+v, want TIER3_MASTER_ARCHIVE readOnly", loc)
+	}
+}
+
 func TestAgentEventEnqueues(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	body := map[string]string{
