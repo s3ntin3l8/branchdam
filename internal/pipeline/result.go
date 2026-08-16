@@ -103,7 +103,8 @@ func selectExifRaw(raw map[string]string) map[string]string {
 }
 
 // videoExts is the closed set of extensions FFProbe runs for (#34). Kept
-// explicit so adding a format is a conscious one-line change.
+// explicit so adding a format is a conscious one-line change. ".ts" here
+// means MPEG transport stream, not TypeScript source.
 var videoExts = map[string]bool{
 	"mp4": true, "mov": true, "m4v": true, "mkv": true, "avi": true,
 	"webm": true, "wmv": true, "mts": true, "m2ts": true, "ts": true,

@@ -447,12 +447,12 @@ func TestIsVideoExt(t *testing.T) {
 			t.Errorf("isVideoExt(%q) = false, want true", ext)
 		}
 	}
-	for _, ext := range []string{"MP4", ".mkv"} {
+	for _, ext := range []string{"MP4", ".mkv", ".MP4"} {
 		if !isVideoExt(ext) {
 			t.Errorf("isVideoExt(%q) = false, want true (gate must normalize case/dot)", ext)
 		}
 	}
-	notVideo := []string{"jpg", "arw", "mp3"}
+	notVideo := []string{"jpg", "arw", "mp3", "", "."}
 	for _, ext := range notVideo {
 		if isVideoExt(ext) {
 			t.Errorf("isVideoExt(%q) = true, want false", ext)

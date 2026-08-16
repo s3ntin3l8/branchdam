@@ -368,8 +368,10 @@ func needsFullHash(policy string, tierReadOnly, hasCollision bool) bool {
 
 // processFile does all the slow, off-transaction work for one file: opens
 // it through storage.Guard, hashes it, optionally escalates to full_hash,
-// and optionally runs exiftool. Runs entirely on a workers.Pool goroutine,
-// never inside a database transaction.
+// and optionally runs exiftool. It also runs FFProbe for video extensions
+// under the same probeTimeout budget; a video-heavy scan can pause progress
+// for long stretches between batch commits. Runs entirely on a workers.Pool
+// goroutine, never inside a database transaction.
 func processFile(ctx context.Context, deps ScanDeps, location storage.Location, rec indexer.Record) (*Result, error) {
 	f, err := deps.Guard.OpenRead(rec.Path)
 	if err != nil {
