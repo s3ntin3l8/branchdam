@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useProgress, useStartScan, useStorageLocations } from "../hooks/queries";
 
 export default function IngestPage() {
-  const { data, isLoading } = useStorageLocations();
+  const { data, isLoading, isError, error } = useStorageLocations();
   const [selected, setSelected] = useState<number | "">("");
   const startScan = useStartScan();
   const progress = useProgress(10);
@@ -32,12 +32,15 @@ export default function IngestPage() {
         <button
           type="button"
           disabled={selected === "" || startScan.isPending}
-          onClick={() => startScan.mutate(selected as number)}
+          onClick={() => selected !== "" && startScan.mutate(selected)}
           className="rounded bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
         >
           {startScan.isPending ? "Starting…" : "Scan"}
         </button>
       </div>
+      {isError && (
+        <p className="mb-4 text-sm text-red-400">Failed to load storage locations: {String(error)}</p>
+      )}
       {hasReadOnly && (
         <p className="mb-4 text-xs text-neutral-500">
           Read-only locations (e.g. TIER3_MASTER_ARCHIVE) can be scanned, but no writes are ever made to them.
@@ -47,6 +50,8 @@ export default function IngestPage() {
       <h2 className="mb-2 text-lg font-semibold">Recent jobs</h2>
       {progress.isLoading ? (
         <p className="text-neutral-500">Loading…</p>
+      ) : progress.isError ? (
+        <p className="text-red-400">Failed to load recent scan jobs.</p>
       ) : (progress.data?.jobs.length ?? 0) === 0 ? (
         <p className="text-neutral-500">No scans yet.</p>
       ) : (
