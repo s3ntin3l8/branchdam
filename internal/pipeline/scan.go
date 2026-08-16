@@ -130,21 +130,45 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	total := drainAndCommit(ctx, deps, location.ID, jobID, results, &filesSeen, &filesFailed, log)
 
 	finalErr := walkErr
-	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-		if finalErr != nil {
+	if finalErr != nil {
+		// A walk that failed partway means the sweep cannot know which nodes
+		// were genuinely unseen vs. just not reached -- sweep never runs. The
+		// job is failed in its own transaction so it always terminalizes.
+		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.FailScanJob(ctx, sqlcgen.FailScanJobParams{ID: jobID, LastError: sql.NullString{String: finalErr.Error(), Valid: true}})
-		}
-		if n, err := q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
-			StorageLocationID: location.ID,
-			BeforeUnix:        startedAt,
 		}); err != nil {
-			return err
-		} else if n > 0 {
-			log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", n)
+			log.Error("pipeline: fail scan job", "jobID", jobID, "err", err)
 		}
+		return
+	} else if failed := filesFailed.Load(); failed > 0 {
+		// Files the walk SAW but failed to commit (processFile error, submit
+		// refused) never had last_seen_at bumped -- sweeping them would flip
+		// live files to MISSING and can feed a spurious RebaseMissingNodePath
+		// steal. A pass with any failed files skips the sweep entirely.
+		log.Info("pipeline: skipping MISSING sweep, files failed this pass", "jobID", jobID, "failed", failed)
+	} else {
+		// Clean pass: everything walked was committed, so anything still
+		// older than the scan's start was genuinely unseen. A sweep failure
+		// is logged, never fatal -- the scan itself succeeded, and the node
+		// is simply swept one pass later (delayed-not-wrong).
+		var swept int64
+		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+			var err error
+			swept, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
+				StorageLocationID: location.ID,
+				BeforeUnix:        startedAt,
+			})
+			return err
+		}); err != nil {
+			log.Error("pipeline: MISSING sweep failed (delayed-not-wrong, swept next pass)", "jobID", jobID, "err", err)
+		} else if swept > 0 {
+			log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", swept)
+		}
+	}
+	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.CompleteScanJob(ctx, jobID)
 	}); err != nil {
-		log.Error("pipeline: finalize scan job", "jobID", jobID, "err", err)
+		log.Error("pipeline: complete scan job", "jobID", jobID, "err", err)
 	}
 	log.Info("pipeline: scan complete", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"inserted", total.Inserted, "touched", total.Touched, "versionCollisions", total.VersionCollisions, "moved", total.Moved)

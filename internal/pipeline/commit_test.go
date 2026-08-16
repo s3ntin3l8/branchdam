@@ -336,10 +336,12 @@ func TestMarkUnseenNodesMissingScopedToLocation(t *testing.T) {
 		t.Fatalf("backdate last_seen_at: %v", err)
 	}
 
-	n, err := db.InTxExclusive(database, ctx, func(q *sqlcgen.Queries) (int64, error) {
-		return q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{StorageLocationID: locA, BeforeUnix: 9})
-	})
-	if err != nil {
+	var n int64
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		n, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{StorageLocationID: locA, BeforeUnix: 9})
+		return err
+	}); err != nil {
 		t.Fatalf("MarkUnseenNodesMissing: %v", err)
 	}
 	if n != 1 {

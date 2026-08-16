@@ -185,39 +185,26 @@ func (d *DB) InTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	return nil
 }
 
-// InTxExclusive runs fn inside a single write transaction on the writer
-// pool's one connection and returns fn's value. Same guarantee as InTx,
-// for the rare call that needs a result value out of the transaction.
-// A free function, not a method: Go forbids type parameters on methods.
-func InTxExclusive[T any](d *DB, ctx context.Context, fn func(*sqlcgen.Queries) (T, error)) (T, error) {
-	var out T
-	if err := d.InTx(ctx, func(q *sqlcgen.Queries) error {
-		v, err := fn(q)
-		if err != nil {
-			return err
-		}
-		out = v
-		return nil
-	}); err != nil {
-		return out, err
-	}
-	return out, nil
-}
-
 // ExecInTx runs a raw SQL statement inside a single write transaction on
 // the writer pool's one connection, returning the sql.Result so callers can
 // read RowsAffected. Test fixtures that need to set columns no sqlc query
-// writes use this; production code should prefer a named query.
+// writes use this; production code should prefer a named query. Error
+// handling mirrors InTx: an Exec error rolls the transaction back (surfacing
+// a rollback failure), a Commit error is wrapped with its context.
 func (d *DB) ExecInTx(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	tx, err := d.writer.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
+
 	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		_ = tx.Rollback()
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return nil, fmt.Errorf("%w (rollback also failed: %v)", err, rbErr)
+		}
 		return nil, err
 	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}

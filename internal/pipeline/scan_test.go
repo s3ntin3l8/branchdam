@@ -36,38 +36,8 @@ func TestRunScanEndToEnd(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 
-	var locationID int64
-	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
-		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
-			Name:     "test-export",
-			RootPath: resolvedRoot,
-			Tier:     "TIER2_EXPORTS",
-			ReadOnly: 0,
-			Prunable: 0,
-		})
-		locationID = loc.ID
-		return err
-	})
-	if err != nil {
-		t.Fatalf("seed location: %v", err)
-	}
-
-	guard := storage.NewGuard([]storage.Location{
-		{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false},
-	})
-
-	pool := workers.New[string](2, 16)
-	poolCtx, cancelPool := context.WithCancel(context.Background())
-	defer cancelPool()
-	pool.Run(poolCtx)
-
-	deps := ScanDeps{
-		DB:             database,
-		Guard:          guard,
-		Prober:         probe.New(), // whatever is/isn't installed -- RunScan must work either way
-		Pool:           pool,
-		FullHashPolicy: "never", // keep this test focused on orchestration, not hashing policy (covered by TestNeedsFullHashPolicy)
-	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
 	location := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
 
 	jobID, err := RunScan(ctx, deps, location)
@@ -78,19 +48,7 @@ func TestRunScanEndToEnd(t *testing.T) {
 		t.Fatal("RunScan returned job id 0")
 	}
 
-	var job sqlcgen.ScanJob
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		job, err = database.Reader.GetScanJob(ctx, jobID)
-		if err != nil {
-			t.Fatalf("GetScanJob: %v", err)
-		}
-		if job.State != "RUNNING" {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
+	job := waitJobDone(t, database, jobID)
 	if job.State != "COMPLETED" {
 		t.Fatalf("scan job state = %q, want COMPLETED (last_error=%v)", job.State, job.LastError)
 	}
@@ -390,6 +348,56 @@ func TestScanAbortedPartwayLeavesAllNodesActive(t *testing.T) {
 	}
 	if got := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "a.txt")); got.LifecycleState != "ACTIVE" {
 		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE (MISSING sweep must not run on a failed walk)", got.LifecycleState)
+	}
+}
+
+// TestScanSweepSkippedWhenFilesFailed guards the false-MISSING bug: a file
+// the walk SAW but failed to commit (processFile error) never gets
+// last_seen_at bumped, so a pass with failed files must skip the sweep
+// entirely -- otherwise a live file gets flipped to MISSING and can feed a
+// spurious RebaseMissingNodePath steal.
+func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "alpha content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 1): %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("pass 1 state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	// Pass 2: the real walk, PLUS a Record pointing at a file that does not
+	// exist -- processFile fails for it, so filesFailed > 0 while the walk
+	// itself succeeds. The sweep must be skipped.
+	realWalk := indexer.Walk
+	deps.WalkFn = func(ctx context.Context, root string, onFile func(indexer.Record) error) error {
+		if err := realWalk(ctx, root, onFile); err != nil {
+			return err
+		}
+		return onFile(indexer.Record{Path: filepath.Join(root, "does-not-exist.bin"), Size: 1, ModTime: time.Now()})
+	}
+	jobID2, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 2): %v", err)
+	}
+	if job := waitJobDone(t, database, jobID2); job.State != "COMPLETED" {
+		t.Fatalf("pass 2 state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	if got := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "a.txt")); got.LifecycleState != "ACTIVE" {
+		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE (sweep must skip a pass with failed files)", got.LifecycleState)
 	}
 }
 
