@@ -2,12 +2,15 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/indexer"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -141,6 +144,152 @@ func TestWatchSupervisorRenamePreservesNodeUUID(t *testing.T) {
 	}
 	if oldNode, err := database.Reader.GetLiveNodeByPath(ctx, before); err == nil && oldNode.LifecycleState == "ACTIVE" {
 		t.Errorf("old path still ACTIVE after rename: %s", before)
+	}
+}
+
+// TestRebaseIfMovedCreateFirstRebases is the direct unit test for the
+// kernel-Create-first ordering rebaseIfMoved exists to handle: inotify on
+// Linux delivers a rename's IN_MOVED_TO (create) before its IN_MOVED_FROM
+// (removal), so the old node is still ACTIVE -- not MISSING -- when the new
+// file is processed. rebaseIfMoved must recognize the move from the
+// filesystem (old file gone from disk, same fast_hash) and rebase the old
+// node in place, rather than letting a duplicate node be inserted.
+func TestRebaseIfMovedCreateFirstRebases(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	writeFile(t, oldPath, "renamed content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "rebase-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("seed scan state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	original := mustGetLiveNode(t, database, oldPath)
+	if original.LifecycleState != "ACTIVE" {
+		t.Fatalf("precondition broken: old node = %q, want ACTIVE", original.LifecycleState)
+	}
+
+	// The Create-first precondition: the old file is gone from disk, but the
+	// node is still ACTIVE -- its removal event has not been processed yet.
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+
+	newPath := filepath.Join(resolvedRoot, "new.txt")
+	writeFile(t, newPath, "renamed content") // the moved file: identical content
+	info, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatalf("stat new: %v", err)
+	}
+	result, err := processFile(ctx, deps, loc, indexer.Record{Path: newPath, Size: info.Size(), ModTime: info.ModTime()})
+	if err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if original.FastHash == nil || *original.FastHash != result.FastHash {
+		t.Fatalf("precondition broken: old fast_hash %v != new fast_hash %q", original.FastHash, result.FastHash)
+	}
+
+	moved, err := NewWatcherSupervisor(deps, nil).rebaseIfMoved(ctx, loc, result)
+	if err != nil {
+		t.Fatalf("rebaseIfMoved: %v", err)
+	}
+	if !moved {
+		t.Fatal("rebaseIfMoved = false, want true (old file gone, same fast_hash)")
+	}
+
+	rebased := mustGetLiveNode(t, database, newPath)
+	if rebased.ID != original.ID {
+		t.Errorf("rebased id = %d, want %d (same row, no fresh insert)", rebased.ID, original.ID)
+	}
+	if rebased.NodeUuid != original.NodeUuid {
+		t.Errorf("rebased node_uuid = %q, want %q", rebased.NodeUuid, original.NodeUuid)
+	}
+	if rebased.LifecycleState != "ACTIVE" {
+		t.Errorf("rebased lifecycle_state = %q, want ACTIVE", rebased.LifecycleState)
+	}
+
+	// The old path must no longer resolve to a live node -- the row was
+	// rebound to newPath, not left behind.
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, oldPath); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("old path still resolves after rebase (err=%v)", err)
+	}
+
+	// And the move inserted nothing: exactly one live node carries this
+	// fast_hash now.
+	nodes, err := database.Reader.ListLiveNodesByFastHash(ctx, &result.FastHash)
+	if err != nil {
+		t.Fatalf("ListLiveNodesByFastHash: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Errorf("live nodes with fast_hash = %d, want 1 (no duplicate inserted)", len(nodes))
+	}
+}
+
+// TestRebaseIfMovedLeavesDuplicateAlone is the negative counterpart: the old
+// file is still on disk, so a same-content file at a new path is a genuine
+// duplicate -- not a move -- and rebaseIfMoved must decline (returning
+// false), leaving the old node untouched for Commit's normal duplicate /
+// collision handling.
+func TestRebaseIfMovedLeavesDuplicateAlone(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	writeFile(t, oldPath, "renamed content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "rebase-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("seed scan state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	original := mustGetLiveNode(t, database, oldPath)
+
+	// Old file deliberately still present: identical content at a new path is
+	// a duplicate, not a move -- rebaseIfMoved must leave it alone.
+	newPath := filepath.Join(resolvedRoot, "dup.txt")
+	writeFile(t, newPath, "renamed content")
+	info, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatalf("stat new: %v", err)
+	}
+	result, err := processFile(ctx, deps, loc, indexer.Record{Path: newPath, Size: info.Size(), ModTime: info.ModTime()})
+	if err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+
+	moved, err := NewWatcherSupervisor(deps, nil).rebaseIfMoved(ctx, loc, result)
+	if err != nil {
+		t.Fatalf("rebaseIfMoved: %v", err)
+	}
+	if moved {
+		t.Fatal("rebaseIfMoved = true, want false (old file still on disk)")
+	}
+
+	// Old node untouched, still ACTIVE at its path.
+	if got := mustGetLiveNode(t, database, oldPath); got.ID != original.ID || got.LifecycleState != "ACTIVE" {
+		t.Errorf("old node changed: id=%d state=%q, want id=%d ACTIVE", got.ID, got.LifecycleState, original.ID)
 	}
 }
 
