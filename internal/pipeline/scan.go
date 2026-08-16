@@ -430,6 +430,12 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 			result.DerivedFromID = exif.DerivedFromID
 			result.CapturedAt = exif.CapturedAt
 			result.CameraModel = exif.Model
+			result.Make = exif.Make
+			result.LensModel = exif.LensModel
+			result.SerialNumber = exif.SerialNumber
+			result.GPSLatitude = exif.GPSLatitude
+			result.GPSLongitude = exif.GPSLongitude
+			result.ExifRaw = selectExifRaw(exif.Raw)
 		}
 	}
 
