@@ -339,7 +339,14 @@ func TestMarkUnseenNodesMissingScopedToLocation(t *testing.T) {
 	var n int64
 	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
-		n, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{StorageLocationID: locA, BeforeUnix: 9})
+		// KeepActive is this call's "exclude these paths" list; production
+		// passes the pass's seen-but-uncertain set, falling back to this
+		// sentinel when empty -- sqlc substitutes NULL for an empty slice and
+		// file_path NOT IN (NULL) is unknown (false), so an empty list would
+		// silently sweep nothing.
+		n, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
+			StorageLocationID: locA, BeforeUnix: 9, KeepActive: []string{""},
+		})
 		return err
 	}); err != nil {
 		t.Fatalf("MarkUnseenNodesMissing: %v", err)

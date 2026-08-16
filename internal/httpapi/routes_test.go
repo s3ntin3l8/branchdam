@@ -284,3 +284,83 @@ func TestScanEndToEndThroughHTTP(t *testing.T) {
 		t.Fatalf("got %d assets, want 2: %+v", len(assetsResp.Assets), assetsResp.Assets)
 	}
 }
+
+// TestScanJobOutlivesRequestContext is the C1 regression guard: the scan
+// goroutine must outlive the HTTP request context that started it. A real TCP
+// server (httptest.NewServer) cancels the request's context the moment the
+// handler returns -- unlike doJSON's direct ServeHTTP, which never does -- so
+// this test fails if RunScan inherits the request ctx: the walk's per-entry
+// check aborts with context.Canceled (job FAILED) or the commit/sweep InTxs
+// fail on the canceled ctx (job stuck RUNNING forever).
+func TestScanJobOutlivesRequestContext(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	var locationID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "http-scan-request-ctx", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		locationID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	srv.guard = storage.NewGuard([]storage.Location{
+		{ID: locationID, Name: "http-scan-request-ctx", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false},
+	})
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body, err := json.Marshal(map[string]int64{"storageLocationId": locationID})
+	if err != nil {
+		t.Fatalf("marshal scan request: %v", err)
+	}
+	resp, err := http.Post(ts.URL+"/api/v1/scan", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /api/v1/scan: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/v1/scan status = %d", resp.StatusCode)
+	}
+	var scanResp struct {
+		JobID int64 `json:"jobId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&scanResp); err != nil {
+		t.Fatalf("decode scan response: %v", err)
+	}
+	if scanResp.JobID == 0 {
+		t.Fatal("jobId is 0")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var job sqlcgen.ScanJob
+	for time.Now().Before(deadline) {
+		job, err = database.Reader.GetScanJob(ctx, scanResp.JobID)
+		if err != nil {
+			t.Fatalf("GetScanJob: %v", err)
+		}
+		if job.State != "RUNNING" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job.State != "COMPLETED" {
+		t.Fatalf("job state = %q, want COMPLETED (last_error=%v) -- scan did not outlive the request context", job.State, job.LastError)
+	}
+	if job.FilesSeen != 1 {
+		t.Errorf("FilesSeen = %d, want 1", job.FilesSeen)
+	}
+}

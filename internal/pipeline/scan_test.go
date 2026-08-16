@@ -351,19 +351,22 @@ func TestScanAbortedPartwayLeavesAllNodesActive(t *testing.T) {
 	}
 }
 
-// TestScanSweepSkippedWhenFilesFailed guards the false-MISSING bug: a file
-// the walk SAW but failed to commit (processFile error) never gets
-// last_seen_at bumped, so a pass with failed files must skip the sweep
-// entirely -- otherwise a live file gets flipped to MISSING and can feed a
-// spurious RebaseMissingNodePath steal. Mutation-sensitive by construction:
-// pass 2 "sees" a.txt (a real, existing node) but fails to hash it, so its
-// last_seen_at stays stale and, without the guard, the sweep catches it.
-func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
+// TestScanSweepExcludesFailedPaths guards the false-MISSING bug: a file the
+// walk SAW but failed to commit (processFile error) never gets last_seen_at
+// bumped, so the sweep must exclude exactly those paths -- not skip the whole
+// location -- or a live file gets flipped to MISSING and can feed a spurious
+// RebaseMissingNodePath steal. Mutation-sensitive by construction: pass 2
+// "sees" a.txt (a real, existing node) but fails to hash it, so its
+// last_seen_at stays stale; b.txt is on disk but genuinely absent from pass
+// 2's walk. With the exclusion, a.txt survives as ACTIVE while b.txt is swept
+// MISSING; without it, both would be swept.
+func TestScanSweepExcludesFailedPaths(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "alpha content")
+	writeFile(t, filepath.Join(root, "b.txt"), "bravo content")
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatalf("resolve root: %v", err)
@@ -379,19 +382,25 @@ func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
 	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
 		t.Fatalf("pass 1 state = %q (last_error=%v)", job.State, job.LastError)
 	}
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if got := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, name)); got.LifecycleState != "ACTIVE" {
+			t.Fatalf("pre-conditions broken: %s = %q, want ACTIVE", name, got.LifecycleState)
+		}
+	}
 
 	// Pass 2 must start in a strictly later wall-clock second than pass 1's
-	// insert (unixepoch() is 1s-granular), so a.txt's last_seen_at -- set in
-	// pass 1, never bumped since -- is stale relative to pass 2's started_at
-	// and a sweep would catch it.
+	// insert (unixepoch() is 1s-granular), so both nodes' last_seen_at -- set
+	// in pass 1, never bumped since -- are stale relative to pass 2's
+	// started_at and the sweep would catch them.
 	waitForNextSecond(t)
 
 	// Pass 2: emit a SINGLE record at a.txt's real path with an inflated
-	// Size. The walk "sees" a.txt, but hashing.FastHash's ReadAt hits a
-	// short-EOF read (hashing.go:43-44: read != n with io.EOF) and errors, so
-	// processFile fails -- filesFailed > 0 -- while the walk itself returns
-	// nil. a.txt is never re-committed this pass, so its last_seen_at stays
-	// stale from pass 1.
+	// Size, and nothing for b.txt. The walk "sees" a.txt, but
+	// hashing.FastHash's ReadAt hits a short-EOF read (hashing.go:43-44:
+	// read != n with io.EOF) and errors, so processFile fails -- a.txt joins
+	// the seen-but-uncertain set -- while the walk itself returns nil. b.txt
+	// is genuinely absent from this pass's walk, so its stale last_seen_at is
+	// exactly what the sweep is supposed to catch.
 	aPath := filepath.Join(resolvedRoot, "a.txt")
 	deps.WalkFn = func(ctx context.Context, root string, onFile func(indexer.Record) error) error {
 		return onFile(indexer.Record{Path: aPath, Size: 1 << 30, ModTime: time.Now()})
@@ -405,7 +414,10 @@ func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
 	}
 
 	if got := mustGetLiveNode(t, database, aPath); got.LifecycleState != "ACTIVE" {
-		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE (sweep must skip a pass with failed files)", got.LifecycleState)
+		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE (seen-but-uncertain path must be excluded from the sweep)", got.LifecycleState)
+	}
+	if got := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "b.txt")); got.LifecycleState != "MISSING" {
+		t.Errorf("b.txt lifecycle_state = %q, want MISSING (genuinely unseen node must still be swept)", got.LifecycleState)
 	}
 }
 
