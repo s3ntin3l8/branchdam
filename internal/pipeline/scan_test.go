@@ -355,7 +355,9 @@ func TestScanAbortedPartwayLeavesAllNodesActive(t *testing.T) {
 // the walk SAW but failed to commit (processFile error) never gets
 // last_seen_at bumped, so a pass with failed files must skip the sweep
 // entirely -- otherwise a live file gets flipped to MISSING and can feed a
-// spurious RebaseMissingNodePath steal.
+// spurious RebaseMissingNodePath steal. Mutation-sensitive by construction:
+// pass 2 "sees" a.txt (a real, existing node) but fails to hash it, so its
+// last_seen_at stays stale and, without the guard, the sweep catches it.
 func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
@@ -378,15 +380,21 @@ func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
 		t.Fatalf("pass 1 state = %q (last_error=%v)", job.State, job.LastError)
 	}
 
-	// Pass 2: the real walk, PLUS a Record pointing at a file that does not
-	// exist -- processFile fails for it, so filesFailed > 0 while the walk
-	// itself succeeds. The sweep must be skipped.
-	realWalk := indexer.Walk
+	// Pass 2 must start in a strictly later wall-clock second than pass 1's
+	// insert (unixepoch() is 1s-granular), so a.txt's last_seen_at -- set in
+	// pass 1, never bumped since -- is stale relative to pass 2's started_at
+	// and a sweep would catch it.
+	waitForNextSecond(t)
+
+	// Pass 2: emit a SINGLE record at a.txt's real path with an inflated
+	// Size. The walk "sees" a.txt, but hashing.FastHash's ReadAt hits a
+	// short-EOF read (hashing.go:43-44: read != n with io.EOF) and errors, so
+	// processFile fails -- filesFailed > 0 -- while the walk itself returns
+	// nil. a.txt is never re-committed this pass, so its last_seen_at stays
+	// stale from pass 1.
+	aPath := filepath.Join(resolvedRoot, "a.txt")
 	deps.WalkFn = func(ctx context.Context, root string, onFile func(indexer.Record) error) error {
-		if err := realWalk(ctx, root, onFile); err != nil {
-			return err
-		}
-		return onFile(indexer.Record{Path: filepath.Join(root, "does-not-exist.bin"), Size: 1, ModTime: time.Now()})
+		return onFile(indexer.Record{Path: aPath, Size: 1 << 30, ModTime: time.Now()})
 	}
 	jobID2, err := RunScan(ctx, deps, loc)
 	if err != nil {
@@ -396,7 +404,7 @@ func TestScanSweepSkippedWhenFilesFailed(t *testing.T) {
 		t.Fatalf("pass 2 state = %q (last_error=%v)", job.State, job.LastError)
 	}
 
-	if got := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "a.txt")); got.LifecycleState != "ACTIVE" {
+	if got := mustGetLiveNode(t, database, aPath); got.LifecycleState != "ACTIVE" {
 		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE (sweep must skip a pass with failed files)", got.LifecycleState)
 	}
 }

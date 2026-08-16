@@ -133,7 +133,10 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	if finalErr != nil {
 		// A walk that failed partway means the sweep cannot know which nodes
 		// were genuinely unseen vs. just not reached -- sweep never runs. The
-		// job is failed in its own transaction so it always terminalizes.
+		// job is failed in its own transaction, so it reaches a terminal state
+		// barring a failure of the terminalizing write itself -- which only
+		// happens when the DB is failing, and there is nothing else the scan
+		// can do about it.
 		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.FailScanJob(ctx, sqlcgen.FailScanJobParams{ID: jobID, LastError: sql.NullString{String: finalErr.Error(), Valid: true}})
 		}); err != nil {
