@@ -152,3 +152,19 @@ UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated
 
 -- name: MarkNodeMissing :exec
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
+
+-- name: MarkUnseenNodesMissing :execrows
+-- Phase 1 (#31): at the end of a successful full scan, every ACTIVE node under
+-- the scanned storage location whose last_seen_at predates the scan's start is
+-- gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+-- last_seen_at on every node the walk actually saw, so anything still old here
+-- was genuinely unseen this scan. Scoped by storage_location_id so a scan of
+-- one mount never touches another. unixepoch() is 1s granularity, so a node
+-- last seen in a scan that happened to end in the SAME wall-clock second as
+-- this scan's start may survive one extra scan -- it is swept the next round,
+-- which is delayed-not-wrong.
+UPDATE media_nodes
+SET lifecycle_state = 'MISSING', updated_at = unixepoch()
+WHERE storage_location_id = sqlc.arg('storage_location_id')
+  AND lifecycle_state = 'ACTIVE'
+  AND last_seen_at < sqlc.arg('before_unix');

@@ -77,6 +77,16 @@ type Querier interface {
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	MarkNodeMissing(ctx context.Context, id int64) error
+	// Phase 1 (#31): at the end of a successful full scan, every ACTIVE node under
+	// the scanned storage location whose last_seen_at predates the scan's start is
+	// gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+	// last_seen_at on every node the walk actually saw, so anything still old here
+	// was genuinely unseen this scan. Scoped by storage_location_id so a scan of
+	// one mount never touches another. unixepoch() is 1s granularity, so a node
+	// last seen in a scan that happened to end in the SAME wall-clock second as
+	// this scan's start may survive one extra scan -- it is swept the next round,
+	// which is delayed-not-wrong.
+	MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error)
 	// Pillar 5 move detection, applied: the id and node_uuid never change, so
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
