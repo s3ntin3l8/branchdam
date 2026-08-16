@@ -10,6 +10,17 @@ import (
 	"database/sql"
 )
 
+const cancelScanJob = `-- name: CancelScanJob :exec
+UPDATE scan_jobs SET state = 'CANCELLED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
+`
+
+// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
+// not FAILED -- only a watcher that died on its own is a failure.
+func (q *Queries) CancelScanJob(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, cancelScanJob, id)
+	return err
+}
+
 const completeScanJob = `-- name: CompleteScanJob :exec
 UPDATE scan_jobs SET state = 'COMPLETED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
 `

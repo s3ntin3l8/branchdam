@@ -16,6 +16,9 @@ type Querier interface {
 	// row can never share file_path even for an instant within the
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
+	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
+	// not FAILED -- only a watcher that died on its own is a failure.
+	CancelScanJob(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) error
 	// Minimal edge insert, landed here because PR 6's own version-collision test
