@@ -210,7 +210,10 @@ const metadataCap = 64 // per-node metadata row cap -- overflow is logged, never
 // persistMetadata writes kv as node_metadata rows inside the caller's write
 // transaction, in sorted-key order so cap truncation is deterministic.
 // Overflow past maxRows is logged at DEBUG and dropped, never an error --
-// one over-tagged file must not fail a whole scan.
+// one over-tagged file must not fail a whole scan. That "logged and dropped"
+// guarantee covers cap overflow only: a hard insert error still aborts the
+// enclosing Commit transaction, so node and metadata land together or not at
+// all.
 func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, source string, kv map[string]string, maxRows int, log *slog.Logger) error {
 	if len(kv) == 0 || maxRows <= 0 {
 		return nil
@@ -253,6 +256,10 @@ func exifMetadata(r Result) map[string]string {
 	if r.GPSLongitude != nil {
 		kv["Composite:GPSLongitude"] = strconv.FormatFloat(*r.GPSLongitude, 'f', -1, 64)
 	}
+	// The allowlist is re-applied here (not only in selectExifRaw) so the
+	// unit test can bypass selectExifRaw by feeding ExifRaw directly, and so
+	// hand-built Results are filtered too -- defense-in-depth so the two
+	// filters can't drift.
 	for k, v := range r.ExifRaw {
 		if exifRawAllowlist[k] {
 			kv[k] = v
