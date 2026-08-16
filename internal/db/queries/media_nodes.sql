@@ -140,9 +140,15 @@ SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
 WHERE id = ?1;
 
 -- name: TouchMediaNode :exec
--- Same content at the same path, seen again on a later scan -- just record
--- that, no new row.
-UPDATE media_nodes SET mtime_unix = ?2, last_seen_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
+-- Same content at the same path, seen again on a later scan. Records that
+-- and, if the row was MISSING (a file re-created at its old path), reactivates
+-- it in place -- a MISSING row found alive again is not a version collision
+-- and must not stay MISSING.
+UPDATE media_nodes
+SET mtime_unix = ?2, last_seen_at = unixepoch(),
+    lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
+    updated_at = unixepoch()
+WHERE id = ?1;
 
 -- name: UpdateMediaNodeFullHash :exec
 -- Escalation path for T1: computed lazily, only when fast_hash collides

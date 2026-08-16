@@ -99,8 +99,10 @@ type Querier interface {
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
-	// Same content at the same path, seen again on a later scan -- just record
-	// that, no new row.
+	// Same content at the same path, seen again on a later scan. Records that
+	// and, if the row was MISSING (a file re-created at its old path), reactivates
+	// it in place -- a MISSING row found alive again is not a version collision
+	// and must not stay MISSING.
 	TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE

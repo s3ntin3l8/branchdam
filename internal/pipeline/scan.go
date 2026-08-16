@@ -44,6 +44,11 @@ type ScanDeps struct {
 	Engine         *graph.Engine
 	FullHashPolicy string // "always" | "tier3_and_collision" (default) | "never"
 	Log            *slog.Logger
+
+	// WalkFn is the directory-walk function RunScan uses, defaulting to
+	// indexer.Walk. Overridable in tests to force a mid-walk error -- the
+	// data-loss failure mode the MISSING sweep must never fire on.
+	WalkFn func(ctx context.Context, root string, onFile func(indexer.Record) error) error
 }
 
 // RunScan creates a scan_jobs row and returns its id immediately; the walk
@@ -64,11 +69,11 @@ func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int
 		return 0, fmt.Errorf("create scan job: %w", err)
 	}
 
-	go runScan(ctx, deps, location, job.ID)
+	go runScan(ctx, deps, location, job.ID, job.StartedAt)
 	return job.ID, nil
 }
 
-func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobID int64) {
+func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobID, startedAt int64) {
 	log := deps.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -78,7 +83,11 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	var wg sync.WaitGroup
 	var filesSeen, filesFailed atomic.Int32
 
-	walkErr := indexer.Walk(ctx, location.RootPath, func(rec indexer.Record) error {
+	walkFn := deps.WalkFn
+	if walkFn == nil {
+		walkFn = indexer.Walk
+	}
+	walkErr := walkFn(ctx, location.RootPath, func(rec indexer.Record) error {
 		if rec.IsSymlink {
 			return nil // following a symlink is a storage.Guard-mediated decision elsewhere, not this pass's
 		}
@@ -124,6 +133,14 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 		if finalErr != nil {
 			return q.FailScanJob(ctx, sqlcgen.FailScanJobParams{ID: jobID, LastError: sql.NullString{String: finalErr.Error(), Valid: true}})
+		}
+		if n, err := q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
+			StorageLocationID: location.ID,
+			BeforeUnix:        startedAt,
+		}); err != nil {
+			return err
+		} else if n > 0 {
+			log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", n)
 		}
 		return q.CompleteScanJob(ctx, jobID)
 	}); err != nil {

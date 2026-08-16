@@ -608,7 +608,11 @@ func (q *Queries) SetSupersededBy(ctx context.Context, arg SetSupersededByParams
 }
 
 const touchMediaNode = `-- name: TouchMediaNode :exec
-UPDATE media_nodes SET mtime_unix = ?2, last_seen_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
+UPDATE media_nodes
+SET mtime_unix = ?2, last_seen_at = unixepoch(),
+    lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
+    updated_at = unixepoch()
+WHERE id = ?1
 `
 
 type TouchMediaNodeParams struct {
@@ -616,8 +620,10 @@ type TouchMediaNodeParams struct {
 	MtimeUnix int64
 }
 
-// Same content at the same path, seen again on a later scan -- just record
-// that, no new row.
+// Same content at the same path, seen again on a later scan. Records that
+// and, if the row was MISSING (a file re-created at its old path), reactivates
+// it in place -- a MISSING row found alive again is not a version collision
+// and must not stay MISSING.
 func (q *Queries) TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error {
 	_, err := q.db.ExecContext(ctx, touchMediaNode, arg.ID, arg.MtimeUnix)
 	return err
