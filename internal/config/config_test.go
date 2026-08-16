@@ -94,3 +94,19 @@ storageLocations:
 		t.Errorf("StorageLocations[1] = %+v, want prunable TIER1_LOCAL_SCRATCH", cfg.StorageLocations[1])
 	}
 }
+
+func TestLoadAuthzGroups(t *testing.T) {
+	path := writeConfig(t, `
+authz:
+  groups:
+    - dam-admins
+    - super-users
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Authz.Groups) != 2 || cfg.Authz.Groups[0] != "dam-admins" || cfg.Authz.Groups[1] != "super-users" {
+		t.Errorf("Authz.Groups = %v, want [dam-admins super-users]", cfg.Authz.Groups)
+	}
+}
