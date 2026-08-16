@@ -60,3 +60,6 @@ compose.override.yml
 
 # Claude Code project state (plans, worktrees, local settings)
 .claude/
+
+# Agent workspace (superpowers plans, scratch)
+/docs/superpowers/
