@@ -140,9 +140,15 @@ SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
 WHERE id = ?1;
 
 -- name: TouchMediaNode :exec
--- Same content at the same path, seen again on a later scan -- just record
--- that, no new row.
-UPDATE media_nodes SET mtime_unix = ?2, last_seen_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
+-- Same content at the same path, seen again on a later scan. Records that
+-- and, if the row was MISSING (a file re-created at its old path), reactivates
+-- it in place -- a MISSING row found alive again is not a version collision
+-- and must not stay MISSING.
+UPDATE media_nodes
+SET mtime_unix = ?2, last_seen_at = unixepoch(),
+    lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
+    updated_at = unixepoch()
+WHERE id = ?1;
 
 -- name: UpdateMediaNodeFullHash :exec
 -- Escalation path for T1: computed lazily, only when fast_hash collides
@@ -152,3 +158,26 @@ UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated
 
 -- name: MarkNodeMissing :exec
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
+
+-- name: MarkUnseenNodesMissing :execrows
+-- Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
+-- scanned storage location whose last_seen_at predates the scan's start is
+-- gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+-- last_seen_at on every node the walk actually saw and committed, so anything
+-- still old here was genuinely unseen this scan. KeepActive is the pass's
+-- seen-but-uncertain set -- paths the walk saw but did not reliably commit
+-- (processFile error, submit refused, dropped result, batch Commit failure) --
+-- and is excluded from the sweep: a file on disk with a stale last_seen_at is
+-- not proof it's gone. SQLite's per-statement variable limit (32766 on modern
+-- builds) bounds how large KeepActive can be; beyond that the caller would
+-- need to chunk the sweep, which it does not. Scoped by storage_location_id so
+-- a scan of one mount never touches another. unixepoch() is 1s granularity, so
+-- a node last seen in a scan that happened to end in the SAME wall-clock
+-- second as this scan's start may survive one extra scan -- it is swept the
+-- next round, which is delayed-not-wrong.
+UPDATE media_nodes
+SET lifecycle_state = 'MISSING', updated_at = unixepoch()
+WHERE storage_location_id = sqlc.arg('storage_location_id')
+  AND lifecycle_state = 'ACTIVE'
+  AND last_seen_at < sqlc.arg('before_unix')
+  AND file_path NOT IN (sqlc.slice('keep_active'));

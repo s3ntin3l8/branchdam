@@ -185,6 +185,32 @@ func (d *DB) InTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	return nil
 }
 
+// ExecInTx runs a raw SQL statement inside a single write transaction on
+// the writer pool's one connection, returning the sql.Result so callers can
+// read RowsAffected. Test fixtures that need to set columns no sqlc query
+// writes use this; production code should prefer a named query. Error
+// handling mirrors InTx: an Exec error rolls the transaction back (surfacing
+// a rollback failure), a Commit error is wrapped with its context.
+func (d *DB) ExecInTx(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	tx, err := d.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return nil, fmt.Errorf("%w (rollback also failed: %v)", err, rbErr)
+		}
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+	return res, nil
+}
+
 // migrate applies pending goose migrations against db (the writer pool).
 // goose's package-level API carries global dialect/baseFS state, which is
 // fine here -- this process opens exactly one database.

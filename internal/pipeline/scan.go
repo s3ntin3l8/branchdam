@@ -44,6 +44,11 @@ type ScanDeps struct {
 	Engine         *graph.Engine
 	FullHashPolicy string // "always" | "tier3_and_collision" (default) | "never"
 	Log            *slog.Logger
+
+	// WalkFn is the directory-walk function RunScan uses, defaulting to
+	// indexer.Walk. Overridable in tests to force a mid-walk error -- the
+	// data-loss failure mode the MISSING sweep must never fire on.
+	WalkFn func(ctx context.Context, root string, onFile func(indexer.Record) error) error
 }
 
 // RunScan creates a scan_jobs row and returns its id immediately; the walk
@@ -64,11 +69,48 @@ func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int
 		return 0, fmt.Errorf("create scan job: %w", err)
 	}
 
-	go runScan(ctx, deps, location, job.ID)
+	// The scan is a background job, not a request: it must outlive the HTTP
+	// request context that started it, or the first canceled ctx (the walk's
+	// per-entry check, any InTx) kills it mid-flight and the job never
+	// completes. context.WithoutCancel keeps the values but drops the
+	// cancellation -- shutdown is the pool's concern, not the request's.
+	go runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt)
 	return job.ID, nil
 }
 
-func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobID int64) {
+// uncertainPaths is the pass's seen-but-uncertain set: every path the walk
+// saw but that was not reliably committed (processFile error, submit refused,
+// dropped result, batch Commit failure). It is concurrency-safe because the
+// walk callback and the pool goroutines write to it while drainAndCommit and
+// finalize read it. The MISSING sweep excludes these paths -- a file on disk
+// with a stale last_seen_at is not proof it's gone, and the sweep is the only
+// automated force that flips a node to MISSING.
+type uncertainPaths struct {
+	mu    sync.Mutex
+	paths map[string]struct{}
+}
+
+func newUncertainPaths() *uncertainPaths {
+	return &uncertainPaths{paths: make(map[string]struct{})}
+}
+
+func (u *uncertainPaths) add(path string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.paths[path] = struct{}{}
+}
+
+func (u *uncertainPaths) list() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]string, 0, len(u.paths))
+	for p := range u.paths {
+		out = append(out, p)
+	}
+	return out
+}
+
+func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobID, startedAt int64) {
 	log := deps.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -77,8 +119,13 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	results := make(chan Result, batchSize*2)
 	var wg sync.WaitGroup
 	var filesSeen, filesFailed atomic.Int32
+	uncertain := newUncertainPaths()
 
-	walkErr := indexer.Walk(ctx, location.RootPath, func(rec indexer.Record) error {
+	walkFn := deps.WalkFn
+	if walkFn == nil {
+		walkFn = indexer.Walk
+	}
+	walkErr := walkFn(ctx, location.RootPath, func(rec indexer.Record) error {
 		if rec.IsSymlink {
 			return nil // following a symlink is a storage.Guard-mediated decision elsewhere, not this pass's
 		}
@@ -91,6 +138,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				defer wg.Done()
 				result, err := processFile(jobCtx, deps, location, rec)
 				if err != nil {
+					uncertain.add(rec.Path)
 					filesFailed.Add(1)
 					log.Warn("pipeline: index file failed", "path", rec.Path, "err", err)
 					return err
@@ -98,12 +146,15 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				select {
 				case results <- *result:
 				case <-jobCtx.Done():
+					uncertain.add(rec.Path)
+					filesFailed.Add(1)
 				}
 				return nil
 			},
 		})
 		if !submitted {
 			wg.Done()
+			uncertain.add(rec.Path)
 			filesFailed.Add(1)
 			log.Warn("pipeline: submit refused (duplicate in flight or queue full)", "path", rec.Path)
 		}
@@ -118,16 +169,69 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		close(results)
 	}()
 
-	total := drainAndCommit(ctx, deps, location.ID, jobID, results, &filesSeen, &filesFailed, log)
+	total := drainAndCommit(ctx, deps, location.ID, jobID, results, &filesSeen, &filesFailed, uncertain, log)
 
 	finalErr := walkErr
-	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-		if finalErr != nil {
+	if finalErr != nil {
+		// A walk that failed partway means the sweep cannot know which nodes
+		// were genuinely unseen vs. just not reached -- sweep never runs. The
+		// job is failed in its own transaction, so it reaches a terminal state
+		// barring a failure of the terminalizing write itself -- which only
+		// happens when the DB is failing, and there is nothing else the scan
+		// can do about it.
+		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.FailScanJob(ctx, sqlcgen.FailScanJobParams{ID: jobID, LastError: sql.NullString{String: finalErr.Error(), Valid: true}})
+		}); err != nil {
+			log.Error("pipeline: fail scan job", "jobID", jobID, "err", err)
 		}
+		return
+	}
+
+	// The sweep runs on every successful walk, excluding this pass's
+	// seen-but-uncertain paths. A file the walk saw but failed to commit never
+	// had last_seen_at bumped -- sweeping it would flip a live file to MISSING
+	// and can feed a spurious RebaseMissingNodePath steal -- so exclusion, not
+	// a whole-location skip, is the fix: everything else this scan genuinely
+	// did not see is still swept.
+	keepActive := uncertain.list()
+	if len(keepActive) == 0 {
+		// sqlc substitutes NULL for an empty slice, and file_path NOT IN
+		// (NULL) is unknown -- false -- in SQL's three-valued logic: an empty
+		// list would silently disable the sweep on every clean pass. A real
+		// file_path is always a non-empty absolute path, so this sentinel can
+		// never match one and NOT IN stays true for every row.
+		keepActive = []string{""}
+	} else {
+		log.Info("pipeline: excluding seen-but-uncertain paths from MISSING sweep", "jobID", jobID, "excluded", len(keepActive))
+	}
+
+	// A sweep failure is logged, never fatal -- the scan itself succeeded, and
+	// the node is simply swept one pass later (delayed-not-wrong).
+	var swept int64
+	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		swept, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
+			StorageLocationID: location.ID,
+			BeforeUnix:        startedAt,
+			KeepActive:        keepActive,
+		})
+		return err
+	}); err != nil {
+		log.Error("pipeline: MISSING sweep failed (delayed-not-wrong, swept next pass)", "jobID", jobID, "err", err)
+	} else if swept > 0 {
+		log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", swept)
+	}
+
+	// CompleteScanJob runs in its own transaction, after the sweep: the two
+	// are deliberately not atomic. A crash between them leaves the job RUNNING
+	// with already-swept nodes -- status-only rows, the swept rows are already
+	// correctly MISSING, and the next scan re-sweeps harmlessly. Gating the
+	// sweep and the terminal write behind one transaction would instead widen
+	// the "RUNNING forever" failure window on a mid-write crash.
+	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.CompleteScanJob(ctx, jobID)
 	}); err != nil {
-		log.Error("pipeline: finalize scan job", "jobID", jobID, "err", err)
+		log.Error("pipeline: complete scan job", "jobID", jobID, "err", err)
 	}
 	log.Info("pipeline: scan complete", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"inserted", total.Inserted, "touched", total.Touched, "versionCollisions", total.VersionCollisions, "moved", total.Moved)
@@ -136,7 +240,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 // drainAndCommit reads results as they arrive and commits every batchSize
 // items or batchInterval, whichever comes first, updating scan_jobs
 // progress after each flush.
-func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64, results <-chan Result, filesSeen, filesFailed *atomic.Int32, log *slog.Logger) Stats {
+func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64, results <-chan Result, filesSeen, filesFailed *atomic.Int32, uncertain *uncertainPaths, log *slog.Logger) Stats {
 	var total Stats
 	buf := make([]Result, 0, batchSize)
 
@@ -150,7 +254,15 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		total.VersionCollisions += stats.VersionCollisions
 		total.Moved += stats.Moved
 		if err != nil {
+			// The whole batch failed to land -- every path in it stays
+			// seen-but-uncertain and must be excluded from the MISSING
+			// sweep, or a live file with a stale last_seen_at gets flipped
+			// to MISSING and can feed a spurious RebaseMissingNodePath steal.
 			log.Error("pipeline: commit batch", "err", err)
+			filesFailed.Add(int32(len(buf)))
+			for _, r := range buf {
+				uncertain.add(r.Path)
+			}
 		} else if deps.Engine != nil {
 			resolveEdgesForBatch(ctx, deps, buf, log)
 		}

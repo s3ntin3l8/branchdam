@@ -77,6 +77,22 @@ type Querier interface {
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	MarkNodeMissing(ctx context.Context, id int64) error
+	// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
+	// scanned storage location whose last_seen_at predates the scan's start is
+	// gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+	// last_seen_at on every node the walk actually saw and committed, so anything
+	// still old here was genuinely unseen this scan. KeepActive is the pass's
+	// seen-but-uncertain set -- paths the walk saw but did not reliably commit
+	// (processFile error, submit refused, dropped result, batch Commit failure) --
+	// and is excluded from the sweep: a file on disk with a stale last_seen_at is
+	// not proof it's gone. SQLite's per-statement variable limit (32766 on modern
+	// builds) bounds how large KeepActive can be; beyond that the caller would
+	// need to chunk the sweep, which it does not. Scoped by storage_location_id so
+	// a scan of one mount never touches another. unixepoch() is 1s granularity, so
+	// a node last seen in a scan that happened to end in the SAME wall-clock
+	// second as this scan's start may survive one extra scan -- it is swept the
+	// next round, which is delayed-not-wrong.
+	MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error)
 	// Pillar 5 move detection, applied: the id and node_uuid never change, so
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
@@ -89,8 +105,10 @@ type Querier interface {
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
-	// Same content at the same path, seen again on a later scan -- just record
-	// that, no new row.
+	// Same content at the same path, seen again on a later scan. Records that
+	// and, if the row was MISSING (a file re-created at its old path), reactivates
+	// it in place -- a MISSING row found alive again is not a version collision
+	// and must not stay MISSING.
 	TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
