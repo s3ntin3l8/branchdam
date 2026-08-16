@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -22,8 +23,10 @@ import (
 //
 // Watch blocks until ctx is cancelled or an unrecoverable error occurs.
 // Lstat only, same as Walk -- onEvent's Record never implies the file has
-// been opened.
-func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.Logger, onEvent func(Record) error) error {
+// been opened. onRemove fires for a path that has genuinely disappeared
+// (os.Lstat returns fs.ErrNotExist) after the debounce window; it may be nil.
+func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.Logger,
+	onEvent func(Record) error, onRemove func(path string) error) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("indexer: create watcher: %w", err)
@@ -46,7 +49,7 @@ func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.L
 			if !ok {
 				return nil
 			}
-			handleEvent(watcher, event, deb, log, onEvent)
+			handleEvent(watcher, event, deb, log, onEvent, onRemove)
 
 		case werr, ok := <-watcher.Errors:
 			if !ok {
@@ -59,7 +62,7 @@ func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.L
 	}
 }
 
-func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer, log *slog.Logger, onEvent func(Record) error) {
+func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer, log *slog.Logger, onEvent func(Record) error, onRemove func(path string) error) {
 	// A newly created directory needs its own watch, and needs it added
 	// promptly (not after the debounce delay) or files created inside it
 	// in the same burst would be missed entirely.
@@ -74,9 +77,11 @@ func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer
 	deb.trigger(event.Name, func() {
 		info, err := os.Lstat(event.Name)
 		if err != nil {
-			// Removed (or never existed by the time we got to it) -- not
-			// this package's decision what that means for the node graph;
-			// the caller (internal/pipeline) owns MISSING-state transitions.
+			if errors.Is(err, fs.ErrNotExist) && onRemove != nil {
+				if rerr := onRemove(event.Name); rerr != nil && log != nil {
+					log.Warn("indexer: onRemove", "path", event.Name, "err", rerr)
+				}
+			}
 			return
 		}
 		if info.IsDir() {
