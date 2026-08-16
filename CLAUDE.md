@@ -234,6 +234,8 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 
 ## Documentation map
 
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) -- setup, the pre-PR checklist (and precisely what
+  `make lint` does and doesn't cover), codegen contracts, PR title / branch protection rules.
 - [`docs/spec/original-spec.md`](docs/spec/original-spec.md) -- the design spec as received,
   committed verbatim. A historical input, not the live contract; where it disagrees with the
   code, the code is right.
