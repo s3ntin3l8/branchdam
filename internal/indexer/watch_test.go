@@ -12,6 +12,16 @@ import (
 
 func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
+// noRemovals is the stub onRemove for tests that never delete files: it logs
+// rather than fails so a spurious removal callback is visible in the output.
+func noRemovals(t *testing.T) func(string) error {
+	t.Helper()
+	return func(path string) error {
+		t.Logf("watch removal (unexpected in this test): %s", path)
+		return nil
+	}
+}
+
 // waitFor polls cond until it's true or the deadline passes, failing the
 // test otherwise. fsnotify delivery is asynchronous (a real kernel queue),
 // so watch tests poll rather than asserting on a fixed sleep.
@@ -41,7 +51,7 @@ func TestWatchReportsNewFile(t *testing.T) {
 			seen = append(seen, r.Path)
 			mu.Unlock()
 			return nil
-		})
+		}, noRemovals(t))
 	}()
 
 	// Give the watcher a moment to install its inotify watch before the
@@ -80,7 +90,7 @@ func TestWatchDebouncesRapidWrites(t *testing.T) {
 			callCount++
 			mu.Unlock()
 			return nil
-		})
+		}, noRemovals(t))
 	}()
 	time.Sleep(50 * time.Millisecond)
 
@@ -121,7 +131,7 @@ func TestWatchTracksNewSubdirectory(t *testing.T) {
 			seen = append(seen, r.Path)
 			mu.Unlock()
 			return nil
-		})
+		}, noRemovals(t))
 	}()
 	time.Sleep(50 * time.Millisecond)
 
@@ -142,6 +152,43 @@ func TestWatchTracksNewSubdirectory(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		for _, p := range seen {
+			if p == target {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestWatchReportsRemoval(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var removed []string
+	go func() {
+		_ = Watch(ctx, root, 20*time.Millisecond, testLogger(), func(r Record) error { return nil },
+			func(path string) error {
+				mu.Lock()
+				removed = append(removed, path)
+				mu.Unlock()
+				return nil
+			})
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	target := filepath.Join(root, "gone.txt")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("remove fixture: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, p := range removed {
 			if p == target {
 				return true
 			}

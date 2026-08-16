@@ -15,6 +15,11 @@ UPDATE scan_jobs SET state = 'COMPLETED', finished_at = unixepoch(), updated_at 
 -- name: FailScanJob :exec
 UPDATE scan_jobs SET state = 'FAILED', last_error = ?2, finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
 
+-- name: CancelScanJob :exec
+-- Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
+-- not FAILED -- only a watcher that died on its own is a failure.
+UPDATE scan_jobs SET state = 'CANCELLED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
+
 -- name: GetScanJob :one
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
        files_failed, edges_created, started_at, finished_at, last_error, updated_at

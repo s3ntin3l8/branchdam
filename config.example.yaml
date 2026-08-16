@@ -36,10 +36,12 @@ storageLocations:
     rootPath: /storage/archive
     tier: TIER3_MASTER_ARCHIVE
     readOnly: true                # enforced in the DB CHECK too; Tier 3 is always read-only
+    # watch is never honored here: the Tier 3 master archive is not watched
 
   - name: exports
     rootPath: /storage/exports
     tier: TIER2_EXPORTS
+    # watch: false                # continuous ingest is opt-in, off by default
 
   - name: projects
     rootPath: /storage/projects
@@ -49,3 +51,5 @@ storageLocations:
     rootPath: /storage/scratch
     tier: TIER1_LOCAL_SCRATCH
     prunable: true                # only Tier 1 may be prunable
+    # watch: false                # off by default
+    watch: true                   # example: watch continuous ingest on working tiers

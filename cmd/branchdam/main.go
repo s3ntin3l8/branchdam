@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/httpapi"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -98,6 +100,20 @@ func main() {
 	engine := graph.NewEngine(database, log, graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{})
 	hub := sse.New()
 
+	var supervisor *pipeline.WatcherSupervisor
+	if watched := watchedFromConfig(cfg.StorageLocations); len(watched) > 0 {
+		watchedLocs, err := resolveWatchedLocations(ctx, database, watched)
+		if err != nil {
+			log.Error("resolve watched locations", "err", err)
+			os.Exit(1)
+		}
+		supervisor = pipeline.NewWatcherSupervisor(pipeline.ScanDeps{
+			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
+			FullHashPolicy: cfg.Workers.FullHashPolicy, Log: log,
+		}, func() { hub.Broadcast() })
+		supervisor.Start(ctx, watchedLocs, 0)
+	}
+
 	spa, err := web.Dist()
 	if err != nil {
 		log.Error("embed spa", "err", err)
@@ -132,6 +148,12 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown error", "err", err)
 		os.Exit(1)
+	}
+	if supervisor != nil {
+		// Watchers already stopped on ctx.Done; Wait() joins each location's
+		// consumer goroutine, which holds the writer DB and calls Commit
+		// directly (never Pool.Submit), so it must finish before db.Close.
+		supervisor.Wait()
 	}
 	// ctx (the signal context) is already Done by this point, which is what
 	// tells the pool's worker goroutines to stop after their current job --
@@ -175,4 +197,36 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// watchedFromConfig returns the config locations to watch: opt-in via config
+// (`watch: true`) and never Tier 3, regardless of config -- the master
+// archive is not watched (spec Pillar 3's continuous ingest is for working
+// tiers).
+func watchedFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
+	out := make([]config.StorageLocation, 0, len(cfgs))
+	for _, c := range cfgs {
+		if c.Watch && c.Tier != "TIER3_MASTER_ARCHIVE" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// resolveWatchedLocations looks up each watched config entry's storage_locations
+// row (upserted by seedStorageLocations a moment earlier) and builds the
+// storage.Location slice the supervisor needs. A watched entry with no row is
+// a configuration error, surfaced immediately.
+func resolveWatchedLocations(ctx context.Context, database *db.DB, cfgs []config.StorageLocation) ([]storage.Location, error) {
+	out := make([]storage.Location, 0, len(cfgs))
+	for _, c := range cfgs {
+		row, err := database.Reader.GetStorageLocationByPath(ctx, c.RootPath)
+		if err != nil {
+			return nil, fmt.Errorf("watched location %q (%s): %w", c.Name, c.RootPath, err)
+		}
+		out = append(out, storage.Location{
+			ID: row.ID, Name: row.Name, RootPath: row.RootPath, Tier: row.Tier, ReadOnly: row.ReadOnly != 0,
+		})
+	}
+	return out, nil
 }

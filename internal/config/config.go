@@ -71,6 +71,13 @@ type StorageLocation struct {
 	Tier     string `yaml:"tier"`
 	ReadOnly bool   `yaml:"readOnly"`
 	Prunable bool   `yaml:"prunable"`
+
+	// Watch opts this location into a continuous fsnotify watcher at startup
+	// (kind='WATCH' scan job), off by default. Never honored for Tier 3 --
+	// the master archive is never watched regardless of this flag. Local NVMe
+	// volumes only; fsnotify does not fire reliably over SMB/NFS (that
+	// differential mtime sweep is a separate, later issue).
+	Watch bool `yaml:"watch"`
 }
 
 func defaultConfig() Config {
