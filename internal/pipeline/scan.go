@@ -248,7 +248,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		if len(buf) == 0 {
 			return
 		}
-		stats, err := Commit(ctx, deps.DB, locationID, buf)
+		stats, err := Commit(ctx, deps.DB, locationID, buf, log)
 		total.Inserted += stats.Inserted
 		total.Touched += stats.Touched
 		total.VersionCollisions += stats.VersionCollisions
