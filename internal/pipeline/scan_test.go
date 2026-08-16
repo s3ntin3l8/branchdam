@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -477,5 +478,90 @@ func TestSamePathRecreationReactivates(t *testing.T) {
 	}
 	if got.LifecycleState != "ACTIVE" {
 		t.Errorf("lifecycle_state = %q, want ACTIVE", got.LifecycleState)
+	}
+}
+
+// requireTool skips the test when the named binary isn't installed, mirroring
+// internal/probe's own helper -- neither ffmpeg nor exiftool is present on
+// every machine that runs `go test ./...` (notably, the CI Go job doesn't
+// install them), matching the graceful-degradation requirement of the spec.
+func requireTool(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s not installed, skipping (the e2e EXIF test needs it)", name)
+	}
+	return path
+}
+
+// makeTaggedFixtureJPEG generates a tiny real JPEG via ffmpeg and tags it
+// with exiftool, so the e2e test exercises the actual probe subprocess path
+// end to end rather than a canned fixture checked into the repo.
+func makeTaggedFixtureJPEG(t *testing.T, dir string) string {
+	t.Helper()
+	requireTool(t, "ffmpeg")
+	exiftoolPath := requireTool(t, "exiftool")
+
+	path := filepath.Join(dir, "fixture.jpg")
+	ffmpeg := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64", "-frames:v", "1", path)
+	if out, err := ffmpeg.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture jpeg: %v\n%s", err, out)
+	}
+
+	tagArgs := []string{
+		"-overwrite_original",
+		"-EXIF:Make=SONY", "-EXIF:Model=ILCE-7M4", "-EXIF:LensModel=FE 24-70mm F2.8 GM",
+		"-EXIF:SerialNumber=1234567",
+		"-EXIF:DateTimeOriginal=2026:07:15 14:30:00", "-EXIF:OffsetTimeOriginal=+02:00",
+		"-GPSLatitude=33.9", "-GPSLatitudeRef=S", "-GPSLongitude=18.4", "-GPSLongitudeRef=W",
+		"-XMP-xmpMM:DocumentID=doc-abc-123", "-XMP-xmpMM:OriginalDocumentID=orig-doc-xyz",
+		path,
+	}
+	tagCmd := exec.Command(exiftoolPath, tagArgs...)
+	if out, err := tagCmd.CombinedOutput(); err != nil {
+		t.Fatalf("tag fixture jpeg: %v\n%s", err, out)
+	}
+	return path
+}
+
+// TestExifFixtureProducesExpectedNodeMetadata is the #33 e2e: a real tagged
+// JPEG walked and scanned by the full pipeline (indexer.Walk -> workers.Pool
+// -> processFile's probe.Exif -> Commit) must land its EXIF fields in
+// node_metadata under source='exiftool'.
+func TestExifFixtureProducesExpectedNodeMetadata(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	imgPath := makeTaggedFixtureJPEG(t, root)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	node := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, filepath.Base(imgPath)))
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	var makeVal string
+	for _, r := range rows {
+		if r.Source == "exiftool" && r.Key == "EXIF:Make" {
+			makeVal = r.Value
+		}
+	}
+	if makeVal != "SONY" {
+		t.Errorf("EXIF:Make = %q, want SONY (all rows: %+v)", makeVal, rows)
 	}
 }

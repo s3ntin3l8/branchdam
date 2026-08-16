@@ -254,7 +254,9 @@ func exifMetadata(r Result) map[string]string {
 		kv["Composite:GPSLongitude"] = strconv.FormatFloat(*r.GPSLongitude, 'f', -1, 64)
 	}
 	for k, v := range r.ExifRaw {
-		kv[k] = v
+		if exifRawAllowlist[k] {
+			kv[k] = v
+		}
 	}
 	return kv
 }

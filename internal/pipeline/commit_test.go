@@ -1,7 +1,9 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -377,5 +379,131 @@ func TestFilenameStem(t *testing.T) {
 		if got := filenameStem(in); got != want {
 			t.Errorf("filenameStem(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCommitPersistsExifMetadataExactly(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	gpsLat := -33.915
+	gpsLong := 18.411
+	result := Result{
+		Path: "/exports/shot.jpg", FileName: "shot.jpg", FileExt: "jpg",
+		Size: 100, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa",
+		Make:         "SONY",
+		LensModel:    "FE 24-70mm F2.8 GM",
+		SerialNumber: "1234567",
+		GPSLatitude:  &gpsLat,
+		GPSLongitude: &gpsLong,
+		ExifRaw: map[string]string{
+			"EXIF:ISO":          "100",
+			"EXIF:JunkTag":      "must-not-persist",
+			"XMP:Rating":        "5",
+			"EXIF:Particularly": "also-must-not-persist",
+		},
+	}
+	if _, err := Commit(ctx, database, locationID, []Result{result}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/shot.jpg")
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Source+"\x00"+r.Key] = r.Value
+	}
+	want := map[string]string{
+		"exiftool\x00EXIF:Make":              "SONY",
+		"exiftool\x00EXIF:LensModel":         "FE 24-70mm F2.8 GM",
+		"exiftool\x00EXIF:SerialNumber":      "1234567",
+		"exiftool\x00Composite:GPSLatitude":  "-33.915",
+		"exiftool\x00Composite:GPSLongitude": "18.411",
+		"exiftool\x00EXIF:ISO":               "100",
+		"exiftool\x00XMP:Rating":             "5",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("metadata rows = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if _, ok := got["exiftool\x00EXIF:JunkTag"]; ok {
+		t.Error("EXIF:JunkTag persisted, want the allowlist to drop it")
+	}
+}
+
+func TestPersistMetadataCapTruncates(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/cap.jpg", FileName: "cap.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
+	}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/cap.jpg")
+	var scrubbed bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&scrubbed, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	kv := map[string]string{"k1": "v1", "k2": "v2", "k3": "v3", "k4": "v4", "k5": "v5"}
+	if err := persistMetadata(ctx, database.ReaderQueriesForTest(), node.ID, "internal", kv, 3, log); err != nil {
+		t.Fatalf("persistMetadata: %v", err)
+	}
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3 (cap)", len(rows))
+	}
+	if rows[0].Key != "k1" || rows[2].Key != "k3" {
+		t.Errorf("sorted truncation wrong: keys = %q %q %q", rows[0].Key, rows[1].Key, rows[2].Key)
+	}
+	if !strings.Contains(scrubbed.String(), "overflow dropped") {
+		t.Error("expected a DEBUG overflow log line")
+	}
+}
+
+func TestSameContentTouchDoesNotDuplicateMetadata(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	result := Result{
+		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+		Make: "CANON",
+		ExifRaw: map[string]string{
+			"EXIF:ISO":   "100",
+			"XMP:Rating": "5",
+		},
+	}
+	for i := 0; i < 2; i++ {
+		stats, err := Commit(ctx, database, locationID, []Result{result})
+		if err != nil {
+			t.Fatalf("Commit (pass %d): %v", i, err)
+		}
+		if i == 0 && stats.Inserted != 1 {
+			t.Fatalf("pass 0: stats = %+v, want Inserted=1", stats)
+		}
+		if i == 1 && stats.Touched != 1 {
+			t.Fatalf("pass 1: stats = %+v, want Touched=1", stats)
+		}
+	}
+
+	node := mustGetLiveNode(t, database, "/stable.jpg")
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("metadata rows = %d, want 3 (EXIF:Make, EXIF:ISO, XMP:Rating -- one set, not duplicated)", len(rows))
 	}
 }
