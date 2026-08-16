@@ -90,17 +90,68 @@ func TestWatchSupervisorCreateThenMissingThenRebase(t *testing.T) {
 	}
 }
 
+// TestWatchSupervisorRenamePreservesNodeUUID covers the case that motivated
+// the serialized per-location consumer: an os.Rename emits a Remove(old) and
+// a Create(new) whose processing order must be deterministic, or the moved
+// file gets a brand-new node_uuid instead of a rebase of the old node.
+func TestWatchSupervisorRenamePreservesNodeUUID(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "rename-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	sctx, scancel := context.WithCancel(context.Background())
+	super := NewWatcherSupervisor(deps, nil)
+	super.Start(sctx, []storage.Location{loc}, 50*time.Millisecond)
+	defer super.Wait()
+	defer scancel()
+
+	// Give the watcher a moment to install its fsnotify watch before the
+	// first write, or the CREATE event could be missed entirely.
+	time.Sleep(100 * time.Millisecond)
+
+	before := filepath.Join(resolvedRoot, "before.txt")
+	if err := writeFileToDisk(before, "renamed content"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		n, err := database.Reader.GetLiveNodeByPath(ctx, before)
+		return err == nil && n.LifecycleState == "ACTIVE"
+	})
+	original := mustGetLiveNode(t, database, before)
+
+	after := filepath.Join(resolvedRoot, "after.txt")
+	if err := os.Rename(before, after); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		n, err := database.Reader.GetLiveNodeByPath(ctx, after)
+		return err == nil && n.LifecycleState == "ACTIVE" && n.ID == original.ID
+	})
+	moved := mustGetLiveNode(t, database, after)
+	if moved.NodeUuid != original.NodeUuid {
+		t.Errorf("node_uuid changed over a rename: %q -> %q", original.NodeUuid, moved.NodeUuid)
+	}
+	if oldNode, err := database.Reader.GetLiveNodeByPath(ctx, before); err == nil && oldNode.LifecycleState == "ACTIVE" {
+		t.Errorf("old path still ACTIVE after rename: %s", before)
+	}
+}
+
 func TestWatchJobFailedOnDeath(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 
-	gone := filepath.Join(t.TempDir(), "does-not-exist")
 	resolvedGone, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolve base: %v", err)
 	}
-	_ = gone
-	_ = resolvedGone
 	// location row must exist (FK), but the root path itself does not.
 	rootForRow := filepath.Join(resolvedGone, "nope")
 	if err := os.MkdirAll(filepath.Dir(rootForRow), 0o755); err != nil {
