@@ -15,6 +15,20 @@ export interface Config {
   version: string;
 }
 
+export interface StorageLocation {
+  id: number;
+  name: string;
+  rootPath: string;
+  tier:
+    | "TIER0_LOCAL_STAGING"
+    | "TIER1_LOCAL_SCRATCH"
+    | "TIER2_EXPORTS"
+    | "TIER3_MASTER_ARCHIVE"
+    | "PROJECTS";
+  readOnly: boolean;
+  prunable: boolean;
+}
+
 export interface Asset {
   id: number;
   nodeUuid: string;

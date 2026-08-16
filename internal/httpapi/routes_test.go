@@ -164,6 +164,61 @@ func TestAuditQueueEmpty(t *testing.T) {
 	}
 }
 
+func TestListStorageLocations(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	archiveRoot := t.TempDir()
+	resolvedArchive, err := filepath.EvalSymlinks(archiveRoot)
+	if err != nil {
+		t.Fatalf("resolve archive root: %v", err)
+	}
+	scratchRoot := t.TempDir()
+	resolvedScratch, err := filepath.EvalSymlinks(scratchRoot)
+	if err != nil {
+		t.Fatalf("resolve scratch root: %v", err)
+	}
+
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if _, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "archive", RootPath: resolvedArchive, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		}); err != nil {
+			return err
+		}
+		_, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "scratch", RootPath: resolvedScratch, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 1,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/storage-locations", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/storage-locations status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Locations []storageLocationDTO `json:"locations"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Locations) != 2 {
+		t.Fatalf("got %d locations, want 2: %+v", len(got.Locations), got.Locations)
+	}
+	archive, scratch := got.Locations[0], got.Locations[1]
+	if archive.Tier != "TIER3_MASTER_ARCHIVE" || !archive.ReadOnly {
+		t.Errorf("archive = %+v, want TIER3_MASTER_ARCHIVE readOnly", archive)
+	}
+	if scratch.Tier != "TIER1_LOCAL_SCRATCH" || scratch.ReadOnly {
+		t.Errorf("scratch = %+v, want TIER1_LOCAL_SCRATCH not readOnly", scratch)
+	}
+	if scratch.Name != "scratch" || scratch.RootPath != resolvedScratch || !scratch.Prunable {
+		t.Errorf("scratch = %+v, want name/rootPath round-trip and prunable", scratch)
+	}
+}
+
 func TestAgentEventEnqueues(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	body := map[string]string{

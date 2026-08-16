@@ -6,6 +6,7 @@ import { useMe } from "./hooks/queries";
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
 const AuditQueuePage = lazy(() => import("./pages/AuditQueuePage"));
+const IngestPage = lazy(() => import("./pages/IngestPage"));
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   return (
@@ -33,6 +34,7 @@ export default function App() {
         <div className="space-y-1">
           <NavItem to="/assets">Assets</NavItem>
           <NavItem to="/audit">Audit Queue</NavItem>
+          <NavItem to="/ingest">Ingest</NavItem>
         </div>
         {me && me.kind === "user" && me.name && (
           <div className="absolute bottom-4 text-xs text-neutral-500">Signed in as {me.name}</div>
@@ -45,6 +47,7 @@ export default function App() {
             <Route path="/assets" element={<AssetListPage />} />
             <Route path="/assets/:id" element={<AssetDetailPage />} />
             <Route path="/audit" element={<AuditQueuePage />} />
+            <Route path="/ingest" element={<IngestPage />} />
           </Routes>
         </Suspense>
       </main>
