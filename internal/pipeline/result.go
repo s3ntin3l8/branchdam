@@ -4,7 +4,11 @@
 // internal/httpapi both go through Commit, never sqlcgen directly.
 package pipeline
 
-import "time"
+import (
+	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/probe"
+)
 
 // Result is one file's fully-computed index data, ready to commit. It is
 // produced by a worker job (indexer.Walk/Watch -> workers.Pool -> hashing +
@@ -49,6 +53,12 @@ type Result struct {
 	// the scan decided to persist. Empty means "nothing persisted". The full
 	// Raw map is deliberately never dumped -- see exifRawAllowlist.
 	ExifRaw map[string]string
+
+	// FFProbe holds the parsed video-stream probe for this file; nil when the
+	// file isn't a video, ffprobe is absent, or probing failed. Persisted as
+	// node_metadata rows with source='ffprobe'. RawJSON is deliberately not
+	// persisted (#34).
+	FFProbe *probe.FFProbeResult
 }
 
 // Stats summarizes what a Commit call actually did, for scan_jobs progress
@@ -90,3 +100,13 @@ func selectExifRaw(raw map[string]string) map[string]string {
 	}
 	return out
 }
+
+// videoExts is the closed set of extensions FFProbe runs for (#34). Kept
+// explicit so adding a format is a conscious one-line change.
+var videoExts = map[string]bool{
+	"mp4": true, "mov": true, "m4v": true, "mkv": true, "avi": true,
+	"webm": true, "wmv": true, "mts": true, "m2ts": true, "ts": true,
+	"3gp": true, "flv": true, "mpg": true, "mpeg": true,
+}
+
+func isVideoExt(ext string) bool { return videoExts[ext] }
