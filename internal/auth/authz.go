@@ -32,6 +32,7 @@ func writeForbidden(w http.ResponseWriter, detail string) {
 // for any authenticated principal. If allowedGroups is empty, all authenticated users have write access,
 // and a WARN log naming authz.groups is emitted upon middleware creation.
 func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) http.Handler {
+	allowedGroups = slices.Clone(allowedGroups)
 	if len(allowedGroups) == 0 && log != nil {
 		log.Warn("authz.groups is empty: all authenticated users have admin access", "key", "authz.groups")
 	}

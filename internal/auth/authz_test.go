@@ -62,6 +62,28 @@ func TestRequireAdmin(t *testing.T) {
 			wantCode: http.StatusOK,
 		},
 		{
+			name:          "non-admin user HEAD allowed",
+			allowedGroups: []string{"admin"},
+			principal: &Principal{
+				Kind:   KindUser,
+				Name:   "alice",
+				Groups: []string{"users"},
+			},
+			method:   http.MethodHead,
+			wantCode: http.StatusOK,
+		},
+		{
+			name:          "non-admin user OPTIONS allowed",
+			allowedGroups: []string{"admin"},
+			principal: &Principal{
+				Kind:   KindUser,
+				Name:   "alice",
+				Groups: []string{"users"},
+			},
+			method:   http.MethodOptions,
+			wantCode: http.StatusOK,
+		},
+		{
 			name:          "empty allowedGroups permits non-admin POST",
 			allowedGroups: nil,
 			principal: &Principal{
