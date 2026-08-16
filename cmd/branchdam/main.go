@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,17 +40,13 @@ func main() {
 	healthcheck := flag.Bool("healthcheck", false, "probe the local /healthz endpoint and exit (for container HEALTHCHECK)")
 	flag.Parse()
 
-	level := slog.LevelInfo
-	if *debug {
-		level = slog.LevelDebug
-	}
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		log.Error("load config", "err", err)
+		slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).Error("load config", "err", err)
 		os.Exit(1)
 	}
+
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel(cfg.LogLevel, *debug)}))
 
 	if *healthcheck {
 		os.Exit(runHealthcheck(cfg.ListenAddr))
@@ -197,6 +194,27 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// logLevel resolves the slog level from config, letting -debug override it.
+func logLevel(cfgLevel string, debug bool) slog.Level {
+	if debug {
+		return slog.LevelDebug
+	}
+	return parseLogLevel(cfgLevel)
 }
 
 // watchedFromConfig returns the config locations to watch: opt-in via config
