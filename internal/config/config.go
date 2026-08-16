@@ -48,8 +48,9 @@ type Database struct {
 
 // HTTP configures the stdlib http.Server wrapping the mux.
 type HTTP struct {
-	ReadTimeoutSecs  int `yaml:"readTimeoutSecs"`
-	WriteTimeoutSecs int `yaml:"writeTimeoutSecs"`
+	ReadTimeoutSecs  int  `yaml:"readTimeoutSecs"`
+	WriteTimeoutSecs int  `yaml:"writeTimeoutSecs"`
+	ExposeOpenAPI    bool `yaml:"exposeOpenAPI"`
 }
 
 // Workers configures the bounded hash worker pool (internal/workers, PR 4).

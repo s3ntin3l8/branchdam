@@ -110,3 +110,17 @@ authz:
 		t.Errorf("Authz.Groups = %v, want [dam-admins super-users]", cfg.Authz.Groups)
 	}
 }
+
+func TestExposeOpenAPIConfig(t *testing.T) {
+	path := writeConfig(t, `
+http:
+  exposeOpenAPI: true
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.HTTP.ExposeOpenAPI {
+		t.Errorf("HTTP.ExposeOpenAPI = false, want true")
+	}
+}

@@ -14,6 +14,7 @@ database:
 http:
   readTimeoutSecs: 15
   writeTimeoutSecs: 15
+  exposeOpenAPI: false            # expose /openapi.json and /docs (default false)
 
 workers:
   hashWorkers: 0                  # 0 = auto (min(4, NumCPU)); hashing is I/O

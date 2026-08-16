@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,14 +92,24 @@ const contentSecurityPolicy = "default-src 'self'; " +
 	"frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
 
 // Handler returns the root mux wrapped in the middleware chain: recover ->
-// securityHeaders -> log -> auth.Route -> mux. auth.Route is innermost,
-// closest to the mux, because it's the thing deciding WHICH identity
-// extraction runs before any handler -- everything outside it is
-// identity-agnostic.
+// securityHeaders -> log -> auth.Route -> openAPIMiddleware -> mux. auth.Route is innermost
+// among global wrappers because it decides WHICH identity extraction runs before any handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
+	exposeOpenAPI := false
+	var allowedGroups []string
+	if s.cfg != nil {
+		exposeOpenAPI = s.cfg.HTTP.ExposeOpenAPI
+		allowedGroups = s.cfg.Authz.Groups
+	}
+
 	humaConfig := huma.DefaultConfig("branchDAM", s.version)
+	if !exposeOpenAPI {
+		humaConfig.OpenAPIPath = ""
+		humaConfig.DocsPath = ""
+	}
+
 	api := humago.New(mux, humaConfig)
 	s.registerRoutes(api)
 
@@ -112,9 +123,48 @@ func (s *Server) Handler() http.Handler {
 	if s.cfg != nil {
 		apiKey = s.cfg.Agent.APIKey
 	}
-	routed := auth.Route(apiKey, s.log, mux)
+
+	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
+	routed := auth.Route(apiKey, s.log, authzHandler)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))
+}
+
+func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Logger, next http.Handler) http.Handler {
+	requireAdmin := auth.RequireAdmin(allowedGroups, log)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		isOpenAPI := path == "/openapi.json" || path == "/openapi.yaml" || path == "/openapi" || path == "/docs" || strings.HasPrefix(path, "/docs/") || strings.HasPrefix(path, "/openapi/")
+		if isOpenAPI {
+			if !exposeOpenAPI {
+				http.NotFound(w, r)
+				return
+			}
+			p, ok := auth.From(r.Context())
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"$schema":"https://huma.rocks/schema/error.json","title":"Forbidden","status":403,"detail":"authentication required"}` + "\n"))
+				return
+			}
+			if p.Kind != auth.KindMachine && len(allowedGroups) > 0 {
+				isAdmin := false
+				for _, g := range p.Groups {
+					if slices.Contains(allowedGroups, g) {
+						isAdmin = true
+						break
+					}
+				}
+				if !isAdmin {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"$schema":"https://huma.rocks/schema/error.json","title":"Forbidden","status":403,"detail":"admin authorization required"}` + "\n"))
+					return
+				}
+			}
+		}
+		requireAdmin(next).ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
