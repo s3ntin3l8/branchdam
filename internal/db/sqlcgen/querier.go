@@ -54,6 +54,9 @@ type Querier interface {
 	// prefix. See docs/schema.md fix #1.
 	GetStorageLocationByPath(ctx context.Context, rootPath string) (StorageLocation, error)
 	InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error)
+	// Phase 1 (#33): EXIF/ffprobe overflow. Upsert on the table's natural key so
+	// a re-scan that re-derives metadata replaces rather than duplicates rows.
+	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
 	// The audit queue (spec §7) is this query over review_state, not a second
 	// table. v_media_edges_resolved's parent_missing works for every
 	// relationship_type -- the spec's deleted trigger never did. See
@@ -77,6 +80,8 @@ type Querier interface {
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
+	// Backs tests and any future metadata inspector UI.
+	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	MarkNodeMissing(ctx context.Context, id int64) error

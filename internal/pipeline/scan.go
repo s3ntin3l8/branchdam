@@ -248,7 +248,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		if len(buf) == 0 {
 			return
 		}
-		stats, err := Commit(ctx, deps.DB, locationID, buf)
+		stats, err := Commit(ctx, deps.DB, locationID, buf, log)
 		total.Inserted += stats.Inserted
 		total.Touched += stats.Touched
 		total.VersionCollisions += stats.VersionCollisions
@@ -430,6 +430,12 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 			result.DerivedFromID = exif.DerivedFromID
 			result.CapturedAt = exif.CapturedAt
 			result.CameraModel = exif.Model
+			result.Make = exif.Make
+			result.LensModel = exif.LensModel
+			result.SerialNumber = exif.SerialNumber
+			result.GPSLatitude = exif.GPSLatitude
+			result.GPSLongitude = exif.GPSLongitude
+			result.ExifRaw = selectExifRaw(exif.Raw)
 		}
 	}
 

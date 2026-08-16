@@ -34,6 +34,21 @@ type Result struct {
 	DerivedFromID      string
 	CapturedAt         *time.Time
 	CameraModel        string
+
+	// New in #33. Typed fields mirror probe.ExifResult; persisted as
+	// node_metadata rows with source='exiftool' (keyed by the same grouped tag
+	// names exiftool reports), alongside a bounded allowlist of Raw tags.
+	// CameraModel is not repeated here -- it's the promoted camera_model column.
+	Make         string
+	LensModel    string
+	SerialNumber string
+	GPSLatitude  *float64
+	GPSLongitude *float64
+
+	// ExifRaw is the bounded, explicit allowlist subset of probe.ExifResult.Raw
+	// the scan decided to persist. Empty means "nothing persisted". The full
+	// Raw map is deliberately never dumped -- see exifRawAllowlist.
+	ExifRaw map[string]string
 }
 
 // Stats summarizes what a Commit call actually did, for scan_jobs progress
@@ -43,4 +58,35 @@ type Stats struct {
 	Touched           int // same content at the same path, no new row
 	VersionCollisions int // docs/schema.md fix #3: old archived, new inserted
 	Moved             int // Pillar 5: MISSING node's path rebased
+}
+
+// exifRawAllowlist is the closed set of exiftool tag names persisted into
+// node_metadata. Everything else exiftool reports is discarded -- an explicit
+// allowlist, not the full map, so tag sets we never query are never written.
+var exifRawAllowlist = map[string]bool{
+	"EXIF:ExposureTime":            true,
+	"EXIF:FNumber":                 true,
+	"EXIF:ISO":                     true,
+	"EXIF:FocalLength":             true,
+	"EXIF:FocalLengthIn35mmFormat": true,
+	"EXIF:WhiteBalance":            true,
+	"EXIF:ColorSpace":              true,
+	"EXIF:Orientation":             true,
+	"EXIF:Software":                true,
+	"EXIF:Artist":                  true,
+	"EXIF:Copyright":               true,
+	"EXIF:ImageDescription":        true,
+	"XMP:Rating":                   true,
+	"XMP:Label":                    true,
+	"XMP:Subject":                  true,
+}
+
+func selectExifRaw(raw map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range raw {
+		if exifRawAllowlist[k] {
+			out[k] = v
+		}
+	}
+	return out
 }

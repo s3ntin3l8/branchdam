@@ -211,6 +211,12 @@ func (d *DB) ExecInTx(ctx context.Context, query string, args ...any) (sql.Resul
 	return res, nil
 }
 
+// ReaderQueriesForTest exposes a writer-bound Queries handle to tests that
+// need to exercise persistence helpers inside a pipeline transaction.
+func (d *DB) ReaderQueriesForTest() *sqlcgen.Queries {
+	return sqlcgen.New(d.writer)
+}
+
 // migrate applies pending goose migrations against db (the writer pool).
 // goose's package-level API carries global dialect/baseFS state, which is
 // fine here -- this process opens exactly one database.
