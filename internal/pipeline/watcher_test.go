@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -290,6 +291,152 @@ func TestRebaseIfMovedLeavesDuplicateAlone(t *testing.T) {
 	// Old node untouched, still ACTIVE at its path.
 	if got := mustGetLiveNode(t, database, oldPath); got.ID != original.ID || got.LifecycleState != "ACTIVE" {
 		t.Errorf("old node changed: id=%d state=%q, want id=%d ACTIVE", got.ID, got.LifecycleState, original.ID)
+	}
+}
+
+// TestRebaseIfMovedDeclinesFullHashMismatch pins the full_hash guard -- the
+// property that makes rebaseIfMoved strictly safer than Commit's scan-path
+// move detection (which matches fast_hash alone). With a stored full_hash set
+// and a result carrying a DIFFERENT full_hash, the move must be declined even
+// though the old file is gone from disk and the fast_hash matches: the
+// content can't be verified as identical, so a fast_hash-only rebase could
+// steal a genuinely different file.
+func TestRebaseIfMovedDeclinesFullHashMismatch(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	writeFile(t, oldPath, "renamed content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.FullHashPolicy = "always" // so the seeded node stores a full_hash
+	loc := storage.Location{ID: locationID, Name: "rebase-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("seed scan state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	original := mustGetLiveNode(t, database, oldPath)
+	if original.FullHash == nil {
+		t.Fatal("precondition broken: seeded node has no stored full_hash (FullHashPolicy=always should set one)")
+	}
+
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+
+	// Hand-crafted result: the SAME fast_hash as the stored node (so the move
+	// would otherwise match) but a DIFFERENT full_hash -- the guard must
+	// decline rather than rebase a file whose content it can't verify.
+	result := &Result{
+		Path:     filepath.Join(resolvedRoot, "new.txt"),
+		FileName: "new.txt",
+		FileExt:  "txt",
+		Size:     16,
+		ModTime:  time.Now(),
+		FastHash: *original.FastHash,
+		FullHash: strings.Repeat("0", 64),
+	}
+
+	moved, err := NewWatcherSupervisor(deps, nil).rebaseIfMoved(ctx, loc, result)
+	if err != nil {
+		t.Fatalf("rebaseIfMoved: %v", err)
+	}
+	if moved {
+		t.Fatal("rebaseIfMoved = true, want false (stored full_hash != result full_hash)")
+	}
+
+	// Node untouched, still ACTIVE at its original path with its full_hash.
+	got := mustGetLiveNode(t, database, oldPath)
+	if got.ID != original.ID || got.LifecycleState != "ACTIVE" {
+		t.Errorf("old node changed: id=%d state=%q, want id=%d ACTIVE", got.ID, got.LifecycleState, original.ID)
+	}
+	if got.FullHash == nil || *got.FullHash != *original.FullHash {
+		t.Errorf("old node full_hash changed: %v -> %v", original.FullHash, got.FullHash)
+	}
+}
+
+// TestRebaseIfMovedFullHashMatchRebases is the full_hash guard's pass side:
+// when the stored node's full_hash EQUALS the new file's (content verified
+// beyond the 64-bit fast_hash), the guard must not decline -- the move
+// rebases in place exactly as in the never-policy case.
+func TestRebaseIfMovedFullHashMatchRebases(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	writeFile(t, oldPath, "renamed content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.FullHashPolicy = "always" // so the stored node AND the processed result both carry a full_hash
+	loc := storage.Location{ID: locationID, Name: "rebase-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("seed scan state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	original := mustGetLiveNode(t, database, oldPath)
+	if original.FullHash == nil {
+		t.Fatal("precondition broken: seeded node has no stored full_hash (FullHashPolicy=always should set one)")
+	}
+
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+
+	newPath := filepath.Join(resolvedRoot, "new.txt")
+	writeFile(t, newPath, "renamed content") // identical content: same full_hash as stored
+	info, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatalf("stat new: %v", err)
+	}
+	result, err := processFile(ctx, deps, loc, indexer.Record{Path: newPath, Size: info.Size(), ModTime: info.ModTime()})
+	if err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if result.FullHash == "" {
+		t.Fatal("precondition broken: processFile produced no full_hash under FullHashPolicy=always")
+	}
+	if *original.FullHash != result.FullHash {
+		t.Fatalf("precondition broken: stored full_hash %q != processed full_hash %q", *original.FullHash, result.FullHash)
+	}
+
+	moved, err := NewWatcherSupervisor(deps, nil).rebaseIfMoved(ctx, loc, result)
+	if err != nil {
+		t.Fatalf("rebaseIfMoved: %v", err)
+	}
+	if !moved {
+		t.Fatal("rebaseIfMoved = false, want true (stored full_hash == result full_hash)")
+	}
+
+	rebased := mustGetLiveNode(t, database, newPath)
+	if rebased.ID != original.ID {
+		t.Errorf("rebased id = %d, want %d (same row, no fresh insert)", rebased.ID, original.ID)
+	}
+	if rebased.NodeUuid != original.NodeUuid {
+		t.Errorf("rebased node_uuid = %q, want %q", rebased.NodeUuid, original.NodeUuid)
+	}
+	if rebased.LifecycleState != "ACTIVE" {
+		t.Errorf("rebased lifecycle_state = %q, want ACTIVE", rebased.LifecycleState)
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, oldPath); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("old path still resolves after rebase (err=%v)", err)
 	}
 }
 
