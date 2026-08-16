@@ -83,18 +83,18 @@ type storageLocationDTO struct {
 	Prunable bool   `json:"prunable"`
 }
 
-type listStorageLocationsOutput struct {
+type ListStorageLocationsOutput struct {
 	Body struct {
 		Locations []storageLocationDTO `json:"locations"`
 	}
 }
 
-func (s *Server) handleListStorageLocations(ctx context.Context, _ *struct{}) (*listStorageLocationsOutput, error) {
+func (s *Server) handleListStorageLocations(ctx context.Context, _ *struct{}) (*ListStorageLocationsOutput, error) {
 	rows, err := s.db.Reader.ListStorageLocations(ctx)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list storage locations", err)
 	}
-	out := &listStorageLocationsOutput{}
+	out := &ListStorageLocationsOutput{}
 	out.Body.Locations = make([]storageLocationDTO, len(rows))
 	for i, r := range rows {
 		out.Body.Locations[i] = storageLocationDTO{
