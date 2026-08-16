@@ -331,7 +331,7 @@ func TestScanJobOutlivesRequestContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /api/v1/scan: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /api/v1/scan status = %d", resp.StatusCode)
 	}
