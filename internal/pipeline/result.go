@@ -5,6 +5,7 @@
 package pipeline
 
 import (
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/probe"
@@ -109,4 +110,4 @@ var videoExts = map[string]bool{
 	"3gp": true, "flv": true, "mpg": true, "mpeg": true,
 }
 
-func isVideoExt(ext string) bool { return videoExts[ext] }
+func isVideoExt(ext string) bool { return videoExts[strings.ToLower(strings.TrimPrefix(ext, "."))] }

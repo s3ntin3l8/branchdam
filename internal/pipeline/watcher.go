@@ -43,6 +43,13 @@ const watchDebounce = 500 * time.Millisecond
 // Commit calls the way a full scan does (see scan.go's batchSize/
 // batchInterval) would be a reasonable follow-up; the per-location
 // serialization itself is deliberate.
+//
+// Watch-path events run processFile, so videos on a watched location go
+// through probe.FFProbe under the same probeTimeout budget as the scan path
+// and degrade gracefully when ffprobe fails or is absent -- a deliberate
+// consistency with the scan path, not an oversight. A video burst serialized
+// behind one consumer can stall ingestion and re-probe content-identical
+// touches; a shorter watch-path budget is a possible future refinement.
 type WatcherSupervisor struct {
 	deps      ScanDeps
 	log       *slog.Logger

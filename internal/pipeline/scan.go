@@ -28,7 +28,7 @@ import (
 const (
 	batchSize     = 64
 	batchInterval = 250 * time.Millisecond
-	exifTimeout   = 30 * time.Second
+	probeTimeout  = 30 * time.Second
 )
 
 // ScanDeps bundles what a scan needs. Pool is expected to already be
@@ -419,7 +419,7 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		// spec directive 9.4: fall back gracefully to fast_hash indexing if
 		// metadata parsing fails -- an Exif error here is logged, never
 		// returned, so one unreadable tag never fails the whole file.
-		exifCtx, cancel := context.WithTimeout(ctx, exifTimeout)
+		exifCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		exif, err := deps.Prober.Exif(exifCtx, rec.Path)
 		cancel()
 		if err != nil {
@@ -442,7 +442,7 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 	if deps.Prober != nil && deps.Prober.HasFFProbe() && isVideoExt(ext) {
 		// spec directive 9.4: ffprobe failure is logged and the file still
 		// indexes -- same graceful-degradation rule as the Exif call.
-		ffCtx, cancel := context.WithTimeout(ctx, exifTimeout)
+		ffCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		ff, err := deps.Prober.FFProbe(ffCtx, rec.Path)
 		cancel()
 		if err != nil {
