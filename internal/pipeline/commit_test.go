@@ -11,6 +11,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
 )
 
 func openTestDB(t *testing.T) *db.DB {
@@ -436,6 +437,86 @@ func TestCommitPersistsExifMetadataExactly(t *testing.T) {
 	}
 	if _, ok := got["exiftool\x00EXIF:JunkTag"]; ok {
 		t.Error("EXIF:JunkTag persisted, want the allowlist to drop it")
+	}
+}
+
+func TestIsVideoExt(t *testing.T) {
+	video := []string{"mp4", "mov", "mkv", "m2ts"}
+	for _, ext := range video {
+		if !isVideoExt(ext) {
+			t.Errorf("isVideoExt(%q) = false, want true", ext)
+		}
+	}
+	for _, ext := range []string{"MP4", ".mkv", ".MP4"} {
+		if !isVideoExt(ext) {
+			t.Errorf("isVideoExt(%q) = false, want true (gate must normalize case/dot)", ext)
+		}
+	}
+	notVideo := []string{"jpg", "arw", "mp3", "", "."}
+	for _, ext := range notVideo {
+		if isVideoExt(ext) {
+			t.Errorf("isVideoExt(%q) = true, want false", ext)
+		}
+	}
+}
+
+func floatPtr(f float64) *float64 { return &f }
+
+func TestCommitPersistsFFProbeMetadata(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	result := Result{
+		Path: "/exports/clip.mp4", FileName: "clip.mp4", FileExt: "mp4",
+		Size: 200, ModTime: time.Now(), FastHash: "bbbbbbbbbbbbbbbb",
+		FFProbe: &probe.FFProbeResult{
+			FormatName: "mov,mp4,m4a,3gp,3g2,mj2", DurationSeconds: floatPtr(1.0),
+			VideoCodec: "h264", AudioCodec: "aac", Width: 320, Height: 240,
+		},
+	}
+	if _, err := Commit(ctx, database, locationID, []Result{result}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/clip.mp4")
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Key] = r.Value
+	}
+	want := map[string]string{
+		"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration_seconds": "1",
+		"video_codec": "h264", "audio_codec": "aac", "width": "320", "height": "240",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ffprobe rows = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+
+	// A second Commit with FFProbe nil persists no ffprobe rows at all.
+	if _, err := Commit(ctx, database, locationID, []Result{{
+		Path: "/exports/photo.jpg", FileName: "photo.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "cccccccccccccccc",
+	}}); err != nil {
+		t.Fatalf("Commit (photo): %v", err)
+	}
+	photo := mustGetLiveNode(t, database, "/exports/photo.jpg")
+	prows, err := database.Reader.ListNodeMetadata(ctx, photo.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata (photo): %v", err)
+	}
+	for _, r := range prows {
+		if r.Source == "ffprobe" {
+			t.Errorf("photo node has an ffprobe row: %s=%s", r.Key, r.Value)
+		}
 	}
 }
 

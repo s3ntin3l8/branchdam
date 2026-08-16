@@ -28,7 +28,7 @@ import (
 const (
 	batchSize     = 64
 	batchInterval = 250 * time.Millisecond
-	exifTimeout   = 30 * time.Second
+	probeTimeout  = 30 * time.Second
 )
 
 // ScanDeps bundles what a scan needs. Pool is expected to already be
@@ -368,8 +368,10 @@ func needsFullHash(policy string, tierReadOnly, hasCollision bool) bool {
 
 // processFile does all the slow, off-transaction work for one file: opens
 // it through storage.Guard, hashes it, optionally escalates to full_hash,
-// and optionally runs exiftool. Runs entirely on a workers.Pool goroutine,
-// never inside a database transaction.
+// and optionally runs exiftool. It also runs FFProbe for video extensions
+// under the same probeTimeout budget; a video-heavy scan can pause progress
+// for long stretches between batch commits. Runs entirely on a workers.Pool
+// goroutine, never inside a database transaction.
 func processFile(ctx context.Context, deps ScanDeps, location storage.Location, rec indexer.Record) (*Result, error) {
 	f, err := deps.Guard.OpenRead(rec.Path)
 	if err != nil {
@@ -419,7 +421,7 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		// spec directive 9.4: fall back gracefully to fast_hash indexing if
 		// metadata parsing fails -- an Exif error here is logged, never
 		// returned, so one unreadable tag never fails the whole file.
-		exifCtx, cancel := context.WithTimeout(ctx, exifTimeout)
+		exifCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		exif, err := deps.Prober.Exif(exifCtx, rec.Path)
 		cancel()
 		if err != nil {
@@ -436,6 +438,19 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 			result.GPSLatitude = exif.GPSLatitude
 			result.GPSLongitude = exif.GPSLongitude
 			result.ExifRaw = selectExifRaw(exif.Raw)
+		}
+	}
+
+	if deps.Prober != nil && deps.Prober.HasFFProbe() && isVideoExt(ext) {
+		// spec directive 9.4: ffprobe failure is logged and the file still
+		// indexes -- same graceful-degradation rule as the Exif call.
+		ffCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		ff, err := deps.Prober.FFProbe(ffCtx, rec.Path)
+		cancel()
+		if err != nil {
+			deps.logOrDiscard().Debug("pipeline: ffprobe probe failed, indexing without it", "path", rec.Path, "err", err)
+		} else {
+			result.FFProbe = ff
 		}
 	}
 

@@ -565,3 +565,64 @@ func TestExifFixtureProducesExpectedNodeMetadata(t *testing.T) {
 		t.Errorf("EXIF:Make = %q, want SONY (all rows: %+v)", makeVal, rows)
 	}
 }
+
+// makeFixtureMP4 generates a tiny real H.264/AAC video via ffmpeg, so the
+// e2e test exercises the actual probe subprocess path rather than a canned
+// fixture file checked into the repo. Mirrors internal/probe's fixture.
+func makeFixtureMP4(t *testing.T, dir string) string {
+	t.Helper()
+	requireTool(t, "ffmpeg")
+
+	path := filepath.Join(dir, "fixture.mp4")
+	cmd := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:duration=1",
+		"-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+		"-c:v", "libx264", "-c:a", "aac", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture mp4: %v\n%s", err, out)
+	}
+	return path
+}
+
+// TestFFProbeVideoFixturePersistsThroughScan is the #34 e2e: a real video
+// walked and scanned by the full pipeline (indexer.Walk -> workers.Pool ->
+// processFile's probe.FFProbe -> Commit) must land its ffprobe stream
+// fields in node_metadata under source='ffprobe'.
+func TestFFProbeVideoFixturePersistsThroughScan(t *testing.T) {
+	requireTool(t, "ffprobe")
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	vidPath := makeFixtureMP4(t, root)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	node := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, filepath.Base(vidPath)))
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	var codecVal string
+	for _, r := range rows {
+		if r.Source == "ffprobe" && r.Key == "video_codec" {
+			codecVal = r.Value
+		}
+	}
+	if codecVal != "h264" {
+		t.Errorf("video_codec = %q, want h264 (all rows: %+v)", codecVal, rows)
+	}
+}

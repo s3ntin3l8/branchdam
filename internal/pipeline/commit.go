@@ -172,6 +172,9 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 	if err := persistMetadata(ctx, q, node.ID, "exiftool", exifMetadata(r), metadataCap, log); err != nil {
 		return sqlcgen.MediaNode{}, err
 	}
+	if err := persistMetadata(ctx, q, node.ID, "ffprobe", ffprobeMetadata(r), metadataCap, log); err != nil {
+		return sqlcgen.MediaNode{}, err
+	}
 	return node, nil
 }
 
@@ -264,6 +267,36 @@ func exifMetadata(r Result) map[string]string {
 		if exifRawAllowlist[k] {
 			kv[k] = v
 		}
+	}
+	return kv
+}
+
+// ffprobeMetadata assembles the source='ffprobe' rows for a fresh node.
+// Structured fields only -- size_bytes is already a column, and RawJSON is
+// out of scope by design (#34).
+func ffprobeMetadata(r Result) map[string]string {
+	f := r.FFProbe
+	if f == nil {
+		return nil
+	}
+	kv := make(map[string]string, 6)
+	if f.FormatName != "" {
+		kv["format_name"] = f.FormatName
+	}
+	if f.DurationSeconds != nil {
+		kv["duration_seconds"] = strconv.FormatFloat(*f.DurationSeconds, 'f', -1, 64)
+	}
+	if f.VideoCodec != "" {
+		kv["video_codec"] = f.VideoCodec
+	}
+	if f.AudioCodec != "" {
+		kv["audio_codec"] = f.AudioCodec
+	}
+	if f.Width > 0 {
+		kv["width"] = strconv.Itoa(f.Width)
+	}
+	if f.Height > 0 {
+		kv["height"] = strconv.Itoa(f.Height)
 	}
 	return kv
 }
