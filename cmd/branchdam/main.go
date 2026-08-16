@@ -150,7 +150,10 @@ func main() {
 		os.Exit(1)
 	}
 	if supervisor != nil {
-		supervisor.Wait() // watchers already stopped on ctx.Done; join so no submit races pool.Drain
+		// Watchers already stopped on ctx.Done; Wait() joins each location's
+		// consumer goroutine, which holds the writer DB and calls Commit
+		// directly (never Pool.Submit), so it must finish before db.Close.
+		supervisor.Wait()
 	}
 	// ctx (the signal context) is already Done by this point, which is what
 	// tells the pool's worker goroutines to stop after their current job --

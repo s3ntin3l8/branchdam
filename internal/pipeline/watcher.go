@@ -29,14 +29,20 @@ const watchDebounce = 500 * time.Millisecond
 // watched -- main.go filters before Start.
 //
 // Every location's events are processed by a single consumer goroutine
-// reading an unbuffered channel in the order fsnotify delivered them, so
-// hashing/Commit run one at a time per location instead of in unbounded
-// parallel goroutines. Event order is NOT assumed to be Remove-before-Create
-// for a rename: inotify on Linux actually delivers a rename's IN_MOVED_TO
-// before its IN_MOVED_FROM, so move detection must be order-independent (see
-// rebaseIfMoved). Batching Commit calls the way a full scan does (see
-// scan.go's batchSize/batchInterval) would be a reasonable follow-up; the
-// per-location serialization itself is deliberate.
+// reading an unbuffered channel, so hashing/Commit run one at a time per
+// location instead of in unbounded parallel goroutines. The consumer makes
+// no ordering assumptions about events: the debouncer's per-path
+// time.AfterFunc goroutines can deliver them in any order, and inotify on
+// Linux actually delivers a rename's IN_MOVED_TO before its IN_MOVED_FROM,
+// so rename move detection is deliberately order-independent (see
+// rebaseIfMoved). A file-level rename IS move-detected; a recursive
+// DIRECTORY rename is not (the fsnotify watch moves with the directory, so
+// no per-file remove/create events fire) -- files under it land as fresh
+// nodes on the next full scan and the old nodes sweep to MISSING, the same
+// fidelity gap as the pure-scan path: self-healing, no data loss. Batching
+// Commit calls the way a full scan does (see scan.go's batchSize/
+// batchInterval) would be a reasonable follow-up; the per-location
+// serialization itself is deliberate.
 type WatcherSupervisor struct {
 	deps      ScanDeps
 	log       *slog.Logger
@@ -55,12 +61,14 @@ func NewWatcherSupervisor(deps ScanDeps, nudge func()) *WatcherSupervisor {
 
 // Start begins one watch goroutine per location and returns immediately.
 // Goroutines block until ctx is cancelled (-> CANCELLED) or their watcher
-// dies (-> FAILED). Calling Start more than once is a no-op.
+// dies (-> FAILED). A second call is a no-op and logs a warning.
 func (w *WatcherSupervisor) Start(ctx context.Context, locations []storage.Location, debounce time.Duration) {
 	if debounce <= 0 {
 		debounce = watchDebounce
 	}
+	started := false
 	w.startOnce.Do(func() {
+		started = true
 		for _, loc := range locations {
 			w.wg.Add(1)
 			go func(l storage.Location) {
@@ -69,6 +77,9 @@ func (w *WatcherSupervisor) Start(ctx context.Context, locations []storage.Locat
 			}(loc)
 		}
 	})
+	if !started {
+		w.log.Warn("pipeline: WatcherSupervisor.Start called after the first start; ignoring", "locations", len(locations))
+	}
 }
 
 // Wait blocks until every watch goroutine has returned. Called during
@@ -87,11 +98,13 @@ type watchItem struct {
 // watchWork is the handoff between indexer.Watch's debounce callbacks and a
 // location's consumer goroutine. The callbacks only ever enqueue; the
 // consumer is the sole reader and the only code that touches the database.
-// enqueue blocks until the consumer takes the item, which preserves whatever
-// order fsnotify delivered the events in and doubles as backpressure: while
-// the consumer is busy hashing, further events wait instead of spawning more
-// goroutines. (The order itself carries no semantic weight -- rename move
-// detection is deliberately order-independent, see rebaseIfMoved.)
+// enqueue blocks until the consumer takes the item, which doubles as
+// backpressure: while the consumer is busy hashing, further events wait
+// instead of spawning more goroutines. The order items land on the channel
+// carries no semantic weight -- the debouncer fires one time.AfterFunc
+// goroutine per path and Go does not guarantee their order, so consumers
+// must not assume any event ordering (rename move detection is deliberately
+// order-independent, see rebaseIfMoved).
 //
 // close() records the intent to stop under the same mutex enqueue uses
 // before the channel itself is closed, so a blocked send can never race the
@@ -148,9 +161,9 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 		for item := range work.ch {
 			// Every item updates the job's counters -- a failure must still
 			// be persisted (files_failed), not dropped with the callback.
-			// bump only on a handled item (including a removal there was
-			// nothing to mark), never on failure: a nudge means "something
-			// changed".
+			// bump only when handleWatchItem reports the item was handled: a
+			// nudge means "something changed" (a failed event or a removal
+			// with nothing to mark is not a change).
 			bumped := w.handleWatchItem(ctx, loc, item, &seen, &hashed, &failed)
 			w.updateJob(job.ID, &seen, &hashed, &failed)
 			if bumped {
@@ -200,8 +213,8 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 
 // handleWatchItem processes one watchItem to completion, returning whether
 // the frontend should be nudged. Events and removals each count against
-// files_seen; a handled item (including a removal there was nothing to mark)
-// bumps, a failure does not.
+// files_seen; a handled item bumps, a failure does not (and a removal with
+// nothing to mark is not a nudge -- nothing changed).
 func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed *atomic.Int32) bool {
 	if item.remove {
 		return w.handleRemoval(ctx, item.path, seen, failed)
@@ -271,6 +284,13 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 		if n.FullHash != nil && result.FullHash != "" && *n.FullHash != result.FullHash {
 			continue // genuinely different content sharing a fast_hash (T1)
 		}
+		// TOCTOU: the GetLiveNodeByPath pre-check above read on the reader
+		// pool, this rebase writes later on the single writer connection. A
+		// concurrent full scan committing a node at result.Path in between
+		// trips the partial unique index on file_path, RebaseMissingNodePath
+		// fails, and the event is counted failed and picked up by the next
+		// scan. Fail-safe, never corrupting: the worst case is a deferred
+		// (re-)index, not a wrong row.
 		if err := w.deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
 				ID:                n.ID,
@@ -287,14 +307,15 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 	return false, nil
 }
 
-// handleRemoval marks the live node at path MISSING, or is a no-op when
-// there is nothing to mark (never indexed, or already MISSING -- the
-// move-rebase case where Commit already rebound the node to its new path).
+// handleRemoval marks the live node at path MISSING, returning whether the
+// frontend should be nudged. It is a no-op when there is nothing to mark
+// (never indexed, or already MISSING -- e.g. a rename whose node was already
+// rebound by rebaseIfMoved); only a real ACTIVE -> MISSING transition bumps.
 func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen, failed *atomic.Int32) bool {
 	seen.Add(1)
 	node, err := w.deps.DB.Reader.GetLiveNodeByPath(ctx, path)
 	if errors.Is(err, sql.ErrNoRows) {
-		return true // never indexed, or already rebound
+		return false // never indexed, or already rebound -- nothing changed
 	}
 	if err != nil {
 		failed.Add(1)
@@ -302,7 +323,7 @@ func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen
 		return false
 	}
 	if node.LifecycleState == "MISSING" {
-		return true
+		return false // already missing -- nothing to transition
 	}
 	if err := w.deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.MarkNodeMissing(ctx, node.ID)
