@@ -9,6 +9,10 @@ export function useConfig() {
   return useQuery({ queryKey: ["config"], queryFn: api.config });
 }
 
+export function useStorageLocations() {
+  return useQuery({ queryKey: ["storage-locations"], queryFn: api.listStorageLocations });
+}
+
 export function useAssets(params: { limit?: number; offset?: number } = {}) {
   return useQuery({
     queryKey: ["assets", params],
