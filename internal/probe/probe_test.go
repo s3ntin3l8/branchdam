@@ -226,6 +226,7 @@ func TestExifRespectsContextTimeout(t *testing.T) {
 }
 
 func TestExtractPHashDirectImage(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.png")
 
@@ -260,6 +261,7 @@ func TestExtractPHashDirectImage(t *testing.T) {
 }
 
 func TestExtractPHashNonImageFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 	if err := os.WriteFile(path, []byte("hello world text file"), 0644); err != nil {

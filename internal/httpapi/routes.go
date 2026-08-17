@@ -373,13 +373,15 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 	}
 
 	fullHashPolicy := "tier3_and_collision"
-	if s.cfg != nil && s.cfg.Workers.FullHashPolicy != "" {
+	disablePHash := false
+	if s.cfg != nil {
 		fullHashPolicy = s.cfg.Workers.FullHashPolicy
+		disablePHash = !s.cfg.Workers.PerceptualHash
 	}
 
 	jobID, err := pipeline.RunScan(ctx, pipeline.ScanDeps{
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
-		FullHashPolicy: fullHashPolicy, Log: s.log,
+		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
 	}, location)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("start scan", err)
