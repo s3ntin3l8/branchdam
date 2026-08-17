@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Guidelines
+
+- **Use the repo's templates.** When opening a PR, fill in
+  [`.github/pull_request_template.md`](.github/pull_request_template.md) rather than writing a
+  free-form body -- its checklist encodes what actually breaks CI (golangci-lint separately from
+  `make lint`, sqlc codegen, DTO hand-sync) and is meant to be ticked honestly, not skipped. When
+  filing an issue, use the
+  [issue blueprint](.github/ISSUE_TEMPLATE/issue-blueprint.md) (Context/Scope/Out of
+  scope/Acceptance criteria). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full pre-PR
+  checklist.
+
 ## Commands
 
 ### Backend (Go)
@@ -234,6 +245,8 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 
 ## Documentation map
 
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) -- setup, the pre-PR checklist (and precisely what
+  `make lint` does and doesn't cover), codegen contracts, PR title / branch protection rules.
 - [`docs/spec/original-spec.md`](docs/spec/original-spec.md) -- the design spec as received,
   committed verbatim. A historical input, not the live contract; where it disagrees with the
   code, the code is right.
