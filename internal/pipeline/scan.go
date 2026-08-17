@@ -127,54 +127,73 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	if walkFn == nil {
 		walkFn = indexer.Walk
 	}
-	walkErr := walkFn(ctx, location.RootPath, func(rec indexer.Record) error {
-		if rec.IsSymlink {
-			return nil // following a symlink is a storage.Guard-mediated decision elsewhere, not this pass's
-		}
-		filesSeen.Add(1)
 
-		wg.Add(1)
-		submitted := deps.Pool.Submit(ctx, workers.Job[string]{
-			Key: rec.Path,
-			Run: func(jobCtx context.Context) error {
-				defer wg.Done()
-				result, err := processFile(jobCtx, deps, location, rec)
-				if err != nil {
-					uncertain.add(rec.Path)
-					filesFailed.Add(1)
-					log.Warn("pipeline: index file failed", "path", rec.Path, "err", err)
-					return err
-				}
-				select {
-				case results <- *result:
-				case <-jobCtx.Done():
-					uncertain.add(rec.Path)
-					filesFailed.Add(1)
-				}
-				return nil
-			},
-		})
-		if !submitted {
-			wg.Done()
-			uncertain.add(rec.Path)
-			filesFailed.Add(1)
-			log.Warn("pipeline: submit refused (duplicate in flight or queue full)", "path", rec.Path)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		log.Error("pipeline: walk failed", "location", location.RootPath, "err", walkErr)
-	}
-
+	// The walk runs on its own goroutine so drainAndCommit (below) can start
+	// consuming results while the walk is still in progress, instead of
+	// after it finishes. Without this, nobody reads `results` for the
+	// entire walk: once the buffer (batchSize*2) fills, every pool worker
+	// blocks on `results <- *result`, the pool's own queue then fills
+	// behind them, and Submit starts refusing -- silently capping a scan at
+	// roughly the first `cap(results) + queue depth + worker count` files
+	// and reporting the rest as failed rather than failing the job.
+	//
+	// walkDone is joined explicitly (rather than relying on close(results)
+	// having already happened-before drainAndCommit's return) so that
+	// reading walkErr below is safe regardless of *why* drainAndCommit
+	// returned -- today its only return is the `!ok` branch after
+	// close(results), but a future shutdown-cancellation path (returning
+	// early on ctx.Done(), say) would otherwise let drainAndCommit return
+	// while this goroutine is still running and still writing walkErr, an
+	// unsynchronized read.
+	var walkErr error
+	walkDone := make(chan struct{})
 	go func() {
+		defer close(walkDone)
+		walkErr = walkFn(ctx, location.RootPath, func(rec indexer.Record) error {
+			if rec.IsSymlink {
+				return nil // following a symlink is a storage.Guard-mediated decision elsewhere, not this pass's
+			}
+			filesSeen.Add(1)
+
+			wg.Add(1)
+			submitted := deps.Pool.Submit(ctx, workers.Job[string]{
+				Key: rec.Path,
+				Run: func(jobCtx context.Context) error {
+					defer wg.Done()
+					result, err := processFile(jobCtx, deps, location, rec)
+					if err != nil {
+						uncertain.add(rec.Path)
+						filesFailed.Add(1)
+						log.Warn("pipeline: index file failed", "path", rec.Path, "err", err)
+						return err
+					}
+					select {
+					case results <- *result:
+					case <-jobCtx.Done():
+						uncertain.add(rec.Path)
+						filesFailed.Add(1)
+					}
+					return nil
+				},
+			})
+			if !submitted {
+				wg.Done()
+				uncertain.add(rec.Path)
+				filesFailed.Add(1)
+				log.Warn("pipeline: submit refused (duplicate in flight or queue full)", "path", rec.Path)
+			}
+			return nil
+		})
 		wg.Wait()
 		close(results)
 	}()
 
 	total := drainAndCommit(ctx, deps, location.ID, jobID, results, &filesSeen, &filesFailed, uncertain, log)
+	<-walkDone
 
 	finalErr := walkErr
 	if finalErr != nil {
+		log.Error("pipeline: walk failed", "location", location.RootPath, "err", finalErr)
 		// A walk that failed partway means the sweep cannot know which nodes
 		// were genuinely unseen vs. just not reached -- sweep never runs. The
 		// job is failed in its own transaction, so it reaches a terminal state
