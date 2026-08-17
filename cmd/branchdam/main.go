@@ -96,6 +96,7 @@ func main() {
 
 	engine := graph.NewEngine(database, log, graph.NewProjectSidecarResolver(cfg.PathRewrites), graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{}, graph.HeuristicSpatialTemporalResolver{})
 	hub := sse.New()
+	scanTracker := &pipeline.ScanTracker{}
 
 	var supervisor *pipeline.WatcherSupervisor
 	if watched := watchedFromConfig(cfg.StorageLocations); len(watched) > 0 {
@@ -120,6 +121,7 @@ func main() {
 	srv := httpapi.New(httpapi.Deps{
 		Config: &cfg, Log: log, DB: database, Guard: guard, Prober: prober,
 		Pool: pool, Engine: engine, Hub: hub, SPA: spa, Version: version,
+		Tracker: scanTracker,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -152,6 +154,18 @@ func main() {
 		// directly (never Pool.Submit), so it must finish before db.Close.
 		supervisor.Wait()
 	}
+	// scanTracker.Wait() joins every in-flight RunScan goroutine (started
+	// via POST /api/v1/scan) before the database closes, the same guarantee
+	// supervisor.Wait() above already gives the watch path. This must come
+	// before pool.Drain(): a scan's own wg.Wait() (internal/pipeline/scan.go)
+	// depends on the pool's workers resolving every submitted job one way or
+	// another -- either running it or, since #92, calling its OnAbandon hook
+	// once the pool's own ctx (this same ctx) is done -- so a scan can only
+	// finish once the pool has started winding down, which is already true
+	// here since ctx is Done. Draining first would just make this wait
+	// redundant, not wrong, but ordering it this way mirrors the watcher
+	// case above and keeps "join background scan work" as one clear step.
+	scanTracker.Wait()
 	// ctx (the signal context) is already Done by this point, which is what
 	// tells the pool's worker goroutines to stop after their current job --
 	// Drain waits for that to actually finish before the database closes.

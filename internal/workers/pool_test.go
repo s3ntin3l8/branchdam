@@ -155,3 +155,129 @@ func TestPoolRefusesAfterContextCancelled(t *testing.T) {
 		t.Fatal("Submit with an already-cancelled context returned true, want false")
 	}
 }
+
+// TestPoolRefusesAfterRunContextCancelled is the #92 companion to
+// TestPoolRefusesAfterContextCancelled: it proves Submit also refuses once
+// the *Pool's own* Run context is done, even when the caller passes a
+// different context that's still live (e.g. a background scan's
+// context.WithoutCancel(reqCtx), which deliberately never observes request
+// cancellation). Without this, a caller whose own ctx survives shutdown
+// could keep enqueuing jobs after every worker has already exited, and
+// nothing would ever dequeue or abandon them.
+func TestPoolRefusesAfterRunContextCancelled(t *testing.T) {
+	pool := New[int](1, 4)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	pool.Run(runCtx)
+	cancelRun()
+
+	callerCtx := context.Background() // deliberately never cancelled -- this is the case Submit's own ctx.Err() check can't catch
+	if pool.Submit(callerCtx, Job[int]{Key: 1, Run: func(context.Context) error { return nil }}) {
+		t.Fatal("Submit after the Pool's Run context was cancelled returned true, want false, even with a live caller ctx")
+	}
+	pool.Drain()
+}
+
+// TestPoolDrainAbandonsQueuedJobs is a direct, deterministic unit test of
+// drainAbandoned -- the mechanism workerLoop invokes on ctx.Done() -- with
+// no live workers and no goroutine-scheduling race involved. It exercises
+// exactly the #92 regression: a job accepted by Submit but never dequeued
+// must still release whatever bookkeeping its caller attached via
+// OnAbandon, and its dedup key must clear from inflight, or Submit would
+// wrongly keep refusing that key as a duplicate forever.
+func TestPoolDrainAbandonsQueuedJobs(t *testing.T) {
+	pool := New[int](1, 4)
+	ctx := context.Background() // deliberately never Run() -- nothing will ever dequeue these except drainAbandoned itself
+
+	var abandoned []int
+	for i := 1; i <= 3; i++ {
+		i := i
+		if !pool.Submit(ctx, Job[int]{
+			Key: i,
+			Run: func(context.Context) error {
+				t.Errorf("Run called for job %d, want OnAbandon only (nothing dequeued this job)", i)
+				return nil
+			},
+			OnAbandon: func() { abandoned = append(abandoned, i) },
+		}) {
+			t.Fatalf("Submit(%d) returned false", i)
+		}
+	}
+
+	pool.drainAbandoned()
+
+	if len(abandoned) != 3 {
+		t.Fatalf("abandoned = %v, want all 3 jobs abandoned exactly once", abandoned)
+	}
+
+	pool.mu.Lock()
+	inflightLen := len(pool.inflight)
+	pool.mu.Unlock()
+	if inflightLen != 0 {
+		t.Errorf("inflight has %d entries after drainAbandoned, want 0 -- an abandoned job's dedup key must clear like a completed one does", inflightLen)
+	}
+}
+
+// TestPoolDrainTerminatesWithAJobStillQueuedAtShutdown is the end-to-end
+// #92 regression against a live pool: a job Submit-ed just before shutdown
+// begins, and never dequeued by the sole worker before it notices
+// ctx.Done(), must not leave Drain() blocked forever. Before this fix,
+// nothing ever called that job's Run (it was never dequeued) or released
+// any equivalent completion signal, so a caller relying on such a signal
+// (like pipeline.runScan's own wg) would hang indefinitely.
+//
+// Which of Run or OnAbandon actually fires for the queued job is a genuine
+// race (Go's select makes no ordering guarantee between an already-ready
+// ctx.Done() and an already-buffered channel receive) and deliberately not
+// asserted here -- see TestPoolDrainAbandonsQueuedJobs above for a
+// deterministic, race-free proof that the abandon path itself works.
+// What's asserted here is the actual regression: Drain() returns, and
+// exactly one of the two completion paths fired.
+func TestPoolDrainTerminatesWithAJobStillQueuedAtShutdown(t *testing.T) {
+	pool := New[int](1, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	pool.Run(ctx)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	if !pool.Submit(ctx, Job[int]{Key: 1, Run: func(context.Context) error {
+		close(firstStarted)
+		<-releaseFirst
+		return nil
+	}}) {
+		t.Fatal("first Submit returned false")
+	}
+	<-firstStarted // the sole worker is now busy, so the next Submit is guaranteed to land in the queue
+
+	var ran, abandoned int32
+	if !pool.Submit(ctx, Job[int]{
+		Key: 2,
+		Run: func(context.Context) error {
+			atomic.AddInt32(&ran, 1)
+			return nil
+		},
+		OnAbandon: func() {
+			atomic.AddInt32(&abandoned, 1)
+		},
+	}) {
+		t.Fatal("second Submit returned false, want true (queue has room)")
+	}
+
+	cancel()            // shutdown begins while job 2 is still sitting in the queue, undequeued
+	close(releaseFirst) // let the in-flight first job finish so the worker re-checks ctx.Done()
+
+	drained := make(chan struct{})
+	go func() {
+		pool.Drain()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Drain() did not return within 5s -- job 2 was left permanently unresolved")
+	}
+
+	if got := ran + abandoned; got != 1 {
+		t.Errorf("ran(%d) + abandoned(%d) = %d, want exactly 1 -- job 2 must resolve exactly once, one way or the other", ran, abandoned, got)
+	}
+}

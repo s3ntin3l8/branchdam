@@ -14,9 +14,17 @@ import (
 // still running is dropped rather than double-processed. Run does the actual
 // work and captures whatever result channel or callback its caller needs;
 // Pool itself is result-agnostic.
+//
+// OnAbandon, if set, is called instead of Run for a job that was accepted by
+// Submit but never dequeued before shutdown (Run(ctx)'s ctx reaching Done).
+// A caller that tracks its own completion via Run's side effects (e.g. a
+// sync.WaitGroup token released inside Run) needs OnAbandon to release that
+// same token for a job Run never executed -- without it, a job stuck in the
+// queue at shutdown leaves that bookkeeping permanently unresolved.
 type Job[K comparable] struct {
-	Key K
-	Run func(context.Context) error
+	Key       K
+	Run       func(context.Context) error
+	OnAbandon func()
 }
 
 // Pool runs Jobs on a fixed number of goroutines, reading from a bounded
@@ -31,7 +39,8 @@ type Pool[K comparable] struct {
 	mu       sync.Mutex
 	inflight map[K]struct{}
 
-	wg sync.WaitGroup
+	wg   sync.WaitGroup
+	done <-chan struct{} // set by Run; nil until Run is called
 }
 
 // New creates a Pool with the given worker count and queue depth. Both are
@@ -56,6 +65,9 @@ func New[K comparable](workerCount, queueDepth int) *Pool[K] {
 // does not block until ctx is done. Call Drain (after cancelling ctx) to
 // wait for in-flight work to finish during shutdown.
 func (p *Pool[K]) Run(ctx context.Context) {
+	p.mu.Lock()
+	p.done = ctx.Done()
+	p.mu.Unlock()
 	for i := 0; i < p.workerCount; i++ {
 		p.wg.Add(1)
 		go p.workerLoop(ctx)
@@ -67,12 +79,41 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			p.drainAbandoned()
 			return
 		case job, ok := <-p.jobs:
 			if !ok {
 				return
 			}
 			p.runJob(ctx, job)
+		}
+	}
+}
+
+// drainAbandoned removes every job currently buffered in p.jobs and calls
+// its OnAbandon hook (if set), so a job that was Submit-ed but never
+// dequeued before shutdown still gets its completion bookkeeping released
+// instead of leaving a caller's wg.Wait() blocked forever. Non-blocking: it
+// only removes what's already buffered at the moment it runs, never waits
+// for more to arrive. Every worker calls this on its own ctx.Done() exit,
+// which is safe to do redundantly -- each buffered job is delivered to
+// exactly one receiver, so however many workers race here, the queue is
+// fully drained across all of them without double-abandoning any job.
+func (p *Pool[K]) drainAbandoned() {
+	for {
+		select {
+		case job, ok := <-p.jobs:
+			if !ok {
+				return
+			}
+			p.mu.Lock()
+			delete(p.inflight, job.Key)
+			p.mu.Unlock()
+			if job.OnAbandon != nil {
+				job.OnAbandon()
+			}
+		default:
+			return
 		}
 	}
 }
@@ -92,12 +133,28 @@ func (p *Pool[K]) runJob(ctx context.Context, job Job[K]) {
 // waiting for a worker to free up or space to open. A context already
 // cancelled at call time also returns false without enqueuing -- callers
 // should not keep submitting new work after shutdown has begun.
+//
+// Submit also refuses once the Pool's own Run context is done, regardless
+// of ctx's state. Without this, a caller whose own ctx deliberately
+// survives shutdown (e.g. a background scan using context.WithoutCancel)
+// could keep enqueuing jobs after every worker has already exited --
+// nothing would ever dequeue or abandon them, and anything waiting on that
+// job's completion (e.g. a sync.WaitGroup token released by Run or
+// OnAbandon) would block forever.
 func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 
 	p.mu.Lock()
+	if p.done != nil {
+		select {
+		case <-p.done:
+			p.mu.Unlock()
+			return false
+		default:
+		}
+	}
 	if _, dup := p.inflight[job.Key]; dup {
 		p.mu.Unlock()
 		return false

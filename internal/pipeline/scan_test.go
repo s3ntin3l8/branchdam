@@ -850,3 +850,108 @@ func TestDrainAndCommitRunsConcurrentlyWithWalk(t *testing.T) {
 		}
 	}
 }
+
+// TestScanFinishesWhenPoolShutsDownMidWalk is the #92 end-to-end regression:
+// cmd/branchdam's shutdown sequence cancels the pool's Run context and then
+// joins ScanTracker.Wait() before the deferred db.Close() -- this test
+// simulates exactly that against a scan that's still mid-walk when shutdown
+// begins, and asserts the join actually terminates (not a hang) with the
+// job in a terminal state, rather than trusting the ordering by inspection
+// alone.
+//
+// Like TestDrainAndCommitRunsConcurrentlyWithWalk (#93), this uses a gated
+// WalkFn instead of real timing: the walk cancels the pool's context after
+// submitting a handful of files, which is a real mid-walk shutdown, not a
+// simulated race, and needs no sleep or throughput assumption to be
+// reliable under -race or coverage instrumentation.
+func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
+	const workerCount = 2
+	const queueDepth = 300 // generous: this test is about shutdown termination, not queue capacity
+	const preGateCount = 5
+	const postGateCount = 20
+	const total = preGateCount + postGateCount
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	paths := make([]string, total)
+	for i := 0; i < total; i++ {
+		p := filepath.Join(resolvedRoot, fmt.Sprintf("file-%04d.txt", i))
+		writeFile(t, p, fmt.Sprintf("content-%d", i))
+		paths[i] = p
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	pool := workers.New[string](workerCount, queueDepth)
+	pool.Run(poolCtx)
+	t.Cleanup(func() {
+		cancelPool()
+		pool.Drain()
+	})
+
+	tracker := &ScanTracker{}
+	deps := ScanDeps{
+		DB:             database,
+		Guard:          storage.NewGuard([]storage.Location{{ID: locationID, Name: "test-shutdown", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}}),
+		Prober:         probe.New(),
+		Pool:           pool,
+		FullHashPolicy: "never",
+		Tracker:        tracker,
+	}
+	deps.WalkFn = func(_ context.Context, _ string, onFile func(indexer.Record) error) error {
+		for i, p := range paths {
+			info, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			if err := onFile(indexer.Record{Path: p, Size: info.Size(), ModTime: info.ModTime()}); err != nil {
+				return err
+			}
+			if i == preGateCount-1 {
+				// Simulate cmd/branchdam's shutdown starting here, mid-walk:
+				// the pool's Run context is cancelled while the walk still
+				// has postGateCount files left to enumerate.
+				cancelPool()
+			}
+		}
+		return nil
+	}
+	location := storage.Location{ID: locationID, Name: "test-shutdown", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+
+	// Mirrors cmd/branchdam/main.go's shutdown ordering: join the tracker
+	// before anything that could touch a closed DB. The database here is
+	// never actually closed early -- what this asserts is that the join
+	// itself terminates, which is the property a closed-DB write or a
+	// permanent hang would both violate.
+	trackerDone := make(chan struct{})
+	go func() {
+		tracker.Wait()
+		close(trackerDone)
+	}()
+	select {
+	case <-trackerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ScanTracker.Wait() did not return within 10s after a mid-walk pool shutdown -- the scan is hung")
+	}
+
+	pool.Drain() // should return promptly: tracker.Wait() already implies every job this scan submitted has resolved
+
+	job, err := database.Reader.GetScanJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("GetScanJob: %v", err)
+	}
+	if job.State == "RUNNING" {
+		t.Fatalf("scan job state = RUNNING after shutdown joined cleanly, want a terminal state (COMPLETED or FAILED)")
+	}
+}
