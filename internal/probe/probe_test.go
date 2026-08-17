@@ -3,6 +3,9 @@ package probe
 import (
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +222,62 @@ func TestExifRespectsContextTimeout(t *testing.T) {
 	_, err := p.Exif(ctx, path)
 	if err == nil {
 		t.Fatal("Exif with an already-expired context succeeded, want an error")
+	}
+}
+
+func TestExtractPHashDirectImage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.png")
+
+	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	for x := 0; x < 100; x++ {
+		for y := 0; y < 100; y++ {
+			img.Set(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 255, A: 255})
+		}
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create test.png: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode test.png: %v", err)
+	}
+	_ = f.Close()
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	phash, err := p.ExtractPHash(ctx, path)
+	if err != nil {
+		t.Fatalf("ExtractPHash: %v", err)
+	}
+	if phash == nil {
+		t.Fatal("ExtractPHash returned nil phash for a valid PNG image")
+	}
+}
+
+func TestExtractPHashNonImageFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(path, []byte("hello world text file"), 0644); err != nil {
+		t.Fatalf("write text file: %v", err)
+	}
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	phash, err := p.ExtractPHash(ctx, path)
+	if err != nil {
+		t.Fatalf("ExtractPHash on non-image file returned error: %v", err)
+	}
+	if phash != nil {
+		t.Errorf("ExtractPHash on text file returned %v, want nil", phash)
 	}
 }
 

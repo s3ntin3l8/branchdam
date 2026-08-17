@@ -38,13 +38,14 @@ const (
 // nil skips edge resolution entirely, which existing tests use to isolate
 // node-commit behavior from internal/graph.
 type ScanDeps struct {
-	DB             *db.DB
-	Guard          *storage.Guard
-	Prober         *probe.Prober
-	Pool           *workers.Pool[string]
-	Engine         *graph.Engine
-	FullHashPolicy string // "always" | "tier3_and_collision" (default) | "never"
-	Log            *slog.Logger
+	DB                    *db.DB
+	Guard                 *storage.Guard
+	Prober                *probe.Prober
+	Pool                  *workers.Pool[string]
+	Engine                *graph.Engine
+	FullHashPolicy        string // "always" | "tier3_and_collision" (default) | "never"
+	DisablePerceptualHash bool   // when true, disables pHash extraction for images
+	Log                   *slog.Logger
 
 	// WalkFn is the directory-walk function RunScan uses, defaulting to
 	// indexer.Walk. Overridable in tests to force a mid-walk error -- the
@@ -440,6 +441,17 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 			result.GPSLatitude = exif.GPSLatitude
 			result.GPSLongitude = exif.GPSLongitude
 			result.ExifRaw = selectExifRaw(exif.Raw)
+		}
+	}
+
+	if deps.Prober != nil && isImageExt(ext) && !deps.DisablePerceptualHash {
+		phCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		ph, err := deps.Prober.ExtractPHash(phCtx, rec.Path)
+		cancel()
+		if err != nil {
+			deps.logOrDiscard().Debug("pipeline: phash extraction failed", "path", rec.Path, "err", err)
+		} else if ph != nil {
+			result.PHash = ph
 		}
 	}
 

@@ -106,7 +106,7 @@ func main() {
 		}
 		supervisor = pipeline.NewWatcherSupervisor(pipeline.ScanDeps{
 			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
-			FullHashPolicy: cfg.Workers.FullHashPolicy, Log: log,
+			FullHashPolicy: cfg.Workers.FullHashPolicy, DisablePerceptualHash: !cfg.Workers.PerceptualHash, Log: log,
 		}, func() { hub.Broadcast() })
 		supervisor.Start(ctx, watchedLocs, 0)
 	}
