@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -343,12 +344,11 @@ func TestMarkUnseenNodesMissingScopedToLocation(t *testing.T) {
 	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		// KeepActive is this call's "exclude these paths" list; production
-		// passes the pass's seen-but-uncertain set, falling back to this
-		// sentinel when empty -- sqlc substitutes NULL for an empty slice and
-		// file_path NOT IN (NULL) is unknown (false), so an empty list would
-		// silently sweep nothing.
+		// passes the pass's seen-but-uncertain set marshaled as a JSON array string
+		// into json_each(?3).
+		jsonKeepActive, _ := json.Marshal([]string{""})
 		n, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
-			StorageLocationID: locA, BeforeUnix: 9, KeepActive: []string{""},
+			StorageLocationID: locA, LastSeenAt: 9, JsonEach: string(jsonKeepActive),
 		})
 		return err
 	}); err != nil {

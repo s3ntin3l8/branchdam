@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -209,11 +210,12 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// the node is simply swept one pass later (delayed-not-wrong).
 	var swept int64
 	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		jsonKeepActive, _ := json.Marshal(keepActive)
 		var err error
 		swept, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
 			StorageLocationID: location.ID,
-			BeforeUnix:        startedAt,
-			KeepActive:        keepActive,
+			LastSeenAt:        startedAt,
+			JsonEach:          string(jsonKeepActive),
 		})
 		return err
 	}); err != nil {

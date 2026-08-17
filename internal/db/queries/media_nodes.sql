@@ -7,7 +7,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
@@ -21,7 +22,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE id = ?1;
 
@@ -34,7 +36,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -46,7 +49,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
 LIMIT 1;
@@ -60,7 +64,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -73,7 +78,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -86,9 +92,28 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED';
+
+-- name: ListTier3Candidates :many
+-- Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
+-- camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
+-- excluding a given node ID.
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE camera_serial = ?1
+  AND captured_at_unix >= ?2
+  AND captured_at_unix <= ?3
+  AND id <> ?4
+  AND lifecycle_state != 'ARCHIVED';
 
 -- name: UpdateMediaNodeGraphStatus :exec
 UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1;
@@ -100,13 +125,14 @@ INSERT INTO media_nodes (
     indexing_status, graph_status, lifecycle_state,
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
+    camera_serial, lens_model,
     first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5,
     ?6, ?7, ?8, ?9, ?10,
     ?11, ?12, ?13,
     ?14, ?15, ?16,
-    ?17, ?18, ?19,
+    ?17, ?18, ?19, ?20, ?21,
     unixepoch(), unixepoch(), unixepoch(), unixepoch()
 )
 RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -114,7 +140,8 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           indexing_status, graph_status, lifecycle_state, superseded_by,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
-          first_seen_at, last_seen_at, created_at, updated_at;
+          first_seen_at, last_seen_at, created_at, updated_at,
+          camera_serial, lens_model;
 
 -- name: ArchiveMediaNode :exec
 -- Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
@@ -168,16 +195,15 @@ UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHE
 -- seen-but-uncertain set -- paths the walk saw but did not reliably commit
 -- (processFile error, submit refused, dropped result, batch Commit failure) --
 -- and is excluded from the sweep: a file on disk with a stale last_seen_at is
--- not proof it's gone. SQLite's per-statement variable limit (32766 on modern
--- builds) bounds how large KeepActive can be; beyond that the caller would
--- need to chunk the sweep, which it does not. Scoped by storage_location_id so
--- a scan of one mount never touches another. unixepoch() is 1s granularity, so
--- a node last seen in a scan that happened to end in the SAME wall-clock
--- second as this scan's start may survive one extra scan -- it is swept the
--- next round, which is delayed-not-wrong.
+-- not proof it's gone. KeepActive paths are passed as a JSON array string
+-- to json_each(?3) to remain within SQLite per-statement parameter bounds.
+-- Scoped by storage_location_id so a scan of one mount never touches another.
+-- unixepoch() is 1s granularity, so a node last seen in a scan that happened
+-- to end in the SAME wall-clock second as this scan's start may survive one
+-- extra scan -- it is swept the next round, which is delayed-not-wrong.
 UPDATE media_nodes
 SET lifecycle_state = 'MISSING', updated_at = unixepoch()
-WHERE storage_location_id = sqlc.arg('storage_location_id')
+WHERE storage_location_id = ?1
   AND lifecycle_state = 'ACTIVE'
-  AND last_seen_at < sqlc.arg('before_unix')
-  AND file_path NOT IN (sqlc.slice('keep_active'));
+  AND last_seen_at < ?2
+  AND file_path NOT IN (SELECT value FROM json_each(?3));
