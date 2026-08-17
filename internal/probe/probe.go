@@ -354,7 +354,7 @@ func (p *Prober) decodeFileAndHash(path string) (*int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	img, _, err := image.Decode(f)
 	if err != nil {
