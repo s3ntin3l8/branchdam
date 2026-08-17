@@ -14,6 +14,7 @@ import (
 type querier interface {
 	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]sqlcgen.MediaNode, error)
 	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]sqlcgen.MediaNode, error)
+	ListTier3Candidates(ctx context.Context, arg sqlcgen.ListTier3CandidatesParams) ([]sqlcgen.MediaNode, error)
 }
 
 // dbLookup implements Lookup against a real *sqlcgen.Queries (i.e.
@@ -37,6 +38,29 @@ func (l *dbLookup) ByOriginalDocumentID(ctx context.Context, documentID string) 
 
 func (l *dbLookup) ByFilenameStem(ctx context.Context, stem string) ([]Node, error) {
 	rows, err := l.q.ListLiveNodesByFilenameStem(ctx, sql.NullString{String: stem, Valid: stem != ""})
+	if err != nil {
+		return nil, err
+	}
+	return toNodes(rows), nil
+}
+
+func (l *dbLookup) BySpatialTemporal(ctx context.Context, cameraSerial string, capturedAt time.Time, window time.Duration, excludeID int64) ([]Node, error) {
+	if cameraSerial == "" || capturedAt.IsZero() {
+		return nil, nil
+	}
+	sec := int64(window.Seconds())
+	if sec < 0 {
+		sec = -sec
+	}
+	minUnix := capturedAt.Unix() - sec
+	maxUnix := capturedAt.Unix() + sec
+
+	rows, err := l.q.ListTier3Candidates(ctx, sqlcgen.ListTier3CandidatesParams{
+		CameraSerial:     sql.NullString{String: cameraSerial, Valid: true},
+		CapturedAtUnix:   sql.NullInt64{Int64: minUnix, Valid: true},
+		CapturedAtUnix_2: sql.NullInt64{Int64: maxUnix, Valid: true},
+		ID:               excludeID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +91,16 @@ func toNodes(rows []sqlcgen.MediaNode) []Node {
 		if r.CapturedAtUnix.Valid {
 			t := time.Unix(r.CapturedAtUnix.Int64, 0).UTC()
 			n.CapturedAt = &t
+		}
+		if r.Phash.Valid {
+			ph := r.Phash.Int64
+			n.PHash = &ph
+		}
+		if r.CameraSerial.Valid {
+			n.CameraSerial = r.CameraSerial.String
+		}
+		if r.LensModel.Valid {
+			n.LensModel = r.LensModel.String
 		}
 		out[i] = n
 	}

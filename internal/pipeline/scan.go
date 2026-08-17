@@ -345,6 +345,16 @@ func toGraphNode(n sqlcgen.MediaNode) graph.Node {
 		t := time.Unix(n.CapturedAtUnix.Int64, 0).UTC()
 		gn.CapturedAt = &t
 	}
+	if n.Phash.Valid {
+		ph := n.Phash.Int64
+		gn.PHash = &ph
+	}
+	if n.CameraSerial.Valid {
+		gn.CameraSerial = n.CameraSerial.String
+	}
+	if n.LensModel.Valid {
+		gn.LensModel = n.LensModel.String
+	}
 	return gn
 }
 

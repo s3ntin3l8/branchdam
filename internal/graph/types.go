@@ -25,6 +25,9 @@ type Node struct {
 	CapturedAt         *time.Time
 	CameraModel        string
 	FilenameStem       string
+	PHash              *int64
+	CameraSerial       string
+	LensModel          string
 }
 
 // Candidate is one resolver's proposed edge between two nodes, not yet
@@ -50,6 +53,9 @@ type Lookup interface {
 	// ByFilenameStem returns live nodes sharing a normalized filename stem
 	// -- the filenameStem resolver's candidate-parent source.
 	ByFilenameStem(ctx context.Context, stem string) ([]Node, error)
+	// BySpatialTemporal returns candidate parents sharing camera_serial within a
+	// window of capturedAt, excluding excludeID.
+	BySpatialTemporal(ctx context.Context, cameraSerial string, capturedAt time.Time, window time.Duration, excludeID int64) ([]Node, error)
 }
 
 // Resolver proposes lineage edges for one child node. Resolve must not

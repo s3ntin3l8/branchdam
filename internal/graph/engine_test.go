@@ -65,6 +65,9 @@ type nodeFixture struct {
 	DocumentID         string
 	CapturedAt         *time.Time
 	CameraModel        string
+	CameraSerial       string
+	LensModel          string
+	PHash              *int64
 }
 
 // fixtureFilenameStem is a deliberate duplicate of pipeline's filenameStem
@@ -116,9 +119,14 @@ func seedNode(t *testing.T, database *db.DB, locationID int64, f nodeFixture) sq
 		DocumentID:         nullString(f.DocumentID),
 		CameraModel:        nullString(f.CameraModel),
 		FilenameStem:       nullString(fixtureFilenameStem(f.FileName)),
+		CameraSerial:       nullString(f.CameraSerial),
+		LensModel:          nullString(f.LensModel),
 	}
 	if f.CapturedAt != nil {
 		params.CapturedAtUnix = sql.NullInt64{Int64: f.CapturedAt.Unix(), Valid: true}
+	}
+	if f.PHash != nil {
+		params.Phash = sql.NullInt64{Int64: *f.PHash, Valid: true}
 	}
 
 	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -532,5 +540,75 @@ func TestPerTierAutoAcceptThreshold(t *testing.T) {
 				t.Errorf("ReviewState = %q, want %q", edges[0].ReviewState, tt.wantReviewState)
 			}
 		})
+	}
+}
+
+func TestLookupBySpatialTemporal(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	baseTime := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	timePlus1s := baseTime.Add(1 * time.Second)
+	timePlus5s := baseTime.Add(5 * time.Second)
+	phashVal := int64(123456789)
+
+	matchParent := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/match_parent.arw",
+		FileName:     "match_parent.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL123",
+		LensModel:    "FE 24-70mm F2.8 GM",
+		CapturedAt:   &baseTime,
+		PHash:        &phashVal,
+	})
+
+	_ = seedNode(t, database, locationID, nodeFixture{
+		Path:         "/outside_window.arw",
+		FileName:     "outside_window.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL123",
+		CapturedAt:   &timePlus5s,
+	})
+
+	_ = seedNode(t, database, locationID, nodeFixture{
+		Path:         "/different_serial.arw",
+		FileName:     "different_serial.arw",
+		FileExt:      "arw",
+		CameraSerial: "OTHER_SERIAL",
+		CapturedAt:   &baseTime,
+	})
+
+	childNode := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/child.jpg",
+		FileName:     "child.jpg",
+		FileExt:      "jpg",
+		CameraSerial: "SERIAL123",
+		LensModel:    "FE 24-70mm F2.8 GM",
+		CapturedAt:   &timePlus1s,
+	})
+
+	lookup := NewLookup(database.Reader)
+	candidates, err := lookup.BySpatialTemporal(ctx, "SERIAL123", timePlus1s, 2*time.Second, childNode.ID)
+	if err != nil {
+		t.Fatalf("BySpatialTemporal: %v", err)
+	}
+
+	if len(candidates) != 1 {
+		t.Fatalf("candidates count = %d, want 1", len(candidates))
+	}
+
+	c := candidates[0]
+	if c.ID != matchParent.ID {
+		t.Errorf("candidate ID = %d, want %d", c.ID, matchParent.ID)
+	}
+	if c.CameraSerial != "SERIAL123" {
+		t.Errorf("CameraSerial = %q, want SERIAL123", c.CameraSerial)
+	}
+	if c.LensModel != "FE 24-70mm F2.8 GM" {
+		t.Errorf("LensModel = %q, want FE 24-70mm F2.8 GM", c.LensModel)
+	}
+	if c.PHash == nil || *c.PHash != phashVal {
+		t.Errorf("PHash = %v, want %d", c.PHash, phashVal)
 	}
 }
