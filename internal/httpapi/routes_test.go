@@ -419,3 +419,92 @@ func TestScanJobOutlivesRequestContext(t *testing.T) {
 		t.Errorf("FilesSeen = %d, want 1", job.FilesSeen)
 	}
 }
+
+func TestMutatingRoutesAuthorization(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	srv.cfg.Authz.Groups = []string{"dam-admins"}
+
+	mutatingPaths := []string{
+		"/api/v1/scan",
+		"/api/v1/edges/1/confirm",
+		"/api/v1/edges/1/reject",
+	}
+
+	for _, path := range mutatingPaths {
+		t.Run("non-admin forbidden: "+path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString("{}"))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Authentik-Username", "alice")
+			req.Header.Set("X-Authentik-Groups", "dam-users")
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want %d for non-admin on %s", rr.Code, http.StatusForbidden, path)
+			}
+		})
+
+		t.Run("admin allowed: "+path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString("{}"))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Authentik-Username", "bob")
+			req.Header.Set("X-Authentik-Groups", "dam-users|dam-admins")
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code == http.StatusForbidden {
+				t.Errorf("status = %d, want non-403 for admin on %s", rr.Code, path)
+			}
+		})
+	}
+}
+
+func TestOpenAPIEndpointExposure(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		srv, _ := fullTestServer(t)
+		srv.cfg.HTTP.ExposeOpenAPI = false
+
+		paths := []string{"/openapi.json", "/openapi.yaml", "/docs"}
+		for _, p := range paths {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("X-Authentik-Username", "alice")
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("GET %s when exposeOpenAPI=false: status = %d, want %d", p, rr.Code, http.StatusNotFound)
+			}
+		}
+	})
+
+	t.Run("enabled and gated by admin check", func(t *testing.T) {
+		srv, _ := fullTestServer(t)
+		srv.cfg.HTTP.ExposeOpenAPI = true
+		srv.cfg.Authz.Groups = []string{"dam-admins"}
+
+		paths := []string{"/openapi.json", "/docs"}
+		for _, p := range paths {
+			// Non-admin -> 403 Forbidden
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("X-Authentik-Username", "alice")
+			req.Header.Set("X-Authentik-Groups", "dam-users")
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("GET %s non-admin when exposeOpenAPI=true: status = %d, want %d", p, rr.Code, http.StatusForbidden)
+			}
+
+			// Admin -> 200 OK
+			reqAdmin := httptest.NewRequest(http.MethodGet, p, nil)
+			reqAdmin.Header.Set("X-Authentik-Username", "bob")
+			reqAdmin.Header.Set("X-Authentik-Groups", "dam-admins")
+			rrAdmin := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rrAdmin, reqAdmin)
+
+			if rrAdmin.Code != http.StatusOK {
+				t.Errorf("GET %s admin when exposeOpenAPI=true: status = %d, want %d", p, rrAdmin.Code, http.StatusOK)
+			}
+		}
+	})
+}

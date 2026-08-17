@@ -68,7 +68,7 @@ npm run typecheck    # tsc -b --noEmit
 ```
 
 `web/src/api/types.ts` and `client.ts` are hand-kept in sync with `internal/httpapi/routes.go`'s
-DTOs -- there's no generated client yet (Huma emits `/openapi.json`; wiring a generator is a
+DTOs -- there's no generated client yet (Huma can emit `/openapi.json`, off by default via `http.exposeOpenAPI`; wiring a generator is a
 reasonable follow-up, not done in increment 1).
 
 ### Docker
