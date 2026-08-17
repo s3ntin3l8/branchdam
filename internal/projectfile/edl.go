@@ -80,13 +80,15 @@ func extractEDLCommentPath(line string) string {
 	// Strip leading * and trim whitespace
 	content := strings.TrimSpace(strings.TrimPrefix(line, "*"))
 
-	// Known prefixes used by CMX3600 EDL generators (DaVinci Resolve, Premiere, Avid, FCP)
+	// Known prefixes used by CMX3600 EDL generators (DaVinci Resolve, Premiere, Avid, FCP).
+	// Sorted longest prefix first to prevent shorter prefixes (e.g. "FROM CLIP:") from matching first.
 	prefixes := []string{
 		"FROM CLIP WITH TRANSFER:",
-		"FROM CLIP:",
-		"SOURCE FILE:",
-		"CLIP NAME:",
 		"FINAL CUT PRO CLIP NAME:",
+		"FROM CLIP NAME:",
+		"SOURCE FILE:",
+		"FROM CLIP:",
+		"CLIP NAME:",
 		"FILE NAME:",
 	}
 

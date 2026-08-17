@@ -15,7 +15,11 @@ func TestFCPXMLParser_Parse_Valid(t *testing.T) {
 	xmlContent := `<?xml version="1.0" encoding="UTF-8"?>
 <fcpxml version="1.8">
     <resources>
-        <asset id="r1" name="Clip001" src="file:///D:/Footage/CameraA/Clip001.mov" />
+        <asset id="r1" name="Clip001" src="file:///D:/Footage/CameraA/Clip001.mov">
+            <metadata>
+                <md key="comment" val="some metadata comment string"/>
+            </metadata>
+        </asset>
         <asset id="r2" name="ProxyClip" src="file:///D:/Footage/CameraA/Proxy_Clip.mp4" />
         <asset id="r3" name="B002" src="/storage/projects/video/B002_C010.ARW" />
     </resources>

@@ -97,7 +97,7 @@ func (p *FCPXMLParser) Parse(ctx context.Context, r io.Reader) ([]Reference, err
 
 func isFCPXMLPathTag(tag string) bool {
 	switch tag {
-	case "asset", "file", "media-rep", "path", "src", "location", "url":
+	case "path", "src", "location", "url":
 		return true
 	default:
 		return false
@@ -121,6 +121,8 @@ func addFCPXMLRef(refs *[]Reference, seen map[string]bool, raw string) {
 				cleaned = cleaned[1:]
 			}
 		}
+	} else if unescaped, err := url.PathUnescape(cleaned); err == nil {
+		cleaned = unescaped
 	}
 
 	if cleaned == "" || seen[cleaned] {

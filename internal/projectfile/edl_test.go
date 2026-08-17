@@ -17,6 +17,7 @@ FCM: DROP FRAME
 
 001  AX       V     C        00:00:00:00 00:00:05:00 01:00:00:00 01:00:05:00
 * FROM CLIP WITH TRANSFER: D:\Footage\CameraA\Clip001.mov
+* FROM CLIP NAME: Clip001_name.mov
 * FROM CLIP: Clip001.mov
 * SOURCE FILE: /storage/projects/video/B002_C010.ARW
 * CLIP NAME: D:\Footage\Proxy_Clip.mp4
@@ -32,21 +33,24 @@ FCM: DROP FRAME
 		t.Fatalf("unexpected error parsing edl: %v", err)
 	}
 
-	if len(refs) != 4 {
-		t.Fatalf("expected 4 references, got %d: %+v", len(refs), refs)
+	if len(refs) != 5 {
+		t.Fatalf("expected 5 references, got %d: %+v", len(refs), refs)
 	}
 
 	if refs[0].RawPath != `D:\Footage\CameraA\Clip001.mov` || refs[0].Role != "media" {
 		t.Errorf("ref 0 mismatch: %+v", refs[0])
 	}
-	if refs[1].RawPath != `Clip001.mov` || refs[1].Role != "media" {
+	if refs[1].RawPath != `Clip001_name.mov` || refs[1].Role != "media" {
 		t.Errorf("ref 1 mismatch: %+v", refs[1])
 	}
-	if refs[2].RawPath != `/storage/projects/video/B002_C010.ARW` || refs[2].Role != "media" {
+	if refs[2].RawPath != `Clip001.mov` || refs[2].Role != "media" {
 		t.Errorf("ref 2 mismatch: %+v", refs[2])
 	}
-	if refs[3].RawPath != `D:\Footage\Proxy_Clip.mp4` || refs[3].Role != "proxy" {
+	if refs[3].RawPath != `/storage/projects/video/B002_C010.ARW` || refs[3].Role != "media" {
 		t.Errorf("ref 3 mismatch: %+v", refs[3])
+	}
+	if refs[4].RawPath != `D:\Footage\Proxy_Clip.mp4` || refs[4].Role != "proxy" {
+		t.Errorf("ref 4 mismatch: %+v", refs[4])
 	}
 }
 
