@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.8">
+    <resources>
+        <asset id="r1" name="Clip001" src="file:///D:/Footage/CameraA/Clip001.mov" start="0s" duration="10s"/>
+        <asset id="r2" name="B002_C010" src="file:///storage/projects/video/B002_C010.ARW" start="0s" duration="5s"/>
+    </resources>
+    <library>
+        <event name="Event 1">
+            <project name="Sample Project">
+            </project>
+        </event>
+    </library>
+</fcpxml>
