@@ -45,7 +45,7 @@ func TestNoDirectAuthentikHeaderReads(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "node_modules", "dist", "web":
+			case ".git", "node_modules", "dist", "web", ".mullion-worktrees":
 				return filepath.SkipDir
 			}
 			return nil
