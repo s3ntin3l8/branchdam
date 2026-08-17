@@ -251,7 +251,7 @@ func (r *ProjectSidecarResolver) Resolve(ctx context.Context, child Node, lookup
 		slog.Warn("project_sidecar resolver unable to open file", "path", child.FilePath, "err", err)
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	refs, err := parser.Parse(ctx, f)
 	if err != nil {
