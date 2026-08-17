@@ -112,3 +112,13 @@ var videoExts = map[string]bool{
 }
 
 func isVideoExt(ext string) bool { return videoExts[strings.ToLower(strings.TrimPrefix(ext, "."))] }
+
+// imageExts is the set of image and camera RAW extensions for which pHash is attempted.
+var imageExts = map[string]bool{
+	"jpg": true, "jpeg": true, "png": true, "gif": true, "webp": true,
+	"tif": true, "tiff": true, "bmp": true, "heic": true, "heif": true,
+	"arw": true, "cr2": true, "cr3": true, "nef": true, "dng": true,
+	"raf": true, "rw2": true, "orf": true, "pef": true, "srw": true,
+}
+
+func isImageExt(ext string) bool { return imageExts[strings.ToLower(strings.TrimPrefix(ext, "."))] }

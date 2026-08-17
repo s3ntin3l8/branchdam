@@ -68,6 +68,7 @@ func TestExiftoolArgsNeverWrite(t *testing.T) {
 }
 
 func TestFFProbeArgsPathAfterSeparator(t *testing.T) {
+	t.Parallel()
 	for _, path := range adversarialPaths {
 		args := ffprobeArgs(path)
 		sawSeparator := false
@@ -83,4 +84,62 @@ func TestFFProbeArgsPathAfterSeparator(t *testing.T) {
 			t.Errorf("ffprobeArgs(%q) does not end with the path: %v", path, args)
 		}
 	}
+}
+
+func TestPreviewImageArgsNeverWrite(t *testing.T) {
+	t.Parallel()
+	for _, fn := range []func(string) []string{previewImageArgs, jpgFromRawArgs, thumbnailImageArgs} {
+		for _, path := range adversarialPaths {
+			args := fn(path)
+			sawSeparator := false
+			for _, a := range args {
+				if a == "--" {
+					sawSeparator = true
+					continue
+				}
+				if sawSeparator {
+					continue
+				}
+				if a == "-overwrite_original" {
+					t.Errorf("args(%q) contains -overwrite_original before --: %v", path, args)
+				}
+				if tagAssignmentRe.MatchString(a) {
+					t.Errorf("args(%q) contains tag assignment before --: %v", path, args)
+				}
+			}
+			if !sawSeparator {
+				t.Errorf("args(%q) has no -- separator: %v", path, args)
+			}
+			if args[len(args)-1] != path {
+				t.Errorf("args(%q) does not end with path: %v", path, args)
+			}
+		}
+	}
+}
+
+func FuzzArgvConstructors(f *testing.F) {
+	for _, path := range adversarialPaths {
+		f.Add(path)
+	}
+	f.Fuzz(func(t *testing.T, path string) {
+		for _, fn := range []func(string) []string{exiftoolArgs, ffprobeArgs, previewImageArgs, jpgFromRawArgs, thumbnailImageArgs} {
+			args := fn(path)
+			if len(args) == 0 {
+				t.Errorf("empty args for path %q", path)
+			}
+			if args[len(args)-1] != path {
+				t.Errorf("args for path %q does not end with path: %v", path, args)
+			}
+			sawSep := false
+			for _, a := range args {
+				if a == "--" {
+					sawSep = true
+					break
+				}
+			}
+			if !sawSep {
+				t.Errorf("args for path %q missing -- separator: %v", path, args)
+			}
+		}
+	})
 }

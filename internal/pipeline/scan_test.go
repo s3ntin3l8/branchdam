@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -624,5 +626,44 @@ func TestFFProbeVideoFixturePersistsThroughScan(t *testing.T) {
 	}
 	if codecVal != "h264" {
 		t.Errorf("video_codec = %q, want h264 (all rows: %+v)", codecVal, rows)
+	}
+}
+
+func TestPerceptualHashExtractionInScan(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.png")
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create sample.png: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode sample.png: %v", err)
+	}
+	_ = f.Close()
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-phash", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	node := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "sample.png"))
+	if !node.Phash.Valid {
+		t.Errorf("node.Phash.Valid = false, want valid pHash")
 	}
 }

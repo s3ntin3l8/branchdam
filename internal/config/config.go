@@ -61,6 +61,8 @@ type Workers struct {
 	// FullHashPolicy is one of "always", "tier3_and_collision" (default),
 	// "never" — see docs/schema.md fix #8.
 	FullHashPolicy string `yaml:"fullHashPolicy"`
+	// PerceptualHash enables pHash extraction for images (default true).
+	PerceptualHash bool `yaml:"perceptualHash"`
 }
 
 // Agent configures the machine-principal auth chain (internal/auth, PR 8).
@@ -101,6 +103,7 @@ func defaultConfig() Config {
 		Workers: Workers{
 			HashWorkers:    0,
 			FullHashPolicy: "tier3_and_collision",
+			PerceptualHash: true,
 		},
 	}
 }

@@ -18,9 +18,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"os"
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 )
 
 // ErrToolUnavailable is returned by Exif or FFProbe when the underlying
@@ -71,6 +78,18 @@ func exiftoolArgs(path string) []string {
 // ffprobe has no write mode of its own to guard against.
 func ffprobeArgs(path string) []string {
 	return []string{"-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "--", path}
+}
+
+func previewImageArgs(path string) []string {
+	return []string{"-b", "-PreviewImage", "--", path}
+}
+
+func jpgFromRawArgs(path string) []string {
+	return []string{"-b", "-JpgFromRaw", "--", path}
+}
+
+func thumbnailImageArgs(path string) []string {
+	return []string{"-b", "-ThumbnailImage", "--", path}
 }
 
 // ExifResult holds the fields spec Pillar 4 inherits from parent to child
@@ -297,4 +316,53 @@ func (p *Prober) FFProbe(ctx context.Context, path string) (*FFProbeResult, erro
 	}
 
 	return result, nil
+}
+
+// ExtractPHash attempts to compute a perceptual hash (pHash) for path.
+// It first attempts direct image decoding using Go's standard image library.
+// If direct decoding fails (e.g. for camera RAW files like .ARW, .CR2, .NEF, .DNG)
+// and exiftool is available, it extracts the embedded PreviewImage (falling back to
+// JpgFromRaw or ThumbnailImage) and computes pHash over the decoded preview image.
+// Returns nil, nil if the file is not an image or if pHash extraction is unsupported.
+func (p *Prober) ExtractPHash(ctx context.Context, path string) (*int64, error) {
+	if ph, err := p.decodeFileAndHash(path); err == nil {
+		return ph, nil
+	}
+
+	if p.HasExiftool() {
+		for _, argsFn := range []func(string) []string{previewImageArgs, jpgFromRawArgs, thumbnailImageArgs} {
+			cmd := exec.CommandContext(ctx, p.exiftoolPath, argsFn(path)...)
+			var stdout bytes.Buffer
+			cmd.Stdout = &stdout
+			if err := cmd.Run(); err == nil && stdout.Len() > 0 {
+				img, _, err := image.Decode(&stdout)
+				if err == nil {
+					hash, err := hashing.PerceptualHash(img)
+					if err == nil {
+						return &hash, nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+func (p *Prober) decodeFileAndHash(path string) (*int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := hashing.PerceptualHash(img)
+	if err != nil {
+		return nil, err
+	}
+	return &hash, nil
 }
