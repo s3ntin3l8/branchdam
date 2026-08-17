@@ -757,7 +757,43 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 		t.Errorf("far pHash emitted %d candidates, want 0 (Hamming > 10 dropped)", len(edgesFar))
 	}
 
-	// Case 4: Guard checks (empty serial / nil capture time)
+	// Case 4: Base-only match (Serial + Time + pHash <= 10, but different lens) -> score 0.79 -> NEEDS_REVIEW
+	parentDiffLens := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/parent_difflens.arw",
+		FileName:     "parent_difflens.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL_XYZ4",
+		LensModel:    "FE 24mm F1.4 GM",
+		CapturedAt:   &t0,
+		PHash:        &phashParent,
+	})
+	childDiffLens := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/child_difflens.jpg",
+		FileName:     "child_difflens.jpg",
+		FileExt:      "jpg",
+		CameraSerial: "SERIAL_XYZ4",
+		LensModel:    "FE 50mm F1.2 GM",
+		CapturedAt:   &t1,
+		PHash:        &phashClose,
+	})
+	edgesDiffLens, err := engine.ResolveAndCommit(ctx, asGraphNode(childDiffLens))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit diff lens: %v", err)
+	}
+	if len(edgesDiffLens) != 1 {
+		t.Fatalf("diff lens edges = %d, want 1", len(edgesDiffLens))
+	}
+	if edgesDiffLens[0].SourceNodeID != parentDiffLens.ID {
+		t.Errorf("SourceNodeID = %d, want %d", edgesDiffLens[0].SourceNodeID, parentDiffLens.ID)
+	}
+	if edgesDiffLens[0].Confidence != 0.79 {
+		t.Errorf("Confidence = %v, want 0.79 (0.70 base + 0.09 phash)", edgesDiffLens[0].Confidence)
+	}
+	if edgesDiffLens[0].ReviewState != "NEEDS_REVIEW" {
+		t.Errorf("ReviewState = %q, want NEEDS_REVIEW", edgesDiffLens[0].ReviewState)
+	}
+
+	// Case 5: Guard checks (empty serial / nil capture time)
 	noSerialCandidates, err := r.Resolve(ctx, Node{ID: 99, CameraSerial: "", CapturedAt: &t0}, NewLookup(database.Reader))
 	if err != nil || len(noSerialCandidates) != 0 {
 		t.Errorf("empty serial returned %d candidates, want 0", len(noSerialCandidates))

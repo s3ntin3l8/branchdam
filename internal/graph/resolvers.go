@@ -158,7 +158,7 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 
 	var candidates []Candidate
 	for _, parent := range parents {
-		if parent.ID == child.ID {
+		if parent.ID == child.ID || parent.CapturedAt == nil {
 			continue
 		}
 
@@ -182,6 +182,7 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 			}
 			confidence += 0.09
 		} else {
+			evidence["phash_missing"] = true
 			if confidence > 0.79 {
 				confidence = 0.79
 			}
