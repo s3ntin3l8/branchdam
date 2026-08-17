@@ -36,7 +36,7 @@ func TestDRPParser_Parse_Valid(t *testing.T) {
 <DaVinciResolveProject>
 	<MediaPool>
 		<Item>
-			<FilePath>D:\Footage\CameraA\Clip001.mov</FilePath>
+			<FilePath>D:\Footage\CameraA\Clip &amp; Take 001.mov</FilePath>
 			<ProxyPath>D:\Footage\CameraA\Clip001_proxy.mp4</ProxyPath>
 		</Item>
 		<Item>
@@ -61,7 +61,7 @@ func TestDRPParser_Parse_Valid(t *testing.T) {
 		t.Fatalf("expected 3 references, got %d: %+v", len(refs), refs)
 	}
 
-	if refs[0].RawPath != `D:\Footage\CameraA\Clip001.mov` || refs[0].Role != "media" {
+	if refs[0].RawPath != `D:\Footage\CameraA\Clip & Take 001.mov` || refs[0].Role != "media" {
 		t.Errorf("ref 0 mismatch: %+v", refs[0])
 	}
 	if refs[1].RawPath != `D:\Footage\CameraA\Clip001_proxy.mp4` || refs[1].Role != "proxy" {
@@ -89,6 +89,29 @@ func TestDRPParser_Parse_Fixture(t *testing.T) {
 	}
 }
 
+func TestDRPParser_Parse_MacOSSidecars(t *testing.T) {
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+
+	// Add macOS sidecar first
+	w1, _ := zw.Create("__MACOSX/._project.xml")
+	_, _ = w1.Write([]byte("junk macos binary data"))
+
+	// Add real project.xml
+	w2, _ := zw.Create("project.xml")
+	_, _ = w2.Write([]byte(`<project><filepath>D:\Real\Path.mov</filepath></project>`))
+	_ = zw.Close()
+
+	parser := &projectfile.DRPParser{}
+	refs, err := parser.Parse(context.Background(), bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("unexpected error with macos sidecar: %v", err)
+	}
+	if len(refs) != 1 || refs[0].RawPath != `D:\Real\Path.mov` {
+		t.Errorf("expected 1 reference matching real path, got %+v", refs)
+	}
+}
+
 func TestDRPParser_Parse_MalformedAndLimits(t *testing.T) {
 	t.Run("corrupt zip input", func(t *testing.T) {
 		parser := &projectfile.DRPParser{}
@@ -113,7 +136,6 @@ func TestDRPParser_Parse_MalformedAndLimits(t *testing.T) {
 	})
 
 	t.Run("archive size cap exceeded", func(t *testing.T) {
-		// Mock oversized reader
 		oversized := make([]byte, projectfile.MaxDRPArchiveSize+10)
 		parser := &projectfile.DRPParser{}
 		_, err := parser.Parse(context.Background(), bytes.NewReader(oversized))

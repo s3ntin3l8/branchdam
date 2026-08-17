@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 )
 
@@ -41,6 +42,11 @@ func (p *DRPParser) Extensions() []string {
 }
 
 func (p *DRPParser) Parse(ctx context.Context, r io.Reader) ([]Reference, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if r == nil {
 		return nil, fmt.Errorf("%w: reader is nil", ErrMalformedDRP)
 	}
@@ -67,16 +73,27 @@ func (p *DRPParser) Parse(ctx context.Context, r io.Reader) ([]Reference, error)
 	var projectXmlFile *zip.File
 
 	for _, file := range zr.File {
+		name := strings.ToLower(file.Name)
+		// Ignore macOS metadata sidecars
+		if strings.HasPrefix(name, "__macosx/") || strings.HasPrefix(filepath.Base(name), "._") {
+			continue
+		}
+
+		if file.UncompressedSize64 > MaxDRPUncompressedBytes {
+			return nil, ErrZipBomb
+		}
 		totalUncompressed += file.UncompressedSize64
-		if strings.HasSuffix(strings.ToLower(file.Name), "project.xml") {
+		if totalUncompressed > MaxDRPUncompressedBytes {
+			return nil, ErrZipBomb
+		}
+
+		if filepath.Base(name) == "project.xml" {
 			projectXmlFile = file
 		}
 	}
 
-	if totalUncompressed > MaxDRPUncompressedBytes {
-		return nil, ErrZipBomb
-	}
-	if len(data) > 0 && float64(totalUncompressed)/float64(len(data)) > MaxDRPExpansionRatio {
+	// Apply ratio check only for uncompressed payloads larger than 5MB to avoid false positives on small XMLs
+	if totalUncompressed > 5*1024*1024 && len(data) > 0 && float64(totalUncompressed)/float64(len(data)) > MaxDRPExpansionRatio {
 		return nil, ErrZipBomb
 	}
 
@@ -105,6 +122,7 @@ func parseDRPXML(data []byte) ([]Reference, error) {
 
 	var inPathTag bool
 	var currentTag string
+	var textBuf strings.Builder
 
 	for {
 		token, err := decoder.Token()
@@ -121,8 +139,8 @@ func parseDRPXML(data []byte) ([]Reference, error) {
 			if isDRPPathTag(tagName) {
 				inPathTag = true
 				currentTag = tagName
+				textBuf.Reset()
 			}
-			// Check element attributes for src or path attributes
 			for _, attr := range t.Attr {
 				attrName := strings.ToLower(attr.Name.Local)
 				if (attrName == "src" || attrName == "path" || attrName == "filepath") && attr.Value != "" {
@@ -130,11 +148,9 @@ func parseDRPXML(data []byte) ([]Reference, error) {
 				}
 			}
 		case xml.EndElement:
-			inPathTag = false
-			currentTag = ""
-		case xml.CharData:
-			if inPathTag {
-				val := strings.TrimSpace(string(t))
+			tagName := strings.ToLower(t.Name.Local)
+			if inPathTag && tagName == currentTag {
+				val := strings.TrimSpace(textBuf.String())
 				if val != "" {
 					role := "media"
 					if strings.Contains(currentTag, "proxy") {
@@ -142,6 +158,13 @@ func parseDRPXML(data []byte) ([]Reference, error) {
 					}
 					addRefWithRole(&refs, seen, val, role)
 				}
+				inPathTag = false
+				currentTag = ""
+				textBuf.Reset()
+			}
+		case xml.CharData:
+			if inPathTag {
+				textBuf.Write(t)
 			}
 		}
 	}
