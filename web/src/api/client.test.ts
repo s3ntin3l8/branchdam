@@ -63,7 +63,7 @@ describe("api client", () => {
   it("startScan sends the storageLocationId as a JSON body", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      status: 200,
+      status: 202,
       json: async () => ({ jobId: 7 }),
     });
     vi.stubGlobal("fetch", fetchMock);
