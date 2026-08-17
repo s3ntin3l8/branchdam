@@ -113,7 +113,17 @@ func seedPipelineLocation(t *testing.T, database *db.DB, rootPath string) int64 
 
 func scanTestDeps(t *testing.T, database *db.DB, rootPath string, locationID int64) ScanDeps {
 	t.Helper()
-	pool := workers.New[string](2, 16)
+	return scanTestDepsN(t, database, rootPath, locationID, 2, 16)
+}
+
+// scanTestDepsN is scanTestDeps with the worker count and queue depth
+// exposed, for tests that need to control the pool's capacity directly --
+// e.g. TestDrainAndCommitRunsConcurrentlyWithWalk, which needs a generous
+// queue depth so queue capacity itself is never the limiting factor and
+// the test exercises only the property it's named for.
+func scanTestDepsN(t *testing.T, database *db.DB, rootPath string, locationID int64, workerCount, queueDepth int) ScanDeps {
+	t.Helper()
+	pool := workers.New[string](workerCount, queueDepth)
 	poolCtx, cancelPool := context.WithCancel(context.Background())
 	t.Cleanup(cancelPool)
 	pool.Run(poolCtx)
@@ -128,8 +138,13 @@ func scanTestDeps(t *testing.T, database *db.DB, rootPath string, locationID int
 
 func waitJobDone(t *testing.T, database *db.DB, jobID int64) sqlcgen.ScanJob {
 	t.Helper()
+	return waitJobDoneWithin(t, database, jobID, 10*time.Second)
+}
+
+func waitJobDoneWithin(t *testing.T, database *db.DB, jobID int64, timeout time.Duration) sqlcgen.ScanJob {
+	t.Helper()
 	ctx := context.Background()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(timeout)
 	var job sqlcgen.ScanJob
 	var err error
 	for time.Now().Before(deadline) {
@@ -142,7 +157,7 @@ func waitJobDone(t *testing.T, database *db.DB, jobID int64) sqlcgen.ScanJob {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("job %d did not reach a terminal state within 10s (state=%s)", jobID, job.State)
+	t.Fatalf("job %d did not reach a terminal state within %s (state=%s)", jobID, timeout, job.State)
 	return job
 }
 
@@ -705,5 +720,133 @@ func TestPerceptualHashDisabledInScan(t *testing.T) {
 	node := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "sample.png"))
 	if node.Phash.Valid {
 		t.Errorf("node.Phash.Valid = true, want false when DisablePerceptualHash is true")
+	}
+}
+
+// TestDrainAndCommitRunsConcurrentlyWithWalk is the #93 regression: before
+// this fix, runScan ran the entire walk to completion before drainAndCommit
+// started consuming `results`. Once the results channel (cap batchSize*2)
+// filled, every pool worker blocked sending its result, the pool's own
+// queue then filled behind them, and Submit started refusing -- silently
+// capping a scan at roughly the first
+// `cap(results) + queue depth + worker count` files and reporting the rest
+// as failed instead of indexing them.
+//
+// An earlier version of this test tried to reproduce that capacity ceiling
+// directly (many files, a small queueDepth, asserting FilesFailed == 0).
+// That approach doesn't work: on a warm temp directory, os.Lstat is so much
+// faster than one worker's hash-plus-DB-check that the entire walk can
+// enumerate hundreds of files before a single job completes, regardless of
+// whether draining is concurrent -- queueDepth alone then decides the
+// outcome, and old and new code failed or passed identically depending
+// only on queueDepth, never distinguishing the fix (confirmed empirically
+// by reverting this fix locally and re-running the same test). Production
+// hits the real ceiling at ~1150 files because real filesystem enumeration
+// has enough per-entry latency for worker throughput to matter within one
+// walk; a fast unit test can't reproduce that latency without an
+// artificial delay, and an artificial delay just moves the flakiness from
+// "how many files" to "how many milliseconds," which proved just as
+// sensitive to `-race`/coverage instrumentation overhead.
+//
+// This test instead proves the actual property directly: it gates the walk
+// mid-flight (via WalkFn) and polls, from inside the still-running walk
+// callback, for evidence that drainAndCommit has already committed at
+// least one batch. That is only possible if drainAndCommit is running
+// concurrently with the walk -- under the pre-fix code, drainAndCommit is
+// never even invoked until walkFn returns, and walkFn is blocked in this
+// very poll, so the poll would time out deterministically every time, not
+// as a matter of relative speed. The bound is generous (15s) specifically
+// so this is a correctness assertion, not a race.
+func TestDrainAndCommitRunsConcurrentlyWithWalk(t *testing.T) {
+	const workerCount = 4
+	const queueDepth = 300 // generous: queue capacity isn't what this test exercises
+	const preGateCount = 5 // enough for flush() to have something to commit; batchInterval's ticker doesn't need a full batch
+	const postGateCount = 20
+	const total = preGateCount + postGateCount
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	paths := make([]string, total)
+	for i := 0; i < total; i++ {
+		p := filepath.Join(resolvedRoot, fmt.Sprintf("file-%04d.txt", i))
+		writeFile(t, p, fmt.Sprintf("content-%d", i))
+		paths[i] = p
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDepsN(t, database, resolvedRoot, locationID, workerCount, queueDepth)
+
+	// RunScan (below) creates the scan_jobs row and returns its id
+	// synchronously, before this WalkFn is ever invoked (it only runs
+	// inside runScan's background goroutine) -- so by the time the gate
+	// below needs jobID, it's already been sent.
+	jobIDCh := make(chan int64, 1)
+	deps.WalkFn = func(_ context.Context, _ string, onFile func(indexer.Record) error) error {
+		for i, p := range paths {
+			info, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			if err := onFile(indexer.Record{Path: p, Size: info.Size(), ModTime: info.ModTime()}); err != nil {
+				return err
+			}
+			if i != preGateCount-1 {
+				continue
+			}
+			// Everything needed for at least one commit has now been
+			// submitted to the pool. Block this walk goroutine here --
+			// walkFn has therefore NOT returned -- and poll for proof
+			// that a batch was already committed.
+			jobID := <-jobIDCh
+			deadline := time.Now().Add(15 * time.Second)
+			committed := false
+			for time.Now().Before(deadline) {
+				if job, err := database.Reader.GetScanJob(context.Background(), jobID); err == nil && job.FilesHashed > 0 {
+					committed = true
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !committed {
+				return fmt.Errorf("no batch was committed within 15s while the walk was still in progress -- drainAndCommit is not running concurrently with the walk")
+			}
+		}
+		return nil
+	}
+	location := storage.Location{ID: locationID, Name: "test-concurrent-drain", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	jobIDCh <- jobID
+
+	job := waitJobDoneWithin(t, database, jobID, 30*time.Second)
+	if job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q, want COMPLETED (last_error=%v) -- a FAILED state here with the gate's own message means drainAndCommit did not run concurrently with the walk", job.State, job.LastError)
+	}
+	if job.FilesSeen != int64(total) {
+		t.Errorf("FilesSeen = %d, want %d", job.FilesSeen, total)
+	}
+	if job.FilesFailed != 0 {
+		t.Errorf("FilesFailed = %d, want 0", job.FilesFailed)
+	}
+	if job.FilesHashed != int64(total) {
+		t.Errorf("FilesHashed = %d, want %d", job.FilesHashed, total)
+	}
+
+	// Every file must actually be committed, not just counted.
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("file-%04d.txt", i)
+		path := filepath.Join(resolvedRoot, name)
+		if _, err := database.Reader.GetLiveNodeByPath(ctx, path); err != nil {
+			t.Errorf("node for %s not found: %v", name, err)
+		}
 	}
 }
