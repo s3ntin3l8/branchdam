@@ -76,6 +76,8 @@ type Querier interface {
 	// filename stem with the child, scored further by capture day / camera /
 	// directory match in internal/graph.
 	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]MediaNode, error)
+	// Look up live media nodes sharing exact file_name for fallback path matching.
+	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.

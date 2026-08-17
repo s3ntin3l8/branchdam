@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -15,6 +16,8 @@ type querier interface {
 	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]sqlcgen.MediaNode, error)
 	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]sqlcgen.MediaNode, error)
 	ListTier3Candidates(ctx context.Context, arg sqlcgen.ListTier3CandidatesParams) ([]sqlcgen.MediaNode, error)
+	GetLiveNodeByPath(ctx context.Context, filePath string) (sqlcgen.MediaNode, error)
+	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]sqlcgen.MediaNode, error)
 }
 
 // dbLookup implements Lookup against a real *sqlcgen.Queries (i.e.
@@ -60,6 +63,32 @@ func (l *dbLookup) BySpatialTemporal(ctx context.Context, cameraSerial string, c
 		CapturedAtUnix_2: sql.NullInt64{Int64: maxUnix, Valid: true},
 		ID:               excludeID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return toNodes(rows), nil
+}
+
+func (l *dbLookup) ByPath(ctx context.Context, filePath string) (*Node, error) {
+	if filePath == "" {
+		return nil, nil
+	}
+	row, err := l.q.GetLiveNodeByPath(ctx, filePath)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	n := ToNode(row)
+	return &n, nil
+}
+
+func (l *dbLookup) ByFileName(ctx context.Context, fileName string) ([]Node, error) {
+	if fileName == "" {
+		return nil, nil
+	}
+	rows, err := l.q.ListLiveNodesByFileName(ctx, fileName)
 	if err != nil {
 		return nil, err
 	}

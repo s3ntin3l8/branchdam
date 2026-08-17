@@ -56,6 +56,10 @@ type Lookup interface {
 	// BySpatialTemporal returns candidate parents sharing camera_serial within a
 	// window of capturedAt, excluding excludeID.
 	BySpatialTemporal(ctx context.Context, cameraSerial string, capturedAt time.Time, window time.Duration, excludeID int64) ([]Node, error)
+	// ByPath returns the live node at exact file_path, or nil if not found.
+	ByPath(ctx context.Context, filePath string) (*Node, error)
+	// ByFileName returns live nodes sharing exact file_name.
+	ByFileName(ctx context.Context, fileName string) ([]Node, error)
 }
 
 // Resolver proposes lineage edges for one child node. Resolve must not

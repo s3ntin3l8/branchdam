@@ -2,12 +2,16 @@ package graph
 
 import (
 	"context"
+	"log/slog"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/projectfile"
 )
 
 // rawExts are camera-native formats a Tier-2 resolver treats as a possible
@@ -220,4 +224,123 @@ func sameDirectory(a, b string) bool {
 		return false
 	}
 	return filepath.Dir(a) == filepath.Dir(b)
+}
+
+// ProjectSidecarResolver parses project sidecar files (.dam.json, .drp, .fcpxml, .edl)
+// and emits Tier-1 PROJECT_SIDECAR edges at confidence 1.00.
+type ProjectSidecarResolver struct {
+	rewrites []config.PathRewrite
+}
+
+// NewProjectSidecarResolver creates a new Tier-1 ProjectSidecarResolver.
+func NewProjectSidecarResolver(rewrites []config.PathRewrite) *ProjectSidecarResolver {
+	return &ProjectSidecarResolver{rewrites: rewrites}
+}
+
+func (r *ProjectSidecarResolver) Name() string { return "project_sidecar" }
+func (r *ProjectSidecarResolver) Tier() int    { return 1 }
+
+func (r *ProjectSidecarResolver) Resolve(ctx context.Context, child Node, lookup Lookup) ([]Candidate, error) {
+	parser, ok := projectfile.GetParser(child.FilePath)
+	if !ok {
+		return nil, nil
+	}
+
+	f, err := os.Open(child.FilePath)
+	if err != nil {
+		slog.Warn("project_sidecar resolver unable to open file", "path", child.FilePath, "err", err)
+		return nil, nil
+	}
+	defer f.Close()
+
+	refs, err := parser.Parse(ctx, f)
+	if err != nil {
+		slog.Warn("project_sidecar resolver failed to parse project file", "path", child.FilePath, "err", err)
+		return nil, nil
+	}
+
+	var candidates []Candidate
+	seenParents := make(map[int64]bool)
+
+	for _, ref := range refs {
+		if ref.RawPath == "" {
+			continue
+		}
+
+		targetNode := r.resolveReference(ctx, ref.RawPath, child.FilePath, lookup)
+		if targetNode == nil || targetNode.ID == child.ID || seenParents[targetNode.ID] {
+			continue
+		}
+
+		seenParents[targetNode.ID] = true
+		candidates = append(candidates, Candidate{
+			ParentID:   targetNode.ID,
+			ChildID:    child.ID,
+			Rel:        "PROJECT_SIDECAR",
+			Confidence: 1.00,
+			Tier:       1,
+			Resolver:   "project_sidecar",
+			Evidence: map[string]any{
+				"project_file_path": child.FilePath,
+				"raw_reference":     ref.RawPath,
+				"role":              ref.Role,
+			},
+		})
+	}
+
+	return candidates, nil
+}
+
+func (r *ProjectSidecarResolver) resolveReference(ctx context.Context, rawPath, childPath string, lookup Lookup) *Node {
+	// 1. Try exact container path match
+	if node, err := lookup.ByPath(ctx, rawPath); err == nil && node != nil {
+		return node
+	}
+
+	// 2. Try operator prefix rewrites
+	rewritten := applyPathRewrite(rawPath, r.rewrites)
+	if rewritten != rawPath {
+		if node, err := lookup.ByPath(ctx, rewritten); err == nil && node != nil {
+			return node
+		}
+	}
+
+	// 3. Fallback matching by filename (basename)
+	base := filepath.Base(rawPath)
+	if base != "" && base != "." && base != "/" {
+		nodes, err := lookup.ByFileName(ctx, base)
+		if err == nil {
+			if len(nodes) == 1 {
+				return &nodes[0]
+			}
+			if len(nodes) > 1 {
+				slog.Warn("project_sidecar ambiguous reference match skipped",
+					"project_file", childPath,
+					"raw_reference", rawPath,
+					"candidate_count", len(nodes),
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+func applyPathRewrite(rawPath string, rewrites []config.PathRewrite) string {
+	normRaw := strings.ReplaceAll(rawPath, "\\", "/")
+	for _, rw := range rewrites {
+		normFrom := strings.ReplaceAll(rw.From, "\\", "/")
+		if normFrom == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(normRaw), strings.ToLower(normFrom)) {
+			rel := normRaw[len(normFrom):]
+			to := strings.ReplaceAll(rw.To, "\\", "/")
+			if !strings.HasSuffix(to, "/") && !strings.HasPrefix(rel, "/") {
+				to += "/"
+			}
+			return filepath.Clean(to + rel)
+		}
+	}
+	return filepath.Clean(normRaw)
 }
