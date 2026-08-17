@@ -187,6 +187,20 @@ UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
 
 -- name: MarkUnseenNodesMissing :execrows
+-- Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
+-- scanned storage location whose last_seen_at predates the scan's start is
+-- gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+-- last_seen_at on every node the walk actually saw and committed, so anything
+-- still old here was genuinely unseen this scan. KeepActive is the pass's
+-- seen-but-uncertain set -- paths the walk saw but did not reliably commit
+-- (processFile error, submit refused, dropped result, batch Commit failure) --
+-- and is excluded from the sweep: a file on disk with a stale last_seen_at is
+-- not proof it's gone. KeepActive paths are passed as a JSON array string
+-- to json_each(?3) to remain within SQLite per-statement parameter bounds.
+-- Scoped by storage_location_id so a scan of one mount never touches another.
+-- unixepoch() is 1s granularity, so a node last seen in a scan that happened
+-- to end in the SAME wall-clock second as this scan's start may survive one
+-- extra scan -- it is swept the next round, which is delayed-not-wrong.
 UPDATE media_nodes
 SET lifecycle_state = 'MISSING', updated_at = unixepoch()
 WHERE storage_location_id = ?1

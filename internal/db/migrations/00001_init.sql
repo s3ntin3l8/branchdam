@@ -236,5 +236,5 @@ DROP TABLE IF EXISTS event_queue;
 DROP TABLE IF EXISTS node_metadata;
 DROP TABLE IF EXISTS remote_sync_state;
 DROP TABLE IF EXISTS media_edges;
--- DROP TABLE IF EXISTS media_nodes;
+DROP TABLE IF EXISTS media_nodes;
 DROP TABLE IF EXISTS storage_locations;
