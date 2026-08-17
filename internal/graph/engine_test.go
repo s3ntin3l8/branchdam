@@ -579,6 +579,20 @@ func TestLookupBySpatialTemporal(t *testing.T) {
 		CapturedAt:   &baseTime,
 	})
 
+	archivedParent := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/archived.arw",
+		FileName:     "archived.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL123",
+		CapturedAt:   &baseTime,
+	})
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.ArchiveMediaNode(ctx, archivedParent.ID)
+	}); err != nil {
+		t.Fatalf("ArchiveMediaNode: %v", err)
+	}
+
 	childNode := seedNode(t, database, locationID, nodeFixture{
 		Path:         "/child.jpg",
 		FileName:     "child.jpg",
@@ -589,6 +603,17 @@ func TestLookupBySpatialTemporal(t *testing.T) {
 	})
 
 	lookup := NewLookup(database.Reader)
+
+	// Guard checks: empty serial or zero time return empty slice
+	noSerial, err := lookup.BySpatialTemporal(ctx, "", timePlus1s, 2*time.Second, childNode.ID)
+	if err != nil || len(noSerial) != 0 {
+		t.Errorf("empty cameraSerial returned %d candidates, err: %v, want 0", len(noSerial), err)
+	}
+	zeroTime, err := lookup.BySpatialTemporal(ctx, "SERIAL123", time.Time{}, 2*time.Second, childNode.ID)
+	if err != nil || len(zeroTime) != 0 {
+		t.Errorf("zero capturedAt returned %d candidates, err: %v, want 0", len(zeroTime), err)
+	}
+
 	candidates, err := lookup.BySpatialTemporal(ctx, "SERIAL123", timePlus1s, 2*time.Second, childNode.ID)
 	if err != nil {
 		t.Fatalf("BySpatialTemporal: %v", err)

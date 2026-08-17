@@ -48,12 +48,11 @@ func (l *dbLookup) BySpatialTemporal(ctx context.Context, cameraSerial string, c
 	if cameraSerial == "" || capturedAt.IsZero() {
 		return nil, nil
 	}
-	sec := int64(window.Seconds())
-	if sec < 0 {
-		sec = -sec
+	if window < 0 {
+		window = -window
 	}
-	minUnix := capturedAt.Unix() - sec
-	maxUnix := capturedAt.Unix() + sec
+	minUnix := capturedAt.Add(-window).Unix()
+	maxUnix := capturedAt.Add(window).Unix()
 
 	rows, err := l.q.ListTier3Candidates(ctx, sqlcgen.ListTier3CandidatesParams{
 		CameraSerial:     sql.NullString{String: cameraSerial, Valid: true},
@@ -67,42 +66,47 @@ func (l *dbLookup) BySpatialTemporal(ctx context.Context, cameraSerial string, c
 	return toNodes(rows), nil
 }
 
+// ToNode converts a database sqlcgen.MediaNode row into a graph.Node value.
+func ToNode(r sqlcgen.MediaNode) Node {
+	n := Node{
+		ID:       r.ID,
+		FilePath: r.FilePath,
+		FileName: r.FileName,
+		FileExt:  r.FileExt,
+	}
+	if r.OriginalDocumentID.Valid {
+		n.OriginalDocumentID = r.OriginalDocumentID.String
+	}
+	if r.DocumentID.Valid {
+		n.DocumentID = r.DocumentID.String
+	}
+	if r.CameraModel.Valid {
+		n.CameraModel = r.CameraModel.String
+	}
+	if r.FilenameStem.Valid {
+		n.FilenameStem = r.FilenameStem.String
+	}
+	if r.CapturedAtUnix.Valid {
+		t := time.Unix(r.CapturedAtUnix.Int64, 0).UTC()
+		n.CapturedAt = &t
+	}
+	if r.Phash.Valid {
+		ph := r.Phash.Int64
+		n.PHash = &ph
+	}
+	if r.CameraSerial.Valid {
+		n.CameraSerial = r.CameraSerial.String
+	}
+	if r.LensModel.Valid {
+		n.LensModel = r.LensModel.String
+	}
+	return n
+}
+
 func toNodes(rows []sqlcgen.MediaNode) []Node {
 	out := make([]Node, len(rows))
 	for i, r := range rows {
-		n := Node{
-			ID:       r.ID,
-			FilePath: r.FilePath,
-			FileName: r.FileName,
-			FileExt:  r.FileExt,
-		}
-		if r.OriginalDocumentID.Valid {
-			n.OriginalDocumentID = r.OriginalDocumentID.String
-		}
-		if r.DocumentID.Valid {
-			n.DocumentID = r.DocumentID.String
-		}
-		if r.CameraModel.Valid {
-			n.CameraModel = r.CameraModel.String
-		}
-		if r.FilenameStem.Valid {
-			n.FilenameStem = r.FilenameStem.String
-		}
-		if r.CapturedAtUnix.Valid {
-			t := time.Unix(r.CapturedAtUnix.Int64, 0).UTC()
-			n.CapturedAt = &t
-		}
-		if r.Phash.Valid {
-			ph := r.Phash.Int64
-			n.PHash = &ph
-		}
-		if r.CameraSerial.Valid {
-			n.CameraSerial = r.CameraSerial.String
-		}
-		if r.LensModel.Valid {
-			n.LensModel = r.LensModel.String
-		}
-		out[i] = n
+		out[i] = ToNode(r)
 	}
 	return out
 }
