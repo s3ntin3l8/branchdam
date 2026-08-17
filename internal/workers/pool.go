@@ -38,9 +38,9 @@ type Pool[K comparable] struct {
 
 	mu       sync.Mutex
 	inflight map[K]struct{}
+	closed   bool // set under mu by closeOnDone; see Submit and closeOnDone
 
-	wg   sync.WaitGroup
-	done <-chan struct{} // set by Run; nil until Run is called
+	wg sync.WaitGroup
 }
 
 // New creates a Pool with the given worker count and queue depth. Both are
@@ -65,9 +65,8 @@ func New[K comparable](workerCount, queueDepth int) *Pool[K] {
 // does not block until ctx is done. Call Drain (after cancelling ctx) to
 // wait for in-flight work to finish during shutdown.
 func (p *Pool[K]) Run(ctx context.Context) {
-	p.mu.Lock()
-	p.done = ctx.Done()
-	p.mu.Unlock()
+	p.wg.Add(1)
+	go p.closeOnDone(ctx)
 	for i := 0; i < p.workerCount; i++ {
 		p.wg.Add(1)
 		go p.workerLoop(ctx)
@@ -79,7 +78,6 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			p.drainAbandoned()
 			return
 		case job, ok := <-p.jobs:
 			if !ok {
@@ -90,30 +88,62 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 	}
 }
 
-// drainAbandoned removes every job currently buffered in p.jobs and calls
-// its OnAbandon hook (if set), so a job that was Submit-ed but never
-// dequeued before shutdown still gets its completion bookkeeping released
-// instead of leaving a caller's wg.Wait() blocked forever. Non-blocking: it
-// only removes what's already buffered at the moment it runs, never waits
-// for more to arrive. Every worker calls this on its own ctx.Done() exit,
-// which is safe to do redundantly -- each buffered job is delivered to
-// exactly one receiver, so however many workers race here, the queue is
-// fully drained across all of them without double-abandoning any job.
-func (p *Pool[K]) drainAbandoned() {
+// closeOnDone waits for ctx to be done, then marks the pool closed and
+// drains whatever is currently buffered in p.jobs, calling each drained
+// job's OnAbandon hook (if set) -- so a job that was Submit-ed but never
+// dequeued before shutdown still gets its completion bookkeeping released,
+// instead of leaving a caller's wg.Wait() blocked forever.
+//
+// This runs as a single dedicated goroutine, tracked by Run alongside the
+// workers, rather than each worker independently racing ctx.Done() against
+// p.jobs and draining redundantly (an earlier version of this method did
+// that). That mattered: with per-worker draining, "check ctx.Done()" and
+// "drain the queue" were two separate, unlocked observations, so a worker
+// could observe ctx.Done(), find the queue empty, and exit -- all while a
+// concurrent Submit call was between its own ctx check and its channel
+// send. That job would land in p.jobs after every worker had already given
+// up on it: enqueued, but with zero remaining readers, permanently
+// unresolved. Marking closed and draining here, both under p.mu -- the same
+// lock Submit takes to check closed before it sends -- makes the two
+// operations strictly ordered: any Submit that completes its send has
+// necessarily done so either entirely before this critical section (so the
+// job is already buffered when the drain below runs and gets caught by it,
+// or already claimed by a still-live worker) or Submit fails outright,
+// because closed was already true by the time it checked.
+func (p *Pool[K]) closeOnDone(ctx context.Context) {
+	defer p.wg.Done()
+	<-ctx.Done()
+
+	p.mu.Lock()
+	p.closed = true
+	abandoned := p.drainLocked()
+	p.mu.Unlock()
+
+	for _, job := range abandoned {
+		if job.OnAbandon != nil {
+			job.OnAbandon()
+		}
+	}
+}
+
+// drainLocked removes every job currently buffered in p.jobs, clears its
+// dedup key, and returns the drained jobs for the caller to abandon outside
+// the lock (an OnAbandon callback that itself calls back into the pool,
+// e.g. re-Submitting, would deadlock if invoked while p.mu is held). Must
+// be called with p.mu held; non-blocking -- it only removes what's already
+// buffered, never waits for more to arrive.
+func (p *Pool[K]) drainLocked() []Job[K] {
+	var drained []Job[K]
 	for {
 		select {
 		case job, ok := <-p.jobs:
 			if !ok {
-				return
+				return drained
 			}
-			p.mu.Lock()
 			delete(p.inflight, job.Key)
-			p.mu.Unlock()
-			if job.OnAbandon != nil {
-				job.OnAbandon()
-			}
+			drained = append(drained, job)
 		default:
-			return
+			return drained
 		}
 	}
 }
@@ -135,40 +165,40 @@ func (p *Pool[K]) runJob(ctx context.Context, job Job[K]) {
 // should not keep submitting new work after shutdown has begun.
 //
 // Submit also refuses once the Pool's own Run context is done, regardless
-// of ctx's state. Without this, a caller whose own ctx deliberately
-// survives shutdown (e.g. a background scan using context.WithoutCancel)
-// could keep enqueuing jobs after every worker has already exited --
-// nothing would ever dequeue or abandon them, and anything waiting on that
-// job's completion (e.g. a sync.WaitGroup token released by Run or
-// OnAbandon) would block forever.
+// of ctx's state -- checked and enqueued in one critical section together
+// with closeOnDone's own close-and-drain, so the two can never interleave
+// (see closeOnDone's doc comment for why that matters: an earlier version
+// checked closed and sent to p.jobs as two separate, unlocked steps, which
+// could let a job land in the queue after every worker had already given
+// up on draining it). Without the closed check at all, a caller whose own
+// ctx deliberately survives shutdown (e.g. a background scan using
+// context.WithoutCancel) could keep enqueuing jobs after every worker has
+// already exited -- nothing would ever dequeue or abandon them, and
+// anything waiting on that job's completion (e.g. a sync.WaitGroup token
+// released by Run or OnAbandon) would block forever.
 func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 
 	p.mu.Lock()
-	if p.done != nil {
-		select {
-		case <-p.done:
-			p.mu.Unlock()
-			return false
-		default:
-		}
-	}
-	if _, dup := p.inflight[job.Key]; dup {
-		p.mu.Unlock()
+	defer p.mu.Unlock()
+
+	if p.closed {
 		return false
 	}
-	p.inflight[job.Key] = struct{}{}
-	p.mu.Unlock()
-
+	if _, dup := p.inflight[job.Key]; dup {
+		return false
+	}
+	// Non-blocking send while holding p.mu is safe: it either succeeds
+	// immediately (room in the buffer) or falls through to default
+	// immediately (full) -- it never waits, so it can't hold the lock for
+	// longer than a moment.
 	select {
 	case p.jobs <- job:
+		p.inflight[job.Key] = struct{}{}
 		return true
 	default:
-		p.mu.Lock()
-		delete(p.inflight, job.Key)
-		p.mu.Unlock()
 		return false
 	}
 }

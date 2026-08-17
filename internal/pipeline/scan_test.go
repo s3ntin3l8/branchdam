@@ -862,8 +862,14 @@ func TestDrainAndCommitRunsConcurrentlyWithWalk(t *testing.T) {
 // Like TestDrainAndCommitRunsConcurrentlyWithWalk (#93), this uses a gated
 // WalkFn instead of real timing: the walk cancels the pool's context after
 // submitting a handful of files, which is a real mid-walk shutdown, not a
-// simulated race, and needs no sleep or throughput assumption to be
-// reliable under -race or coverage instrumentation.
+// simulated race. Its termination is genuinely deterministic (bounded, not
+// just "usually fast") because Pool.Submit and the pool's own shutdown-drain
+// are serialized through the same mutex -- see
+// internal/workers/pool.go's Submit/closeOnDone doc comments, and
+// internal/workers/pool_test.go's
+// TestPoolSubmitNeverOrphansAJobUnderConcurrentShutdown, which reproduces
+// (against an intentionally-reverted Submit) the TOCTOU race that would
+// otherwise make this test's outcome depend on goroutine-scheduling luck.
 func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 	const workerCount = 2
 	const queueDepth = 300 // generous: this test is about shutdown termination, not queue capacity
@@ -953,5 +959,11 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 	}
 	if job.State == "RUNNING" {
 		t.Fatalf("scan job state = RUNNING after shutdown joined cleanly, want a terminal state (COMPLETED or FAILED)")
+	}
+	if job.FilesSeen != int64(total) {
+		t.Errorf("FilesSeen = %d, want %d -- the walk itself always completes (it observes cancelPool but doesn't stop), only Submit outcomes change at shutdown", job.FilesSeen, total)
+	}
+	if got := job.FilesHashed + job.FilesFailed; got != int64(total) {
+		t.Errorf("FilesHashed(%d) + FilesFailed(%d) = %d, want %d -- every file the walk saw must resolve to exactly one outcome; a mismatch means a file was lost during the mid-walk shutdown", job.FilesHashed, job.FilesFailed, got, total)
 	}
 }
