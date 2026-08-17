@@ -476,6 +476,12 @@ func TestPerTierAutoAcceptThreshold(t *testing.T) {
 			wantReviewState: "NEEDS_REVIEW",
 		},
 		{
+			name:            "Tier 3 candidate at exact boundary 0.85 lands AUTO_ACCEPTED",
+			tier:            3,
+			confidence:      0.85,
+			wantReviewState: "AUTO_ACCEPTED",
+		},
+		{
 			name:            "Tier 3 candidate at 0.86 lands AUTO_ACCEPTED",
 			tier:            3,
 			confidence:      0.86,
@@ -490,6 +496,12 @@ func TestPerTierAutoAcceptThreshold(t *testing.T) {
 		{
 			name:            "Tier 2 candidate at 0.90 lands AUTO_ACCEPTED",
 			tier:            2,
+			confidence:      0.90,
+			wantReviewState: "AUTO_ACCEPTED",
+		},
+		{
+			name:            "Tier 1 candidate at 0.90 lands AUTO_ACCEPTED",
+			tier:            1,
 			confidence:      0.90,
 			wantReviewState: "AUTO_ACCEPTED",
 		},
