@@ -206,9 +206,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 // spaHandler serves embedded assets, falling back to index.html for client
-// routes (so deep links work). Returns a 404 handler (not the SPA shell) if
-// no SPA has been embedded yet -- s.spa is nil until PR 10 lands
-// web/dist.
+// routes (so deep links work). web.Dist() provides the embedded FS
+// (web/embed.go); a nil s.spa (tests that don't build an SPA) yields a 404,
+// not the SPA shell.
 func (s *Server) spaHandler() http.Handler {
 	if s.spa == nil {
 		return http.NotFoundHandler()

@@ -1,9 +1,9 @@
 // Package graph resolves lineage edges between media nodes. Increment 1
-// registers two Tier-2 resolvers (deterministic metadata matching); Tier 1
-// (project introspection) and Tier 3 (heuristic spatial-temporal matching)
-// register no resolvers yet, but the Resolver interface and the tier field
-// on every edge already accommodate them -- adding either later is a
-// Register call, not a schema change.
+// registers two Tier-2 resolvers (XMPOriginalDocumentIDResolver and
+// FilenameStemResolver); Tier 1 (project introspection) and Tier 3
+// (heuristic spatial-temporal matching) are a Register call away later,
+// not a schema change -- the Resolver interface and the tier field on
+// every edge already accommodate them.
 package graph
 
 import (

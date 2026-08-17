@@ -232,7 +232,7 @@ func TestAgentEventEnqueues(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var got struct {
@@ -293,7 +293,7 @@ func TestScanEndToEndThroughHTTP(t *testing.T) {
 	srv.guard = guard
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]int64{"storageLocationId": locationID})
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusAccepted {
 		t.Fatalf("POST /api/v1/scan status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var scanResp struct {
@@ -387,7 +387,7 @@ func TestScanJobOutlivesRequestContext(t *testing.T) {
 		t.Fatalf("POST /api/v1/scan: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("POST /api/v1/scan status = %d", resp.StatusCode)
 	}
 	var scanResp struct {

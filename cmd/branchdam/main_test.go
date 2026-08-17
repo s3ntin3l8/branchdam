@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"testing"
 
@@ -53,5 +54,30 @@ func TestResolveWatchedLocations(t *testing.T) {
 	}
 	if len(locs) != 1 || locs[0].Tier != "TIER1_LOCAL_SCRATCH" || locs[0].ID == 0 {
 		t.Fatalf("locs = %+v, want one TIER1_LOCAL_SCRATCH with a real id", locs)
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	cases := map[string]slog.Level{
+		"info": slog.LevelInfo, "debug": slog.LevelDebug,
+		"warn": slog.LevelWarn, "error": slog.LevelError,
+		"INFO": slog.LevelInfo, "bogus": slog.LevelInfo, "": slog.LevelInfo,
+	}
+	for in, want := range cases {
+		if got := parseLogLevel(in); got != want {
+			t.Errorf("parseLogLevel(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestLogLevelDebugOverridesConfig(t *testing.T) {
+	if got := logLevel("error", true); got != slog.LevelDebug {
+		t.Errorf("logLevel(error, debug=true) = %v, want Debug", got)
+	}
+	if got := logLevel("debug", false); got != slog.LevelDebug {
+		t.Errorf("logLevel(debug, debug=false) = %v, want Debug", got)
+	}
+	if got := logLevel("info", false); got != slog.LevelInfo {
+		t.Errorf("logLevel(info, debug=false) = %v, want Info", got)
 	}
 }
