@@ -23,8 +23,9 @@ When raw reference paths originate from external workstations, operator-declared
 ### Step 3: Fallback Matching (Basename + Size)
 If prefix rewrite does not yield a live node match (e.g., files were moved under a subfolder or path rewrites are partially configured):
 - Search live `media_nodes` by exact `file_name` (basename).
-- If a match is found and matches expected criteria (or if single candidate exists), evaluate candidate.
-- If multiple candidates exist, apply the ambiguity policy (Step 3 policy).
+- If the project file format includes asset file size metadata (e.g., `.dam.json` or `.fcpxml`), filter candidate nodes to match `size_bytes`.
+- If a single unique candidate node matches, evaluate candidate.
+- If multiple candidate nodes exist after filtering, apply the ambiguity policy (Section 3 policy).
 
 ---
 
@@ -54,6 +55,22 @@ type Config struct {
     // ... existing fields ...
     PathRewrites []PathRewrite `yaml:"pathRewrites"`
 }
+```
+
+### Worked Transformation Example
+```yaml
+# Input Raw Reference Path:
+"D:\\Footage\\Scene01\\ClipA.mov"
+
+# Configured Path Rewrite Rule:
+from: "D:\\Footage\\"
+to:   "/storage/projects/Footage/"
+
+# Step-by-Step Transformation:
+1. Normalize backslashes:   "D:/Footage/Scene01/ClipA.mov"
+2. Match prefix "D:/Footage/": Matches rule
+3. Replace prefix with "to": "/storage/projects/Footage/Scene01/ClipA.mov"
+4. Clean path result:        "/storage/projects/Footage/Scene01/ClipA.mov"
 ```
 
 ### Normalization Algorithm
