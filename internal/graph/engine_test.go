@@ -637,3 +637,133 @@ func TestLookupBySpatialTemporal(t *testing.T) {
 		t.Errorf("PHash = %v, want %d", c.PHash, phashVal)
 	}
 }
+
+func TestHeuristicSpatialTemporalResolver(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	t0 := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1 * time.Second)
+	phashParent := int64(0x0000000000000000)
+	phashClose := int64(0x000000000000000F) // Hamming distance 4 (<= 10)
+	phashFar := int64(0x00000000FFFFFFFF)   // Hamming distance 32 (> 10)
+
+	// Parent nodes
+	parentFull := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/parent_full.arw",
+		FileName:     "parent_full.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL_XYZ",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t0,
+		PHash:        &phashParent,
+	})
+
+	parentNoPHash := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/parent_nophash.arw",
+		FileName:     "parent_nophash.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL_XYZ2",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t0,
+	})
+
+	_ = seedNode(t, database, locationID, nodeFixture{
+		Path:         "/parent_far.arw",
+		FileName:     "parent_far.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL_XYZ3",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t0,
+		PHash:        &phashParent,
+	})
+
+	// Children nodes
+	childFull := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/child_full.jpg",
+		FileName:     "child_full.jpg",
+		FileExt:      "jpg",
+		CameraSerial: "SERIAL_XYZ",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t1,
+		PHash:        &phashClose,
+	})
+
+	childNoPHash := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/child_nophash.jpg",
+		FileName:     "child_nophash.jpg",
+		FileExt:      "jpg",
+		CameraSerial: "SERIAL_XYZ2",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t1,
+	})
+
+	childFarPHash := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/child_far.jpg",
+		FileName:     "child_far.jpg",
+		FileExt:      "jpg",
+		CameraSerial: "SERIAL_XYZ3",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t1,
+		PHash:        &phashFar,
+	})
+
+	r := HeuristicSpatialTemporalResolver{}
+	engine := NewEngine(database, nil, r)
+
+	// Case 1: Full match (Serial + Lens + Time + pHash <= 10) -> score 0.89 -> AUTO_ACCEPTED
+	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(childFull))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit full: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("full match edges = %d, want 1", len(edges))
+	}
+	if edges[0].SourceNodeID != parentFull.ID {
+		t.Errorf("SourceNodeID = %d, want %d", edges[0].SourceNodeID, parentFull.ID)
+	}
+	if edges[0].Confidence != 0.89 {
+		t.Errorf("Confidence = %v, want 0.89", edges[0].Confidence)
+	}
+	if edges[0].ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("ReviewState = %q, want AUTO_ACCEPTED", edges[0].ReviewState)
+	}
+
+	// Case 2: Missing pHash (NULL phash) -> capped at 0.79 -> NEEDS_REVIEW
+	edgesNoPHash, err := engine.ResolveAndCommit(ctx, asGraphNode(childNoPHash))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit no pHash: %v", err)
+	}
+	if len(edgesNoPHash) != 1 {
+		t.Fatalf("no pHash edges = %d, want 1", len(edgesNoPHash))
+	}
+	if edgesNoPHash[0].SourceNodeID != parentNoPHash.ID {
+		t.Errorf("SourceNodeID = %d, want %d", edgesNoPHash[0].SourceNodeID, parentNoPHash.ID)
+	}
+	if edgesNoPHash[0].Confidence != 0.79 {
+		t.Errorf("Confidence = %v, want 0.79 (capped below 0.80)", edgesNoPHash[0].Confidence)
+	}
+	if edgesNoPHash[0].ReviewState != "NEEDS_REVIEW" {
+		t.Errorf("ReviewState = %q, want NEEDS_REVIEW", edgesNoPHash[0].ReviewState)
+	}
+
+	// Case 3: Far pHash (Hamming distance > 10) -> no candidate emitted
+	edgesFar, err := engine.ResolveAndCommit(ctx, asGraphNode(childFarPHash))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit far pHash: %v", err)
+	}
+	if len(edgesFar) != 0 {
+		t.Errorf("far pHash emitted %d candidates, want 0 (Hamming > 10 dropped)", len(edgesFar))
+	}
+
+	// Case 4: Guard checks (empty serial / nil capture time)
+	noSerialCandidates, err := r.Resolve(ctx, Node{ID: 99, CameraSerial: "", CapturedAt: &t0}, NewLookup(database.Reader))
+	if err != nil || len(noSerialCandidates) != 0 {
+		t.Errorf("empty serial returned %d candidates, want 0", len(noSerialCandidates))
+	}
+	noTimeCandidates, err := r.Resolve(ctx, Node{ID: 99, CameraSerial: "SERIAL_XYZ", CapturedAt: nil}, NewLookup(database.Reader))
+	if err != nil || len(noTimeCandidates) != 0 {
+		t.Errorf("nil CapturedAt returned %d candidates, want 0", len(noTimeCandidates))
+	}
+}
