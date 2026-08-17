@@ -2,6 +2,7 @@ package projectfile_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -68,6 +69,9 @@ func TestDAMJSONParser_Parse_Malformed(t *testing.T) {
 			_, err := parser.Parse(context.Background(), strings.NewReader(tt.input))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("expected err=%v, got %v", tt.wantErr, err)
+			}
+			if tt.wantErr && err != nil && !errors.Is(err, projectfile.ErrMalformedManifest) {
+				t.Errorf("expected error wrapping ErrMalformedManifest, got %v", err)
 			}
 		})
 	}

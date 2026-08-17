@@ -23,10 +23,10 @@ func (p *DAMJSONParser) Extensions() []string {
 }
 
 type damManifest struct {
-	Version         string          `json:"version"`
-	ProjectName     string          `json:"project_name"`
-	MediaReferences []damMediaRef   `json:"media_references"`
-	Files           []string        `json:"files"`
+	Version         string        `json:"version"`
+	ProjectName     string        `json:"project_name"`
+	MediaReferences []damMediaRef `json:"media_references"`
+	Files           []string      `json:"files"`
 }
 
 type damMediaRef struct {
@@ -52,6 +52,10 @@ func (p *DAMJSONParser) Parse(ctx context.Context, r io.Reader) ([]Reference, er
 	var manifest damManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformedManifest, err)
+	}
+
+	if manifest.Version == "" || manifest.ProjectName == "" {
+		return nil, fmt.Errorf("%w: missing required fields version/project_name", ErrMalformedManifest)
 	}
 
 	var refs []Reference

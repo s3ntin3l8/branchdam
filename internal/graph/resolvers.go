@@ -306,7 +306,7 @@ func (r *ProjectSidecarResolver) resolveReference(ctx context.Context, rawPath, 
 	}
 
 	// 3. Fallback matching by filename (basename)
-	base := filepath.Base(rawPath)
+	base := filepath.Base(strings.ReplaceAll(rawPath, "\\", "/"))
 	if base != "" && base != "." && base != "/" {
 		nodes, err := lookup.ByFileName(ctx, base)
 		if err == nil {
