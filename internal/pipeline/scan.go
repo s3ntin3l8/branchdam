@@ -160,6 +160,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	results := make(chan Result, batchSize*2)
 	var wg sync.WaitGroup
 	var filesSeen, filesFailed atomic.Int32
+	var abandonedCount atomic.Int32
 	uncertain := newUncertainPaths()
 
 	walkFn := deps.WalkFn
@@ -228,12 +229,16 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				// was accepted into the pool's queue but the pool shut down
 				// before a worker dequeued it. Same bookkeeping as a refused
 				// submit, so the walk goroutine's wg.Wait() below still sees
-				// this token released.
+				// this token released. Abandons are counted, not logged
+				// individually here -- a shutdown with a full queue
+				// (queueDepth defaults to 1024) would otherwise emit one Warn
+				// line per queued file; a single summary line is logged once
+				// after wg.Wait() below instead.
 				OnAbandon: func() {
 					wg.Done()
 					uncertain.add(rec.Path)
 					filesFailed.Add(1)
-					log.Warn("pipeline: job abandoned (pool shut down before it ran)", "path", rec.Path)
+					abandonedCount.Add(1)
 				},
 			})
 			if !submitted {
@@ -245,6 +250,9 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			return nil
 		})
 		wg.Wait()
+		if n := abandonedCount.Load(); n > 0 {
+			log.Warn("pipeline: jobs abandoned (pool shut down before they ran)", "count", n)
+		}
 		close(results)
 	}()
 
