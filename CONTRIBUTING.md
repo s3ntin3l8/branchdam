@@ -86,6 +86,20 @@ button reads as blocked/"Expected" forever, not just slow -- that's expected, no
 it via the "merge without waiting for requirements" path, which `enforce_admins: false` makes
 available to the repo owner.
 
+## Automated review
+
+Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` GitHub App,
+posted once on `opened` (or once on `ready_for_review` if the PR started as a draft). Ask for
+another look at any point -- including after addressing feedback -- by commenting
+`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). See
+[`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for replying to and resolving
+Hermes's inline comments.
+
+PRs opened from a fork won't get GitHub Actions secrets (a GitHub security boundary, not a
+bug), so the automated review that normally runs on `opened` won't complete for fork PRs -- a
+maintainer can still trigger it manually by commenting `@s3ntin3l8-hermes Review` on the PR,
+which runs in the base repo's context.
+
 ## Templates
 
 All issues and pull request descriptions must adhere to the standard templates:
