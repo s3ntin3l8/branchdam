@@ -33,12 +33,31 @@ name: Hermes (review)
 # string, which would re-trigger this workflow with no human summon.
 # `issue_comment` alone covers both PR-conversation comments and issue
 # comments.
+#
+# SECURITY: this repo is public and this is its first workflow that runs on
+# a self-hosted runner (gh-runner-01-branchdam-01, LAN-reachable to the
+# Hermes API on hermes-01) -- ci.yml runs on ubuntu-latest, not this. For a
+# `pull_request` event, GitHub runs the workflow FILE from the PR's own
+# head ref, i.e. a fork's copy of this file, on whatever runner the `if:`
+# lets it reach. Without the `head.repo.full_name` guard below, any stranger
+# could open a fork PR whose version of auto-review's job runs arbitrary
+# steps on that runner -- fork PRs get no secrets and a read-only token, but
+# the runner itself (its filesystem and LAN access) is the trust boundary,
+# not the token. The on-demand path is unaffected: `issue_comment` always
+# runs the DEFAULT BRANCH's copy of this file, so the author_association
+# gate there is sufficient on its own; a maintainer's @mention on a fork PR
+# still works. (Found by s3ntin3l8-hermes[bot]'s own review of the PR that
+# introduced this workflow -- s3ntin3l8/branchdam#76.)
 on:
   pull_request:
     types: [opened, ready_for_review]
     # `opened`           => review once, if the PR starts non-draft.
-    # `ready_for_review`  => review once, if the PR started as a draft (its
+    # `ready_for_review`  => covers the PR that started as a draft (its
     # `opened` event is skipped below since draft was true at that point).
+    # This event itself can fire more than once (a PR toggled draft<->ready
+    # repeatedly re-fires it each time) -- what actually prevents a second
+    # review is the reusable workflow's own auto-mode re-trigger guard
+    # (skips once this bot has already reviewed the target), not this event.
   issue_comment:
     types: [created]
     # Covers both PR-conversation comments and issue comments. The reusable
@@ -50,6 +69,7 @@ jobs:
   auto-review:
     if: >-
       github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor != 's3ntin3l8-hermes[bot]' &&
       github.actor != 'dependabot[bot]' &&
       github.actor != 'github-actions[bot]' &&
