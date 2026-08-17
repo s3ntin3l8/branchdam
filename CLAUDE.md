@@ -211,6 +211,7 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 - **The asset graph endpoint is one hop, deliberately.** `GET /api/v1/assets/{id}/graph`
   returns direct parents/children only, not a bounded recursive traversal. This is a stated
   scope line for increment 1, not a hidden gap -- see `internal/httpapi/routes.go`.
+- **Auto-accept thresholds are derived per resolver tier.** Tier 1 and Tier 2 use `0.90` (preserving existing classification behavior), while Tier 3 uses `0.85` (so Tier 3's 0.70–0.89 confidence band splits into 0.85–0.89 auto-accepted and 0.70–0.84 audit queue). `needsReviewFloor = 0.50` applies across all tiers.
 
 ## CI
 

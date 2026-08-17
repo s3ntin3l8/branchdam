@@ -10,14 +10,17 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
-// autoAcceptThreshold and needsReviewFloor are the build plan's confidence
-// thresholds: >=0.90 is auto-accepted, [0.50, 0.90) lands in the audit
-// queue (review_state=NEEDS_REVIEW), and anything below 0.50 is dropped --
-// never even written, per the build plan ("< 0.50 dropped, never
-// persisted").
+// autoAcceptThresholdForTier returns the confidence threshold for auto-accepting
+// a candidate edge based on its tier: >=0.85 for Tier 3, >=0.90 for Tier 1 and 2.
+func autoAcceptThresholdForTier(tier int) float64 {
+	if tier == 3 {
+		return 0.85
+	}
+	return 0.90
+}
+
 const (
-	autoAcceptThreshold = 0.90
-	needsReviewFloor    = 0.50
+	needsReviewFloor = 0.50
 )
 
 // Engine runs every registered Resolver against a child node, merges their
@@ -92,7 +95,7 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 			}
 
 			reviewState := "NEEDS_REVIEW"
-			if c.Confidence >= autoAcceptThreshold {
+			if c.Confidence >= autoAcceptThresholdForTier(c.Tier) {
 				reviewState = "AUTO_ACCEPTED"
 			}
 
@@ -161,6 +164,7 @@ func mergeCandidates(candidates []Candidate) []Candidate {
 		if c.Confidence > existing.Confidence {
 			existing.Confidence = c.Confidence
 			existing.Resolver = c.Resolver // the winning resolver's name is what's stored in the resolver column
+			existing.Tier = c.Tier
 		}
 	}
 
