@@ -26,6 +26,13 @@ agent:
   # least 32 characters or agent routes fail closed with 503.
   apiKey: ${BRANCHDAM_AGENT_API_KEY}
 
+authz:
+  # Groups permitted admin (write) access on browser-routed endpoints.
+  # Empty list (default) permits all authenticated users and logs a WARN at startup.
+  groups:
+    - branchdam-admins
+
+
 # One entry per mounted storage tier. Tier must be one of:
 #   TIER0_LOCAL_STAGING, TIER1_LOCAL_SCRATCH, TIER2_EXPORTS,
 #   TIER3_MASTER_ARCHIVE, PROJECTS

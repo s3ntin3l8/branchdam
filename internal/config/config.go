@@ -27,12 +27,18 @@ type Config struct {
 	HTTP       HTTP     `yaml:"http"`
 	Workers    Workers  `yaml:"workers"`
 	Agent      Agent    `yaml:"agent"`
+	Authz      Authz    `yaml:"authz"`
 
 	// StorageLocations seeds the storage_locations table on startup (PR 1).
 	// Tier must be one of the five values fix #1 in docs/schema.md defines:
 	// TIER0_LOCAL_STAGING, TIER1_LOCAL_SCRATCH, TIER2_EXPORTS,
 	// TIER3_MASTER_ARCHIVE, PROJECTS.
 	StorageLocations []StorageLocation `yaml:"storageLocations"`
+}
+
+// Authz configures group-based authorization (internal/auth, PR 2 / issue 37).
+type Authz struct {
+	Groups []string `yaml:"groups"`
 }
 
 // Database configures the SQLite file both pools open (internal/db, PR 1).

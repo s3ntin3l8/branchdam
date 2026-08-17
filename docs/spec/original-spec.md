@@ -237,9 +237,9 @@ CREATE TABLE IF NOT EXISTS media_nodes (
     fast_hash TEXT,                            -- xxHash64 over 6MB sample
     full_hash TEXT,                            -- xxHash64 stream hash
     phash TEXT,                                -- DCT 64-bit hex
-    location_type TEXT NOT NULL DEFAULT 'CENTRAL_TIER3' 
+    location_type TEXT NOT NULL DEFAULT 'CENTRAL_TIER3'
         CHECK (location_type IN ('LOCAL_STAGING', 'CENTRAL_TIER3', 'TIER2_EXPORTS', 'EXTERNAL')),
-    status TEXT NOT NULL DEFAULT 'INDEXED_SHALLOW' 
+    status TEXT NOT NULL DEFAULT 'INDEXED_SHALLOW'
         CHECK (status IN ('INDEXED_SHALLOW', 'INDEXED_FULL', 'MISSING', 'ARCHIVED', 'HIDDEN')),
     metadata JSON,                             -- EXIF, FFprobe, Camera Serial payload
     storage_location_id INTEGER,
@@ -258,12 +258,12 @@ CREATE TABLE IF NOT EXISTS media_edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_node_id TEXT NOT NULL,              -- Parent Node ID
     target_node_id TEXT NOT NULL,              -- Child Node ID
-    relationship_type TEXT NOT NULL 
+    relationship_type TEXT NOT NULL
         CHECK (relationship_type IN ('DERIVED_FROM', 'PROJECT_SIDECAR', 'PROXY_OF', 'FINAL_EXPORT', 'DERIVED_FROM_MISSING_PARENT')),
     confidence_score REAL NOT NULL DEFAULT 1.00 CHECK (confidence_score BETWEEN 0.00 AND 1.00),
-    matching_mechanism TEXT NOT NULL 
+    matching_mechanism TEXT NOT NULL
         CHECK (matching_mechanism IN ('PROJECT_INTROSPECTION', 'EXIF_EXACT', 'REGEX_NAME', 'HEURISTIC_TIME_PHASH', 'MANUAL_OVERRIDE')),
-    status TEXT NOT NULL DEFAULT 'CONFIRMED' 
+    status TEXT NOT NULL DEFAULT 'CONFIRMED'
         CHECK (status IN ('CONFIRMED', 'NEEDS_REVIEW', 'USER_VERIFIED')),
     manual_override BOOLEAN NOT NULL DEFAULT 0,
     metadata JSON,                             -- Render params, timeline clip details
@@ -300,7 +300,7 @@ CREATE TABLE IF NOT EXISTS event_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT UNIQUE NOT NULL,             -- Client UUIDv7
     agent_id TEXT NOT NULL,                    -- Workstation identifier
-    event_type TEXT NOT NULL 
+    event_type TEXT NOT NULL
         CHECK (event_type IN ('EVENT_NODE_CREATED', 'EVENT_EDGE_ATTACHED', 'EVENT_NODE_MOVED', 'EVENT_NODE_DELETED', 'EVENT_PATH_REBASED')),
     payload JSON NOT NULL,
     status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSED', 'FAILED')),
@@ -323,7 +323,7 @@ CREATE TRIGGER IF NOT EXISTS trg_media_nodes_missing_parent
 AFTER UPDATE OF status ON media_nodes
 FOR EACH ROW WHEN NEW.status = 'MISSING'
 BEGIN
-    UPDATE media_edges 
+    UPDATE media_edges
     SET relationship_type = 'DERIVED_FROM_MISSING_PARENT'
     WHERE source_node_id = OLD.id AND relationship_type = 'DERIVED_FROM';
 END;
@@ -332,7 +332,7 @@ CREATE TRIGGER IF NOT EXISTS trg_media_nodes_restore_parent
 AFTER UPDATE OF status ON media_nodes
 FOR EACH ROW WHEN OLD.status = 'MISSING' AND NEW.status != 'MISSING'
 BEGIN
-    UPDATE media_edges 
+    UPDATE media_edges
     SET relationship_type = 'DERIVED_FROM'
     WHERE source_node_id = OLD.id AND relationship_type = 'DERIVED_FROM_MISSING_PARENT';
 END;
