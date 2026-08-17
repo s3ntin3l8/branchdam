@@ -95,10 +95,12 @@ another look at any point -- including after addressing feedback -- by commentin
 [`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for replying to and resolving
 Hermes's inline comments.
 
-PRs opened from a fork won't get GitHub Actions secrets (a GitHub security boundary, not a
-bug), so the automated review that normally runs on `opened` won't complete for fork PRs -- a
-maintainer can still trigger it manually by commenting `@s3ntin3l8-hermes Review` on the PR,
-which runs in the base repo's context.
+Auto-review only runs for PRs from this repo, not forks -- `hermes.yml`'s `auto-review` job is
+gated on `head.repo.full_name == github.repository`, since a `pull_request` event otherwise runs
+a fork's own copy of the workflow file on the self-hosted runner (this repo is public). A
+maintainer can still get a review on a fork PR by commenting `@s3ntin3l8-hermes Review` --
+`issue_comment` always runs the default branch's copy of the workflow, in the base repo's
+context, gated by commenter trust rather than fork origin.
 
 ## Templates
 

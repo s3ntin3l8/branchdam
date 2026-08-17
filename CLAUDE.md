@@ -265,7 +265,11 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   (produced 5 separate review submissions across 5 pushes on a mullion PR before this was
   learned) or to `pull_request_review`/`pull_request_review_comment` (a submitted review's body
   routinely contains the mention string, which would self-trigger). Not in branch protection's
-  required checks -- a review bot going down shouldn't block every merge.
+  required checks -- a review bot going down shouldn't block every merge. `auto-review` is
+  additionally gated to `head.repo.full_name == github.repository` -- this repo is public and
+  the runner is self-hosted, so without that guard a fork PR's own copy of the workflow file
+  (which a `pull_request` event runs) could execute arbitrary steps on the homelab runner. Found
+  by hermes's own review of the PR that introduced this workflow (#76) and fixed same-day.
 
 ## Documentation map
 
