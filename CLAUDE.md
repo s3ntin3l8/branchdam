@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Guidelines
+
+- **Use the repo's templates.** When opening a PR, fill in
+  [`.github/pull_request_template.md`](.github/pull_request_template.md) rather than writing a
+  free-form body -- its checklist encodes what actually breaks CI (golangci-lint separately from
+  `make lint`, sqlc codegen, DTO hand-sync) and is meant to be ticked honestly, not skipped. When
+  filing an issue, use the
+  [issue blueprint](.github/ISSUE_TEMPLATE/issue-blueprint.md) (Context/Scope/Out of
+  scope/Acceptance criteria). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full pre-PR
+  checklist.
+
 ## Commands
 
 ### Backend (Go)
