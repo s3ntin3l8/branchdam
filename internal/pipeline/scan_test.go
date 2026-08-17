@@ -118,10 +118,9 @@ func scanTestDeps(t *testing.T, database *db.DB, rootPath string, locationID int
 
 // scanTestDepsN is scanTestDeps with the worker count and queue depth
 // exposed, for tests that need to control the pool's capacity directly --
-// e.g. TestRunScanExceedsResultsBufferAndQueueDepth, which deliberately
-// sizes the queue small enough that a file count well above
-// batchSize*2+queueDepth+workerCount would have tripped #93's bug if
-// drainAndCommit didn't start consuming concurrently with the walk.
+// e.g. TestDrainAndCommitRunsConcurrentlyWithWalk, which needs a generous
+// queue depth so queue capacity itself is never the limiting factor and
+// the test exercises only the property it's named for.
 func scanTestDepsN(t *testing.T, database *db.DB, rootPath string, locationID int64, workerCount, queueDepth int) ScanDeps {
 	t.Helper()
 	pool := workers.New[string](workerCount, queueDepth)

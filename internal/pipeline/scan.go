@@ -139,12 +139,22 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	//
 	// walkDone is joined explicitly (rather than relying on close(results)
 	// having already happened-before drainAndCommit's return) so that
-	// reading walkErr below is safe regardless of *why* drainAndCommit
-	// returned -- today its only return is the `!ok` branch after
-	// close(results), but a future shutdown-cancellation path (returning
-	// early on ctx.Done(), say) would otherwise let drainAndCommit return
-	// while this goroutine is still running and still writing walkErr, an
-	// unsynchronized read.
+	// reading walkErr below is unambiguously safe -- today drainAndCommit
+	// has only one return path, the `!ok` branch after close(results), so
+	// this join is currently redundant with that happens-before edge, but
+	// it documents the actual requirement instead of an implicit one.
+	//
+	// That requirement matters for whoever adds shutdown handling here
+	// (#92): an early return from drainAndCommit on its own (e.g. on
+	// ctx.Done()) does NOT make this join safe to keep as-is -- pool
+	// workers still blocked on `results <- *result` have no other way out
+	// (their select's other case is jobCtx.Done(), and jobCtx comes from
+	// the pool's own long-lived Run(ctx), not this scan's ctx, per
+	// ScanDeps' doc comment), so wg.Wait() would never return, close(results)
+	// and close(walkDone) would never run, and <-walkDone below would block
+	// forever. A shutdown path needs to keep draining `results` (or reach
+	// the pool's own ctx) until the walk goroutine actually finishes, not
+	// just add an early return to drainAndCommit.
 	var walkErr error
 	walkDone := make(chan struct{})
 	go func() {
