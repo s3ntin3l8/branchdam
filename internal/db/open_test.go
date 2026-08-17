@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/pressly/goose/v3"
+
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
