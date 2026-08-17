@@ -1,0 +1,7 @@
+TITLE: SAMPLE_PROJECT
+FCM: DROP FRAME
+
+001  AX       V     C        00:00:00:00 00:00:05:00 01:00:00:00 01:00:05:00
+* FROM CLIP WITH TRANSFER: D:\Footage\CameraA\Clip001.mov
+* FROM CLIP: Clip001.mov
+* SOURCE FILE: /storage/projects/video/B002_C010.ARW
