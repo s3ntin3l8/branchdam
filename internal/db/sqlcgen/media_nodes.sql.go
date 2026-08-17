@@ -8,11 +8,12 @@ package sqlcgen
 import (
 	"context"
 	"database/sql"
-	"strings"
 )
 
 const archiveMediaNode = `-- name: ArchiveMediaNode :exec
-UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?1
+;
+
+UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?
 `
 
 // Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
@@ -31,7 +32,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -68,6 +70,8 @@ func (q *Queries) GetLiveNodeByPath(ctx context.Context, filePath string) (Media
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
 	)
 	return i, err
 }
@@ -78,7 +82,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE id = ?1
 `
@@ -114,6 +119,8 @@ func (q *Queries) GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, er
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
 	)
 	return i, err
 }
@@ -124,7 +131,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
 LIMIT 1
@@ -161,24 +169,29 @@ func (q *Queries) GetMissingNodeByFastHash(ctx context.Context, fastHash *string
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
 	)
 	return i, err
 }
 
 const insertMediaNode = `-- name: InsertMediaNode :one
+;
+
 INSERT INTO media_nodes (
     node_uuid, storage_location_id, file_path, file_name, file_ext,
     size_bytes, mtime_unix, fast_hash, full_hash, phash,
     indexing_status, graph_status, lifecycle_state,
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
+    camera_serial, lens_model,
     first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5,
     ?6, ?7, ?8, ?9, ?10,
     ?11, ?12, ?13,
     ?14, ?15, ?16,
-    ?17, ?18, ?19,
+    ?17, ?18, ?19, ?20, ?21,
     unixepoch(), unixepoch(), unixepoch(), unixepoch()
 )
 RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -186,7 +199,8 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           indexing_status, graph_status, lifecycle_state, superseded_by,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
-          first_seen_at, last_seen_at, created_at, updated_at
+          first_seen_at, last_seen_at, created_at, updated_at,
+          camera_serial, lens_model
 `
 
 type InsertMediaNodeParams struct {
@@ -209,6 +223,8 @@ type InsertMediaNodeParams struct {
 	CapturedAtUnix     sql.NullInt64
 	CameraModel        sql.NullString
 	FilenameStem       sql.NullString
+	CameraSerial       sql.NullString
+	LensModel          sql.NullString
 }
 
 func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error) {
@@ -232,6 +248,8 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		arg.CapturedAtUnix,
 		arg.CameraModel,
 		arg.FilenameStem,
+		arg.CameraSerial,
+		arg.LensModel,
 	)
 	var i MediaNode
 	err := row.Scan(
@@ -260,6 +278,8 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
 	)
 	return i, err
 }
@@ -270,7 +290,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -313,6 +334,8 @@ func (q *Queries) ListLiveNodesByDocumentID(ctx context.Context, documentID sql.
 			&i.LastSeenAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
 		); err != nil {
 			return nil, err
 		}
@@ -333,7 +356,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -376,6 +400,8 @@ func (q *Queries) ListLiveNodesByFastHash(ctx context.Context, fastHash *string)
 			&i.LastSeenAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
 		); err != nil {
 			return nil, err
 		}
@@ -396,7 +422,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -439,6 +466,8 @@ func (q *Queries) ListLiveNodesByFilenameStem(ctx context.Context, filenameStem 
 			&i.LastSeenAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
 		); err != nil {
 			return nil, err
 		}
@@ -459,7 +488,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
@@ -509,6 +539,90 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 			&i.LastSeenAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTier3Candidates = `-- name: ListTier3Candidates :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE camera_serial = ?1
+  AND captured_at_unix >= ?2
+  AND captured_at_unix <= ?3
+  AND id <> ?4
+  AND lifecycle_state != 'ARCHIVED'
+`
+
+type ListTier3CandidatesParams struct {
+	CameraSerial     sql.NullString
+	CapturedAtUnix   sql.NullInt64
+	CapturedAtUnix_2 sql.NullInt64
+	ID               int64
+}
+
+// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
+// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
+// excluding a given node ID.
+func (q *Queries) ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listTier3Candidates,
+		arg.CameraSerial,
+		arg.CapturedAtUnix,
+		arg.CapturedAtUnix_2,
+		arg.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
 		); err != nil {
 			return nil, err
 		}
@@ -524,6 +638,8 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 }
 
 const markNodeMissing = `-- name: MarkNodeMissing :exec
+;
+
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -533,49 +649,24 @@ func (q *Queries) MarkNodeMissing(ctx context.Context, id int64) error {
 }
 
 const markUnseenNodesMissing = `-- name: MarkUnseenNodesMissing :execrows
+;
+
 UPDATE media_nodes
 SET lifecycle_state = 'MISSING', updated_at = unixepoch()
 WHERE storage_location_id = ?1
   AND lifecycle_state = 'ACTIVE'
   AND last_seen_at < ?2
-  AND file_path NOT IN (/*SLICE:keep_active*/?)
+  AND file_path NOT IN (SELECT value FROM json_each(?3));
 `
 
 type MarkUnseenNodesMissingParams struct {
 	StorageLocationID int64
-	BeforeUnix        int64
-	KeepActive        []string
+	LastSeenAt        int64
+	JsonEach          interface{}
 }
 
-// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
-// scanned storage location whose last_seen_at predates the scan's start is
-// gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
-// last_seen_at on every node the walk actually saw and committed, so anything
-// still old here was genuinely unseen this scan. KeepActive is the pass's
-// seen-but-uncertain set -- paths the walk saw but did not reliably commit
-// (processFile error, submit refused, dropped result, batch Commit failure) --
-// and is excluded from the sweep: a file on disk with a stale last_seen_at is
-// not proof it's gone. SQLite's per-statement variable limit (32766 on modern
-// builds) bounds how large KeepActive can be; beyond that the caller would
-// need to chunk the sweep, which it does not. Scoped by storage_location_id so
-// a scan of one mount never touches another. unixepoch() is 1s granularity, so
-// a node last seen in a scan that happened to end in the SAME wall-clock
-// second as this scan's start may survive one extra scan -- it is swept the
-// next round, which is delayed-not-wrong.
 func (q *Queries) MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error) {
-	query := markUnseenNodesMissing
-	var queryParams []interface{}
-	queryParams = append(queryParams, arg.StorageLocationID)
-	queryParams = append(queryParams, arg.BeforeUnix)
-	if len(arg.KeepActive) > 0 {
-		for _, v := range arg.KeepActive {
-			queryParams = append(queryParams, v)
-		}
-		query = strings.Replace(query, "/*SLICE:keep_active*/?", strings.Repeat(",?", len(arg.KeepActive))[1:], 1)
-	} else {
-		query = strings.Replace(query, "/*SLICE:keep_active*/?", "NULL", 1)
-	}
-	result, err := q.db.ExecContext(ctx, query, queryParams...)
+	result, err := q.db.ExecContext(ctx, markUnseenNodesMissing, arg.StorageLocationID, arg.LastSeenAt, arg.JsonEach)
 	if err != nil {
 		return 0, err
 	}
@@ -583,6 +674,8 @@ func (q *Queries) MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNode
 }
 
 const rebaseMissingNodePath = `-- name: RebaseMissingNodePath :exec
+;
+
 UPDATE media_nodes
 SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
     lifecycle_state = 'ACTIVE', mtime_unix = ?5,
@@ -613,6 +706,8 @@ func (q *Queries) RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNo
 }
 
 const setSupersededBy = `-- name: SetSupersededBy :exec
+;
+
 UPDATE media_nodes SET superseded_by = ?2, updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -629,6 +724,8 @@ func (q *Queries) SetSupersededBy(ctx context.Context, arg SetSupersededByParams
 }
 
 const touchMediaNode = `-- name: TouchMediaNode :exec
+;
+
 UPDATE media_nodes
 SET mtime_unix = ?2, last_seen_at = unixepoch(),
     lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
@@ -651,6 +748,8 @@ func (q *Queries) TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) 
 }
 
 const updateMediaNodeFullHash = `-- name: UpdateMediaNodeFullHash :exec
+;
+
 UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -668,6 +767,8 @@ func (q *Queries) UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNo
 }
 
 const updateMediaNodeGraphStatus = `-- name: UpdateMediaNodeGraphStatus :exec
+;
+
 UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1
 `
 

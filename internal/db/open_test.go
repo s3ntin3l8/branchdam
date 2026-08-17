@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/pressly/goose/v3"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
 func openTestDB(t *testing.T) *DB {
@@ -116,8 +117,8 @@ func TestMigrateUpDownUp(t *testing.T) {
 	}
 	assertTablesExist(t, writerDB)
 
-	if err := goose.Down(writerDB, migrationsDir); err != nil {
-		t.Fatalf("goose Down: %v", err)
+	if err := goose.DownTo(writerDB, migrationsDir, 0); err != nil {
+		t.Fatalf("goose DownTo 0: %v", err)
 	}
 	assertTablesAbsent(t, writerDB)
 
@@ -169,5 +170,83 @@ func assertTablesAbsent(t *testing.T, writerDB *sql.DB) {
 		if !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("table %q still present after migrate down (err=%v)", table, err)
 		}
+	}
+}
+
+func TestListTier3Candidates(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		sl, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name:     "test_tier3_loc",
+			RootPath: "/tmp/test_tier3",
+			Tier:     "PROJECTS",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+
+		node1, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "00000000-0000-7000-8000-000000000001",
+			StorageLocationID: sl.ID,
+			FilePath:          "/tmp/test_tier3/file1.jpg",
+			FileName:          "file1.jpg",
+			FileExt:           "jpg",
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+			CapturedAtUnix:    sql.NullInt64{Int64: 1000, Valid: true},
+			CameraSerial:      sql.NullString{String: "SER123", Valid: true},
+			LensModel:         sql.NullString{String: "Lens 50mm", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+
+		node2, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "00000000-0000-7000-8000-000000000002",
+			StorageLocationID: sl.ID,
+			FilePath:          "/tmp/test_tier3/file2.jpg",
+			FileName:          "file2.jpg",
+			FileExt:           "jpg",
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+			CapturedAtUnix:    sql.NullInt64{Int64: 1001, Valid: true},
+			CameraSerial:      sql.NullString{String: "SER123", Valid: true},
+			LensModel:         sql.NullString{String: "Lens 50mm", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+
+		candidates, err := q.ListTier3Candidates(ctx, sqlcgen.ListTier3CandidatesParams{
+			CameraSerial:     sql.NullString{String: "SER123", Valid: true},
+			CapturedAtUnix:   sql.NullInt64{Int64: 999, Valid: true},
+			CapturedAtUnix_2: sql.NullInt64{Int64: 1003, Valid: true},
+			ID:               node1.ID,
+		})
+		if err != nil {
+			return err
+		}
+		if len(candidates) != 1 {
+			t.Fatalf("got %d candidates, want 1", len(candidates))
+		}
+		if candidates[0].ID != node2.ID {
+			t.Errorf("candidate ID = %d, want %d", candidates[0].ID, node2.ID)
+		}
+		if candidates[0].CameraSerial.String != "SER123" {
+			t.Errorf("camera serial = %q, want SER123", candidates[0].CameraSerial.String)
+		}
+		if candidates[0].LensModel.String != "Lens 50mm" {
+			t.Errorf("lens model = %q, want Lens 50mm", candidates[0].LensModel.String)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("transaction failed: %v", err)
 	}
 }

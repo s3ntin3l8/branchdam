@@ -156,6 +156,8 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 		DocumentID:         nullString(r.DocumentID),
 		DerivedFromID:      nullString(r.DerivedFromID),
 		CameraModel:        nullString(r.CameraModel),
+		CameraSerial:       nullString(r.SerialNumber),
+		LensModel:          nullString(r.LensModel),
 		FilenameStem:       nullString(filenameStem(r.FileName)),
 	}
 	if r.PHash != nil {

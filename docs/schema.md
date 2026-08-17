@@ -111,3 +111,11 @@ One follow-up, not blocking: `v_media_edges_resolved.parent_alive`/`parent_missi
 boolean expressions in a view — generate as Go `interface{}` rather than `bool`, because sqlc
 can't infer a type for a boolean predicate over a view. Add an `overrides:` entry in `sqlc.yaml`
 mapping those two columns to `bool` when `internal/graph` (PR 7) starts consuming them.
+
+## Post-Increment-1 Additions
+
+### Issue #39 (Tier-3 EXIF Fields Migration)
+- Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.
+- Added partial index `ix_media_nodes_camera_time ON media_nodes(camera_serial, captured_at_unix) WHERE camera_serial IS NOT NULL`.
+- Added migration `00002_tier3_camera_fields.sql`.
+- Added `ListTier3Candidates` query in `internal/db/queries/media_nodes.sql`.

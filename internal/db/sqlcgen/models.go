@@ -62,6 +62,8 @@ type MediaNode struct {
 	LastSeenAt         int64
 	CreatedAt          int64
 	UpdatedAt          int64
+	CameraSerial       sql.NullString
+	LensModel          sql.NullString
 }
 
 type NodeMetadatum struct {
