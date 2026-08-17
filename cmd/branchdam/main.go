@@ -94,7 +94,7 @@ func main() {
 	pool := workers.New[string](hashWorkers, 1024)
 	pool.Run(ctx)
 
-	engine := graph.NewEngine(database, log, graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{})
+	engine := graph.NewEngine(database, log, graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{}, graph.HeuristicSpatialTemporalResolver{})
 	hub := sse.New()
 
 	var supervisor *pipeline.WatcherSupervisor

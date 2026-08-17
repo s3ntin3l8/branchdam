@@ -2,9 +2,12 @@ package graph
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 )
 
 // rawExts are camera-native formats a Tier-2 resolver treats as a possible
@@ -127,6 +130,76 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 			Confidence: confidence,
 			Tier:       2,
 			Resolver:   "filename_stem",
+			Evidence:   evidence,
+		})
+	}
+	return candidates, nil
+}
+
+// HeuristicSpatialTemporalResolver matches candidate parents sharing camera
+// serial number within a ±2s capture timestamp window (Tier 3, confidence band
+// 0.70–0.89). Score starts at 0.70 (serial + time match), +0.10 for lens model
+// match, +0.09 for pHash Hamming distance <= 10. Hamming distance > 10 emits no
+// candidate. A node with NULL phash on either side caps confidence below 0.80 (0.79).
+type HeuristicSpatialTemporalResolver struct{}
+
+func (HeuristicSpatialTemporalResolver) Name() string { return "heuristic_spatial_temporal" }
+func (HeuristicSpatialTemporalResolver) Tier() int    { return 3 }
+
+func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node, lookup Lookup) ([]Candidate, error) {
+	if child.CameraSerial == "" || child.CapturedAt == nil {
+		return nil, nil
+	}
+
+	parents, err := lookup.BySpatialTemporal(ctx, child.CameraSerial, *child.CapturedAt, 2*time.Second, child.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var candidates []Candidate
+	for _, parent := range parents {
+		if parent.ID == child.ID || parent.CapturedAt == nil {
+			continue
+		}
+
+		confidence := 0.70
+		deltaSec := math.Abs(child.CapturedAt.Sub(*parent.CapturedAt).Seconds())
+		evidence := map[string]any{
+			"camera_serial":         child.CameraSerial,
+			"capture_delta_seconds": deltaSec,
+		}
+
+		if child.LensModel != "" && child.LensModel == parent.LensModel {
+			confidence += 0.10
+			evidence["lens_model"] = child.LensModel
+		}
+
+		if child.PHash != nil && parent.PHash != nil {
+			dist := hashing.HammingDistance(*child.PHash, *parent.PHash)
+			evidence["hamming_distance"] = dist
+			if dist > 10 {
+				continue
+			}
+			confidence += 0.09
+		} else {
+			evidence["phash_missing"] = true
+			if confidence > 0.79 {
+				confidence = 0.79
+			}
+		}
+
+		confidence = math.Round(confidence*100) / 100
+		if confidence > 0.89 {
+			confidence = 0.89
+		}
+
+		candidates = append(candidates, Candidate{
+			ParentID:   parent.ID,
+			ChildID:    child.ID,
+			Rel:        inferRelationship(child.FileName, child.FileExt, parent.FileExt),
+			Confidence: confidence,
+			Tier:       3,
+			Resolver:   "heuristic_spatial_temporal",
 			Evidence:   evidence,
 		})
 	}
