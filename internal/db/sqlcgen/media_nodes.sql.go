@@ -416,6 +416,70 @@ func (q *Queries) ListLiveNodesByFastHash(ctx context.Context, fastHash *string)
 	return items, nil
 }
 
+const listLiveNodesByFileName = `-- name: ListLiveNodesByFileName :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED'
+`
+
+// Look up live media nodes sharing exact file_name for fallback path matching.
+func (q *Queries) ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodesByFileName, fileName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveNodesByFilenameStem = `-- name: ListLiveNodesByFilenameStem :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,

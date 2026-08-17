@@ -29,11 +29,16 @@ type Config struct {
 	Agent      Agent    `yaml:"agent"`
 	Authz      Authz    `yaml:"authz"`
 
-	// StorageLocations seeds the storage_locations table on startup (PR 1).
-	// Tier must be one of the five values fix #1 in docs/schema.md defines:
-	// TIER0_LOCAL_STAGING, TIER1_LOCAL_SCRATCH, TIER2_EXPORTS,
-	// TIER3_MASTER_ARCHIVE, PROJECTS.
 	StorageLocations []StorageLocation `yaml:"storageLocations"`
+
+	// PathRewrites maps host path prefixes to container path prefixes (PR 44/45).
+	PathRewrites []PathRewrite `yaml:"pathRewrites"`
+}
+
+// PathRewrite maps host path prefixes to container path prefixes.
+type PathRewrite struct {
+	From string `yaml:"from"`
+	To   string `yaml:"to"`
 }
 
 // Authz configures group-based authorization (internal/auth, PR 2 / issue 37).

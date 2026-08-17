@@ -115,6 +115,18 @@ WHERE camera_serial = ?1
   AND id <> ?4
   AND lifecycle_state != 'ARCHIVED';
 
+-- name: ListLiveNodesByFileName :many
+-- Look up live media nodes sharing exact file_name for fallback path matching.
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED';
+
 -- name: UpdateMediaNodeGraphStatus :exec
 UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1;
 
