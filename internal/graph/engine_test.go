@@ -461,3 +461,64 @@ func TestBelowFloorCandidatesNeverPersisted(t *testing.T) {
 		t.Errorf("found %d edges, want 0 (below-floor candidate must never be written)", len(rows))
 	}
 }
+
+func TestPerTierAutoAcceptThreshold(t *testing.T) {
+	tests := []struct {
+		name            string
+		tier            int
+		confidence      float64
+		wantReviewState string
+	}{
+		{
+			name:            "Tier 3 candidate at 0.84 lands NEEDS_REVIEW",
+			tier:            3,
+			confidence:      0.84,
+			wantReviewState: "NEEDS_REVIEW",
+		},
+		{
+			name:            "Tier 3 candidate at 0.86 lands AUTO_ACCEPTED",
+			tier:            3,
+			confidence:      0.86,
+			wantReviewState: "AUTO_ACCEPTED",
+		},
+		{
+			name:            "Tier 2 candidate at 0.86 lands NEEDS_REVIEW",
+			tier:            2,
+			confidence:      0.86,
+			wantReviewState: "NEEDS_REVIEW",
+		},
+		{
+			name:            "Tier 2 candidate at 0.90 lands AUTO_ACCEPTED",
+			tier:            2,
+			confidence:      0.90,
+			wantReviewState: "AUTO_ACCEPTED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := openTestDB(t)
+			ctx := context.Background()
+			locationID := seedLocation(t, database)
+
+			p := seedNode(t, database, locationID, nodeFixture{Path: "/p-" + tt.name + ".jpg", FileName: "p.jpg", FileExt: "jpg"})
+			c := seedNode(t, database, locationID, nodeFixture{Path: "/c-" + tt.name + ".jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+			engine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+				ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: tt.confidence, Tier: tt.tier,
+				Resolver: "test-resolver", Evidence: map[string]any{},
+			}})
+
+			edges, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+			if err != nil {
+				t.Fatalf("ResolveAndCommit: %v", err)
+			}
+			if len(edges) != 1 {
+				t.Fatalf("edges count = %d, want 1", len(edges))
+			}
+			if edges[0].ReviewState != tt.wantReviewState {
+				t.Errorf("ReviewState = %q, want %q", edges[0].ReviewState, tt.wantReviewState)
+			}
+		})
+	}
+}
