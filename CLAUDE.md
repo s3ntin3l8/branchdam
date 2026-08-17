@@ -12,6 +12,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   [issue blueprint](.github/ISSUE_TEMPLATE/issue-blueprint.md) (Context/Scope/Out of
   scope/Acceptance criteria). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full pre-PR
   checklist.
+- **Addressing review feedback (Hermes or human).** Fixing the code alone is not enough --
+  always reply to and resolve the inline conversation too. Thread resolution is GraphQL-only
+  (not derivable from the REST comment id), so it's two calls:
+  ```sh
+  # 1. Reply to the inline comment (REST, uses the comment id)
+  gh api repos/s3ntin3l8/branchdam/pulls/<PR>/comments/<comment_id>/replies -f body="Fixed in <sha>"
+  # 2. Resolve the thread (GraphQL only -- needs the thread node id from a reviewThreads
+  #    query on the PR, NOT the REST comment id)
+  gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
+  ```
 
 ## Commands
 
@@ -242,6 +252,20 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   `ci-go.yml`/`ci-node.yml` workflows already upload coverage under. Codecov reads this file from
   the default branch, not from whichever PR introduces it -- a PR editing `codecov.yml` is itself
   still evaluated under whatever config was already on `main`.
+- **`hermes.yml`**: automated PR review by the `s3ntin3l8-hermes[bot]` GitHub App, via the
+  shared `s3ntin3l8/.github/.github/workflows/hermes-review.yml@main` reusable workflow. The
+  self-hosted runner (`gh-runner-01-branchdam-01`) does not run the review agent itself -- it
+  mints a GitHub App token (for trigger routing only), checks the mention, and relays the prompt
+  over the LAN to a Hermes API server on a separate host (hermes-01); the agent executes there
+  and posts the review back to GitHub with its own token. This is why a LAN-reachable
+  self-hosted runner is required and a GitHub-hosted runner cannot substitute. Two triggers:
+  `auto-review` fires once per PR (`opened` if non-draft, `ready_for_review` if it started as a
+  draft), `on-demand-review` fires on an `@s3ntin3l8-hermes` mention, gated to
+  MEMBER/OWNER/COLLABORATOR commenters. Deliberately **not** subscribed to `synchronize`
+  (produced 5 separate review submissions across 5 pushes on a mullion PR before this was
+  learned) or to `pull_request_review`/`pull_request_review_comment` (a submitted review's body
+  routinely contains the mention string, which would self-trigger). Not in branch protection's
+  required checks -- a review bot going down shouldn't block every merge.
 
 ## Documentation map
 

@@ -1,0 +1,84 @@
+name: Hermes (review)
+
+# Two ways to get a review from the s3ntin3l8-hermes bot:
+#   1. auto-review    -> exactly once per PR: on `opened` if it starts non-draft,
+#      or on `ready_for_review` if it starts as a draft.
+#   2. on-demand-review -> comment "@s3ntin3l8-hermes Review" (or "Triage" on
+#      an issue) any time you want another look -- including every follow-up
+#      after the initial auto-review.
+# Both call the same reusable workflow (s3ntin3l8/.github/.github/workflows/
+# hermes-review.yml@main) with a different `mode`, gated by github.event_name
+# so each job only runs for its own trigger.
+#
+# ARCHITECTURE: the self-hosted runner below does NOT run the agent itself --
+# it mints a GitHub App token (only to resolve the PR/issue for trigger
+# routing), checks the mention, and relays the prompt to a Hermes API server
+# on hermes-01 over the LAN. The agent executes there (full tools/memory/
+# skills) and posts the review back to GitHub itself using its own App token.
+# This is why a LAN-reachable self-hosted runner is mandatory here and a
+# GitHub-hosted runner cannot substitute. See the reusable workflow
+# (s3ntin3l8/.github/.github/workflows/hermes-review.yml) for the full design.
+#
+# IMPORTANT: do NOT add `synchronize` back. It re-triggers a fresh review on
+# EVERY subsequent push, which on a PR under active iteration is an unbounded
+# review loop (each review's comments prompt more commits, each commit fires
+# another review...). Confirmed in practice on mullion's PR #16: 5 pushes
+# while responding to feedback produced 5 separate Hermes review submissions.
+# `ready_for_review` is safe to keep alongside `opened` -- it fires at most
+# once per PR (the draft->ready transition), not on every push.
+#
+# IMPORTANT: do NOT subscribe to `pull_request_review` or
+# `pull_request_review_comment` either. A submitted review fires those
+# events, and review bodies routinely contain the "@s3ntin3l8-hermes"
+# string, which would re-trigger this workflow with no human summon.
+# `issue_comment` alone covers both PR-conversation comments and issue
+# comments.
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+    # `opened`           => review once, if the PR starts non-draft.
+    # `ready_for_review`  => review once, if the PR started as a draft (its
+    # `opened` event is skipped below since draft was true at that point).
+  issue_comment:
+    types: [created]
+    # Covers both PR-conversation comments and issue comments. The reusable
+    # workflow's "Check mention" step enforces the "@s3ntin3l8-hermes" substring
+    # in on-demand mode (default), so a plain comment without the mention is a
+    # cheap no-op, not a review.
+
+jobs:
+  auto-review:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.actor != 's3ntin3l8-hermes[bot]' &&
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]' &&
+      github.event.pull_request.draft == false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mode: auto # review on trigger, no @mention needed
+      mention-trigger: s3ntin3l8-hermes
+    secrets: inherit # pragma: allowlist secret
+
+  on-demand-review:
+    # Restrict to trusted commenters -- otherwise any user could post
+    # "@s3ntin3l8-hermes Review" and trigger a run that inherits HERMES_*
+    # secrets and executes on the self-hosted runner.
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.actor != 's3ntin3l8-hermes[bot]' &&
+      contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
+    secrets: inherit # pragma: allowlist secret
