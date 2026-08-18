@@ -33,6 +33,15 @@ authz:
   groups:
     - branchdam-admins
 
+immich:
+  # External-library scan trigger (phase 7 #55). Leave apiUrl empty to disable
+  # the sync worker. exportPath is where Immich's external library mount
+  # indexes -- the worker enqueues live nodes under it.
+  apiUrl: ${IMMICH_API_URL}
+  apiKey: ${IMMICH_API_KEY}
+  libraryId: <library-uuid>
+  exportPath: /storage/exports/immich
+
 
 # One entry per mounted storage tier. Tier must be one of:
 #   TIER0_LOCAL_STAGING, TIER1_LOCAL_SCRATCH, TIER2_EXPORTS,
