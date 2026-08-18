@@ -11,10 +11,16 @@ import (
 
 // Worker is the periodic loop that drains remote_sync_state for one remote,
 // driving NOT_QUEUED -> PENDING_CLOUD_PUSH -> PUSHING -> PUSHED/PUSH_FAILED
-// via Manager. Each drain tick (1) enqueues live nodes under exportPath that
-// aren't yet tracked for this remote, and (2) processes one PENDING batch
-// through the injected PushFunc. The PushFunc is the actual outbound call
-// (e.g. the Immich client's TriggerScan); the worker itself stays HTTP-free.
+// via Manager. Each drain tick (1) re-claims PUSH_FAILED rows old enough to
+// retry, (2) enqueues live nodes under exportPath that aren't yet tracked for
+// this remote, and (3) processes one PENDING batch through the injected
+// PushFunc. The PushFunc is the actual outbound call (e.g. the Immich
+// client's TriggerScan); the worker itself stays HTTP-free.
+//
+// PUSHED means "the remote was asked to process the node" (for Immich, the
+// library scan was requested) -- NOT that the remote has finished indexing it.
+// With zero-copy disk indexing there is no completion signal to wait on, so
+// PUSHED is set at scan-trigger time.
 type Worker struct {
 	manager    *Manager
 	remote     string
