@@ -119,3 +119,8 @@ mapping those two columns to `bool` when `internal/graph` (PR 7) starts consumin
 - Added partial index `ix_media_nodes_camera_time ON media_nodes(camera_serial, captured_at_unix) WHERE camera_serial IS NOT NULL`.
 - Added migration `00002_tier3_camera_fields.sql`.
 - Added `ListTier3Candidates` query in `internal/db/queries/media_nodes.sql`.
+
+### Phase 7 (#53): `remote_sync_state`'s first write path
+- `remote_sync_state` is no longer DDL-only. Phase 7 landed its first write path (#53): the query surface + `internal/sync` push state machine — idempotent on the `(node_id, remote)` PK, per-remote-scoped, with an atomic claim.
+- Plus the `ListLiveNodesForSync` enqueue source (#55) and the `ListRemoteSyncStateByNode` sync-status read (#156).
+- No schema migration was needed — the table already existed in `00001_init.sql`.
