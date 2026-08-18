@@ -998,3 +998,77 @@ func (q *Queries) UpdateMediaNodeGraphStatus(ctx context.Context, arg UpdateMedi
 	_, err := q.db.ExecContext(ctx, updateMediaNodeGraphStatus, arg.ID, arg.GraphStatus)
 	return err
 }
+
+const getMediaNodeByUUID = `-- name: GetMediaNodeByUUID :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE node_uuid = ?1
+`
+
+func (q *Queries) GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeByUUID, nodeUuid)
+	var i MediaNode
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.StorageLocationID,
+		&i.FilePath,
+		&i.FileName,
+		&i.FileExt,
+		&i.SizeBytes,
+		&i.MtimeUnix,
+		&i.FastHash,
+		&i.FullHash,
+		&i.Phash,
+		&i.IndexingStatus,
+		&i.GraphStatus,
+		&i.LifecycleState,
+		&i.SupersededBy,
+		&i.OriginalDocumentID,
+		&i.DocumentID,
+		&i.DerivedFromID,
+		&i.CapturedAtUnix,
+		&i.CameraModel,
+		&i.FilenameStem,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
+	)
+	return i, err
+}
+
+const rebaseNodePathByUUID = `-- name: RebaseNodePathByUUID :exec
+UPDATE media_nodes
+SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
+    lifecycle_state = 'ACTIVE', mtime_unix = ?5,
+    last_seen_at = unixepoch(), updated_at = unixepoch()
+WHERE node_uuid = ?1
+`
+
+type RebaseNodePathByUUIDParams struct {
+	NodeUuid          string
+	FilePath          string
+	FileName          string
+	StorageLocationID int64
+	MtimeUnix         int64
+}
+
+func (q *Queries) RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error {
+	_, err := q.db.ExecContext(ctx, rebaseNodePathByUUID,
+		arg.NodeUuid,
+		arg.FilePath,
+		arg.FileName,
+		arg.StorageLocationID,
+		arg.MtimeUnix,
+	)
+	return err
+}

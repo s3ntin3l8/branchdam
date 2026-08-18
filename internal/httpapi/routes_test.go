@@ -1340,3 +1340,277 @@ func TestListJobsFiltered(t *testing.T) {
 func toStr(v int64) string {
 	return fmt.Sprintf("%d", v)
 }
+
+func serverWithGuard(t *testing.T) (*Server, *db.DB, *storage.Guard, string, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	exports := filepath.Join(root, "exports")
+	archive := filepath.Join(root, "archive")
+	for _, d := range []string{staging, exports, archive} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	resStaging, _ := filepath.EvalSymlinks(staging)
+	resExports, _ := filepath.EvalSymlinks(exports)
+	resArchive, _ := filepath.EvalSymlinks(archive)
+
+	dbPath := filepath.Join(root, "routes.db")
+	database, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	ctx := context.Background()
+	var loc1, loc2, loc3 sqlcgen.StorageLocation
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc1, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "staging", RootPath: resStaging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		loc2, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "exports", RootPath: resExports, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		loc3, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "archive", RootPath: resArchive, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("upsert locations: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{
+		{ID: loc1.ID, Name: "staging", RootPath: resStaging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: false},
+		{ID: loc2.ID, Name: "exports", RootPath: resExports, Tier: "TIER2_EXPORTS", ReadOnly: false},
+		{ID: loc3.ID, Name: "archive", RootPath: resArchive, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
+	})
+
+	srv := New(Deps{
+		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		DB:      database,
+		Guard:   guard,
+		Prober:  probe.New(),
+		Engine:  graph.NewEngine(database, nil),
+		Hub:     sse.New(),
+		Version: "test",
+	})
+
+	return srv, database, guard, resStaging, resExports, resArchive
+}
+
+func TestAgentHandshake_Success_And_Auth(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+	ctx := context.Background()
+
+	// Enqueue and mark an event processed for agent-alpha
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.EnqueueAgentEvent(ctx, sqlcgen.EnqueueAgentEventParams{
+			EventUuid:   "018f0000-0000-7000-8000-000000000001",
+			AgentID:     "agent-alpha",
+			EventType:   "EVENT_NODE_CREATED",
+			PayloadJson: `{"filePath":"/test.raw"}`,
+		})
+		if err != nil {
+			return err
+		}
+		return q.MarkAgentEventProcessed(ctx, ev.ID)
+	})
+	if err != nil {
+		t.Fatalf("setup event: %v", err)
+	}
+
+	// 1. Missing auth header -> 401
+	reqNoAuth := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", bytesOfJSON(t, map[string]string{
+		"agentId": "agent-alpha",
+	}))
+	reqNoAuth.Header.Set("Content-Type", "application/json")
+	rrNoAuth := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrNoAuth, reqNoAuth)
+	if rrNoAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 Unauthorized", rrNoAuth.Code)
+	}
+
+	// 2. Valid handshake request -> 200 OK with server version and acknowledged event
+	reqAuth := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", bytesOfJSON(t, map[string]string{
+		"agentId":       "agent-alpha",
+		"clientVersion": "0.1.0",
+	}))
+	reqAuth.Header.Set("Content-Type", "application/json")
+	reqAuth.Header.Set("X-API-Key", routeTestAgentKey)
+	rrAuth := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrAuth, reqAuth)
+
+	if rrAuth.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rrAuth.Code, rrAuth.Body.String())
+	}
+
+	var res struct {
+		OK                    bool   `json:"ok"`
+		ServerVersion         string `json:"serverVersion"`
+		ServerTimeUnix        int64  `json:"serverTimeUnix"`
+		AcknowledgedEventUUID string `json:"acknowledgedEventUuid"`
+		PendingEventsCount    int64  `json:"pendingEventsCount"`
+	}
+	if err := json.Unmarshal(rrAuth.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal handshake response: %v", err)
+	}
+
+	if !res.OK || res.ServerVersion != "test" || res.AcknowledgedEventUUID != "018f0000-0000-7000-8000-000000000001" {
+		t.Errorf("unexpected handshake response: %+v", res)
+	}
+}
+
+func TestAgentRebase_Known_And_Unknown_Nodes_And_Tier3_Safety(t *testing.T) {
+	srv, database, _, staging, exports, archive := serverWithGuard(t)
+	ctx := context.Background()
+
+	// Insert existing node on staging with an edge
+	knownUUID := "018f0000-0000-7000-8000-000000000010"
+	childUUID := "018f0000-0000-7000-8000-000000000011"
+	stagingPath := filepath.Join(staging, "clip_orig.mov")
+
+	var parentID, childID int64
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		p, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          knownUUID,
+			StorageLocationID: 1,
+			FilePath:          stagingPath,
+			FileName:          "clip_orig.mov",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		if err != nil {
+			return err
+		}
+		parentID = p.ID
+
+		c, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          childUUID,
+			StorageLocationID: 1,
+			FilePath:          filepath.Join(staging, "clip_proxy.mov"),
+			FileName:          "clip_proxy.mov",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		if err != nil {
+			return err
+		}
+		childID = c.ID
+
+		_, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID:     parentID,
+			TargetNodeID:     childID,
+			RelationshipType: "PROXY_OF",
+			Confidence:       1.0,
+			Tier:             1,
+			Resolver:         "manual",
+			EvidenceJson:     "{}",
+			ReviewState:      "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes & edge: %v", err)
+	}
+
+	// 1. Rebase known node from staging to exports -> preserves node ID and edges
+	rebasedExportPath := filepath.Join(exports, "clip_final.mov")
+	reqRebaseKnown := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   knownUUID,
+		"targetPath": rebasedExportPath,
+		"fileName":   "clip_final.mov",
+	}))
+	reqRebaseKnown.Header.Set("Content-Type", "application/json")
+	reqRebaseKnown.Header.Set("X-API-Key", routeTestAgentKey)
+	rrRebaseKnown := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrRebaseKnown, reqRebaseKnown)
+
+	if rrRebaseKnown.Code != http.StatusOK {
+		t.Fatalf("rebase known status = %d, body = %s", rrRebaseKnown.Code, rrRebaseKnown.Body.String())
+	}
+	var outKnown struct {
+		ID       int64  `json:"id"`
+		NodeUUID string `json:"nodeUuid"`
+		FilePath string `json:"filePath"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(rrRebaseKnown.Body.Bytes(), &outKnown); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if outKnown.ID != parentID || outKnown.Status != "REBASED" || outKnown.FilePath != rebasedExportPath {
+		t.Errorf("rebase known unexpected: %+v, want ID=%d status=REBASED", outKnown, parentID)
+	}
+
+	// Verify edges survived untouched
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		edges, err := q.ListEdgesBySource(ctx, parentID)
+		if err != nil {
+			return err
+		}
+		if len(edges) != 1 || edges[0].TargetNodeID != childID {
+			t.Errorf("edges after rebase = %+v, want 1 edge to childID %d", edges, childID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("check edges: %v", err)
+	}
+
+	// 2. Rebase unknown node -> creates new node (agent is source of truth)
+	unknownUUID := "018f0000-0000-7000-8000-000000000099"
+	unknownExportPath := filepath.Join(exports, "staged_offline.arw")
+	reqRebaseUnknown := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   unknownUUID,
+		"targetPath": unknownExportPath,
+		"fileName":   "staged_offline.arw",
+		"fileExt":    ".arw",
+		"sizeBytes":  2048,
+	}))
+	reqRebaseUnknown.Header.Set("Content-Type", "application/json")
+	reqRebaseUnknown.Header.Set("X-API-Key", routeTestAgentKey)
+	rrRebaseUnknown := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrRebaseUnknown, reqRebaseUnknown)
+
+	if rrRebaseUnknown.Code != http.StatusOK {
+		t.Fatalf("rebase unknown status = %d, body = %s", rrRebaseUnknown.Code, rrRebaseUnknown.Body.String())
+	}
+	var outUnknown struct {
+		ID       int64  `json:"id"`
+		NodeUUID string `json:"nodeUuid"`
+		FilePath string `json:"filePath"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(rrRebaseUnknown.Body.Bytes(), &outUnknown); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if outUnknown.Status != "CREATED" || outUnknown.NodeUUID != unknownUUID {
+		t.Errorf("rebase unknown unexpected: %+v, want status=CREATED", outUnknown)
+	}
+
+	// 3. Rebase target resolving to Tier 3 (read-only archive) -> Refused!
+	tier3Path := filepath.Join(archive, "forbidden.raw")
+	reqTier3 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   knownUUID,
+		"targetPath": tier3Path,
+	}))
+	reqTier3.Header.Set("Content-Type", "application/json")
+	reqTier3.Header.Set("X-API-Key", routeTestAgentKey)
+	rrTier3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrTier3, reqTier3)
+
+	if rrTier3.Code != http.StatusBadRequest {
+		t.Fatalf("rebase to tier 3 status = %d, want 400 Bad Request", rrTier3.Code)
+	}
+}

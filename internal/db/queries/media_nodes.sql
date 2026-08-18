@@ -256,3 +256,21 @@ WHERE storage_location_id = ?1
   AND lifecycle_state = 'ACTIVE'
   AND last_seen_at < ?2
   AND file_path NOT IN (SELECT value FROM json_each(?3));
+
+-- name: GetMediaNodeByUUID :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE node_uuid = ?1;
+
+-- name: RebaseNodePathByUUID :exec
+UPDATE media_nodes
+SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
+    lifecycle_state = 'ACTIVE', mtime_unix = ?5,
+    last_seen_at = unixepoch(), updated_at = unixepoch()
+WHERE node_uuid = ?1;

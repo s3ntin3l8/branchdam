@@ -21,6 +21,7 @@ type Querier interface {
 	CancelScanJob(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
+	CountPendingAgentEvents(ctx context.Context) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
 	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
 	// RETURNING target_node_id (rather than plain :exec) doubles as the
@@ -45,6 +46,8 @@ type Querier interface {
 	// increment is additive, not a schema migration.
 	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EventQueue, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
+	GetAgentEventByUUID(ctx context.Context, eventUuid string) (EventQueue, error)
+	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (EventQueue, error)
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
 	// (docs/schema.md fix #3).
@@ -58,6 +61,7 @@ type Querier interface {
 	// Includes archived rows, unlike GetLiveNodeByPath -- used to verify a
 	// superseded node's post-archive state (superseded_by, lifecycle_state).
 	GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, error)
+	GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error)
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
@@ -116,9 +120,9 @@ type Querier interface {
 	ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
-	PruneArchivedNodeMetadata(ctx context.Context) (int64, error)
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
+	ListPendingAgentEvents(ctx context.Context, limit int64) ([]EventQueue, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
 	// order, capped at one batch. Scoped to a single remote so a node's other
@@ -130,6 +134,8 @@ type Querier interface {
 	// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
+	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
+	MarkAgentEventProcessed(ctx context.Context, id int64) error
 	MarkNodeMissing(ctx context.Context, id int64) error
 	// Terminal failure: records the error and the attempt time.
 	MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error
@@ -156,10 +162,18 @@ type Querier interface {
 	// refreshed -- UpsertMediaEdge's RETURNING row looks the same either way.
 	// Backs scan_jobs.edges_created (fix(pipeline): #90).
 	MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams) (bool, error)
+	// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
+	// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate
+	// in the live graph; their metadata is write-once historical data that grows
+	// monotonically with editing activity. Pruning these rows bounds table size
+	// without deleting media_nodes rows themselves (the "rows are never deleted"
+	// invariant for media_nodes stands).
+	PruneArchivedNodeMetadata(ctx context.Context) (int64, error)
 	// Pillar 5 move detection, applied: the id and node_uuid never change, so
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
+	RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error
 	// Every row still 'RUNNING' at process startup, before this process has
 	// created any scan_jobs row of its own, was left behind by a previous
 	// process that never reached a terminal state -- SIGKILL, OOM-kill,

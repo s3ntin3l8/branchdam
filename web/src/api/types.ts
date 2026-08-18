@@ -165,3 +165,56 @@ export interface JobsQueryParams {
   kind?: ScanJob["kind"];
   state?: ScanJob["state"];
 }
+
+export interface AgentHelloResponse {
+  ok: boolean;
+  version: string;
+}
+
+export interface AgentHandshakeRequest {
+  agentId: string;
+  clientVersion?: string;
+  lastProcessedEventUuid?: string;
+}
+
+export interface AgentHandshakeResponse {
+  ok: boolean;
+  serverVersion: string;
+  serverTimeUnix: number;
+  acknowledgedEventUuid?: string;
+  pendingEventsCount: number;
+}
+
+export interface AgentEventRequest {
+  agentId: string;
+  eventType:
+    | "EVENT_NODE_CREATED"
+    | "EVENT_EDGE_ATTACHED"
+    | "EVENT_NODE_MOVED"
+    | "EVENT_NODE_DELETED"
+    | "EVENT_PATH_REBASED";
+  payload: string;
+}
+
+export interface AgentEventResponse {
+  eventId: string;
+}
+
+export interface AgentRebaseRequest {
+  nodeUuid: string;
+  targetPath: string;
+  mtimeUnix?: number;
+  fileName?: string;
+  fileExt?: string;
+  sizeBytes?: number;
+  fastHash?: string;
+  storageLocationId?: number;
+}
+
+export interface AgentRebaseResponse {
+  id: number;
+  nodeUuid: string;
+  storageLocationId: number;
+  filePath: string;
+  status: "REBASED" | "CREATED";
+}

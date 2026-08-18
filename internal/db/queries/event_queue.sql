@@ -6,3 +6,37 @@
 INSERT INTO event_queue (event_uuid, agent_id, event_type, payload_json, status)
 VALUES (?1, ?2, ?3, ?4, 'PENDING')
 RETURNING id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at;
+
+-- name: ListPendingAgentEvents :many
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+FROM event_queue
+WHERE status = 'PENDING'
+ORDER BY created_at ASC, id ASC
+LIMIT ?1;
+
+-- name: MarkAgentEventProcessed :exec
+UPDATE event_queue
+SET status = 'PROCESSED', processed_at = unixepoch(), error_log = NULL
+WHERE id = ?1;
+
+-- name: MarkAgentEventFailed :exec
+UPDATE event_queue
+SET status = 'FAILED', processed_at = unixepoch(), error_log = ?2
+WHERE id = ?1;
+
+-- name: GetAgentEventByUUID :one
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+FROM event_queue
+WHERE event_uuid = ?1;
+
+-- name: GetLatestProcessedAgentEventByAgent :one
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+FROM event_queue
+WHERE agent_id = ?1 AND status = 'PROCESSED'
+ORDER BY processed_at DESC, id DESC
+LIMIT 1;
+
+-- name: CountPendingAgentEvents :one
+SELECT COUNT(*)
+FROM event_queue
+WHERE status = 'PENDING';

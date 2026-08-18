@@ -7,7 +7,21 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
+
+const countPendingAgentEvents = `-- name: CountPendingAgentEvents :one
+SELECT COUNT(*)
+FROM event_queue
+WHERE status = 'PENDING'
+`
+
+func (q *Queries) CountPendingAgentEvents(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPendingAgentEvents)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const enqueueAgentEvent = `-- name: EnqueueAgentEvent :one
 INSERT INTO event_queue (event_uuid, agent_id, event_type, payload_json, status)
@@ -46,4 +60,120 @@ func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventPa
 		&i.ProcessedAt,
 	)
 	return i, err
+}
+
+const getAgentEventByUUID = `-- name: GetAgentEventByUUID :one
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+FROM event_queue
+WHERE event_uuid = ?1
+`
+
+func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (EventQueue, error) {
+	row := q.db.QueryRowContext(ctx, getAgentEventByUUID, eventUuid)
+	var i EventQueue
+	err := row.Scan(
+		&i.ID,
+		&i.EventUuid,
+		&i.AgentID,
+		&i.EventType,
+		&i.PayloadJson,
+		&i.Status,
+		&i.ErrorLog,
+		&i.CreatedAt,
+		&i.ProcessedAt,
+	)
+	return i, err
+}
+
+const getLatestProcessedAgentEventByAgent = `-- name: GetLatestProcessedAgentEventByAgent :one
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+FROM event_queue
+WHERE agent_id = ?1 AND status = 'PROCESSED'
+ORDER BY processed_at DESC, id DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (EventQueue, error) {
+	row := q.db.QueryRowContext(ctx, getLatestProcessedAgentEventByAgent, agentID)
+	var i EventQueue
+	err := row.Scan(
+		&i.ID,
+		&i.EventUuid,
+		&i.AgentID,
+		&i.EventType,
+		&i.PayloadJson,
+		&i.Status,
+		&i.ErrorLog,
+		&i.CreatedAt,
+		&i.ProcessedAt,
+	)
+	return i, err
+}
+
+const listPendingAgentEvents = `-- name: ListPendingAgentEvents :many
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+FROM event_queue
+WHERE status = 'PENDING'
+ORDER BY created_at ASC, id ASC
+LIMIT ?1
+`
+
+func (q *Queries) ListPendingAgentEvents(ctx context.Context, limit int64) ([]EventQueue, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingAgentEvents, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []EventQueue{}
+	for rows.Next() {
+		var i EventQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventUuid,
+			&i.AgentID,
+			&i.EventType,
+			&i.PayloadJson,
+			&i.Status,
+			&i.ErrorLog,
+			&i.CreatedAt,
+			&i.ProcessedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markAgentEventFailed = `-- name: MarkAgentEventFailed :exec
+UPDATE event_queue
+SET status = 'FAILED', processed_at = unixepoch(), error_log = ?2
+WHERE id = ?1
+`
+
+type MarkAgentEventFailedParams struct {
+	ID       int64
+	ErrorLog sql.NullString
+}
+
+func (q *Queries) MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error {
+	_, err := q.db.ExecContext(ctx, markAgentEventFailed, arg.ID, arg.ErrorLog)
+	return err
+}
+
+const markAgentEventProcessed = `-- name: MarkAgentEventProcessed :exec
+UPDATE event_queue
+SET status = 'PROCESSED', processed_at = unixepoch(), error_log = NULL
+WHERE id = ?1
+`
+
+func (q *Queries) MarkAgentEventProcessed(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, markAgentEventProcessed, id)
+	return err
 }
