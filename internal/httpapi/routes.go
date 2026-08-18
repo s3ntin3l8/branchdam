@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -57,11 +58,25 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Post(api, "/api/v1/agent/hello", s.handleAgentHello)
 	huma.Register(api, huma.Operation{
 		Method:        http.MethodPost,
+		Path:          "/api/v1/agent/handshake",
+		OperationID:   "agentHandshake",
+		Summary:       "Execute agent synchronization handshake",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentHandshake)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
 		Path:          "/api/v1/agent/events",
 		OperationID:   "submitAgentEvent",
 		Summary:       "Accept a workstation agent event",
 		DefaultStatus: http.StatusAccepted,
 	}, s.handleAgentEvent)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
+		Path:          "/api/v1/agent/rebase",
+		OperationID:   "agentRebasePath",
+		Summary:       "Rebase staged media node path",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentRebase)
 }
 
 // --- /api/v1/me ---
@@ -1164,6 +1179,10 @@ type AgentEventOutput struct {
 // deferred workstation-agent increment (see internal/db's event_queue
 // migration comment).
 func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*AgentEventOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, huma.Error500InternalServerError("mint event id", err)
@@ -1184,6 +1203,191 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 
 	out := &AgentEventOutput{}
 	out.Body.EventID = id.String()
+	return out, nil
+}
+
+// --- /api/v1/agent/handshake ---
+
+type AgentHandshakeInput struct {
+	Body struct {
+		AgentID                string `json:"agentId" required:"true"`
+		ClientVersion          string `json:"clientVersion,omitempty"`
+		LastProcessedEventUUID string `json:"lastProcessedEventUuid,omitempty"`
+	}
+}
+
+type AgentHandshakeOutput struct {
+	Body struct {
+		OK                    bool   `json:"ok"`
+		ServerVersion         string `json:"serverVersion"`
+		ServerTimeUnix        int64  `json:"serverTimeUnix"`
+		AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
+		PendingEventsCount    int64  `json:"pendingEventsCount"`
+	}
+}
+
+func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInput) (*AgentHandshakeOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	var pendingCount int64
+	var ackUUID string
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		pendingCount, err = q.CountPendingAgentEvents(ctx)
+		if err != nil {
+			return err
+		}
+		if in.Body.AgentID != "" {
+			latest, err := q.GetLatestProcessedAgentEventByAgent(ctx, in.Body.AgentID)
+			if err == nil {
+				ackUUID = latest.EventUuid
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("handshake query failed", err)
+	}
+
+	out := &AgentHandshakeOutput{}
+	out.Body.OK = true
+	out.Body.ServerVersion = s.version
+	out.Body.ServerTimeUnix = time.Now().Unix()
+	out.Body.AcknowledgedEventUUID = ackUUID
+	out.Body.PendingEventsCount = pendingCount
+	return out, nil
+}
+
+// --- /api/v1/agent/rebase ---
+
+type AgentRebaseInput struct {
+	Body struct {
+		NodeUUID          string  `json:"nodeUuid" required:"true"`
+		TargetPath        string  `json:"targetPath" required:"true"`
+		MtimeUnix         int64   `json:"mtimeUnix,omitempty"`
+		FileName          string  `json:"fileName,omitempty"`
+		FileExt           string  `json:"fileExt,omitempty"`
+		SizeBytes         int64   `json:"sizeBytes,omitempty"`
+		FastHash          *string `json:"fastHash,omitempty"`
+		StorageLocationID int64   `json:"storageLocationId,omitempty"`
+	}
+}
+
+type AgentRebaseOutput struct {
+	Body struct {
+		ID                int64  `json:"id"`
+		NodeUUID          string `json:"nodeUuid"`
+		StorageLocationID int64  `json:"storageLocationId"`
+		FilePath          string `json:"filePath"`
+		Status            string `json:"status"`
+	}
+}
+
+func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+	if in.Body.NodeUUID == "" {
+		return nil, huma.Error400BadRequest("nodeUuid is required", nil)
+	}
+	if in.Body.TargetPath == "" {
+		return nil, huma.Error400BadRequest("targetPath is required", nil)
+	}
+
+	if s.guard == nil {
+		return nil, huma.Error500InternalServerError("storage guard unconfigured", nil)
+	}
+
+	loc, err := s.guard.Resolve(in.Body.TargetPath)
+	if err != nil {
+		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid target path %q: %v", in.Body.TargetPath, err), err)
+	}
+	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+		return nil, huma.Error400BadRequest(fmt.Sprintf("rebase to read-only tier %s refused for path %q", loc.Tier, in.Body.TargetPath), nil)
+	}
+
+	fileName := in.Body.FileName
+	if fileName == "" {
+		fileName = filepath.Base(in.Body.TargetPath)
+	}
+	fileExt := in.Body.FileExt
+	if fileExt == "" {
+		fileExt = filepath.Ext(in.Body.TargetPath)
+	}
+	mtime := in.Body.MtimeUnix
+	if mtime == 0 {
+		mtime = time.Now().Unix()
+	}
+
+	out := &AgentRebaseOutput{}
+	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		existing, err := q.GetMediaNodeByUUID(ctx, in.Body.NodeUUID)
+		if err == nil {
+			// Known node: rebase path in place, preserving id, content hashes, and lineage edges.
+			// Note: Content hashes are not overwritten on path rebase; only location/path/mtime are updated.
+			if err := q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
+				NodeUuid:          in.Body.NodeUUID,
+				FilePath:          in.Body.TargetPath,
+				FileName:          fileName,
+				StorageLocationID: loc.ID,
+				MtimeUnix:         mtime,
+			}); err != nil {
+				return err
+			}
+			out.Body.ID = existing.ID
+			out.Body.NodeUUID = existing.NodeUuid
+			out.Body.StorageLocationID = loc.ID
+			out.Body.FilePath = in.Body.TargetPath
+			out.Body.Status = "REBASED"
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		// Unknown node: agent is the source of truth for an offline staged file; create node!
+		newNode, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:           in.Body.NodeUUID,
+			StorageLocationID:  loc.ID,
+			FilePath:           in.Body.TargetPath,
+			FileName:           fileName,
+			FileExt:            fileExt,
+			SizeBytes:          in.Body.SizeBytes,
+			MtimeUnix:          mtime,
+			FastHash:           in.Body.FastHash,
+			FullHash:           nil,
+			Phash:              sql.NullInt64{},
+			IndexingStatus:     "INDEXED_SHALLOW",
+			GraphStatus:        "UNLINKED",
+			LifecycleState:     "ACTIVE",
+			OriginalDocumentID: sql.NullString{},
+			DocumentID:         sql.NullString{},
+			DerivedFromID:      sql.NullString{},
+			CapturedAtUnix:     sql.NullInt64{},
+			CameraModel:        sql.NullString{},
+			FilenameStem:       sql.NullString{},
+			CameraSerial:       sql.NullString{},
+			LensModel:          sql.NullString{},
+		})
+		if err != nil {
+			return err
+		}
+
+		out.Body.ID = newNode.ID
+		out.Body.NodeUUID = newNode.NodeUuid
+		out.Body.StorageLocationID = loc.ID
+		out.Body.FilePath = in.Body.TargetPath
+		out.Body.Status = "CREATED"
+		return nil
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("rebase operation failed", err)
+	}
+
 	return out, nil
 }
 

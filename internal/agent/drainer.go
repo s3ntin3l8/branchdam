@@ -1,0 +1,566 @@
+package agent
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
+)
+
+// Drainer processes PENDING rows in event_queue oldest-first and applies
+// the corresponding state changes to media_nodes and media_edges.
+type Drainer struct {
+	db         *db.DB
+	guard      *storage.Guard
+	log        *slog.Logger
+	maxRetries int
+
+	mu      sync.Mutex
+	retries map[int64]int
+}
+
+// NewDrainer creates an agent event queue drainer.
+func NewDrainer(database *db.DB, guard *storage.Guard, log *slog.Logger) *Drainer {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Drainer{
+		db:         database,
+		guard:      guard,
+		log:        log,
+		maxRetries: DefaultMaxRetries,
+		retries:    make(map[int64]int),
+	}
+}
+
+// SetMaxRetries overrides the default poison-pill retry threshold.
+func (d *Drainer) SetMaxRetries(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if n <= 0 {
+		n = 1
+	}
+	d.maxRetries = n
+}
+
+// ProcessPending claims up to batchSize PENDING rows oldest-first and applies them.
+// Malformed payloads and poison-pill events are marked FAILED with error_log
+// and never crash the worker or block the queue head.
+func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats, error) {
+	if batchSize <= 0 {
+		batchSize = 50
+	}
+
+	start := time.Now()
+	var stats DrainStats
+
+	var events []sqlcgen.EventQueue
+	err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		events, err = q.ListPendingAgentEvents(ctx, int64(batchSize))
+		return err
+	})
+	if err != nil {
+		return stats, fmt.Errorf("list pending agent events: %w", err)
+	}
+
+	if len(events) == 0 {
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	for _, ev := range events {
+		if err := ctx.Err(); err != nil {
+			stats.Duration = time.Since(start)
+			return stats, err
+		}
+
+		processErr := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			if err := d.applyEvent(ctx, q, ev); err != nil {
+				return err
+			}
+			return q.MarkAgentEventProcessed(ctx, ev.ID)
+		})
+
+		if processErr == nil {
+			d.mu.Lock()
+			delete(d.retries, ev.ID)
+			d.mu.Unlock()
+			stats.Processed++
+			continue
+		}
+
+		// Handle error: check if fatal poison-pill or exceeded retry limit.
+		isFatal := errors.Is(processErr, ErrMalformedPayload) ||
+			errors.Is(processErr, ErrUnknownEventType) ||
+			errors.Is(processErr, ErrInvalidNodeUUID) ||
+			errors.Is(processErr, ErrReadOnlyRebase) ||
+			strings.Contains(processErr.Error(), "constraint failed")
+
+		d.mu.Lock()
+		d.retries[ev.ID]++
+		attempts := d.retries[ev.ID]
+		d.mu.Unlock()
+
+		if isFatal || attempts >= d.maxRetries {
+			d.log.Warn("agent: event failed permanently",
+				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "err", processErr)
+
+			// Mark FAILED with error_log in its own transaction so queue head unblocks.
+			_ = d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+				return q.MarkAgentEventFailed(ctx, sqlcgen.MarkAgentEventFailedParams{
+					ID:       ev.ID,
+					ErrorLog: sql.NullString{String: processErr.Error(), Valid: true},
+				})
+			})
+			d.mu.Lock()
+			delete(d.retries, ev.ID)
+			d.mu.Unlock()
+			stats.Failed++
+		} else {
+			d.log.Warn("agent: transient event error, will retry",
+				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "err", processErr)
+		}
+	}
+
+	stats.Duration = time.Since(start)
+	return stats, nil
+}
+
+// DrainAll continuously processes pending events until the queue is empty or ctx is cancelled.
+func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
+	var totalStats DrainStats
+	start := time.Now()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			totalStats.Duration = time.Since(start)
+			return totalStats, err
+		}
+
+		var pendingCount int64
+		err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			var err error
+			pendingCount, err = q.CountPendingAgentEvents(ctx)
+			return err
+		})
+		if err != nil {
+			totalStats.Duration = time.Since(start)
+			return totalStats, err
+		}
+
+		if pendingCount == 0 {
+			break
+		}
+
+		stats, err := d.ProcessPending(ctx, 100)
+		if err != nil {
+			totalStats.Duration = time.Since(start)
+			return totalStats, err
+		}
+
+		totalStats.Processed += stats.Processed
+		totalStats.Failed += stats.Failed
+
+		if stats.Processed == 0 && stats.Failed == 0 {
+			// If all pending events are in retry cooldown or failed, break to prevent infinite loop
+			break
+		}
+	}
+
+	totalStats.Duration = time.Since(start)
+	return totalStats, nil
+}
+
+func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+	switch ev.EventType {
+	case EventNodeCreated:
+		return d.applyNodeCreated(ctx, q, ev)
+	case EventEdgeAttached:
+		return d.applyEdgeAttached(ctx, q, ev)
+	case EventNodeMoved:
+		return d.applyNodeMoved(ctx, q, ev)
+	case EventNodeDeleted:
+		return d.applyNodeDeleted(ctx, q, ev)
+	case EventPathRebased:
+		return d.applyPathRebased(ctx, q, ev)
+	default:
+		return fmt.Errorf("%w: %s", ErrUnknownEventType, ev.EventType)
+	}
+}
+
+func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+	var p NodeCreatedPayload
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return fmt.Errorf("%w: unmarshal node created: %v", ErrMalformedPayload, err)
+	}
+	if p.NodeUUID == "" {
+		return fmt.Errorf("%w: missing nodeUuid in node created payload", ErrInvalidNodeUUID)
+	}
+	if p.FilePath == "" {
+		return fmt.Errorf("%w: missing filePath in node created payload", ErrMalformedPayload)
+	}
+
+	// Idempotency: if node already exists with this node_uuid, it's a no-op success.
+	if _, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lookup node by uuid: %w", err)
+	}
+
+	// Resolve storage location if needed.
+	locID := p.StorageLocationID
+	if d.guard != nil {
+		loc, err := d.guard.Resolve(p.FilePath)
+		if err != nil && locID == 0 {
+			return fmt.Errorf("%w: file path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
+		}
+		if err == nil {
+			locID = loc.ID
+		}
+	}
+	if locID == 0 {
+		locID = 1
+	}
+
+	fileName := p.FileName
+	if fileName == "" {
+		fileName = filepath.Base(p.FilePath)
+	}
+	fileExt := p.FileExt
+	if fileExt == "" {
+		fileExt = filepath.Ext(p.FilePath)
+	}
+
+	indexingStatus := "INDEXED_SHALLOW"
+	if p.FullHash != nil && *p.FullHash != "" {
+		indexingStatus = "INDEXED_FULL"
+	}
+
+	var nullFastHash *string
+	if p.FastHash != nil && *p.FastHash != "" {
+		nullFastHash = p.FastHash
+	}
+	var nullFullHash *string
+	if p.FullHash != nil && *p.FullHash != "" {
+		nullFullHash = p.FullHash
+	}
+
+	var nullPhash sql.NullInt64
+	if p.Phash != nil {
+		nullPhash = sql.NullInt64{Int64: *p.Phash, Valid: true}
+	}
+	var nullCameraModel sql.NullString
+	if p.CameraModel != nil && *p.CameraModel != "" {
+		nullCameraModel = sql.NullString{String: *p.CameraModel, Valid: true}
+	}
+	var nullCameraSerial sql.NullString
+	if p.CameraSerial != nil && *p.CameraSerial != "" {
+		nullCameraSerial = sql.NullString{String: *p.CameraSerial, Valid: true}
+	}
+	var nullLensModel sql.NullString
+	if p.LensModel != nil && *p.LensModel != "" {
+		nullLensModel = sql.NullString{String: *p.LensModel, Valid: true}
+	}
+	var nullCapturedAt sql.NullInt64
+	if p.CapturedAtUnix != nil {
+		nullCapturedAt = sql.NullInt64{Int64: *p.CapturedAtUnix, Valid: true}
+	}
+	var nullOrigDocID sql.NullString
+	if p.OriginalDocumentID != nil && *p.OriginalDocumentID != "" {
+		nullOrigDocID = sql.NullString{String: *p.OriginalDocumentID, Valid: true}
+	}
+	var nullDocID sql.NullString
+	if p.DocumentID != nil && *p.DocumentID != "" {
+		nullDocID = sql.NullString{String: *p.DocumentID, Valid: true}
+	}
+	var nullDerivedFromID sql.NullString
+	if p.DerivedFromID != nil && *p.DerivedFromID != "" {
+		nullDerivedFromID = sql.NullString{String: *p.DerivedFromID, Valid: true}
+	}
+	var nullFilenameStem sql.NullString
+	if p.FilenameStem != nil && *p.FilenameStem != "" {
+		nullFilenameStem = sql.NullString{String: *p.FilenameStem, Valid: true}
+	}
+
+	mtime := p.MtimeUnix
+	if mtime == 0 {
+		mtime = time.Now().Unix()
+	}
+
+	_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+		NodeUuid:           p.NodeUUID,
+		StorageLocationID:  locID,
+		FilePath:           p.FilePath,
+		FileName:           fileName,
+		FileExt:            fileExt,
+		SizeBytes:          p.SizeBytes,
+		MtimeUnix:          mtime,
+		FastHash:           nullFastHash,
+		FullHash:           nullFullHash,
+		Phash:              nullPhash,
+		IndexingStatus:     indexingStatus,
+		GraphStatus:        "UNLINKED",
+		LifecycleState:     "ACTIVE",
+		OriginalDocumentID: nullOrigDocID,
+		DocumentID:         nullDocID,
+		DerivedFromID:      nullDerivedFromID,
+		CapturedAtUnix:     nullCapturedAt,
+		CameraModel:        nullCameraModel,
+		FilenameStem:       nullFilenameStem,
+		CameraSerial:       nullCameraSerial,
+		LensModel:          nullLensModel,
+	})
+	return err
+}
+
+func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+	var p EdgeAttachedPayload
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return fmt.Errorf("%w: unmarshal edge attached: %v", ErrMalformedPayload, err)
+	}
+
+	sourceID := p.SourceNodeID
+	if sourceID == 0 {
+		if p.SourceNodeUUID == "" {
+			return fmt.Errorf("%w: missing sourceNodeUuid in edge attached payload", ErrMalformedPayload)
+		}
+		srcNode, err := q.GetMediaNodeByUUID(ctx, p.SourceNodeUUID)
+		if err != nil {
+			return fmt.Errorf("resolve source node %q: %w", p.SourceNodeUUID, err)
+		}
+		sourceID = srcNode.ID
+	}
+
+	targetID := p.TargetNodeID
+	if targetID == 0 {
+		if p.TargetNodeUUID == "" {
+			return fmt.Errorf("%w: missing targetNodeUuid in edge attached payload", ErrMalformedPayload)
+		}
+		tgtNode, err := q.GetMediaNodeByUUID(ctx, p.TargetNodeUUID)
+		if err != nil {
+			return fmt.Errorf("resolve target node %q: %w", p.TargetNodeUUID, err)
+		}
+		targetID = tgtNode.ID
+	}
+
+	if p.RelationshipType == "" {
+		p.RelationshipType = "DERIVED_FROM"
+	}
+	confidence := p.Confidence
+	if confidence <= 0 {
+		confidence = 1.0
+	}
+	tier := p.Tier
+	if tier <= 0 {
+		tier = 1
+	}
+	resolver := p.Resolver
+	if resolver == "" {
+		resolver = "agent"
+	}
+	evidenceJSON := string(p.EvidenceJSON)
+	if evidenceJSON == "" {
+		evidenceJSON = "{}"
+	}
+	reviewState := p.ReviewState
+	if reviewState == "" {
+		reviewState = "AUTO_ACCEPTED"
+	}
+
+	// Create edge. If edge already exists with this source, target, and relationship,
+	// CreateMediaEdge or conflict handling ensures idempotency.
+	_, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+		SourceNodeID:     sourceID,
+		TargetNodeID:     targetID,
+		RelationshipType: p.RelationshipType,
+		Confidence:       confidence,
+		Tier:             tier,
+		Resolver:         resolver,
+		EvidenceJson:     evidenceJSON,
+		ReviewState:      reviewState,
+	})
+	if err != nil {
+		// SQLite UNIQUE constraint violation -> already exists, treat as idempotent success.
+		if isDuplicateEdgeError(err) {
+			return nil
+		}
+		return fmt.Errorf("insert media edge: %w", err)
+	}
+	return nil
+}
+
+func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+	var p NodeMovedPayload
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return fmt.Errorf("%w: unmarshal node moved: %v", ErrMalformedPayload, err)
+	}
+	if p.NodeUUID == "" {
+		return fmt.Errorf("%w: missing nodeUuid in node moved payload", ErrInvalidNodeUUID)
+	}
+	if p.NewFilePath == "" {
+		return fmt.Errorf("%w: missing newFilePath in node moved payload", ErrMalformedPayload)
+	}
+
+	node, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: node uuid %s", ErrNodeNotFound, p.NodeUUID)
+		}
+		return fmt.Errorf("lookup node for move: %w", err)
+	}
+
+	locID := p.NewStorageLocationID
+	if d.guard != nil {
+		loc, err := d.guard.Resolve(p.NewFilePath)
+		if err == nil {
+			if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+				return fmt.Errorf("%w: move target %q resolves to read-only tier %s", ErrReadOnlyRebase, p.NewFilePath, loc.Tier)
+			}
+			locID = loc.ID
+		}
+	}
+	if locID == 0 {
+		locID = node.StorageLocationID
+	}
+
+	fileName := p.NewFileName
+	if fileName == "" {
+		fileName = filepath.Base(p.NewFilePath)
+	}
+	mtime := p.MtimeUnix
+	if mtime == 0 {
+		mtime = node.MtimeUnix
+	}
+
+	return q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
+		NodeUuid:          p.NodeUUID,
+		FilePath:          p.NewFilePath,
+		FileName:          fileName,
+		StorageLocationID: locID,
+		MtimeUnix:         mtime,
+	})
+}
+
+func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+	var p NodeDeletedPayload
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return fmt.Errorf("%w: unmarshal node deleted: %v", ErrMalformedPayload, err)
+	}
+	if p.NodeUUID == "" {
+		return fmt.Errorf("%w: missing nodeUuid in node deleted payload", ErrInvalidNodeUUID)
+	}
+
+	node, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: node uuid %s", ErrNodeNotFound, p.NodeUUID)
+		}
+		return fmt.Errorf("lookup node for deletion: %w", err)
+	}
+
+	// Schema fix #6 / Spec Pillar 5: never delete row from database; set lifecycle_state='MISSING'.
+	return q.MarkNodeMissing(ctx, node.ID)
+}
+
+func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+	var p PathRebasedPayload
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return fmt.Errorf("%w: unmarshal path rebased: %v", ErrMalformedPayload, err)
+	}
+	if p.NodeUUID == "" {
+		return fmt.Errorf("%w: missing nodeUuid in path rebased payload", ErrInvalidNodeUUID)
+	}
+	if p.TargetFilePath == "" {
+		return fmt.Errorf("%w: missing targetFilePath in path rebased payload", ErrMalformedPayload)
+	}
+
+	locID := p.TargetStorageLocationID
+	if d.guard != nil {
+		loc, err := d.guard.Resolve(p.TargetFilePath)
+		if err != nil && locID == 0 {
+			return fmt.Errorf("%w: target path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.TargetFilePath, err)
+		}
+		if err == nil {
+			if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+				return fmt.Errorf("%w: %q resolves to read-only tier %s", ErrReadOnlyRebase, p.TargetFilePath, loc.Tier)
+			}
+			locID = loc.ID
+		}
+	}
+	if locID == 0 {
+		locID = 1
+	}
+
+	fileName := p.TargetFileName
+	if fileName == "" {
+		fileName = filepath.Base(p.TargetFilePath)
+	}
+	mtime := p.MtimeUnix
+	if mtime == 0 {
+		mtime = time.Now().Unix()
+	}
+
+	_, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	if err == nil {
+		// Existing node: rebase path in place.
+		return q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
+			NodeUuid:          p.NodeUUID,
+			FilePath:          p.TargetFilePath,
+			FileName:          fileName,
+			StorageLocationID: locID,
+			MtimeUnix:         mtime,
+		})
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lookup node for rebase: %w", err)
+	}
+
+	// Unknown node_uuid: agent is the source of truth for an offline staged file; create node!
+	fileExt := filepath.Ext(p.TargetFilePath)
+	indexingStatus := "INDEXED_SHALLOW"
+
+	_, insertErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+		NodeUuid:           p.NodeUUID,
+		StorageLocationID:  locID,
+		FilePath:           p.TargetFilePath,
+		FileName:           fileName,
+		FileExt:            fileExt,
+		SizeBytes:          p.SizeBytes,
+		MtimeUnix:          mtime,
+		FastHash:           p.FastHash,
+		FullHash:           nil,
+		Phash:              sql.NullInt64{},
+		IndexingStatus:     indexingStatus,
+		GraphStatus:        "UNLINKED",
+		LifecycleState:     "ACTIVE",
+		OriginalDocumentID: sql.NullString{},
+		DocumentID:         sql.NullString{},
+		DerivedFromID:      sql.NullString{},
+		CapturedAtUnix:     sql.NullInt64{},
+		CameraModel:        sql.NullString{},
+		FilenameStem:       sql.NullString{},
+		CameraSerial:       sql.NullString{},
+		LensModel:          sql.NullString{},
+	})
+	return insertErr
+}
+
+func isDuplicateEdgeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed: media_edges") ||
+		strings.Contains(msg, "UNIQUE constraint failed")
+}
