@@ -1465,10 +1465,15 @@ func statfsWithTimeoutFn(statfs func(path string, buf *unix.Statfs_t) error, pat
 		r.err = statfs(path, &r.stat)
 		done <- r
 	}()
+	// time.NewTimer (not time.After) so the common success path can Stop
+	// and release the timer immediately, rather than leaving it running
+	// for the rest of statfsTimeout after every single successful probe.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case r := <-done:
 		return r.stat, r.err
-	case <-time.After(timeout):
+	case <-timer.C:
 		return unix.Statfs_t{}, fmt.Errorf("storage probe timed out after %s", timeout)
 	}
 }
