@@ -101,7 +101,7 @@ func parsePRPROJXML(data []byte) ([]Reference, error) {
 			for _, attr := range t.Attr {
 				attrName := strings.ToLower(attr.Name.Local)
 				if (attrName == "src" || attrName == "path" || attrName == "filepath" || attrName == "url") && attr.Value != "" {
-					addPRPROJRef(&refs, seen, attr.Value)
+					addPRPROJRef(&refs, seen, attr.Value, "media")
 				}
 			}
 		case xml.EndElement:
@@ -109,7 +109,11 @@ func parsePRPROJXML(data []byte) ([]Reference, error) {
 			if inPathTag && tagName == currentTag {
 				val := strings.TrimSpace(textBuf.String())
 				if val != "" {
-					addPRPROJRef(&refs, seen, val)
+					role := "media"
+					if strings.Contains(currentTag, "proxy") {
+						role = "proxy"
+					}
+					addPRPROJRef(&refs, seen, val, role)
 				}
 				inPathTag = false
 				currentTag = ""
@@ -134,7 +138,7 @@ func isPRPROJPathTag(tag string) bool {
 	}
 }
 
-func addPRPROJRef(refs *[]Reference, seen map[string]bool, raw string) {
+func addPRPROJRef(refs *[]Reference, seen map[string]bool, raw, role string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return
@@ -158,8 +162,7 @@ func addPRPROJRef(refs *[]Reference, seen map[string]bool, raw string) {
 	}
 	seen[cleaned] = true
 
-	role := "media"
-	if strings.Contains(strings.ToLower(raw), "proxy") {
+	if role == "media" && strings.Contains(strings.ToLower(raw), "proxy") {
 		role = "proxy"
 	}
 

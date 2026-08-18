@@ -33,7 +33,7 @@ func TestPRPROJParser_Parse_Valid(t *testing.T) {
         <Media>
             <FilePath>D:\Footage\CameraA\Clip &amp; Take 001.mov</FilePath>
             <ActualMediaFilePath>/storage/projects/video/B002_C010.ARW</ActualMediaFilePath>
-            <ProxyPath>D:\Footage\Proxy_Clip.mp4</ProxyPath>
+            <ProxyPath>D:\Footage\Render001.mp4</ProxyPath>
         </Media>
     </Project>
 </PremiereData>`
@@ -60,7 +60,7 @@ func TestPRPROJParser_Parse_Valid(t *testing.T) {
 	if refs[1].RawPath != `/storage/projects/video/B002_C010.ARW` || refs[1].Role != "media" {
 		t.Errorf("ref 1 mismatch: %+v", refs[1])
 	}
-	if refs[2].RawPath != `D:\Footage\Proxy_Clip.mp4` || refs[2].Role != "proxy" {
+	if refs[2].RawPath != `D:\Footage\Render001.mp4` || refs[2].Role != "proxy" {
 		t.Errorf("ref 2 mismatch: %+v", refs[2])
 	}
 }
@@ -83,11 +83,36 @@ func TestPRPROJParser_Parse_Fixture(t *testing.T) {
 }
 
 func TestPRPROJParser_Parse_MalformedAndLimits(t *testing.T) {
+	t.Run("nil reader", func(t *testing.T) {
+		parser := &projectfile.PRPROJParser{}
+		_, err := parser.Parse(context.Background(), nil)
+		if err == nil || !errors.Is(err, projectfile.ErrMalformedPRPROJ) {
+			t.Errorf("expected ErrMalformedPRPROJ for nil reader, got %v", err)
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		parser := &projectfile.PRPROJParser{}
+		_, err := parser.Parse(context.Background(), strings.NewReader(""))
+		if err == nil || !errors.Is(err, projectfile.ErrMalformedPRPROJ) {
+			t.Errorf("expected ErrMalformedPRPROJ for empty input, got %v", err)
+		}
+	})
+
 	t.Run("corrupt gzip input", func(t *testing.T) {
 		parser := &projectfile.PRPROJParser{}
 		_, err := parser.Parse(context.Background(), strings.NewReader("not a gzip stream"))
 		if err == nil || !errors.Is(err, projectfile.ErrMalformedPRPROJ) {
 			t.Errorf("expected ErrMalformedPRPROJ, got %v", err)
+		}
+	})
+
+	t.Run("invalid xml in gzip stream", func(t *testing.T) {
+		gzData := createTestGzipPRPROJ(t, "<invalid xml")
+		parser := &projectfile.PRPROJParser{}
+		_, err := parser.Parse(context.Background(), bytes.NewReader(gzData))
+		if err == nil || !errors.Is(err, projectfile.ErrMalformedPRPROJ) {
+			t.Errorf("expected ErrMalformedPRPROJ for invalid xml, got %v", err)
 		}
 	})
 
