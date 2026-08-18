@@ -69,3 +69,24 @@ func (q *Queries) ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMet
 	}
 	return items, nil
 }
+
+const pruneArchivedNodeMetadata = `-- name: PruneArchivedNodeMetadata :execrows
+DELETE FROM node_metadata
+WHERE node_id IN (
+    SELECT id FROM media_nodes WHERE lifecycle_state = 'ARCHIVED'
+)
+`
+
+// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
+// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate
+// in the live graph; their metadata is write-once historical data that grows
+// monotonically with editing activity. Pruning these rows bounds table size
+// without deleting media_nodes rows themselves (the "rows are never deleted"
+// invariant for media_nodes stands).
+func (q *Queries) PruneArchivedNodeMetadata(ctx context.Context) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneArchivedNodeMetadata)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
