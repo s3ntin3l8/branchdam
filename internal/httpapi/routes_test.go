@@ -508,3 +508,34 @@ func TestOpenAPIEndpointExposure(t *testing.T) {
 		}
 	})
 }
+
+func TestHandleListPathRewrites(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	srv.cfg.PathRewrites = []config.PathRewrite{
+		{From: "D:\\Footage", To: "/storage/footage"},
+		{From: "/Volumes/NAS", To: "/storage/nas"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config/path-rewrites", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/config/path-rewrites: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var rewrites []PathRewriteDTO
+	if err := json.NewDecoder(rr.Body).Decode(&rewrites); err != nil {
+		t.Fatalf("decode json response: %v", err)
+	}
+
+	if len(rewrites) != 2 {
+		t.Fatalf("got %d path rewrites, want 2", len(rewrites))
+	}
+	if rewrites[0].From != "D:\\Footage" || rewrites[0].To != "/storage/footage" {
+		t.Errorf("rewrite 0 mismatch: %+v", rewrites[0])
+	}
+	if rewrites[1].From != "/Volumes/NAS" || rewrites[1].To != "/storage/nas" {
+		t.Errorf("rewrite 1 mismatch: %+v", rewrites[1])
+	}
+}

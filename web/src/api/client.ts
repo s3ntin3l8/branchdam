@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AuditEntry, Config, Me, ScanJob, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AuditEntry, Config, Me, PathRewrite, ScanJob, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -31,6 +31,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   me: () => request<Me>("/api/v1/me"),
   config: () => request<Config>("/api/v1/config"),
+  listPathRewrites: () => request<PathRewrite[]>("/api/v1/config/path-rewrites"),
 
   listStorageLocations: () => request<{ locations: StorageLocation[] }>("/api/v1/storage-locations"),
 

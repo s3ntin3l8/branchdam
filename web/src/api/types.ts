@@ -11,8 +11,14 @@ export interface Me {
   groups?: string[];
 }
 
+export interface PathRewrite {
+  from: string;
+  to: string;
+}
+
 export interface Config {
   version: string;
+  pathRewrites?: PathRewrite[];
 }
 
 export interface StorageLocation {
