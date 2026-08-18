@@ -69,10 +69,17 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 	case err == nil:
 		if existing.FastHash != nil && *existing.FastHash == r.FastHash {
 			stats.Touched++
-			return q.TouchMediaNode(ctx, sqlcgen.TouchMediaNodeParams{
+			if err := q.TouchMediaNode(ctx, sqlcgen.TouchMediaNodeParams{
 				ID:        existing.ID,
 				MtimeUnix: r.ModTime.Unix(),
-			})
+			}); err != nil {
+				return err
+			}
+			// A node seen unchanged still backfills metadata: one indexed
+			// while exiftool/ffprobe were absent from PATH would otherwise
+			// stay permanently metadata-less, since its fast_hash never
+			// changes and it always takes this branch (see #86).
+			return persistAllMetadata(ctx, q, existing.ID, r, log)
 		}
 		return commitVersionCollision(ctx, q, locationID, existing, r, stats, log)
 
@@ -108,13 +115,18 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 		missing, err := q.GetMissingNodeByFastHash(ctx, &r.FastHash)
 		if err == nil {
 			stats.Moved++
-			return q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
+			if err := q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
 				ID:                missing.ID,
 				FilePath:          r.Path,
 				FileName:          r.FileName,
 				StorageLocationID: locationID,
 				MtimeUnix:         r.ModTime.Unix(),
-			})
+			}); err != nil {
+				return err
+			}
+			// A rebased node backfills metadata the same way a touched one
+			// does -- see the touched branch above and #86.
+			return persistAllMetadata(ctx, q, missing.ID, r, log)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("get missing node by fast_hash: %w", err)
@@ -171,10 +183,7 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 	if err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("insert media node: %w", err)
 	}
-	if err := persistMetadata(ctx, q, node.ID, "exiftool", exifMetadata(r), metadataCap, log); err != nil {
-		return sqlcgen.MediaNode{}, err
-	}
-	if err := persistMetadata(ctx, q, node.ID, "ffprobe", ffprobeMetadata(r), metadataCap, log); err != nil {
+	if err := persistAllMetadata(ctx, q, node.ID, r, log); err != nil {
 		return sqlcgen.MediaNode{}, err
 	}
 	return node, nil
@@ -240,6 +249,23 @@ func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, sour
 		}
 	}
 	return nil
+}
+
+// persistAllMetadata writes both r's exiftool and ffprobe metadata against
+// nodeID. Called on every branch that lands a node in the DB with r's data
+// available -- new insert, version-collision successor, touched (unchanged
+// fast_hash), and rebase/move -- not only on insert: a node first indexed
+// while exiftool/ffprobe were absent from PATH would otherwise stay
+// permanently metadata-less, since its fast_hash never changes on later
+// scans and it always takes the touched branch. InsertNodeMetadata is an
+// upsert (ON CONFLICT (node_id, source, key) DO UPDATE), so calling this
+// repeatedly for an already-populated node is a no-op past the first write,
+// not a duplicate-row risk.
+func persistAllMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, r Result, log *slog.Logger) error {
+	if err := persistMetadata(ctx, q, nodeID, "exiftool", exifMetadata(r), metadataCap, log); err != nil {
+		return err
+	}
+	return persistMetadata(ctx, q, nodeID, "ffprobe", ffprobeMetadata(r), metadataCap, log)
 }
 
 // exifMetadata assembles the source='exiftool' rows for a fresh node: the

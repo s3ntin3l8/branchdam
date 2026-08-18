@@ -314,6 +314,61 @@ func TestMissingNodeRebasesOnMove(t *testing.T) {
 	}
 }
 
+// TestRebasedNodeBackfillsMetadata backs #86: a node indexed before
+// exiftool/ffprobe were on PATH, then later moved, must gain its metadata
+// on the rebase pass -- not stay permanently metadata-less just because
+// RebaseMissingNodePath (unlike insertNewNode) never called persistMetadata
+// before this fix.
+func TestRebasedNodeBackfillsMetadata(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	// First pass: no probe data at all, as if exiftool/ffprobe were absent.
+	_, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/old/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee"},
+	})
+	if err != nil {
+		t.Fatalf("Commit (initial, probe-less): %v", err)
+	}
+	original := mustGetLiveNode(t, database, "/old/place.jpg")
+	if rows, err := database.Reader.ListNodeMetadata(ctx, original.ID); err != nil {
+		t.Fatalf("ListNodeMetadata (initial): %v", err)
+	} else if len(rows) != 0 {
+		t.Fatalf("initial metadata rows = %d, want 0", len(rows))
+	}
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.MarkNodeMissing(ctx, original.ID)
+	}); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+
+	// Second pass: same content at a new path, now with probe data -- the
+	// tools were installed in between, or this is the first pass to reach
+	// this file after they were.
+	stats, err := Commit(ctx, database, locationID, []Result{
+		{
+			Path: "/new/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee",
+			Make: "CANON", ExifRaw: map[string]string{"EXIF:ISO": "100"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Commit (after move): %v", err)
+	}
+	if stats.Moved != 1 {
+		t.Fatalf("stats = %+v, want Moved=1", stats)
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, original.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata (after move): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("metadata rows after rebase = %d, want 2 (EXIF:Make, EXIF:ISO)", len(rows))
+	}
+}
+
 // TestMarkUnseenNodesMissingScopedToLocation: the set-based MISSING sweep is
 // scoped by storage_location_id -- a scan of one mount must never touch
 // another mount's nodes, even when both are stale.
@@ -586,5 +641,54 @@ func TestSameContentTouchDoesNotDuplicateMetadata(t *testing.T) {
 	}
 	if len(rows) != 3 {
 		t.Fatalf("metadata rows = %d, want 3 (EXIF:Make, EXIF:ISO, XMP:Rating -- one set, not duplicated)", len(rows))
+	}
+}
+
+// TestTouchBackfillsMetadataForProbelessFirstScan backs #86: a node first
+// indexed while exiftool/ffprobe were absent from PATH stays metadata-less
+// forever under its unchanged fast_hash unless the touched branch itself
+// persists metadata -- installing the binaries and rescanning must
+// backfill it, not require a content change. Unlike
+// TestSameContentTouchDoesNotDuplicateMetadata (which starts with metadata
+// present both passes and so passes regardless of whether the touched
+// branch does anything), this starts with none and asserts the second pass
+// adds it.
+func TestTouchBackfillsMetadataForProbelessFirstScan(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	bare := Result{Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg", Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff"}
+	stats, err := Commit(ctx, database, locationID, []Result{bare})
+	if err != nil {
+		t.Fatalf("Commit (initial, probe-less): %v", err)
+	}
+	if stats.Inserted != 1 {
+		t.Fatalf("stats = %+v, want Inserted=1", stats)
+	}
+	node := mustGetLiveNode(t, database, "/stable.jpg")
+	if rows, err := database.Reader.ListNodeMetadata(ctx, node.ID); err != nil {
+		t.Fatalf("ListNodeMetadata (initial): %v", err)
+	} else if len(rows) != 0 {
+		t.Fatalf("initial metadata rows = %d, want 0 (simulating a probe-less first scan)", len(rows))
+	}
+
+	withProbeData := bare
+	withProbeData.Make = "CANON"
+	withProbeData.ExifRaw = map[string]string{"EXIF:ISO": "100"}
+	stats, err = Commit(ctx, database, locationID, []Result{withProbeData})
+	if err != nil {
+		t.Fatalf("Commit (touched, with probe data): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("stats = %+v, want Touched=1", stats)
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata (after touched backfill): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("metadata rows after backfill = %d, want 2 (EXIF:Make, EXIF:ISO)", len(rows))
 	}
 }
