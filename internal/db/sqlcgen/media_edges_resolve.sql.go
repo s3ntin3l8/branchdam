@@ -128,10 +128,26 @@ INSERT INTO media_edges (
 )
 ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     confidence    = MAX(excluded.confidence, media_edges.confidence),
-    tier          = CASE WHEN excluded.confidence >= media_edges.confidence THEN excluded.tier ELSE media_edges.tier END,
-    resolver      = CASE WHEN excluded.confidence >= media_edges.confidence THEN excluded.resolver ELSE media_edges.resolver END,
-    evidence_json = CASE WHEN excluded.confidence >= media_edges.confidence THEN excluded.evidence_json ELSE media_edges.evidence_json END,
-    review_state  = CASE WHEN excluded.confidence >= media_edges.confidence THEN excluded.review_state ELSE media_edges.review_state END,
+    tier          = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.tier ELSE media_edges.tier END,
+    resolver      = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.resolver ELSE media_edges.resolver END,
+    evidence_json = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.evidence_json ELSE media_edges.evidence_json END,
+    review_state  = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.review_state ELSE media_edges.review_state END,
     updated_at    = unixepoch()
 WHERE media_edges.review_state NOT IN ('CONFIRMED', 'REJECTED')
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
@@ -176,10 +192,30 @@ type UpsertMediaEdgeParams struct {
 // recomputed here at all: excluded.review_state (bind ?8) already carries
 // the tier-correct value Engine computed for this candidate, so keying it
 // the same way as confidence keeps the two permanently consistent. On an
-// exact confidence tie, >= deliberately favors the incoming candidate
+// exact confidence tie, `>=` deliberately favors the incoming candidate
 // (excluded) -- that's what refreshes evidence_json/resolver/timestamps on
 // an identical same-resolver re-fire, the common case. Do not tighten this
-// to >.
+// to `>` outright (Hermes review on PR #128 suggested exactly that for
+// review_state alone; rejected below).
+//
+// One exception carves into that `>=`: because the per-tier auto-accept
+// threshold differs by tier (0.85 for Tier 3, 0.90 otherwise), an exact
+// confidence tie between a HIGHER tier (already AUTO_ACCEPTED) and a LOWER
+// tier candidate at that same confidence (computed NEEDS_REVIEW, since it
+// doesn't clear ITS tier's higher threshold) would otherwise let the
+// lower-tier candidate win the tie and downgrade review_state -- confidence
+// doesn't regress, but review_state does, which is exactly the class of bug
+// this query exists to prevent. Each CASE below therefore adds one more
+// clause on top of the `>=` tie rule: excluded still wins ties EXCEPT the
+// specific one where the stored row is AUTO_ACCEPTED and the incoming
+// candidate computed NEEDS_REVIEW at that same confidence. Applying that
+// same exception to ALL FOUR fields together (not just review_state, as
+// Hermes' suggestion would have done) is deliberate: tier/resolver/
+// evidence_json/review_state must always
+// describe the SAME pass, so on a blocked tie the stored row's provenance
+// stays fully intact too, rather than adopting the incoming candidate's
+// tier/resolver while keeping the old review_state -- that combination
+// would itself be an inconsistent, self-contradicting row.
 func (q *Queries) UpsertMediaEdge(ctx context.Context, arg UpsertMediaEdgeParams) (MediaEdge, error) {
 	row := q.db.QueryRowContext(ctx, upsertMediaEdge,
 		arg.SourceNodeID,

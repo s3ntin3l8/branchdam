@@ -836,6 +836,67 @@ func TestUpsertMediaEdgeUpgradesOnStrongerPass(t *testing.T) {
 	}
 }
 
+// TestUpsertMediaEdgeTieDoesNotDowngradeAutoAccept backs a Hermes review
+// finding on PR #128: per-tier auto-accept thresholds differ (0.85 for
+// Tier 3, 0.90 otherwise), so an EXACT confidence tie between a stored
+// Tier-3 AUTO_ACCEPTED edge and a later Tier-2 candidate at that same
+// confidence must not let the tie-break hand the row to the weaker-tier
+// candidate -- confidence wouldn't regress (still 0.89), but review_state
+// would, from AUTO_ACCEPTED to NEEDS_REVIEW, which is exactly the class of
+// bug UpsertMediaEdge's WHERE-keyed CASE exists to prevent. And because
+// tier/resolver/evidence_json/review_state are always adopted together
+// (never independently), the blocked tie must leave the ORIGINAL Tier-3
+// provenance fully intact, not a mix of new tier/resolver with stale
+// review_state.
+func TestUpsertMediaEdgeTieDoesNotDowngradeAutoAccept(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	p := seedNode(t, database, locationID, nodeFixture{Path: "/p-tie.jpg", FileName: "p.jpg", FileExt: "jpg"})
+	c := seedNode(t, database, locationID, nodeFixture{Path: "/c-tie.jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+	tier3Engine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.89, Tier: 3,
+		Resolver: "heuristic_spatial_temporal", Evidence: map[string]any{"pass": "1"},
+	}})
+	edges, _, err := tier3Engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (pass 1, tier 3 @ 0.89): %v", err)
+	}
+	if len(edges) != 1 || edges[0].ReviewState != "AUTO_ACCEPTED" {
+		t.Fatalf("pass 1: got %+v, want one AUTO_ACCEPTED edge", edges)
+	}
+
+	// Same confidence (0.89), lower tier: 0.89 clears Tier 3's 0.85
+	// threshold but not Tier 2's 0.90, so Engine computes NEEDS_REVIEW for
+	// THIS candidate even though its confidence ties the stored value.
+	tier2Engine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.89, Tier: 2,
+		Resolver: "filename_stem", Evidence: map[string]any{"pass": "2"},
+	}})
+	edges, _, err = tier2Engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (pass 2, tier 2 @ 0.89 tie): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("pass 2: got %d edges, want 1", len(edges))
+	}
+	edge := edges[0]
+	if edge.Confidence != 0.89 {
+		t.Errorf("confidence = %v, want 0.89 (unchanged)", edge.Confidence)
+	}
+	if edge.ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("review_state = %q, want AUTO_ACCEPTED (a same-confidence, lower-tier candidate must not downgrade it)", edge.ReviewState)
+	}
+	if edge.Tier != 3 {
+		t.Errorf("tier = %d, want 3 (original provenance must stay intact when the tie is blocked)", edge.Tier)
+	}
+	if edge.Resolver != "heuristic_spatial_temporal" {
+		t.Errorf("resolver = %q, want heuristic_spatial_temporal (original provenance must stay intact when the tie is blocked)", edge.Resolver)
+	}
+}
+
 func TestLookupBySpatialTemporal(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
