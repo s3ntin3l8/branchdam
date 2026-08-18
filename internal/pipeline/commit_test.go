@@ -589,7 +589,9 @@ func TestPersistMetadataCapTruncates(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&scrubbed, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	kv := map[string]string{"k1": "v1", "k2": "v2", "k3": "v3", "k4": "v4", "k5": "v5"}
-	if err := persistMetadata(ctx, database.ReaderQueriesForTest(), node.ID, "internal", kv, 3, log); err != nil {
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return persistMetadata(ctx, q, node.ID, "internal", kv, 3, log)
+	}); err != nil {
 		t.Fatalf("persistMetadata: %v", err)
 	}
 	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
