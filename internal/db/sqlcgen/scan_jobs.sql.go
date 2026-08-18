@@ -30,6 +30,17 @@ func (q *Queries) CompleteScanJob(ctx context.Context, id int64) error {
 	return err
 }
 
+const countRunningScanJobs = `-- name: CountRunningScanJobs :one
+SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
+`
+
+func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRunningScanJobs)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createScanJob = `-- name: CreateScanJob :one
 INSERT INTO scan_jobs (storage_location_id, kind, state, started_at, updated_at)
 VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch())

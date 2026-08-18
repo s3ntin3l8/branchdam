@@ -209,3 +209,25 @@ func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 func (p *Pool[K]) Drain() {
 	p.wg.Wait()
 }
+
+// InFlight returns the number of jobs currently submitted and not yet finished.
+func (p *Pool[K]) InFlight() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.inflight)
+}
+
+// QueueDepth returns the current number of jobs buffered in the queue.
+func (p *Pool[K]) QueueDepth() int {
+	return len(p.jobs)
+}
+
+// QueueCapacity returns the buffer capacity of the queue channel.
+func (p *Pool[K]) QueueCapacity() int {
+	return cap(p.jobs)
+}
+
+// WorkerCount returns the configured number of worker goroutines.
+func (p *Pool[K]) WorkerCount() int {
+	return p.workerCount
+}

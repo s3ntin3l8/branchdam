@@ -49,3 +49,6 @@ SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
 FROM scan_jobs
 ORDER BY started_at DESC
 LIMIT ?1;
+
+-- name: CountRunningScanJobs :one
+SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH';

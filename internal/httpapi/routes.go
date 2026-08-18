@@ -10,6 +10,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -24,6 +25,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/config/path-rewrites", s.handleListPathRewrites)
 
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
+	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)
 
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
@@ -819,5 +821,115 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 
 	out := &AgentEventOutput{}
 	out.Body.EventID = id.String()
+	return out, nil
+}
+
+// --- /api/v1/storage-health ---
+
+type storageLocationHealthDTO struct {
+	ID              int64   `json:"id"`
+	Name            string  `json:"name"`
+	RootPath        string  `json:"rootPath"`
+	Tier            string  `json:"tier"`
+	ReadOnly        bool    `json:"readOnly"`
+	Prunable        bool    `json:"prunable"`
+	IsActive        bool    `json:"isActive"`
+	NodeCount       int64   `json:"nodeCount"`
+	TotalBytes      uint64  `json:"totalBytes"`
+	UsedBytes       uint64  `json:"usedBytes"`
+	FreeBytes       uint64  `json:"freeBytes"`
+	IsDegraded      bool    `json:"isDegraded"`
+	DegradedMessage *string `json:"degradedMessage,omitempty"`
+}
+
+type storageQueueHealthDTO struct {
+	WorkerPoolInFlight int   `json:"workerPoolInFlight"`
+	WorkerPoolQueued   int   `json:"workerPoolQueued"`
+	WorkerPoolCapacity int   `json:"workerPoolCapacity"`
+	WorkerCount        int   `json:"workerCount"`
+	RunningScanJobs    int64 `json:"runningScanJobs"`
+}
+
+type storageHealthDTO struct {
+	Locations []storageLocationHealthDTO `json:"locations"`
+	Queues    storageQueueHealthDTO      `json:"queues"`
+}
+
+type storageHealthOutput struct {
+	Body storageHealthDTO
+}
+
+func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storageHealthOutput, error) {
+	out := &storageHealthOutput{}
+	out.Body.Locations = []storageLocationHealthDTO{}
+
+	var locations []sqlcgen.StorageLocation
+	var counts []sqlcgen.ListNodeCountsByLocationRow
+	var runningJobs int64
+
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		locations, err = q.ListStorageLocations(ctx)
+		if err != nil {
+			return err
+		}
+		counts, err = q.ListNodeCountsByLocation(ctx)
+		if err != nil {
+			return err
+		}
+		runningJobs, err = q.CountRunningScanJobs(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("fetch storage health metrics", err)
+	}
+
+	countMap := make(map[int64]int64, len(counts))
+	for _, c := range counts {
+		countMap[c.StorageLocationID] = c.NodeCount
+	}
+
+	for _, loc := range locations {
+		dto := storageLocationHealthDTO{
+			ID:        loc.ID,
+			Name:      loc.Name,
+			RootPath:  loc.RootPath,
+			Tier:      loc.Tier,
+			ReadOnly:  loc.ReadOnly == 1,
+			Prunable:  loc.Prunable == 1,
+			IsActive:  loc.IsActive == 1,
+			NodeCount: countMap[loc.ID],
+		}
+
+		var stat unix.Statfs_t
+		if err := unix.Statfs(loc.RootPath, &stat); err != nil {
+			dto.IsDegraded = true
+			msg := err.Error()
+			dto.DegradedMessage = &msg
+		} else {
+			bsize := uint64(stat.Bsize)
+			dto.TotalBytes = stat.Blocks * bsize
+			dto.FreeBytes = stat.Bavail * bsize
+			if stat.Blocks >= stat.Bfree {
+				dto.UsedBytes = (stat.Blocks - stat.Bfree) * bsize
+			}
+		}
+		out.Body.Locations = append(out.Body.Locations, dto)
+	}
+
+	if s.pool != nil {
+		out.Body.Queues = storageQueueHealthDTO{
+			WorkerPoolInFlight: s.pool.InFlight(),
+			WorkerPoolQueued:   s.pool.QueueDepth(),
+			WorkerPoolCapacity: s.pool.QueueCapacity(),
+			WorkerCount:        s.pool.WorkerCount(),
+			RunningScanJobs:    runningJobs,
+		}
+	} else {
+		out.Body.Queues = storageQueueHealthDTO{
+			RunningScanJobs: runningJobs,
+		}
+	}
+
 	return out, nil
 }

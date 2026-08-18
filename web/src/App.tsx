@@ -8,6 +8,7 @@ const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
 const AuditQueuePage = lazy(() => import("./pages/AuditQueuePage"));
 const IngestPage = lazy(() => import("./pages/IngestPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const StorageHealthPage = lazy(() => import("./pages/StorageHealthPage"));
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   return (
@@ -44,6 +45,7 @@ export default function App() {
           </NavItem>
           <NavItem to="/audit">Audit Queue</NavItem>
           <NavItem to="/ingest">Ingest</NavItem>
+          <NavItem to="/storage-health">Storage Health</NavItem>
           <NavItem to="/settings">Settings</NavItem>
         </div>
         {me && me.kind === "user" && me.name && (
@@ -58,6 +60,7 @@ export default function App() {
             <Route path="/assets/:id" element={<AssetDetailPage />} />
             <Route path="/audit" element={<AuditQueuePage />} />
             <Route path="/ingest" element={<IngestPage />} />
+            <Route path="/storage-health" element={<StorageHealthPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </Suspense>
