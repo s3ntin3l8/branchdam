@@ -1,5 +1,5 @@
 import { useParams, useSearchParams } from "react-router";
-import { useAsset, useAssetLineage } from "../hooks/queries";
+import { useAsset, useAssetLineage, useAssetSyncStatus, useRetrySync } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
@@ -21,6 +21,8 @@ export default function AssetDetailPage() {
 
   const { data: asset, isLoading, isError } = useAsset(assetId);
   const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(assetId, depth);
+  const { data: sync, isLoading: isSyncLoading } = useAssetSyncStatus(assetId);
+  const retrySync = useRetrySync();
 
   if (!assetId || Number.isNaN(assetId)) return <div className="p-6 text-red-400">Invalid asset id.</div>;
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
@@ -52,6 +54,47 @@ export default function AssetDetailPage() {
           <Field label="Fast hash (xxHash64)" value={asset.fastHash} />
           <Field label="Full hash (BLAKE3-256)" value={asset.fullHash} />
         </dl>
+      </section>
+
+      <section>
+        <h2 className="mb-2 text-sm font-medium text-neutral-400">Sync status</h2>
+        <div className="rounded border border-neutral-800 p-3">
+          {isSyncLoading ? (
+            <p className="text-sm text-neutral-500">Loading sync status…</p>
+          ) : sync?.sync && sync.sync.length > 0 ? (
+            <div className="space-y-3">
+              {sync.sync.map((s) => (
+                <div key={s.remote} className="flex items-start justify-between gap-4 text-sm">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-neutral-200">{s.remote}</span>
+                      <span className="rounded bg-neutral-800 px-2 py-0.5 font-mono text-xs text-neutral-300">
+                        {s.syncStatus}
+                      </span>
+                    </div>
+                    {s.lastError && <p className="mt-1 break-all text-xs text-red-400">Error: {s.lastError}</p>}
+                    {s.lastAttemptAt !== undefined && (
+                      <p className="mt-1 text-xs text-neutral-500">
+                        Last attempt: {new Date(s.lastAttemptAt * 1000).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
+                  {s.syncStatus === "PUSH_FAILED" && (
+                    <button
+                      onClick={() => retrySync.mutate(asset.id)}
+                      disabled={retrySync.isPending}
+                      className="shrink-0 rounded border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-neutral-200 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {retrySync.isPending ? "Retrying…" : "Retry"}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-neutral-500">No sync state yet.</p>
+          )}
+        </div>
       </section>
 
       <section>

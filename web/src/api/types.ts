@@ -103,6 +103,25 @@ export interface InheritMetadataResponse {
   inherited: Record<string, string>;
 }
 
+export type SyncStatus =
+  | "NOT_QUEUED"
+  | "PENDING_CLOUD_PUSH"
+  | "PUSHING"
+  | "PUSHED"
+  | "PUSH_FAILED";
+
+export interface SyncState {
+  remote: string;
+  syncStatus: SyncStatus;
+  remoteAssetId?: string;
+  lastError?: string;
+  lastAttemptAt?: number;
+}
+
+export interface AssetSyncStatus {
+  sync: SyncState[];
+}
+
 export interface ScanJob {
   id: number;
   kind: "FULL_SCAN" | "INCREMENTAL" | "WATCH";
