@@ -149,15 +149,16 @@ func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJo
 
 const updateScanJobProgress = `-- name: UpdateScanJobProgress :exec
 UPDATE scan_jobs
-SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, updated_at = unixepoch()
+SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, edges_created = ?5, updated_at = unixepoch()
 WHERE id = ?1
 `
 
 type UpdateScanJobProgressParams struct {
-	ID          int64
-	FilesSeen   int64
-	FilesHashed int64
-	FilesFailed int64
+	ID           int64
+	FilesSeen    int64
+	FilesHashed  int64
+	FilesFailed  int64
+	EdgesCreated int64
 }
 
 func (q *Queries) UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error {
@@ -166,6 +167,7 @@ func (q *Queries) UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobPr
 		arg.FilesSeen,
 		arg.FilesHashed,
 		arg.FilesFailed,
+		arg.EdgesCreated,
 	)
 	return err
 }

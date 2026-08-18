@@ -6,7 +6,7 @@ RETURNING id, storage_location_id, kind, state, files_seen, files_hashed,
 
 -- name: UpdateScanJobProgress :exec
 UPDATE scan_jobs
-SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, updated_at = unixepoch()
+SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, edges_created = ?5, updated_at = unixepoch()
 WHERE id = ?1;
 
 -- name: CompleteScanJob :exec

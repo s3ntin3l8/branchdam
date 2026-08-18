@@ -56,13 +56,17 @@ func NewEngine(database *db.DB, log *slog.Logger, resolvers ...Resolver) *Engine
 // see docs/schema.md fix #7 -- and the upsert itself never downgrades a
 // human CONFIRMED/REJECTED decision (media_edges_resolve.sql). Returns the
 // edges actually committed (empty if every candidate was below
-// needsReviewFloor or would have closed a cycle).
-func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.MediaEdge, error) {
+// needsReviewFloor or would have closed a cycle) and how many of those were
+// genuinely new rows, as opposed to an existing edge whose
+// confidence/evidence was merely refreshed -- UpsertMediaEdge's RETURNING
+// row looks the same either way, so the caller can't tell the two apart
+// without this. Backs scan_jobs.edges_created.
+func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.MediaEdge, int, error) {
 	var all []Candidate
 	for _, r := range e.resolvers {
 		candidates, err := r.Resolve(ctx, child, e.lookup)
 		if err != nil {
-			return nil, fmt.Errorf("resolver %s: %w", r.Name(), err)
+			return nil, 0, fmt.Errorf("resolver %s: %w", r.Name(), err)
 		}
 		all = append(all, candidates...)
 	}
@@ -70,6 +74,7 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 	merged := mergeCandidates(all)
 
 	var committed []sqlcgen.MediaEdge
+	var created int
 	err := e.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		for _, c := range merged {
 			if c.Confidence < needsReviewFloor {
@@ -87,6 +92,15 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 				e.log.Warn("graph: candidate edge would close a cycle, skipping",
 					"parent", c.ParentID, "child", c.ChildID, "rel", c.Rel, "resolver", c.Resolver)
 				continue
+			}
+
+			existed, err := q.MediaEdgeExists(ctx, sqlcgen.MediaEdgeExistsParams{
+				SourceNodeID:     c.ParentID,
+				TargetNodeID:     c.ChildID,
+				RelationshipType: c.Rel,
+			})
+			if err != nil {
+				return fmt.Errorf("check edge exists %d->%d: %w", c.ParentID, c.ChildID, err)
 			}
 
 			evidenceJSON, err := json.Marshal(c.Evidence)
@@ -113,6 +127,9 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 				return fmt.Errorf("upsert edge %d->%d: %w", c.ParentID, c.ChildID, err)
 			}
 			committed = append(committed, edge)
+			if !existed {
+				created++
+			}
 		}
 
 		if len(committed) > 0 {
@@ -133,9 +150,9 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return committed, nil
+	return committed, created, nil
 }
 
 // mergeCandidates groups candidates by (parent, child, rel), keeping the

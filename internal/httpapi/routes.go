@@ -383,6 +383,11 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
 		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
 		Tracker: s.tracker,
+		Nudge: func() {
+			if s.hub != nil {
+				s.hub.Broadcast()
+			}
+		},
 	}, location)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("start scan", err)

@@ -175,12 +175,15 @@ func TestXMPOriginalDocumentIDMatch(t *testing.T) {
 	})
 
 	engine := newEngine(database)
-	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	edges, created, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit: %v", err)
 	}
 	if len(edges) != 1 {
 		t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
+	}
+	if created != 1 {
+		t.Errorf("created = %d, want 1 (a brand new edge)", created)
 	}
 	edge := edges[0]
 	if edge.SourceNodeID != parent.ID || edge.TargetNodeID != childRow.ID {
@@ -225,7 +228,7 @@ func TestFilenameStemAllBoostsReachesAutoAccept(t *testing.T) {
 	})
 
 	engine := newEngine(database)
-	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit: %v", err)
 	}
@@ -263,7 +266,7 @@ func TestFilenameStemWeakMatchNeedsReview(t *testing.T) {
 	})
 
 	engine := newEngine(database)
-	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit: %v", err)
 	}
@@ -317,7 +320,7 @@ func TestCycleRejected(t *testing.T) {
 		ParentID: b.ID, ChildID: a.ID, Rel: "DERIVED_FROM", Confidence: 0.99, Tier: 1,
 		Resolver: "cycle-fixture", Evidence: map[string]any{},
 	}})
-	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(a))
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(a))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit: %v", err)
 	}
@@ -453,7 +456,7 @@ func TestBelowFloorCandidatesNeverPersisted(t *testing.T) {
 		ParentID: a.ID, ChildID: b.ID, Rel: "DERIVED_FROM", Confidence: 0.49, Tier: 3,
 		Resolver: "weak-fixture", Evidence: map[string]any{},
 	}})
-	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(b))
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(b))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit: %v", err)
 	}
@@ -529,7 +532,7 @@ func TestPerTierAutoAcceptThreshold(t *testing.T) {
 				Resolver: "test-resolver", Evidence: map[string]any{},
 			}})
 
-			edges, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+			edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
 			if err != nil {
 				t.Fatalf("ResolveAndCommit: %v", err)
 			}
@@ -540,6 +543,45 @@ func TestPerTierAutoAcceptThreshold(t *testing.T) {
 				t.Errorf("ReviewState = %q, want %q", edges[0].ReviewState, tt.wantReviewState)
 			}
 		})
+	}
+}
+
+// TestResolveAndCommitCreatedCountOnlyCountsNewEdges backs scan_jobs.edges_created:
+// resolving the same (parent, child) pair twice must only count the first
+// call as a creation -- the second call's UpsertMediaEdge touches an
+// existing row (refreshing confidence/evidence, per media_edges_resolve.sql's
+// own doc comment), which is not a new edge even though it's still returned
+// in committed.
+func TestResolveAndCommitCreatedCountOnlyCountsNewEdges(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	p := seedNode(t, database, locationID, nodeFixture{Path: "/p.jpg", FileName: "p.jpg", FileExt: "jpg"})
+	c := seedNode(t, database, locationID, nodeFixture{Path: "/c.jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+	engine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+		Resolver: "fixed", Evidence: map[string]any{},
+	}})
+
+	edges, created, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (first): %v", err)
+	}
+	if len(edges) != 1 || created != 1 {
+		t.Fatalf("first call: got %d edges, %d created, want 1, 1", len(edges), created)
+	}
+
+	edges, created, err = engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (second): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("second call: got %d edges, want 1 (the same edge, refreshed)", len(edges))
+	}
+	if created != 0 {
+		t.Errorf("second call: created = %d, want 0 (edge already existed)", created)
 	}
 }
 
@@ -713,7 +755,7 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 	engine := NewEngine(database, nil, r)
 
 	// Case 1: Full match (Serial + Lens + Time + pHash <= 10) -> score 0.89 -> AUTO_ACCEPTED
-	edges, err := engine.ResolveAndCommit(ctx, asGraphNode(childFull))
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childFull))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit full: %v", err)
 	}
@@ -731,7 +773,7 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 	}
 
 	// Case 2: Missing pHash (NULL phash) -> capped at 0.79 -> NEEDS_REVIEW
-	edgesNoPHash, err := engine.ResolveAndCommit(ctx, asGraphNode(childNoPHash))
+	edgesNoPHash, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childNoPHash))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit no pHash: %v", err)
 	}
@@ -749,7 +791,7 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 	}
 
 	// Case 3: Far pHash (Hamming distance > 10) -> no candidate emitted
-	edgesFar, err := engine.ResolveAndCommit(ctx, asGraphNode(childFarPHash))
+	edgesFar, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childFarPHash))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit far pHash: %v", err)
 	}
@@ -776,7 +818,7 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 		CapturedAt:   &t1,
 		PHash:        &phashClose,
 	})
-	edgesDiffLens, err := engine.ResolveAndCommit(ctx, asGraphNode(childDiffLens))
+	edgesDiffLens, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childDiffLens))
 	if err != nil {
 		t.Fatalf("ResolveAndCommit diff lens: %v", err)
 	}

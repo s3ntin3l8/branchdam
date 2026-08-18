@@ -72,12 +72,12 @@ type Querier interface {
 	// paths are the same content, the pipeline needs every other live node
 	// sharing that fast_hash so it can escalate to full_hash and compare.
 	ListLiveNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error)
+	// Look up live media nodes sharing exact file_name for fallback path matching.
+	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error)
 	// Tier-2 filenameStem resolver: candidate parents sharing a normalized
 	// filename stem with the child, scored further by capture day / camera /
 	// directory match in internal/graph.
 	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]MediaNode, error)
-	// Look up live media nodes sharing exact file_name for fallback path matching.
-	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
@@ -91,7 +91,26 @@ type Querier interface {
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
 	MarkNodeMissing(ctx context.Context, id int64) error
+	// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
+	// scanned storage location whose last_seen_at predates the scan's start is
+	// gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+	// last_seen_at on every node the walk actually saw and committed, so anything
+	// still old here was genuinely unseen this scan. KeepActive is the pass's
+	// seen-but-uncertain set -- paths the walk saw but did not reliably commit
+	// (processFile error, submit refused, dropped result, batch Commit failure) --
+	// and is excluded from the sweep: a file on disk with a stale last_seen_at is
+	// not proof it's gone. KeepActive paths are passed as a JSON array string
+	// to json_each(?3) to remain within SQLite per-statement parameter bounds.
+	// Scoped by storage_location_id so a scan of one mount never touches another.
+	// unixepoch() is 1s granularity, so a node last seen in a scan that happened
+	// to end in the SAME wall-clock second as this scan's start may survive one
+	// extra scan -- it is swept the next round, which is delayed-not-wrong.
 	MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error)
+	// Checked before UpsertMediaEdge so the caller can tell a genuinely new
+	// edge apart from an existing one whose confidence/evidence was merely
+	// refreshed -- UpsertMediaEdge's RETURNING row looks the same either way.
+	// Backs scan_jobs.edges_created (fix(pipeline): #90).
+	MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams) (bool, error)
 	// Pillar 5 move detection, applied: the id and node_uuid never change, so
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
