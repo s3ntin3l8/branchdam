@@ -1703,3 +1703,174 @@ func TestAgentRebase_Known_And_Unknown_Nodes_And_Tier3_Safety(t *testing.T) {
 		t.Fatalf("rebase to tier 3 status = %d, want 400 Bad Request", rrTier3.Code)
 	}
 }
+
+// seedSyncLocation creates a storage location for seeding nodes.
+func seedSyncLocation(t *testing.T, database *db.DB) int64 {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	var locID int64
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "sync-loc", RootPath: root, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		locID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	return locID
+}
+
+// seedSyncState inserts a remote_sync_state row via UpsertRemoteSyncState (the
+// only sanctioned row-creation path). Returns the upserted row.
+func seedSyncState(t *testing.T, database *db.DB, nodeID int64, remote, status string, lastError string, lastAttemptAt int64) sqlcgen.RemoteSyncState {
+	t.Helper()
+	var row sqlcgen.RemoteSyncState
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		var errStr sql.NullString
+		if lastError != "" {
+			errStr = sql.NullString{String: lastError, Valid: true}
+		}
+		var attempt sql.NullInt64
+		if lastAttemptAt != 0 {
+			attempt = sql.NullInt64{Int64: lastAttemptAt, Valid: true}
+		}
+		var err error
+		row, err = q.UpsertRemoteSyncState(context.Background(), sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: nodeID, Remote: remote, SyncStatus: status,
+			RemoteAssetID: sql.NullString{}, LastError: errStr, LastAttemptAt: attempt,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed sync state: %v", err)
+	}
+	return row
+}
+
+func TestAssetSyncStatus(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "asset.jpg"), "uuid-sync-status")
+
+	now := time.Now().Unix()
+	seedSyncState(t, database, node.ID, "IMMICH", "PUSH_FAILED", "boom: 500", now)
+	seedSyncState(t, database, node.ID, "GOOGLE_PHOTOS", "PUSHED", "", now)
+
+	t.Run("returns both remotes with expected fields", func(t *testing.T) {
+		rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync-status", nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+		}
+		var got struct {
+			Sync []syncStateDTO `json:"sync"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(got.Sync) != 2 {
+			t.Fatalf("got %d sync rows, want 2: %+v", len(got.Sync), got.Sync)
+		}
+		byRemote := map[string]syncStateDTO{}
+		for _, r := range got.Sync {
+			byRemote[r.Remote] = r
+		}
+		immich, ok := byRemote["IMMICH"]
+		if !ok {
+			t.Fatalf("missing IMMICH row: %+v", byRemote)
+		}
+		if immich.SyncStatus != "PUSH_FAILED" {
+			t.Errorf("IMMICH syncStatus = %q, want PUSH_FAILED", immich.SyncStatus)
+		}
+		if immich.LastError == nil || *immich.LastError != "boom: 500" {
+			t.Errorf("IMMICH lastError = %v, want boom: 500", immich.LastError)
+		}
+		if immich.LastAttemptAt == nil || *immich.LastAttemptAt != now {
+			t.Errorf("IMMICH lastAttemptAt = %v, want %d", immich.LastAttemptAt, now)
+		}
+
+		gp, ok := byRemote["GOOGLE_PHOTOS"]
+		if !ok {
+			t.Fatalf("missing GOOGLE_PHOTOS row: %+v", byRemote)
+		}
+		if gp.SyncStatus != "PUSHED" {
+			t.Errorf("GOOGLE_PHOTOS syncStatus = %q, want PUSHED", gp.SyncStatus)
+		}
+		if gp.LastError != nil {
+			t.Errorf("GOOGLE_PHOTOS lastError = %v, want nil", gp.LastError)
+		}
+	})
+
+	t.Run("unknown asset 404s", func(t *testing.T) {
+		rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/999999/sync-status", nil)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", rr.Code)
+		}
+	})
+}
+
+func TestSyncRetryRequeuesFailed(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "retry.jpg"), "uuid-sync-retry")
+
+	now := time.Now().Unix()
+	seedSyncState(t, database, node.ID, "IMMICH", "PUSH_FAILED", "boom: 500", now)
+	seedSyncState(t, database, node.ID, "GOOGLE_PHOTOS", "PUSHED", "", now)
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync/retry", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Requeued int64 `json:"requeued"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Requeued != 1 {
+		t.Errorf("requeued = %d, want 1 (only the PUSH_FAILED row)", out.Requeued)
+	}
+
+	rows, err := database.Reader.ListRemoteSyncStateByNode(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("list sync state: %v", err)
+	}
+	byRemote := map[string]sqlcgen.RemoteSyncState{}
+	for _, r := range rows {
+		byRemote[r.Remote] = r
+	}
+	immich, ok := byRemote["IMMICH"]
+	if !ok {
+		t.Fatalf("missing IMMICH row after retry: %+v", byRemote)
+	}
+	if immich.SyncStatus != "PENDING_CLOUD_PUSH" {
+		t.Errorf("IMMICH syncStatus after retry = %q, want PENDING_CLOUD_PUSH", immich.SyncStatus)
+	}
+	if immich.LastError.Valid {
+		t.Errorf("IMMICH lastError after retry = %q, want cleared", immich.LastError.String)
+	}
+	if gp, ok := byRemote["GOOGLE_PHOTOS"]; !ok || gp.SyncStatus != "PUSHED" {
+		t.Errorf("GOOGLE_PHOTOS should stay PUSHED and uncounted: %+v", gp)
+	}
+}
+
+func TestSyncRetryRequiresAdmin(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	srv.cfg.Authz.Groups = []string{"dam-admins"}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/assets/1/sync/retry", bytes.NewBufferString("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Authentik-Username", "alice")
+	req.Header.Set("X-Authentik-Groups", "dam-users")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for non-admin on sync/retry", rr.Code)
+	}
+}
