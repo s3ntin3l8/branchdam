@@ -238,6 +238,76 @@ func TestRebaseIfMovedCreateFirstRebases(t *testing.T) {
 	}
 }
 
+// TestRebaseIfMovedBackfillsMetadata backs #86: a node indexed before
+// exiftool/ffprobe were on PATH, then moved before its removal event was
+// processed, must gain its metadata on rebaseIfMoved's own rebase --
+// RebaseMissingNodePath alone (unlike insertNewNode) never called
+// persistMetadata before this fix.
+func TestRebaseIfMovedBackfillsMetadata(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	writeFile(t, oldPath, "renamed content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "rebase-metadata-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	// Seed the "old" node directly, with no probe data -- simulating a scan
+	// before exiftool/ffprobe were on PATH.
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: oldPath, FileName: "old.txt", FileExt: "txt", Size: 15, ModTime: time.Now(), FastHash: "abababababababab"},
+	}); err != nil {
+		t.Fatalf("Commit (seed): %v", err)
+	}
+	original := mustGetLiveNode(t, database, oldPath)
+	if rows, err := database.Reader.ListNodeMetadata(ctx, original.ID); err != nil {
+		t.Fatalf("ListNodeMetadata (initial): %v", err)
+	} else if len(rows) != 0 {
+		t.Fatalf("initial metadata rows = %d, want 0 (simulating a probe-less first scan)", len(rows))
+	}
+
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+
+	newPath := filepath.Join(resolvedRoot, "new.txt")
+	writeFile(t, newPath, "renamed content")
+	info, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatalf("stat new: %v", err)
+	}
+	// Same fast_hash as the seeded node, now with probe data -- the tools
+	// were installed in between, or this is the first pass to reach this
+	// file after they were.
+	result := &Result{
+		Path: newPath, FileName: "new.txt", FileExt: "txt", Size: info.Size(), ModTime: info.ModTime(),
+		FastHash: "abababababababab",
+		Make:     "CANON", ExifRaw: map[string]string{"EXIF:ISO": "100"},
+	}
+
+	moved, err := NewWatcherSupervisor(deps, nil).rebaseIfMoved(ctx, loc, result)
+	if err != nil {
+		t.Fatalf("rebaseIfMoved: %v", err)
+	}
+	if !moved {
+		t.Fatal("rebaseIfMoved = false, want true (old file gone, same fast_hash)")
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, original.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata (after rebase): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("metadata rows after rebase = %d, want 2 (EXIF:Make, EXIF:ISO)", len(rows))
+	}
+}
+
 // TestRebaseIfMovedLeavesDuplicateAlone is the negative counterpart: the old
 // file is still on disk, so a same-content file at a new path is a genuine
 // duplicate -- not a move -- and rebaseIfMoved must decline (returning

@@ -299,13 +299,18 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 		// scan. Fail-safe, never corrupting: the worst case is a deferred
 		// (re-)index, not a wrong row.
 		if err := w.deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-			return q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
+			if err := q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
 				ID:                n.ID,
 				FilePath:          result.Path,
 				FileName:          result.FileName,
 				StorageLocationID: loc.ID,
 				MtimeUnix:         result.ModTime.Unix(),
-			})
+			}); err != nil {
+				return err
+			}
+			// Same backfill as Commit's own touched/rebase branches -- see
+			// commit.go's persistAllMetadata doc comment and #86.
+			return persistAllMetadata(ctx, q, n.ID, *result, w.log)
 		}); err != nil {
 			return false, fmt.Errorf("rebase moved node %d: %w", n.ID, err)
 		}
