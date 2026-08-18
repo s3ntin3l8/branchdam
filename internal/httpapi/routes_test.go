@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -1309,6 +1311,43 @@ func TestStorageHealth(t *testing.T) {
 	rrNil := doJSON(t, nilPoolServer.Handler(), http.MethodGet, "/api/v1/storage-health", nil)
 	if rrNil.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/storage-health nil pool status = %d, want 200", rrNil.Code)
+	}
+}
+
+// TestStatfsWithTimeoutSucceedsOnFastPath is statfsWithTimeout's happy
+// path: a real, existing directory with a generous timeout must behave
+// exactly like a direct unix.Statfs call.
+func TestStatfsWithTimeoutSucceedsOnFastPath(t *testing.T) {
+	stat, err := statfsWithTimeout(t.TempDir(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("statfsWithTimeout: %v", err)
+	}
+	if stat.Blocks == 0 {
+		t.Error("stat.Blocks = 0, want a real filesystem stat for an existing directory")
+	}
+}
+
+// TestStatfsWithTimeoutReturnsErrorWhenExceeded backs M4: a hung NFS/SMB
+// mount must degrade the location, not block the whole /api/v1/
+// storage-health response indefinitely. Statfs itself can't be reproduced
+// hanging in a portable unit test (it would need a genuinely wedged
+// mount), so this uses statfsWithTimeoutFn to substitute a stub that
+// blocks forever, forcing the timeout branch deterministically against a
+// real, non-degenerate timeout -- an earlier version of this test raced a
+// 1ns timeout against the real syscall instead, which was flaky in CI: a
+// fast enough real Statfs call occasionally won that race, so the test
+// would flip-flop between exercising the timeout branch and the success
+// branch depending on runner load, not the code under test.
+func TestStatfsWithTimeoutReturnsErrorWhenExceeded(t *testing.T) {
+	blockForever := func(_ string, _ *unix.Statfs_t) error {
+		select {}
+	}
+	_, err := statfsWithTimeoutFn(blockForever, "/irrelevant", 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("statfsWithTimeoutFn with a permanently-blocked syscall returned nil error, want a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %q, want it to mention a timeout", err.Error())
 	}
 }
 
