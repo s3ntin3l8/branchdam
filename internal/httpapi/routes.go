@@ -770,7 +770,9 @@ func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 		if e.ReviewState != "AUTO_ACCEPTED" && e.ReviewState != "CONFIRMED" {
 			continue
 		}
-		if best == nil || e.Confidence > best.Confidence {
+		// Highest confidence wins; on a tie, the lowest edge id (deterministic,
+		// since ListEdgesByTarget has no ORDER BY).
+		if best == nil || e.Confidence > best.Confidence || (e.Confidence == best.Confidence && e.ID < best.ID) {
 			best = e
 		}
 	}

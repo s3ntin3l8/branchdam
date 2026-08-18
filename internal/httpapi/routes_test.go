@@ -2007,3 +2007,32 @@ func TestSyncRetryRequiresAdmin(t *testing.T) {
 		t.Errorf("status = %d, want 403 for non-admin on sync/retry", rr.Code)
 	}
 }
+
+func TestPickWinningParentTieBreaksByID(t *testing.T) {
+	edges := []sqlcgen.MediaEdge{
+		{ID: 5, Confidence: 0.9, ReviewState: "AUTO_ACCEPTED"},
+		{ID: 3, Confidence: 0.9, ReviewState: "CONFIRMED"},
+		{ID: 7, Confidence: 0.9, ReviewState: "REJECTED"},
+		{ID: 9, Confidence: 0.9, ReviewState: "NEEDS_REVIEW"},
+	}
+
+	got := pickWinningParent(edges)
+	if got == nil {
+		t.Fatal("pickWinningParent = nil, want the lowest-ID eligible edge")
+	}
+	if got.ID != 3 {
+		t.Errorf("winning edge id = %d, want 3 (lowest-ID eligible on equal confidence)", got.ID)
+	}
+	if got.ReviewState != "CONFIRMED" {
+		t.Errorf("winning review state = %q, want CONFIRMED", got.ReviewState)
+	}
+
+	edges = append(edges, sqlcgen.MediaEdge{ID: 1, Confidence: 0.95, ReviewState: "AUTO_ACCEPTED"})
+	got = pickWinningParent(edges)
+	if got == nil {
+		t.Fatal("pickWinningParent = nil, want the higher-confidence edge")
+	}
+	if got.ID != 1 {
+		t.Errorf("winning edge id = %d, want 1 (higher confidence beats the tie-break)", got.ID)
+	}
+}
