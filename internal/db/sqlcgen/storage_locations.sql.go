@@ -95,6 +95,41 @@ func (q *Queries) GetStorageLocationByPath(ctx context.Context, rootPath string)
 	return i, err
 }
 
+const listNodeCountsByLocation = `-- name: ListNodeCountsByLocation :many
+SELECT storage_location_id, COUNT(*) AS node_count
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+GROUP BY storage_location_id
+`
+
+type ListNodeCountsByLocationRow struct {
+	StorageLocationID int64
+	NodeCount         int64
+}
+
+func (q *Queries) ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNodeCountsByLocation)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListNodeCountsByLocationRow{}
+	for rows.Next() {
+		var i ListNodeCountsByLocationRow
+		if err := rows.Scan(&i.StorageLocationID, &i.NodeCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStorageLocations = `-- name: ListStorageLocations :many
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
 FROM storage_locations

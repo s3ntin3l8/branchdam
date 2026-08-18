@@ -792,6 +792,91 @@ func TestCreateManualEdge(t *testing.T) {
 	}
 }
 
+func TestStorageHealth(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	invalidDir := filepath.Join(tmpDir, "nonexistent-mount-path")
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc1, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "valid", RootPath: tmpDir, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 1,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "invalid", RootPath: invalidDir, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc1.ID, NodeUuid: "uuid-s1", FilePath: filepath.Join(tmpDir, "f1.raw"), FileName: "f1.raw", FileExt: ".raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed storage health test data: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/storage-health", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/storage-health status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var got struct {
+		Locations []struct {
+			Name            string  `json:"name"`
+			NodeCount       int64   `json:"nodeCount"`
+			TotalBytes      uint64  `json:"totalBytes"`
+			IsDegraded      bool    `json:"isDegraded"`
+			DegradedMessage *string `json:"degradedMessage"`
+		} `json:"locations"`
+		Queues struct {
+			WorkerPoolCapacity int   `json:"workerPoolCapacity"`
+			RunningScanJobs    int64 `json:"runningScanJobs"`
+		} `json:"queues"`
+	}
+
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal storage health response: %v", err)
+	}
+
+	if len(got.Locations) != 2 {
+		t.Fatalf("got %d locations, want 2", len(got.Locations))
+	}
+
+	var validLoc, invalidLoc *struct {
+		Name            string  `json:"name"`
+		NodeCount       int64   `json:"nodeCount"`
+		TotalBytes      uint64  `json:"totalBytes"`
+		IsDegraded      bool    `json:"isDegraded"`
+		DegradedMessage *string `json:"degradedMessage"`
+	}
+
+	for i := range got.Locations {
+		if got.Locations[i].Name == "valid" {
+			validLoc = &got.Locations[i]
+		} else if got.Locations[i].Name == "invalid" {
+			invalidLoc = &got.Locations[i]
+		}
+	}
+
+	if validLoc == nil || invalidLoc == nil {
+		t.Fatalf("locations missing valid or invalid entry: %+v", got.Locations)
+	}
+
+	if validLoc.IsDegraded || validLoc.NodeCount != 1 || validLoc.TotalBytes == 0 {
+		t.Errorf("valid location unexpected state: %+v", validLoc)
+	}
+
+	if !invalidLoc.IsDegraded || invalidLoc.DegradedMessage == nil {
+		t.Errorf("invalid location should be degraded: %+v", invalidLoc)
+	}
+}
+
 func toStr(v int64) string {
 	return fmt.Sprintf("%d", v)
 }

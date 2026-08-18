@@ -115,3 +115,32 @@ export interface LineageResponse {
   nodes: Asset[];
   edges: Edge[];
 }
+
+export interface StorageLocationHealth {
+  id: number;
+  name: string;
+  rootPath: string;
+  tier: StorageLocation["tier"];
+  readOnly: boolean;
+  prunable: boolean;
+  isActive: boolean;
+  nodeCount: number;
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  isDegraded: boolean;
+  degradedMessage?: string;
+}
+
+export interface StorageQueueHealth {
+  workerPoolInFlight: number;
+  workerPoolQueued: number;
+  workerPoolCapacity: number;
+  workerCount: number;
+  runningScanJobs: number;
+}
+
+export interface StorageHealth {
+  locations: StorageLocationHealth[];
+  queues: StorageQueueHealth;
+}

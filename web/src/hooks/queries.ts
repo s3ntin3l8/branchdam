@@ -118,3 +118,11 @@ export function useProgress(limit = 10) {
     refetchInterval: 15_000,
   });
 }
+
+export function useStorageHealth() {
+  return useQuery({
+    queryKey: ["storage-health"],
+    queryFn: api.getStorageHealth,
+    refetchInterval: 10_000,
+  });
+}

@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AuditEntry, Config, CreateEdgeInput, Edge, LineageResponse, Me, PathRewrite, ScanJob, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AuditEntry, Config, CreateEdgeInput, Edge, LineageResponse, Me, PathRewrite, ScanJob, StorageHealth, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -65,4 +65,6 @@ export const api = {
       body: JSON.stringify({ storageLocationId }),
     }),
   listProgress: (limit = 10) => request<{ jobs: ScanJob[] }>(`/api/v1/progress?limit=${limit}`),
+
+  getStorageHealth: () => request<StorageHealth>("/api/v1/storage-health"),
 };

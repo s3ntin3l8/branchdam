@@ -36,3 +36,9 @@ WHERE id = ?1;
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
 FROM storage_locations
 WHERE root_path = ?1;
+
+-- name: ListNodeCountsByLocation :many
+SELECT storage_location_id, COUNT(*) AS node_count
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+GROUP BY storage_location_id;
