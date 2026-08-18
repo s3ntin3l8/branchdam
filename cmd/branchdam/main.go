@@ -69,7 +69,7 @@ func main() {
 		}
 	}()
 
-	if err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
+	if _, err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
 		log.Error("reconcile orphaned scan jobs", "err", err)
 		os.Exit(1)
 	}
@@ -192,7 +192,17 @@ func main() {
 // WatcherSupervisor.Start below, or a reconciled row and a fresh row for
 // the same location could momentarily both claim to represent "the" watch
 // state for it.
-func reconcileOrphanedScanJobs(ctx context.Context, database *db.DB, log *slog.Logger) error {
+//
+// This assumes exclusive single-process ownership of the database file --
+// there is no flock/pid guard anywhere in this codebase, and SQLite's WAL
+// mode plus busy_timeout make concurrent access from two branchdam
+// instances workable at the driver level, just not safe at this
+// invariant's level: a second instance started against the same DB (e.g.
+// running `go run ./cmd/branchdam` against a database a running container
+// already owns) would mark the first instance's genuinely-live rows
+// FAILED out from under it. Documented as a deployment assumption
+// (single instance per database file), not enforced in code.
+func reconcileOrphanedScanJobs(ctx context.Context, database *db.DB, log *slog.Logger) (int64, error) {
 	var n int64
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
@@ -203,12 +213,12 @@ func reconcileOrphanedScanJobs(ctx context.Context, database *db.DB, log *slog.L
 		return err
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if n > 0 {
 		log.Warn("pipeline: reconciled orphaned scan_jobs rows from a previous process", "count", n)
 	}
-	return nil
+	return n, nil
 }
 
 // seedStorageLocations applies config.yaml's storageLocations list
