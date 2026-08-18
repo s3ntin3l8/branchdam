@@ -4,17 +4,28 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
+
+// filenameStemCandidateCap bounds ListLiveNodesByFilenameStem's result set --
+// defense in depth on top of (not instead of) versionSuffixRe's own bound
+// (internal/pipeline/commit.go), which narrows but does not close the
+// over-collapse bug class: an unpadded 1-2 digit hyphen-numbering scheme
+// can still produce a large same-stem batch (see versionSuffixRe's doc
+// comment). High enough to never fire on any legitimate shoot (even a
+// large one), low enough that hitting it is worth a WARN log rather than
+// scoring an unbounded candidate set every scan.
+const filenameStemCandidateCap = 500
 
 // querier is the subset of sqlcgen.Querier lookup.go needs -- narrowed so
 // this package doesn't need the full generated interface just to read two
 // query results.
 type querier interface {
 	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]sqlcgen.MediaNode, error)
-	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]sqlcgen.MediaNode, error)
+	ListLiveNodesByFilenameStem(ctx context.Context, arg sqlcgen.ListLiveNodesByFilenameStemParams) ([]sqlcgen.MediaNode, error)
 	ListTier3Candidates(ctx context.Context, arg sqlcgen.ListTier3CandidatesParams) ([]sqlcgen.MediaNode, error)
 	GetLiveNodeByPath(ctx context.Context, filePath string) (sqlcgen.MediaNode, error)
 	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]sqlcgen.MediaNode, error)
@@ -40,9 +51,20 @@ func (l *dbLookup) ByOriginalDocumentID(ctx context.Context, documentID string) 
 }
 
 func (l *dbLookup) ByFilenameStem(ctx context.Context, stem string) ([]Node, error) {
-	rows, err := l.q.ListLiveNodesByFilenameStem(ctx, sql.NullString{String: stem, Valid: stem != ""})
+	rows, err := l.q.ListLiveNodesByFilenameStem(ctx, sqlcgen.ListLiveNodesByFilenameStemParams{
+		FilenameStem: sql.NullString{String: stem, Valid: stem != ""},
+		Limit:        filenameStemCandidateCap,
+	})
 	if err != nil {
 		return nil, err
+	}
+	if len(rows) == filenameStemCandidateCap {
+		// Exactly at the cap: it may have truncated a larger result set, or
+		// the stem may genuinely have exactly this many live matches -- the
+		// distinction isn't knowable from a LIMIT'd query, so this logs
+		// conservatively rather than silently under-resolving either way.
+		slog.Warn("graph: filename_stem candidate lookup hit its cap, results may be truncated",
+			"stem", stem, "cap", filenameStemCandidateCap)
 	}
 	return toNodes(rows), nil
 }

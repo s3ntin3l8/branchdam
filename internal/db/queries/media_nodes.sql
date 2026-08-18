@@ -117,7 +117,12 @@ WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
 -- name: ListLiveNodesByFilenameStem :many
 -- Tier-2 filenameStem resolver: candidate parents sharing a normalized
 -- filename stem with the child, scored further by capture day / camera /
--- directory match in internal/graph.
+-- directory match in internal/graph. Capped at ?2 rows -- defense in depth
+-- on top of (not instead of) versionSuffixRe's own -\d{1,2} bound
+-- (internal/pipeline/commit.go), which narrows but does not close the
+-- over-collapse bug class: an unpadded 1-2 digit hyphen-numbering scheme
+-- can still produce a large same-stem batch. FilenameStemResolver logs
+-- when this cap is actually hit.
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -126,7 +131,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        first_seen_at, last_seen_at, created_at, updated_at,
        camera_serial, lens_model
 FROM media_nodes
-WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED';
+WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
+LIMIT ?2;
 
 -- name: ListTier3Candidates :many
 -- Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
