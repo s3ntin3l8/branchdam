@@ -220,14 +220,16 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 
 	// Resolve storage location if needed.
 	locID := p.StorageLocationID
-	if locID == 0 && d.guard != nil {
+	if d.guard != nil {
 		loc, err := d.guard.Resolve(p.FilePath)
+		if err != nil && locID == 0 {
+			return fmt.Errorf("%w: file path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
+		}
 		if err == nil {
 			locID = loc.ID
 		}
 	}
 	if locID == 0 {
-		// Fallback to location 1 if not resolvable.
 		locID = 1
 	}
 
@@ -486,6 +488,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	locID := p.TargetStorageLocationID
 	if d.guard != nil {
 		loc, err := d.guard.Resolve(p.TargetFilePath)
+		if err != nil && locID == 0 {
+			return fmt.Errorf("%w: target path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.TargetFilePath, err)
+		}
 		if err == nil {
 			if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
 				return fmt.Errorf("%w: %q resolves to read-only tier %s", ErrReadOnlyRebase, p.TargetFilePath, loc.Tier)

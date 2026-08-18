@@ -21,6 +21,7 @@ go.work.sum
 vendor/
 
 # Build output
+/.bin/
 /dist/
 /out/
 /tmp/

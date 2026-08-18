@@ -1327,7 +1327,8 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, err := q.GetMediaNodeByUUID(ctx, in.Body.NodeUUID)
 		if err == nil {
-			// Known node: rebase path in place, preserving id and edges
+			// Known node: rebase path in place, preserving id, content hashes, and lineage edges.
+			// Note: Content hashes are not overwritten on path rebase; only location/path/mtime are updated.
 			if err := q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
 				NodeUuid:          in.Body.NodeUUID,
 				FilePath:          in.Body.TargetPath,
