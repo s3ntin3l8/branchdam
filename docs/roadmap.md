@@ -69,7 +69,11 @@ ordering accident available in this codebase.
 
 Google Photos push is filed as a single research spike (phase 7), not an implementation phase —
 third-party access to the Google Photos API is restricted enough that feasibility needs
-confirming before any code is written. The workstation agent (phase 10) is filed as one
+confirming before any code is written. **Resolved as a no-go**, see
+[`docs/google-photos.md`](google-photos.md) — not on Google's restrictions (push survives, quota
+is ample, OAuth has a workable path pending confirmation) but on branchDAM's sync layer having no
+byte-transfer capability and no way to verify a Google Photos copy against `full_hash`. The
+workstation agent (phase 10) is filed as one
 placeholder tracking issue; its repo location (separate repo vs. a subdirectory here) is an open
 decision to make once phase 8 shows what the agent actually needs to talk to.
 
