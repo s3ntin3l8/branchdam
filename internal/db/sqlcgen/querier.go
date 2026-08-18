@@ -104,6 +104,10 @@ type Querier interface {
 	// can still produce a large same-stem batch. FilenameStemResolver logs
 	// when this cap is actually hit.
 	ListLiveNodesByFilenameStem(ctx context.Context, arg ListLiveNodesByFilenameStemParams) ([]MediaNode, error)
+	// #55: the sync worker's enqueue source -- live nodes under a path prefix
+	// (the Immich export mount) that have NO remote_sync_state row for the given
+	// remote yet. Once pushed, a row exists and the node drops out of this set.
+	ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesForSyncParams) ([]ListLiveNodesForSyncRow, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
