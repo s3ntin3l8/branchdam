@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -29,7 +30,11 @@ import (
 //     excluded: they can't be called outside this package, so an internal
 //     helper returning a raw handle for another package-internal function to
 //     use isn't itself a leak (the unexported writer/reader fields work the
-//     same way -- see check 2).
+//     same way -- see check 2). Asymmetry, not a gap: a hypothetical future
+//     exported Reader() method that just returns d.Reader would trip this
+//     check even though the field itself is allowlisted below -- accepted,
+//     since no such method exists today and adding an exemption for a
+//     hypothetical one isn't worth the complexity yet.
 //  2. An EXPORTED struct field of this package's own type declarations with
 //     one of those same types -- DB.Reader is exactly this shape (a field,
 //     not a function) and is the one sanctioned exception, allowlisted by
@@ -37,7 +42,11 @@ import (
 //     of how it's exposed. A hypothetical symmetric DB.Writer field bound to
 //     d.writer would reintroduce #85's capability under a different name and
 //     a function-only check would miss it entirely. Unexported fields
-//     (writer, reader) are excluded for the same reason as check 1.
+//     (writer, reader) are excluded for the same reason as check 1. Embedded
+//     (anonymous) fields are included too -- struct{ *sqlcgen.Queries }
+//     promotes a field literally named Queries, exactly as exported and
+//     leaky as a named one, and Go's ast.Field.Names is empty for them, so
+//     naively ranging over Names alone would silently miss this shape.
 //
 // InTx itself takes a func(*sqlcgen.Queries) error *parameter*, not a
 // *sqlcgen.Queries *return value* -- the transaction, not a raw handle, is
@@ -74,9 +83,104 @@ func TestNoWriteCapableQueriesAccessorOutsideInTx(t *testing.T) {
 	}
 	dbDir := filepath.Dir(thisFile)
 
-	entries, err := os.ReadDir(dbDir)
+	violations, err := findWriteCapableHandleViolations(dbDir)
 	if err != nil {
-		t.Fatalf("read %s: %v", dbDir, err)
+		t.Fatalf("scan %s: %v", dbDir, err)
+	}
+	for _, v := range violations {
+		t.Errorf("%s -- a production accessor outside InTx/ExecInTx reintroduces the write-capable, non-transactional escape hatch #85 removed (ReaderQueriesForTest); route through InTx instead", v)
+	}
+}
+
+// TestFindWriteCapableHandleViolationsCatchesKnownShapes is the fixture-based
+// self-test of the detection logic itself: writes a small synthetic package
+// exercising every shape the guard above claims to catch (named field,
+// embedded field, exported func return) alongside shapes it should leave
+// alone (the allowlisted Reader field, an unexported func, a _test.go file),
+// and asserts exactly the expected violations are found. Exists because the
+// production test above can only be verified by manually reintroducing and
+// reverting a violation in this package's real source (as this PR's own
+// description does) -- this test catches a regression in the detection
+// logic itself without needing that manual cycle, and is what would have
+// caught the embedded-field gap during review instead of after.
+func TestFindWriteCapableHandleViolationsCatchesKnownShapes(t *testing.T) {
+	dir := t.TempDir()
+	const fixture = `package fixture
+
+import "example.com/sqlcgen"
+
+type Good struct {
+	Reader *sqlcgen.Queries // allowlisted field name -- not a violation
+}
+
+type BadNamedField struct {
+	Writer *sqlcgen.Queries
+}
+
+type BadEmbeddedField struct {
+	*sqlcgen.Queries
+}
+
+func GoodFunc() error { return nil }
+
+func BadFunc() *sqlcgen.Queries { return nil }
+
+func badUnexportedFunc() *sqlcgen.Queries { return nil } // unexported -- not a violation
+`
+	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// A _test.go file in the same dir must never be scanned, even with an
+	// obvious violation in it.
+	const testFixture = `package fixture
+
+import "example.com/sqlcgen"
+
+func ViolationInTestFile() *sqlcgen.Queries { return nil }
+`
+	if err := os.WriteFile(filepath.Join(dir, "fixture_test.go"), []byte(testFixture), 0o644); err != nil {
+		t.Fatalf("write test fixture: %v", err)
+	}
+
+	got, err := findWriteCapableHandleViolations(dir)
+	if err != nil {
+		t.Fatalf("findWriteCapableHandleViolations: %v", err)
+	}
+
+	wantSubstrings := []string{
+		"field Writer is a write-capable handle",
+		"field Queries is a write-capable handle", // the embedded field's promoted name
+		"func BadFunc returns a write-capable handle directly",
+	}
+	for _, want := range wantSubstrings {
+		found := false
+		for _, v := range got {
+			if strings.Contains(v, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("violations = %v, want one containing %q", got, want)
+		}
+	}
+	if len(got) != len(wantSubstrings) {
+		t.Errorf("violations = %v (%d), want exactly %d (Reader, GoodFunc, badUnexportedFunc, and the _test.go file must not appear)", got, len(got), len(wantSubstrings))
+	}
+}
+
+// findWriteCapableHandleViolations walks every non-_test.go .go file
+// directly in dir (not recursive) and returns a description of each
+// production declaration that exposes a write-capable database handle --
+// see TestNoWriteCapableQueriesAccessorOutsideInTx's doc comment for what
+// counts and why. Factored out from that test so the detection logic can be
+// exercised against a fixture directory (see
+// TestFindWriteCapableHandleViolationsCatchesKnownShapes), not only against
+// this package's own current source.
+func findWriteCapableHandleViolations(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	const allowlistedField = "Reader" // query_only=ON, can't write regardless of exposure
@@ -88,10 +192,10 @@ func TestNoWriteCapableQueriesAccessorOutsideInTx(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		path := filepath.Join(dbDir, name)
+		path := filepath.Join(dir, name)
 		file, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
+			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch decl := n.(type) {
@@ -116,23 +220,52 @@ func TestNoWriteCapableQueriesAccessorOutsideInTx(t *testing.T) {
 					if !isWriteCapableHandleType(field.Type) {
 						continue
 					}
-					for _, fname := range field.Names {
+					for _, fname := range fieldNames(field) {
 						// Unexported fields (writer, reader) can never leak
 						// outside this package regardless of their type --
 						// only an exported field is a potential accessor.
-						if !fname.IsExported() || fname.Name == allowlistedField {
+						if !ast.IsExported(fname) || fname == allowlistedField {
 							continue
 						}
-						violations = append(violations, name+": field "+fname.Name+" is a write-capable handle")
+						violations = append(violations, name+": field "+fname+" is a write-capable handle")
 					}
 				}
 			}
 			return true
 		})
 	}
+	return violations, nil
+}
 
-	for _, v := range violations {
-		t.Errorf("%s -- a production accessor outside InTx/ExecInTx reintroduces the write-capable, non-transactional escape hatch #85 removed (ReaderQueriesForTest); route through InTx instead", v)
+// fieldNames returns field's declared names, or -- for an embedded
+// (anonymous) field, where ast.Field.Names is empty -- the single promoted
+// name Go derives from the embedded type itself (e.g. an embedded
+// *sqlcgen.Queries promotes as "Queries").
+func fieldNames(field *ast.Field) []string {
+	if len(field.Names) > 0 {
+		names := make([]string, len(field.Names))
+		for i, n := range field.Names {
+			names[i] = n.Name
+		}
+		return names
+	}
+	if name := embeddedFieldName(field.Type); name != "" {
+		return []string{name}
+	}
+	return nil
+}
+
+func embeddedFieldName(expr ast.Expr) string {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	switch e := expr.(type) {
+	case *ast.SelectorExpr:
+		return e.Sel.Name
+	case *ast.Ident:
+		return e.Name
+	default:
+		return ""
 	}
 }
 
