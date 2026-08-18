@@ -857,9 +857,10 @@ func TestStorageHealth(t *testing.T) {
 	}
 
 	for i := range got.Locations {
-		if got.Locations[i].Name == "valid" {
+		switch got.Locations[i].Name {
+		case "valid":
 			validLoc = &got.Locations[i]
-		} else if got.Locations[i].Name == "invalid" {
+		case "invalid":
 			invalidLoc = &got.Locations[i]
 		}
 	}
