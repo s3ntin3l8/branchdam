@@ -23,12 +23,14 @@ RETURNING node_id, remote, sync_status, remote_asset_id, last_error, last_attemp
 
 -- name: ListRemoteSyncStateByStatus :many
 -- The sync worker's claim query: oldest-attempt-first so a backlog drains in
--- order, capped at one batch.
+-- order, capped at one batch. Scoped to a single remote -- a node can hold
+-- both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
+-- ProcessPending(remote) must never list (or re-flip) another remote's rows.
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
 FROM remote_sync_state
-WHERE sync_status = ?1
+WHERE remote = ?1 AND sync_status = ?2
 ORDER BY last_attempt_at ASC, node_id ASC
-LIMIT ?2;
+LIMIT ?3;
 
 -- name: MarkRemoteSyncStatePushed :exec
 -- Terminal success: records the remote asset id (empty for a scan-trigger

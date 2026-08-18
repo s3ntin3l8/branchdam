@@ -177,6 +177,43 @@ func TestProcessPendingFailureMarksPushFailed(t *testing.T) {
 	}
 }
 
+func TestProcessPendingIsRemoteScoped(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	node := seedNode(t, database, locID, "/exports/immich/shot.jpg")
+
+	// One node legitimately holds rows for both remotes under the (node_id, remote) PK.
+	if err := mgr.Enqueue(ctx, Node{ID: node.ID, Checksum: "aaaaaaaaaaaaaaaa"}, RemoteImmich); err != nil {
+		t.Fatalf("Enqueue IMMICH: %v", err)
+	}
+	if err := mgr.Enqueue(ctx, Node{ID: node.ID, Checksum: "aaaaaaaaaaaaaaaa"}, RemoteGooglePhotos); err != nil {
+		t.Fatalf("Enqueue GOOGLE_PHOTOS: %v", err)
+	}
+
+	push := &recordingPush{}
+	if _, err := mgr.ProcessPending(ctx, RemoteImmich, 10, push.fn); err != nil {
+		t.Fatalf("ProcessPending(IMMICH): %v", err)
+	}
+
+	// Only the IMMICH row may be claimed/pushed; GOOGLE_PHOTOS stays PENDING.
+	immich, err := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if err != nil {
+		t.Fatalf("GetRemoteSyncState(IMMICH): %v", err)
+	}
+	if immich.SyncStatus != "PUSHED" {
+		t.Errorf("IMMICH sync_status = %q, want PUSHED", immich.SyncStatus)
+	}
+	gp, err := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteGooglePhotos})
+	if err != nil {
+		t.Fatalf("GetRemoteSyncState(GOOGLE_PHOTOS): %v", err)
+	}
+	if gp.SyncStatus != "PENDING_CLOUD_PUSH" {
+		t.Errorf("GOOGLE_PHOTOS sync_status = %q, want PENDING_CLOUD_PUSH (must not be touched)", gp.SyncStatus)
+	}
+}
+
 func TestRecoverStalePushingResetsStrandedRows(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)

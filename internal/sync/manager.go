@@ -94,49 +94,66 @@ func (m *Manager) Enqueue(ctx context.Context, node Node, remote string) error {
 }
 
 // ProcessPending claims up to batchSize PENDING_CLOUD_PUSH rows for remote,
-// marks them PUSHING atomically, invokes push once for the whole batch, and
-// marks every node PUSHED (or PUSH_FAILED on error). Returns how many nodes
-// were attempted.
+// marks them PUSHING, invokes push once for the whole batch, and marks every
+// node PUSHED (or PUSH_FAILED on error). Returns how many nodes were
+// attempted.
+//
+// The claim is atomic with the selection: both happen inside ONE write
+// transaction on the writer pool's single connection, so a concurrent second
+// ProcessPending cannot see the same rows still PENDING and double-trigger.
+// (The worker is additionally a single goroutine per remote, but the atomic
+// claim is what makes the guarantee hold even under an accidental second
+// worker.) The batch is scoped to `remote` so a node's other-remote rows are
+// never touched.
 func (m *Manager) ProcessPending(ctx context.Context, remote string, batchSize int, push PushFunc) (int, error) {
 	if batchSize <= 0 {
 		batchSize = 1
 	}
-	rows, err := m.db.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{
-		SyncStatus: "PENDING_CLOUD_PUSH", Limit: int64(batchSize),
+
+	var claimed []int64
+	err := m.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		rows, err := q.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{
+			Remote: remote, SyncStatus: "PENDING_CLOUD_PUSH", Limit: int64(batchSize),
+		})
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			if _, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+				NodeID: r.NodeID, Remote: remote, SyncStatus: "PUSHING",
+				RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+				LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			}); err != nil {
+				return err
+			}
+			claimed = append(claimed, r.NodeID)
+		}
+		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("sync: list pending: %w", err)
+		return 0, fmt.Errorf("sync: claim pending batch: %w", err)
 	}
-	if len(rows) == 0 {
+	if len(claimed) == 0 {
 		return 0, nil
 	}
 
-	nodeIDs := make([]int64, len(rows))
-	nodes := make([]Node, len(rows))
-	for i, r := range rows {
-		nodeIDs[i] = r.NodeID
-		nodes[i] = Node{ID: r.NodeID}
-	}
-
-	// Claim the whole batch as PUSHING atomically, BEFORE any remote call --
-	// a restart or second worker can't double-trigger a scan for a node that
-	// is already claimed (this is what #55's restart criterion rests on).
-	if err := m.setBatchStatus(ctx, nodeIDs, remote, "PUSHING", "", nil); err != nil {
-		return 0, fmt.Errorf("sync: claim batch as PUSHING: %w", err)
+	nodes := make([]Node, len(claimed))
+	for i, id := range claimed {
+		nodes[i] = Node{ID: id}
 	}
 
 	if err := push(ctx, nodes); err != nil {
 		msg := err.Error()
-		if merr := m.setBatchStatus(ctx, nodeIDs, remote, "PUSH_FAILED", "", &msg); merr != nil {
+		if merr := m.setBatchStatus(ctx, claimed, remote, "PUSH_FAILED", "", &msg); merr != nil {
 			m.log.Error("sync: mark batch failed", "err", merr)
 		}
-		return len(nodes), err
+		return len(claimed), err
 	}
 
-	if err := m.setBatchStatus(ctx, nodeIDs, remote, "PUSHED", "", nil); err != nil {
-		return len(nodes), fmt.Errorf("sync: mark batch pushed: %w", err)
+	if err := m.setBatchStatus(ctx, claimed, remote, "PUSHED", "", nil); err != nil {
+		return len(claimed), fmt.Errorf("sync: mark batch pushed: %w", err)
 	}
-	return len(nodes), nil
+	return len(claimed), nil
 }
 
 // RecoverStalePushing resets PUSHING rows older than olderThan back to

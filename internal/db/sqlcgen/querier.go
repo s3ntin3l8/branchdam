@@ -105,7 +105,8 @@ type Querier interface {
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
-	// order, capped at one batch.
+	// order, capped at one batch. Scoped to a single remote so a node's other
+	// remote rows are never listed or re-flipped.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
