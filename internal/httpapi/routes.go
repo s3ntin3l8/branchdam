@@ -739,7 +739,11 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 			return err
 		}
 		createdEdge = edge
-		return nil
+		// A manual edge is CONFIRMED at insert time (CreateManualMediaEdge) --
+		// the same review_state write confirm/reject makes, so it needs the
+		// same graph_status recompute or the target node stays UNLINKED
+		// despite now having a confirmed parent.
+		return recomputeGraphStatus(ctx, q, in.Body.TargetNodeID)
 	})
 	if err != nil {
 		var humaErr huma.StatusError
@@ -894,11 +898,47 @@ func reviewerName(ctx context.Context) sql.NullString {
 	return sql.NullString{String: p.Name, Valid: true}
 }
 
+// recomputeGraphStatus re-derives nodeID's graph_status from ALL of its
+// current live parent edges (ListEdgesByTarget), not just the one edge a
+// confirm/reject call just touched -- a human decision on one candidate
+// says nothing by itself about whether the node overall is linked. Mirrors
+// internal/graph.Engine.ResolveAndCommit's LINKED/NEEDS_REVIEW precedence
+// (an AUTO_ACCEPTED or CONFIRMED edge wins outright; a REJECTED edge is
+// never enough on its own to justify NEEDS_REVIEW), extended with the
+// no-edges-at-all-considered case Engine never has to handle (it only ever
+// runs after at least one candidate existed): if every edge is REJECTED,
+// or the node has none, the status reverts to UNLINKED rather than being
+// left stuck at whatever it was before.
+func recomputeGraphStatus(ctx context.Context, q *sqlcgen.Queries, nodeID int64) error {
+	edges, err := q.ListEdgesByTarget(ctx, nodeID)
+	if err != nil {
+		return fmt.Errorf("list edges for graph_status recompute: %w", err)
+	}
+	status := "UNLINKED"
+	for _, e := range edges {
+		if e.ReviewState == "AUTO_ACCEPTED" || e.ReviewState == "CONFIRMED" {
+			status = "LINKED"
+			break
+		}
+		if e.ReviewState != "REJECTED" {
+			status = "NEEDS_REVIEW"
+		}
+	}
+	return q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{ID: nodeID, GraphStatus: status})
+}
+
 func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		targetNodeID, err := q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		if err != nil {
+			return err
+		}
+		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error404NotFound("edge not found")
+		}
 		return nil, huma.Error500InternalServerError("confirm edge", err)
 	}
 	out := &EdgeReviewOutput{}
@@ -908,9 +948,16 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 
 func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		targetNodeID, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		if err != nil {
+			return err
+		}
+		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error404NotFound("edge not found")
+		}
 		return nil, huma.Error500InternalServerError("reject edge", err)
 	}
 	out := &EdgeReviewOutput{}

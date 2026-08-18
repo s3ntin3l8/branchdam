@@ -10,10 +10,11 @@ import (
 	"database/sql"
 )
 
-const confirmMediaEdge = `-- name: ConfirmMediaEdge :exec
+const confirmMediaEdge = `-- name: ConfirmMediaEdge :one
 UPDATE media_edges
 SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
 WHERE id = ?1
+RETURNING target_node_id
 `
 
 type ConfirmMediaEdgeParams struct {
@@ -21,9 +22,16 @@ type ConfirmMediaEdgeParams struct {
 	ReviewedBy sql.NullString
 }
 
-func (q *Queries) ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) error {
-	_, err := q.db.ExecContext(ctx, confirmMediaEdge, arg.ID, arg.ReviewedBy)
-	return err
+// RETURNING target_node_id (rather than plain :exec) doubles as the
+// existence check: sql.ErrNoRows means id didn't match any row, which the
+// caller (internal/httpapi) turns into a 404 instead of a silent no-op
+// 200. The returned target_node_id is what the caller re-derives
+// graph_status from -- see routes.go's recomputeGraphStatus.
+func (q *Queries) ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, confirmMediaEdge, arg.ID, arg.ReviewedBy)
+	var target_node_id int64
+	err := row.Scan(&target_node_id)
+	return target_node_id, err
 }
 
 const getMediaEdgeBySourceTargetRel = `-- name: GetMediaEdgeBySourceTargetRel :one
@@ -89,10 +97,11 @@ func (q *Queries) MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams
 	return edge_exists, err
 }
 
-const rejectMediaEdge = `-- name: RejectMediaEdge :exec
+const rejectMediaEdge = `-- name: RejectMediaEdge :one
 UPDATE media_edges
 SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
 WHERE id = ?1
+RETURNING target_node_id
 `
 
 type RejectMediaEdgeParams struct {
@@ -100,9 +109,12 @@ type RejectMediaEdgeParams struct {
 	ReviewedBy sql.NullString
 }
 
-func (q *Queries) RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) error {
-	_, err := q.db.ExecContext(ctx, rejectMediaEdge, arg.ID, arg.ReviewedBy)
-	return err
+// See ConfirmMediaEdge's comment -- same shape, same reasoning.
+func (q *Queries) RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, rejectMediaEdge, arg.ID, arg.ReviewedBy)
+	var target_node_id int64
+	err := row.Scan(&target_node_id)
+	return target_node_id, err
 }
 
 const resolvedEdgeParentMissing = `-- name: ResolvedEdgeParentMissing :one

@@ -104,15 +104,23 @@ SELECT EXISTS(
     WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3
 ) AS edge_exists;
 
--- name: ConfirmMediaEdge :exec
+-- name: ConfirmMediaEdge :one
+-- RETURNING target_node_id (rather than plain :exec) doubles as the
+-- existence check: sql.ErrNoRows means id didn't match any row, which the
+-- caller (internal/httpapi) turns into a 404 instead of a silent no-op
+-- 200. The returned target_node_id is what the caller re-derives
+-- graph_status from -- see routes.go's recomputeGraphStatus.
 UPDATE media_edges
 SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
-WHERE id = ?1;
+WHERE id = ?1
+RETURNING target_node_id;
 
--- name: RejectMediaEdge :exec
+-- name: RejectMediaEdge :one
+-- See ConfirmMediaEdge's comment -- same shape, same reasoning.
 UPDATE media_edges
 SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
-WHERE id = ?1;
+WHERE id = ?1
+RETURNING target_node_id;
 
 -- name: ResolvedEdgeParentMissing :one
 -- Backs T7's regression guard: v_media_edges_resolved.parent_missing must
