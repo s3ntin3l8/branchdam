@@ -261,6 +261,40 @@ func TestWaitBounded(t *testing.T) {
 			t.Errorf("expected component name in log output, got: %s", buf.String())
 		}
 	})
+
+	// Backs the shutdown sequence's own join-phase context: httpServer.
+	// Shutdown's realistic failure mode is its OWN context's deadline
+	// firing, and reusing that same already-expired context for the joins
+	// below it would give every waitBounded call effectively zero real
+	// time before giving up -- this pins waitBounded's actual behavior on
+	// an already-expired context (returns false near-instantly, still
+	// running waitFunc in its own goroutine even though the caller never
+	// waits for it) so that invariant can't silently regress if the join
+	// phase's fresh context is ever accidentally swapped back for the
+	// outer shutdownCtx.
+	t.Run("returns false immediately when context is already expired", func(t *testing.T) {
+		buf := &bytes.Buffer{}
+		log := slog.New(slog.NewTextHandler(buf, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+		defer cancel()
+		time.Sleep(time.Millisecond) // guarantee ctx is expired before waitBounded runs
+
+		slowDone := make(chan struct{})
+		defer close(slowDone)
+
+		start := time.Now()
+		ok := waitBounded(ctx, log, "alreadyExpired", func() {
+			<-slowDone
+		})
+		elapsed := time.Since(start)
+
+		if ok {
+			t.Error("waitBounded returned true against an already-expired context, want false")
+		}
+		if elapsed > 100*time.Millisecond {
+			t.Errorf("waitBounded took %v against an already-expired context, want near-instant", elapsed)
+		}
+	})
 }
 
 // TestCloseDatabaseSkipsCloseWhenUnsafe is the invariant this fix is really
