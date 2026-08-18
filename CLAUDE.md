@@ -256,6 +256,20 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 - **`codeql.yml`**: scans `go,javascript-typescript` -- CodeQL hard-fails (not a graceful no-op)
   if a requested language has zero source files, which is why this was Go-only until the SPA
   (PR 10) landed real frontend source.
+- **`Docker image build` can fail on a transient `ghcr.io` login denial, unrelated to code.**
+  Observed 2026-08-18 (run 32141578050, merge commit `2632ba1`): the `linux/amd64` leg's
+  `docker/login-action` step failed with `Error response from daemon: Get "https://ghcr.io/v2/":
+  denied: denied`, while the `linux/arm64` leg of the *same run*, same credentials, logged in
+  successfully 0.6s later -- the only such failure in the prior 100 `push`-to-`main` runs. Because
+  `merge` is `needs: [prepare, build]`, one denied leg skips the manifest-list job entirely and
+  silently leaves `:edge` stale; the fix (a bounded `docker login --password-stdin` retry loop
+  replacing `docker/login-action` in both the `build` and `merge` jobs) is in the shared
+  `s3ntin3l8/.github`'s `docker-publish.yml` (PR #48), not this repo -- same "shared-workflow
+  change, not a per-repo workaround" pattern as `release.yml` above. Not one of the five required
+  branch-protection checks, so it never blocks a merge; if it recurs, check whether the newest
+  `main` push already republished `:edge` before considering a re-run -- re-running an old failed
+  run re-tags with that run's (stale) `github.sha` and can move `:edge` **backwards** if a newer
+  push has since published.
 - **Branch protection on `main`**: required status checks (`Go (build · vet · test) /
   lint-and-test`, `Web (typecheck · build) / lint-and-test`, `CodeQL`,
   `review / dependency-review`, `golangci-lint`), no required reviews (solo repo),
