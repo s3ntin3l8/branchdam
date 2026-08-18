@@ -188,8 +188,20 @@ func TestEnqueuePendingIsNoOpAndPushingShortCircuits(t *testing.T) {
 	if err := mgr.Enqueue(ctx, n, RemoteImmich); err != nil {
 		t.Fatalf("Enqueue (1): %v", err)
 	}
-	first, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
-	firstAttempt := first.LastAttemptAt
+	// Backdate the PENDING row's last_attempt_at to a clearly-old value so the
+	// "unchanged on no-op" assertion below is robust across unix-second
+	// granularity (the claim query drains by last_attempt_at ASC).
+	backdated := time.Now().Add(-time.Hour).Unix()
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PENDING_CLOUD_PUSH",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+			LastAttemptAt: sql.NullInt64{Int64: backdated, Valid: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
 
 	// Re-enqueueing an already-PENDING row is a no-op and must NOT bump
 	// last_attempt_at (re-ordering the FIFO) nor duplicate the row.
@@ -197,11 +209,11 @@ func TestEnqueuePendingIsNoOpAndPushingShortCircuits(t *testing.T) {
 		t.Fatalf("Enqueue (2, pending) should be a no-op: %v", err)
 	}
 	after, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
-	if !after.LastAttemptAt.Valid || after.LastAttemptAt.Int64 != firstAttempt.Int64 {
-		t.Errorf("last_attempt_at changed on a no-op enqueue: %+v -> %+v", firstAttempt, after.LastAttemptAt)
+	if !after.LastAttemptAt.Valid || after.LastAttemptAt.Int64 != backdated {
+		t.Errorf("last_attempt_at changed on a no-op enqueue: want %d, got %+v", backdated, after.LastAttemptAt)
 	}
 
-	// A PUSHING row short-circuits with ErrAlreadyPushed.
+	// A PUSHING row short-circuits with ErrAlreadyPushed and leaves the row untouched.
 	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
 			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSHING",
@@ -214,6 +226,10 @@ func TestEnqueuePendingIsNoOpAndPushingShortCircuits(t *testing.T) {
 	}
 	if err := mgr.Enqueue(ctx, n, RemoteImmich); !errors.Is(err, ErrAlreadyPushed) {
 		t.Fatalf("Enqueue on PUSHING = %v, want ErrAlreadyPushed", err)
+	}
+	still, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if still.SyncStatus != "PUSHING" {
+		t.Errorf("row regressed by a short-circuited enqueue: sync_status = %q, want still PUSHING", still.SyncStatus)
 	}
 }
 
