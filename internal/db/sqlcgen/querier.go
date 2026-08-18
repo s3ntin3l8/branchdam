@@ -20,16 +20,16 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
-	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
-	CountPendingAgentEvents(ctx context.Context) (int64, error)
-	CountRunningScanJobs(ctx context.Context) (int64, error)
-	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
 	// RETURNING target_node_id (rather than plain :exec) doubles as the
 	// existence check: sql.ErrNoRows means id didn't match any row, which the
 	// caller (internal/httpapi) turns into a 404 instead of a silent no-op
 	// 200. The returned target_node_id is what the caller re-derives
 	// graph_status from -- see routes.go's recomputeGraphStatus.
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
+	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
+	CountPendingAgentEvents(ctx context.Context) (int64, error)
+	CountRunningScanJobs(ctx context.Context) (int64, error)
+	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
 	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
@@ -44,10 +44,10 @@ type Querier interface {
 	// Actually draining/processing these rows ships with the deferred
 	// workstation-agent increment -- this table and endpoint exist now so that
 	// increment is additive, not a schema migration.
-	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EventQueue, error)
+	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
-	GetAgentEventByUUID(ctx context.Context, eventUuid string) (EventQueue, error)
-	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (EventQueue, error)
+	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
+	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
 	// (docs/schema.md fix #3).
@@ -74,6 +74,7 @@ type Querier interface {
 	// the single source of truth for tier is this table, never a hardcoded
 	// prefix. See docs/schema.md fix #1.
 	GetStorageLocationByPath(ctx context.Context, rootPath string) (StorageLocation, error)
+	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
 	InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error)
 	// Phase 1 (#33): EXIF/ffprobe overflow. Upsert on the table's natural key so
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
@@ -122,15 +123,16 @@ type Querier interface {
 	// the main asset list.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
 	ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error)
+	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
-	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
-	ListPendingAgentEvents(ctx context.Context, limit int64) ([]EventQueue, error)
+	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
-	// order, capped at one batch. Scoped to a single remote so a node's other
-	// remote rows are never listed or re-flipped.
+	// order, capped at one batch. Scoped to a single remote -- a node can hold
+	// both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
+	// ProcessPending(remote) must never list (or re-flip) another remote's rows.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)

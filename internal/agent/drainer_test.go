@@ -103,7 +103,7 @@ func setupTestDB(t *testing.T) *testEnv {
 	}
 }
 
-func enqueueEvent(t *testing.T, database *db.DB, eventType string, payload any) sqlcgen.EventQueue {
+func enqueueEvent(t *testing.T, database *db.DB, eventType string, payload any) sqlcgen.EnqueueAgentEventRow {
 	t.Helper()
 	ctx := context.Background()
 	eventUUID := uuid.New().String()
@@ -118,7 +118,7 @@ func enqueueEvent(t *testing.T, database *db.DB, eventType string, payload any) 
 		payloadStr = string(b)
 	}
 
-	var row sqlcgen.EventQueue
+	var row sqlcgen.EnqueueAgentEventRow
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		row, err = q.EnqueueAgentEvent(ctx, sqlcgen.EnqueueAgentEventParams{
@@ -458,4 +458,91 @@ func TestDrainer_EdgeAttached_SelfLoopFails(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestDrainer_RetryPersistenceAcrossInvocations(t *testing.T) {
+	env := setupTestDB(t)
+	drainer1 := agent.NewDrainer(env.db, env.guard, nil)
+	drainer1.SetMaxRetries(3)
+	ctx := context.Background()
+
+	// Enqueue a node moved event with unknown node UUID -> transient error (lookup node for move)
+	unknownUUID := uuid.New().String()
+	event := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
+		NodeUUID:    unknownUUID,
+		NewFilePath: filepath.Join(env.staging, "nonexistent.mov"),
+	})
+
+	// Pass 1: drainer1 runs ProcessPending once -> failure is transient, increments retry_count in DB to 1
+	stats1, err := drainer1.ProcessPending(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats1.Processed)
+	require.Equal(t, 0, stats1.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, event.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PENDING", ev.Status)
+		require.Equal(t, int64(1), ev.RetryCount)
+		require.True(t, ev.ErrorLog.Valid)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Simulate restart: create a new Drainer instance with empty in-memory state
+	drainer2 := agent.NewDrainer(env.db, env.guard, nil)
+	drainer2.SetMaxRetries(3)
+
+	// Pass 2: drainer2 runs ProcessPending -> retry_count becomes 2
+	stats2, err := drainer2.ProcessPending(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats2.Processed)
+	require.Equal(t, 0, stats2.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, event.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PENDING", ev.Status)
+		require.Equal(t, int64(2), ev.RetryCount)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Pass 3: drainer2 runs ProcessPending -> attempts reaches 3 >= maxRetries -> marks FAILED
+	stats3, err := drainer2.ProcessPending(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats3.Processed)
+	require.Equal(t, 1, stats3.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, event.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", ev.Status)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_Backoff(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	drainer.SetMaxRetries(10)
+	drainer.SetRetryBackoff(50 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	// Enqueue a transient error event
+	enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
+		NodeUUID:    uuid.New().String(),
+		NewFilePath: filepath.Join(env.staging, "ghost.mov"),
+	})
+
+	// DrainAll should back off until ctx expires
+	start := time.Now()
+	_, err := drainer.DrainAll(ctx)
+	duration := time.Since(start)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.GreaterOrEqual(t, duration, 50*time.Millisecond)
 }
