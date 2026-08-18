@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/indexer"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
@@ -657,8 +659,8 @@ func TestConsumeOneAbandonsWhenContextAlreadyDone(t *testing.T) {
 	}
 	item := watchItem{rec: indexer.Record{Path: target, Size: info.Size(), ModTime: info.ModTime()}}
 
-	var seen, hashed, failed atomic.Int32
-	bumped, abandoned := w.consumeOne(cancelledCtx, loc, item, &seen, &hashed, &failed)
+	var seen, hashed, failed, edgesCreated atomic.Int32
+	bumped, abandoned := w.consumeOne(cancelledCtx, loc, item, &seen, &hashed, &failed, &edgesCreated)
 
 	if !abandoned {
 		t.Fatal("abandoned = false, want true (ctx already done)")
@@ -703,8 +705,8 @@ func TestConsumeOneProcessesNormallyWhenContextLive(t *testing.T) {
 	}
 	item := watchItem{rec: indexer.Record{Path: target, Size: info.Size(), ModTime: info.ModTime()}}
 
-	var seen, hashed, failed atomic.Int32
-	bumped, abandoned := w.consumeOne(context.Background(), loc, item, &seen, &hashed, &failed)
+	var seen, hashed, failed, edgesCreated atomic.Int32
+	bumped, abandoned := w.consumeOne(context.Background(), loc, item, &seen, &hashed, &failed, &edgesCreated)
 
 	if abandoned {
 		t.Fatal("abandoned = true, want false (ctx is live)")
@@ -717,6 +719,109 @@ func TestConsumeOneProcessesNormallyWhenContextLive(t *testing.T) {
 	}
 	if _, err := database.Reader.GetLiveNodeByPath(context.Background(), target); err != nil {
 		t.Errorf("GetLiveNodeByPath: %v (item should have been committed normally)", err)
+	}
+}
+
+// TestWatchEdgesCreatedAccumulatesAcrossItems backs M2: the watch path's
+// edgesCreated counter must accumulate across every item a consumer
+// handles, the same way runScan's drainAndCommit does (scan.go), not reset
+// to 0 on the next updateJob call. Reuses testFixedParentResolver
+// (scan_test.go), the same real graph.Engine fixture #90's scan-path
+// equivalent (TestScanPersistsEdgesCreated) uses, so this exercises the
+// actual resolveEdgesForBatch/ResolveAndCommit path, not a fake.
+//
+// Drives two watchItems directly through consumeOne (bypassing fsnotify
+// for determinism) against ONE shared counter, exactly as watchLocation's
+// consumer loop does: the parent's own item first (no edge -- the resolver
+// guards against proposing a node as its own parent), then the child's,
+// which creates exactly one edge. The counter must read 1 after both, not
+// reset between calls and not double-count.
+func TestWatchEdgesCreatedAccumulatesAcrossItems(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parentPath := filepath.Join(resolvedRoot, "parent.jpg")
+	childPath := filepath.Join(resolvedRoot, "child.jpg")
+	if err := writeFileToDisk(parentPath, "parent content"); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	if err := writeFileToDisk(childPath, "child content"); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	deps.Engine = graph.NewEngine(database, nil, testFixedParentResolver{parentPath: parentPath})
+	loc := storage.Location{ID: locationID, Name: "watch-edges-created-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	w := NewWatcherSupervisor(deps, nil)
+
+	parentInfo, err := os.Stat(parentPath)
+	if err != nil {
+		t.Fatalf("stat parent: %v", err)
+	}
+	childInfo, err := os.Stat(childPath)
+	if err != nil {
+		t.Fatalf("stat child: %v", err)
+	}
+
+	var seen, hashed, failed, edgesCreated atomic.Int32
+	ctx := context.Background()
+
+	var job sqlcgen.ScanJob
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		j, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: locationID, Valid: true}, Kind: "WATCH",
+		})
+		job = j
+		return err
+	}); err != nil {
+		t.Fatalf("create scan job: %v", err)
+	}
+
+	// Every step below calls updateJob and re-reads scan_jobs from the DB,
+	// not just the in-memory counter -- the actual bug (edges_created SET
+	// to an absolute value on every call, per UpdateScanJobProgress) only
+	// shows up across repeated persisted writes, which is what a running
+	// watch consumer actually does (one updateJob call per item over the
+	// job's whole lifetime, not once at the end).
+	persistedEdgesCreated := func() int64 {
+		t.Helper()
+		w.updateJob(job.ID, &seen, &hashed, &failed, &edgesCreated)
+		persisted, err := database.Reader.GetScanJob(ctx, job.ID)
+		if err != nil {
+			t.Fatalf("get scan job: %v", err)
+		}
+		return persisted.EdgesCreated
+	}
+
+	parentItem := watchItem{rec: indexer.Record{Path: parentPath, Size: parentInfo.Size(), ModTime: parentInfo.ModTime()}}
+	if bumped, abandoned := w.consumeOne(ctx, loc, parentItem, &seen, &hashed, &failed, &edgesCreated); abandoned || !bumped {
+		t.Fatalf("parent consumeOne: bumped=%v abandoned=%v, want true,false", bumped, abandoned)
+	}
+	if got := persistedEdgesCreated(); got != 0 {
+		t.Fatalf("persisted edges_created after parent = %d, want 0 (a node is never its own parent)", got)
+	}
+
+	childItem := watchItem{rec: indexer.Record{Path: childPath, Size: childInfo.Size(), ModTime: childInfo.ModTime()}}
+	if bumped, abandoned := w.consumeOne(ctx, loc, childItem, &seen, &hashed, &failed, &edgesCreated); abandoned || !bumped {
+		t.Fatalf("child consumeOne: bumped=%v abandoned=%v, want true,false", bumped, abandoned)
+	}
+	if got := persistedEdgesCreated(); got != 1 {
+		t.Fatalf("persisted edges_created after child = %d, want 1", got)
+	}
+
+	// Re-process the same child item -- the edge already exists, so this
+	// call contributes 0 newly-created edges. A subsequent updateJob call
+	// must NOT reset the persisted count back to 0 (the exact failure mode
+	// this test backs): it must SET the still-accumulated total, 1, again.
+	if bumped, abandoned := w.consumeOne(ctx, loc, childItem, &seen, &hashed, &failed, &edgesCreated); abandoned || !bumped {
+		t.Fatalf("re-processed child consumeOne: bumped=%v abandoned=%v, want true,false", bumped, abandoned)
+	}
+	if got := persistedEdgesCreated(); got != 1 {
+		t.Errorf("persisted edges_created after re-processing the child = %d, want 1 (must not reset to 0)", got)
 	}
 }
 

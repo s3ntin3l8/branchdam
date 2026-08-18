@@ -288,17 +288,17 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 	consumerWG.Add(1)
 	go func() {
 		defer consumerWG.Done()
-		var seen, hashed, failed atomic.Int32
+		var seen, hashed, failed, edgesCreated atomic.Int32
 		for {
 			item, ok := work.dequeue()
 			if !ok {
 				// Persist the final counts, including any items abandoned
 				// during a fast shutdown drain -- their bookkeeping wasn't
 				// written per-item (see consumeOne).
-				w.updateJob(job.ID, &seen, &hashed, &failed)
+				w.updateJob(job.ID, &seen, &hashed, &failed, &edgesCreated)
 				return
 			}
-			bumped, abandoned := w.consumeOne(ctx, loc, item, &seen, &hashed, &failed)
+			bumped, abandoned := w.consumeOne(ctx, loc, item, &seen, &hashed, &failed, &edgesCreated)
 			if abandoned {
 				// No per-item updateJob call here -- that would reintroduce
 				// the same shutdown-drain delay via DB round-trips instead
@@ -311,7 +311,7 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 			// bump only when handleWatchItem reports the item was handled: a
 			// nudge means "something changed" (a failed event or a removal
 			// with nothing to mark is not a change).
-			w.updateJob(job.ID, &seen, &hashed, &failed)
+			w.updateJob(job.ID, &seen, &hashed, &failed, &edgesCreated)
 			if bumped {
 				w.bump()
 			}
@@ -375,7 +375,7 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 // Mirrors workers.Pool's OnAbandon (#92) for the same reason: the next
 // full scan is this package's existing self-healing catch-up path for
 // anything a watch event misses.
-func (w *WatcherSupervisor) consumeOne(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed *atomic.Int32) (bumped, abandoned bool) {
+func (w *WatcherSupervisor) consumeOne(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed, edgesCreated *atomic.Int32) (bumped, abandoned bool) {
 	if ctx.Err() != nil {
 		// Only seen, not failed: this item was never attempted, so counting
 		// it as a failure would make files_failed>0 on every ordinary
@@ -387,14 +387,14 @@ func (w *WatcherSupervisor) consumeOne(ctx context.Context, loc storage.Location
 		seen.Add(1)
 		return false, true
 	}
-	return w.handleWatchItem(ctx, loc, item, seen, hashed, failed), false
+	return w.handleWatchItem(ctx, loc, item, seen, hashed, failed, edgesCreated), false
 }
 
 // handleWatchItem processes one watchItem to completion, returning whether
 // the frontend should be nudged. Events and removals each count against
 // files_seen; a handled item bumps, a failure does not (and a removal with
 // nothing to mark is not a nudge -- nothing changed).
-func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed *atomic.Int32) bool {
+func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed, edgesCreated *atomic.Int32) bool {
 	if item.remove {
 		return w.handleRemoval(ctx, item.path, seen, failed)
 	}
@@ -426,7 +426,7 @@ func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Loc
 		hashed.Add(int32(stats.Inserted + stats.Touched + stats.VersionCollisions + stats.Moved))
 	}
 	if w.deps.Engine != nil {
-		resolveEdgesForBatch(ctx, w.deps, []Result{*result}, w.log)
+		edgesCreated.Add(int32(resolveEdgesForBatch(ctx, w.deps, []Result{*result}, w.log)))
 	}
 	return true
 }
@@ -521,17 +521,19 @@ func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen
 	return true
 }
 
-func (w *WatcherSupervisor) updateJob(jobID int64, seen, hashed, failed *atomic.Int32) {
-	// EdgesCreated is left at its zero value here -- UpdateScanJobProgress
-	// SETs an absolute value, not an increment, and the watch path never
-	// calls graph.Engine.ResolveAndCommit, so 0 is correct today. If a
-	// future change wires edge resolution into the watcher, this call site
-	// will need its own accumulated count threaded in the same way
-	// runScan's drainAndCommit does (see scan.go), or every watch-job
-	// progress update will silently reset edges_created back to 0.
+func (w *WatcherSupervisor) updateJob(jobID int64, seen, hashed, failed, edgesCreated *atomic.Int32) {
+	// edgesCreated must already be the running total across every item this
+	// consumer has handled, not just this call's item -- see
+	// handleWatchItem, which feeds resolveEdgesForBatch's return value into
+	// it on every item, the same quantity runScan's drainAndCommit sums
+	// into its own Stats.EdgesCreated field (scan.go). UpdateScanJobProgress
+	// SETs an absolute value, not an increment, so passing anything less
+	// than the running total here would silently regress edges_created on
+	// this call.
 	if err := w.deps.DB.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		return q.UpdateScanJobProgress(context.Background(), sqlcgen.UpdateScanJobProgressParams{
 			ID: jobID, FilesSeen: int64(seen.Load()), FilesHashed: int64(hashed.Load()), FilesFailed: int64(failed.Load()),
+			EdgesCreated: int64(edgesCreated.Load()),
 		})
 	}); err != nil {
 		w.log.Warn("pipeline: update watch job progress", "jobID", jobID, "err", err)
