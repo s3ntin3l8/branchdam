@@ -56,7 +56,7 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
 | 4 | Tier-3 heuristic resolver (serial + lens + ±2s + Hamming ≤ 10) | 3 |
 | 5 | Tier-1 project introspection: `.dam.json`, `.drp`, `.fcpxml`/`.edl` | 1 |
 | 6 | Multi-hop graph traversal and the spec's remaining UI surfaces | 4, 5 |
-| 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push | 3 |
+| 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push — landed (see below) | 3 |
 | 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 |
 | 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 |
 | 10 | Workstation agent — placeholder tracking issue, decomposed later | 8 |
@@ -76,6 +76,14 @@ byte-transfer capability and no way to verify a Google Photos copy against `full
 workstation agent (phase 10) is filed as one
 placeholder tracking issue; its repo location (separate repo vs. a subdirectory here) is an open
 decision to make once phase 8 shows what the agent actually needs to talk to.
+
+Phase 7 is delivered: #53 shipped `remote_sync_state`'s first write path (`internal/sync`'s push
+state machine), #54 the EXIF/XMP inheritance endpoint, and #55 the Immich external-library
+scan-trigger client and sync worker. Five hardening/UI follow-ups landed on top: #156 sync status
+API/UI + manual PUSH_FAILED re-trigger, #157 backfill of child `node_metadata` after inheritance,
+#158 joining the Immich sync worker on shutdown, #159 Immich 429/Retry-After handling, and #160 a
+deterministic `pickWinningParent` tie-break. See the post-increment-1 note in
+[`docs/schema.md`](schema.md) for the schema-side.
 
 ## Notable per-phase decisions
 
