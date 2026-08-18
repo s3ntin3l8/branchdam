@@ -18,6 +18,7 @@ type EventQueue struct {
 	ErrorLog    sql.NullString
 	CreatedAt   int64
 	ProcessedAt sql.NullInt64
+	RetryCount  int64
 }
 
 type MediaEdge struct {

@@ -26,7 +26,7 @@ func (q *Queries) CountPendingAgentEvents(ctx context.Context) (int64, error) {
 const enqueueAgentEvent = `-- name: EnqueueAgentEvent :one
 INSERT INTO event_queue (event_uuid, agent_id, event_type, payload_json, status)
 VALUES (?1, ?2, ?3, ?4, 'PENDING')
-RETURNING id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+RETURNING id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 `
 
 type EnqueueAgentEventParams struct {
@@ -36,18 +36,31 @@ type EnqueueAgentEventParams struct {
 	PayloadJson string
 }
 
+type EnqueueAgentEventRow struct {
+	ID          int64
+	EventUuid   string
+	AgentID     string
+	EventType   string
+	PayloadJson string
+	Status      string
+	RetryCount  int64
+	ErrorLog    sql.NullString
+	CreatedAt   int64
+	ProcessedAt sql.NullInt64
+}
+
 // Backs POST /api/v1/agent/events: persists and returns 202 in increment 1.
 // Actually draining/processing these rows ships with the deferred
 // workstation-agent increment -- this table and endpoint exist now so that
 // increment is additive, not a schema migration.
-func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EventQueue, error) {
+func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error) {
 	row := q.db.QueryRowContext(ctx, enqueueAgentEvent,
 		arg.EventUuid,
 		arg.AgentID,
 		arg.EventType,
 		arg.PayloadJson,
 	)
-	var i EventQueue
+	var i EnqueueAgentEventRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventUuid,
@@ -55,6 +68,7 @@ func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventPa
 		&i.EventType,
 		&i.PayloadJson,
 		&i.Status,
+		&i.RetryCount,
 		&i.ErrorLog,
 		&i.CreatedAt,
 		&i.ProcessedAt,
@@ -63,14 +77,27 @@ func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventPa
 }
 
 const getAgentEventByUUID = `-- name: GetAgentEventByUUID :one
-SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
 WHERE event_uuid = ?1
 `
 
-func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (EventQueue, error) {
+type GetAgentEventByUUIDRow struct {
+	ID          int64
+	EventUuid   string
+	AgentID     string
+	EventType   string
+	PayloadJson string
+	Status      string
+	RetryCount  int64
+	ErrorLog    sql.NullString
+	CreatedAt   int64
+	ProcessedAt sql.NullInt64
+}
+
+func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error) {
 	row := q.db.QueryRowContext(ctx, getAgentEventByUUID, eventUuid)
-	var i EventQueue
+	var i GetAgentEventByUUIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventUuid,
@@ -78,6 +105,7 @@ func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (Ev
 		&i.EventType,
 		&i.PayloadJson,
 		&i.Status,
+		&i.RetryCount,
 		&i.ErrorLog,
 		&i.CreatedAt,
 		&i.ProcessedAt,
@@ -86,16 +114,29 @@ func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (Ev
 }
 
 const getLatestProcessedAgentEventByAgent = `-- name: GetLatestProcessedAgentEventByAgent :one
-SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
 WHERE agent_id = ?1 AND status = 'PROCESSED'
 ORDER BY processed_at DESC, id DESC
 LIMIT 1
 `
 
-func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (EventQueue, error) {
+type GetLatestProcessedAgentEventByAgentRow struct {
+	ID          int64
+	EventUuid   string
+	AgentID     string
+	EventType   string
+	PayloadJson string
+	Status      string
+	RetryCount  int64
+	ErrorLog    sql.NullString
+	CreatedAt   int64
+	ProcessedAt sql.NullInt64
+}
+
+func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error) {
 	row := q.db.QueryRowContext(ctx, getLatestProcessedAgentEventByAgent, agentID)
-	var i EventQueue
+	var i GetLatestProcessedAgentEventByAgentRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventUuid,
@@ -103,6 +144,7 @@ func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agent
 		&i.EventType,
 		&i.PayloadJson,
 		&i.Status,
+		&i.RetryCount,
 		&i.ErrorLog,
 		&i.CreatedAt,
 		&i.ProcessedAt,
@@ -110,23 +152,52 @@ func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agent
 	return i, err
 }
 
+const incrementAgentEventRetry = `-- name: IncrementAgentEventRetry :exec
+UPDATE event_queue
+SET retry_count = retry_count + 1, error_log = ?2
+WHERE id = ?1
+`
+
+type IncrementAgentEventRetryParams struct {
+	ID       int64
+	ErrorLog sql.NullString
+}
+
+func (q *Queries) IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error {
+	_, err := q.db.ExecContext(ctx, incrementAgentEventRetry, arg.ID, arg.ErrorLog)
+	return err
+}
+
 const listPendingAgentEvents = `-- name: ListPendingAgentEvents :many
-SELECT id, event_uuid, agent_id, event_type, payload_json, status, error_log, created_at, processed_at
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
 WHERE status = 'PENDING'
 ORDER BY created_at ASC, id ASC
 LIMIT ?1
 `
 
-func (q *Queries) ListPendingAgentEvents(ctx context.Context, limit int64) ([]EventQueue, error) {
+type ListPendingAgentEventsRow struct {
+	ID          int64
+	EventUuid   string
+	AgentID     string
+	EventType   string
+	PayloadJson string
+	Status      string
+	RetryCount  int64
+	ErrorLog    sql.NullString
+	CreatedAt   int64
+	ProcessedAt sql.NullInt64
+}
+
+func (q *Queries) ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listPendingAgentEvents, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []EventQueue{}
+	items := []ListPendingAgentEventsRow{}
 	for rows.Next() {
-		var i EventQueue
+		var i ListPendingAgentEventsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.EventUuid,
@@ -134,6 +205,7 @@ func (q *Queries) ListPendingAgentEvents(ctx context.Context, limit int64) ([]Ev
 			&i.EventType,
 			&i.PayloadJson,
 			&i.Status,
+			&i.RetryCount,
 			&i.ErrorLog,
 			&i.CreatedAt,
 			&i.ProcessedAt,

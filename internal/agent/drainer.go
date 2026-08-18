@@ -20,10 +20,11 @@ import (
 // Drainer processes PENDING rows in event_queue oldest-first and applies
 // the corresponding state changes to media_nodes and media_edges.
 type Drainer struct {
-	db         *db.DB
-	guard      *storage.Guard
-	log        *slog.Logger
-	maxRetries int
+	db          *db.DB
+	guard       *storage.Guard
+	log         *slog.Logger
+	maxRetries  int
+	backoffWait time.Duration
 
 	mu      sync.Mutex
 	retries map[int64]int
@@ -53,6 +54,13 @@ func (d *Drainer) SetMaxRetries(n int) {
 	d.maxRetries = n
 }
 
+// SetRetryBackoff configures the backoff sleep duration in DrainAll when a batch makes no progress.
+func (d *Drainer) SetRetryBackoff(delay time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.backoffWait = delay
+}
+
 // ProcessPending claims up to batchSize PENDING rows oldest-first and applies them.
 // Malformed payloads and poison-pill events are marked FAILED with error_log
 // and never crash the worker or block the queue head.
@@ -64,7 +72,7 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 	start := time.Now()
 	var stats DrainStats
 
-	var events []sqlcgen.EventQueue
+	var events []sqlcgen.ListPendingAgentEventsRow
 	err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		events, err = q.ListPendingAgentEvents(ctx, int64(batchSize))
@@ -109,7 +117,10 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 
 		d.mu.Lock()
 		d.retries[ev.ID]++
-		attempts := d.retries[ev.ID]
+		attempts := int(ev.RetryCount) + 1
+		if d.retries[ev.ID] > attempts {
+			attempts = d.retries[ev.ID]
+		}
 		d.mu.Unlock()
 
 		if isFatal || attempts >= d.maxRetries {
@@ -130,6 +141,14 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		} else {
 			d.log.Warn("agent: transient event error, will retry",
 				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "err", processErr)
+
+			// Persist retry count in DB so retries survive crashes and multi-instance restarts.
+			_ = d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+				return q.IncrementAgentEventRetry(ctx, sqlcgen.IncrementAgentEventRetryParams{
+					ID:       ev.ID,
+					ErrorLog: sql.NullString{String: processErr.Error(), Valid: true},
+				})
+			})
 		}
 	}
 
@@ -173,8 +192,21 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 		totalStats.Failed += stats.Failed
 
 		if stats.Processed == 0 && stats.Failed == 0 {
-			// If all pending events are in retry cooldown or failed, break to prevent infinite loop
-			break
+			// If all pending events are in retry cooldown or unprogressed, back off or break
+			d.mu.Lock()
+			backoff := d.backoffWait
+			d.mu.Unlock()
+
+			if backoff <= 0 {
+				break
+			}
+			select {
+			case <-time.After(backoff):
+				// retry next iteration
+			case <-ctx.Done():
+				totalStats.Duration = time.Since(start)
+				return totalStats, ctx.Err()
+			}
 		}
 	}
 
@@ -182,7 +214,7 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 	return totalStats, nil
 }
 
-func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	switch ev.EventType {
 	case EventNodeCreated:
 		return d.applyNodeCreated(ctx, q, ev)
@@ -199,7 +231,7 @@ func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen
 	}
 }
 
-func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	var p NodeCreatedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal node created: %v", ErrMalformedPayload, err)
@@ -324,7 +356,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 	return err
 }
 
-func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	var p EdgeAttachedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal edge attached: %v", ErrMalformedPayload, err)
@@ -400,7 +432,7 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 	return nil
 }
 
-func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	var p NodeMovedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal node moved: %v", ErrMalformedPayload, err)
@@ -452,7 +484,7 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 	})
 }
 
-func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	var p NodeDeletedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal node deleted: %v", ErrMalformedPayload, err)
@@ -473,7 +505,7 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	return q.MarkNodeMissing(ctx, node.ID)
 }
 
-func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.EventQueue) error {
+func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	var p PathRebasedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal path rebased: %v", ErrMalformedPayload, err)
