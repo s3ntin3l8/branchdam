@@ -1163,7 +1163,7 @@ func TestRejectEdgeRecomputesGraphStatus_MixedEdges(t *testing.T) {
 		t.Fatalf("seed nodes: %v", err)
 	}
 
-	var edge1 sqlcgen.MediaEdge
+	var edge1, edge2 sqlcgen.MediaEdge
 	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		edge1, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
@@ -1173,7 +1173,7 @@ func TestRejectEdgeRecomputesGraphStatus_MixedEdges(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+		edge2, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
 			SourceNodeID: n3.ID, TargetNodeID: n2.ID, RelationshipType: "DERIVED_FROM",
 			Confidence: 0.60, Tier: 2, Resolver: "test", ReviewState: "NEEDS_REVIEW",
 		})
@@ -1194,6 +1194,20 @@ func TestRejectEdgeRecomputesGraphStatus_MixedEdges(t *testing.T) {
 	}
 	if after.GraphStatus != "NEEDS_REVIEW" {
 		t.Errorf("target graph_status after reject = %q, want NEEDS_REVIEW (edge2 is still pending review)", after.GraphStatus)
+	}
+
+	// 2. Reject edge2 as well: all parent candidate edges are now REJECTED -> graph_status reverts to UNLINKED.
+	rr2 := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/reject", edge2.ID), nil)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("reject edge2 status = %d, want 200, body = %s", rr2.Code, rr2.Body.String())
+	}
+
+	afterAllRejected, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target after all rejected: %v", err)
+	}
+	if afterAllRejected.GraphStatus != "UNLINKED" {
+		t.Errorf("target graph_status after all edges rejected = %q, want UNLINKED", afterAllRejected.GraphStatus)
 	}
 }
 
