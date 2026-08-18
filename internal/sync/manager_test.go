@@ -316,6 +316,43 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Fatal("condition not met within", timeout)
 }
 
+func TestWorkerStopsOnCancel(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot.jpg")) // under export path -> enqueued by the first drain
+
+	w := NewWorker(mgr, RemoteImmich, exportPath, 16, time.Hour, func(_ context.Context, _ []Node) error { return nil }, nil)
+
+	w.Start(ctx)
+
+	// Wait until the worker's first drain has pushed the node -- proof the run
+	// goroutine is genuinely in flight before Wait below (Start already
+	// incremented the WaitGroup synchronously, but this pins down that the loop
+	// is doing real work rather than about to return).
+	waitFor(t, 5*time.Second, func() bool {
+		rows, err := database.Reader.ListRemoteSyncStateByStatus(context.Background(), sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+		return err == nil && len(rows) == 1
+	})
+
+	cancel()
+
+	// Wait must join the run goroutine promptly on ctx cancellation -- this is
+	// what main.go relies on to drain the worker before db.Close.
+	waited := make(chan struct{})
+	go func() { w.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker.Wait did not return within 2s of ctx cancellation")
+	}
+}
+
 func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)
@@ -331,8 +368,7 @@ func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
 	push := &recordingPush{}
 	w := NewWorker(mgr, RemoteImmich, exportPath, 16, 50*time.Millisecond, push.fn, nil)
 
-	done := make(chan struct{})
-	go func() { w.Run(ctx); close(done) }()
+	w.Start(ctx)
 
 	// Wait until the export-path node is actually PUSHED (push is invoked
 	// before the mark-pushed transaction commits, so waiting on the DB state,
@@ -342,7 +378,9 @@ func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
 		return err == nil && len(rows) == 1
 	})
 	cancel()
-	<-done
+	// Join the run goroutine so no worker DB writes are in flight while the
+	// final assertions below read the DB.
+	w.Wait()
 
 	// Only the export-path node was pushed.
 	rows, err := database.Reader.ListRemoteSyncStateByStatus(context.Background(), sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
