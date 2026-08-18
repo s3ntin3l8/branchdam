@@ -9,6 +9,10 @@ export function useConfig() {
   return useQuery({ queryKey: ["config"], queryFn: api.config });
 }
 
+export function usePathRewrites() {
+  return useQuery({ queryKey: ["path-rewrites"], queryFn: api.listPathRewrites });
+}
+
 export function useStorageLocations() {
   return useQuery({ queryKey: ["storage-locations"], queryFn: api.listStorageLocations });
 }

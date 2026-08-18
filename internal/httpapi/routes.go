@@ -19,6 +19,7 @@ import (
 func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/me", s.handleMe)
 	huma.Get(api, "/api/v1/config", s.handleConfig)
+	huma.Get(api, "/api/v1/config/path-rewrites", s.handleListPathRewrites)
 
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
 
@@ -73,15 +74,49 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 
 // --- /api/v1/config ---
 
+type PathRewriteDTO struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 type ConfigOutput struct {
 	Body struct {
-		Version string `json:"version"`
+		Version      string           `json:"version"`
+		PathRewrites []PathRewriteDTO `json:"pathRewrites"`
 	}
 }
 
 func (s *Server) handleConfig(_ context.Context, _ *struct{}) (*ConfigOutput, error) {
 	out := &ConfigOutput{}
 	out.Body.Version = s.version
+	out.Body.PathRewrites = make([]PathRewriteDTO, 0)
+	if s.cfg != nil {
+		for _, rw := range s.cfg.PathRewrites {
+			out.Body.PathRewrites = append(out.Body.PathRewrites, PathRewriteDTO{
+				From: rw.From,
+				To:   rw.To,
+			})
+		}
+	}
+	return out, nil
+}
+
+type PathRewritesOutput struct {
+	Body []PathRewriteDTO `json:"body"`
+}
+
+func (s *Server) handleListPathRewrites(_ context.Context, _ *struct{}) (*PathRewritesOutput, error) {
+	out := &PathRewritesOutput{
+		Body: make([]PathRewriteDTO, 0),
+	}
+	if s.cfg != nil {
+		for _, rw := range s.cfg.PathRewrites {
+			out.Body = append(out.Body, PathRewriteDTO{
+				From: rw.From,
+				To:   rw.To,
+			})
+		}
+	}
 	return out, nil
 }
 
