@@ -222,7 +222,7 @@ func TestInheritMetadataConflicts(t *testing.T) {
 				return err
 			}
 			for _, e := range rows {
-				if err := q.RejectMediaEdge(context.Background(), sqlcgen.RejectMediaEdgeParams{ID: e.ID, ReviewedBy: sql.NullString{}}); err != nil {
+				if _, err := q.RejectMediaEdge(context.Background(), sqlcgen.RejectMediaEdgeParams{ID: e.ID, ReviewedBy: sql.NullString{}}); err != nil {
 					return err
 				}
 			}
