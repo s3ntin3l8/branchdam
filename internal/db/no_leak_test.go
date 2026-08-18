@@ -70,8 +70,11 @@ import (
 //
 // Deliberately not chased further (a real but accepted limitation, not a gap
 // to fix here): a type alias laundering one of these selectors, an
-// unqualified same-package reference, a closure-returning-closure, or a
-// return type widened to `any` would all evade this -- none of those are
+// unqualified same-package reference, a closure-returning-closure, a return
+// type widened to `any`, or importing "database/sql" under a non-"sql"
+// alias (qualifiedIdent matches the import identifier textually, so `import
+// sq "database/sql"` would make a *sq.DB field or return evade the
+// "sql.DB"/"sql.Tx" name check) would all evade this -- none of those are
 // things a maintainer writes by accident while exposing a test helper, they
 // require deliberately routing around a known guard. This is a regression
 // tripwire for the ReaderQueriesForTest shape and its closest variants, not
@@ -107,7 +110,11 @@ func TestFindWriteCapableHandleViolationsCatchesKnownShapes(t *testing.T) {
 	dir := t.TempDir()
 	const fixture = `package fixture
 
-import "example.com/sqlcgen"
+import (
+	"database/sql"
+
+	"example.com/sqlcgen"
+)
 
 type Good struct {
 	Reader *sqlcgen.Queries // allowlisted field name -- not a violation
@@ -121,9 +128,27 @@ type BadEmbeddedField struct {
 	*sqlcgen.Queries
 }
 
+type BadDBField struct {
+	Conn *sql.DB
+}
+
+type BadTxField struct {
+	Tx *sql.Tx
+}
+
+type BadDBTXField struct {
+	Handle sqlcgen.DBTX
+}
+
 func GoodFunc() error { return nil }
 
 func BadFunc() *sqlcgen.Queries { return nil }
+
+func BadDBFunc() *sql.DB { return nil }
+
+func BadTxFunc() *sql.Tx { return nil }
+
+func BadDBTXFunc() sqlcgen.DBTX { return nil }
 
 func badUnexportedFunc() *sqlcgen.Queries { return nil } // unexported -- not a violation
 `
@@ -150,7 +175,13 @@ func ViolationInTestFile() *sqlcgen.Queries { return nil }
 	wantSubstrings := []string{
 		"field Writer is a write-capable handle",
 		"field Queries is a write-capable handle", // the embedded field's promoted name
+		"field Conn is a write-capable handle",
+		"field Tx is a write-capable handle",
+		"field Handle is a write-capable handle",
 		"func BadFunc returns a write-capable handle directly",
+		"func BadDBFunc returns a write-capable handle directly",
+		"func BadTxFunc returns a write-capable handle directly",
+		"func BadDBTXFunc returns a write-capable handle directly",
 	}
 	for _, want := range wantSubstrings {
 		found := false
