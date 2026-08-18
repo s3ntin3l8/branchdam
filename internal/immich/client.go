@@ -81,22 +81,28 @@ func (c *Client) TriggerScan(ctx context.Context) error {
 		}
 		lastErr = err
 		if attempt < triggerAttempts-1 {
-			delay := wait
-			if httpErr != nil && httpErr.Status == http.StatusTooManyRequests && httpErr.RetryAfter > 0 {
-				delay = httpErr.RetryAfter
-				if delay > maxRetryAfterWait {
-					delay = maxRetryAfterWait
-				}
-			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(delay):
+			case <-time.After(retryDelay(wait, httpErr)):
 			}
 			wait *= 2
 		}
 	}
 	return fmt.Errorf("immich: trigger scan after %d attempts: %w", triggerAttempts, lastErr)
+}
+
+// retryDelay is how long to wait before the next attempt: the capped
+// Retry-After of a 429 when present and positive, otherwise the exponential
+// backoff.
+func retryDelay(backoff time.Duration, httpErr *ErrImmichHTTP) time.Duration {
+	if httpErr != nil && httpErr.Status == http.StatusTooManyRequests && httpErr.RetryAfter > 0 {
+		if httpErr.RetryAfter > maxRetryAfterWait {
+			return maxRetryAfterWait
+		}
+		return httpErr.RetryAfter
+	}
+	return backoff
 }
 
 func (c *Client) triggerOnce(ctx context.Context) error {
@@ -127,7 +133,7 @@ func (c *Client) triggerOnce(ctx context.Context) error {
 
 // parseRetryAfter parses a Retry-After header value, either a non-negative
 // integer number of seconds or an HTTP-date (RFC 7231). It returns zero for
-// anything unparseable or negative.
+// anything unparseable or negative, and caps any result at maxRetryAfterWait.
 func parseRetryAfter(v string) time.Duration {
 	if v == "" {
 		return 0
@@ -136,10 +142,16 @@ func parseRetryAfter(v string) time.Duration {
 		if secs < 0 {
 			return 0
 		}
+		if secs > int(maxRetryAfterWait/time.Second) {
+			return maxRetryAfterWait
+		}
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		if d := time.Until(t); d > 0 {
+			if d > maxRetryAfterWait {
+				return maxRetryAfterWait
+			}
 			return d
 		}
 	}
