@@ -44,6 +44,15 @@ var version = "dev"
 // processFile (a large-file full hash, or a stalled network mount).
 const shutdownBudget = 30 * time.Second
 
+// errShutdownDegraded is returned by runShutdownSequence when any wait timed
+// out and the database was deliberately left open (dbUnsafeToClose). Without
+// this, a timed-out join that isn't httpServer.Shutdown itself (supervisor,
+// scanTracker, or the pool) would leave shutdownErr nil, so run() -- and
+// therefore the process's exit code -- would report a degraded shutdown
+// identically to a fully clean one. main() maps any run() error to exit 1,
+// which is what lets an orchestrator tell the two apart.
+var errShutdownDegraded = errors.New("shutdown: one or more waits timed out; database left open")
+
 func main() {
 	cfgPath := flag.String("config", envOr("BRANCHDAM_CONFIG", "config.yaml"), "path to config file")
 	debug := flag.Bool("debug", os.Getenv("BRANCHDAM_DEBUG") != "", "enable debug logging")
@@ -237,6 +246,9 @@ func runShutdownSequence(shutdownCtx context.Context, log *slog.Logger, httpServ
 	if !waitWithin(shutdownCtx, pool.Drain) {
 		log.Error("shutdown: worker pool drain timed out")
 		*dbUnsafeToClose = true
+	}
+	if shutdownErr == nil && *dbUnsafeToClose {
+		shutdownErr = errShutdownDegraded
 	}
 	return shutdownErr
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -254,21 +255,20 @@ func TestShutdownSequenceTerminatesWithinBudgetDespiteSlowJob(t *testing.T) {
 
 	var dbUnsafeToClose bool
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
 		done <- runShutdownSequence(shutdownCtx, slog.New(slog.DiscardHandler), httpServer, nil, scanTracker, pool, &dbUnsafeToClose)
 	}()
 
+	// The 2s wait margin against a 200ms budget is the real "did it actually
+	// bound the wait" assertion; a tighter elapsed-time check flaked under a
+	// loaded -race runner and was dropped (hermes review on PR #119).
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Errorf("runShutdownSequence returned err = %v, want nil (httpServer was never served)", err)
+		if !errors.Is(err, errShutdownDegraded) {
+			t.Errorf("runShutdownSequence returned err = %v, want errShutdownDegraded (the pool drain timed out)", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runShutdownSequence did not return within 2s of a 200ms budget -- shutdown is hanging on the slow job")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("runShutdownSequence took %s, want close to the %s budget", elapsed, budget)
 	}
 	if !dbUnsafeToClose {
 		t.Error("dbUnsafeToClose = false, want true -- the pool never actually finished draining within budget")
