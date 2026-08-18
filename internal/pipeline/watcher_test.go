@@ -639,8 +639,8 @@ func TestWatchWorkDropsOldestUnderPressure(t *testing.T) {
 		work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/burst/%d", i)}})
 	}
 
+	backlog := work.backlogLen()
 	work.mu.Lock()
-	backlog := len(work.items)
 	first := work.items[0].rec.Path
 	last := work.items[len(work.items)-1].rec.Path
 	work.mu.Unlock()
@@ -710,6 +710,52 @@ func TestWatchWorkDequeueDrainsThenCloses(t *testing.T) {
 	for i, path := range got {
 		if want := fmt.Sprintf("/item/%d", i); path != want {
 			t.Errorf("item %d = %q, want %q", i, path, want)
+		}
+	}
+}
+
+// TestWatchWorkEnqueueRaceWithClose is the regression guard for a real
+// panic an independent hermes review reproduced against an earlier version
+// of this fix: enqueue's non-blocking notify send happened AFTER releasing
+// q.mu, so a concurrent close() could close q.notify in the gap between
+// enqueue's unlock and its send -- a send racing a channel close panics
+// ("send on closed channel"), taking the whole process down (a panic in
+// any goroutine is fatal). This is reachable in production any time
+// indexer.Watch's debounce timers are still firing (they are not joined
+// before watchLocation calls work.close()) right as shutdown begins.
+//
+// The fix serializes the notify send (in enqueue) and the notify close (in
+// close()) through the same q.mu, so they can never interleave -- see the
+// watchWork type doc comment. This test doesn't assert an outcome beyond
+// "no panic, no hang": running many concurrent enqueue and close attempts
+// under -race is what would have caught the original bug (the race
+// detector flags the racing chansend/closechan access, and the run panics
+// without the fix), and a clean, race-free run under -race across many
+// iterations is the regression guard against it recurring.
+func TestWatchWorkEnqueueRaceWithClose(t *testing.T) {
+	for iter := 0; iter < 200; iter++ {
+		work := newWatchWork(nil)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/race/%d", i)}})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			work.close()
+		}()
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: enqueue/close did not both return within 5s (deadlock?)", iter)
 		}
 	}
 }

@@ -144,13 +144,19 @@ const watchQueueCapacity = 1024
 // (rename move detection is deliberately order-independent, see
 // rebaseIfMoved).
 //
-// close() records the intent to stop under the same mutex enqueue uses,
-// and wakes any goroutine parked in dequeue via notify -- so a concurrent
-// enqueue or dequeue can never race the close: enqueue either lands (then
-// dequeue drains it) or observes closed and bails; dequeue either drains
-// everything already queued or, once empty and closed, returns ok=false.
-// The caller must join the consumer (consumerWG.Wait) after close() and
-// before any finalization.
+// close() records the intent to stop and closes notify, both under the
+// same mutex enqueue's own append-and-signal uses -- so a concurrent
+// enqueue's non-blocking send on notify can never race close()'s close of
+// that same channel (a send racing a close panics: "send on closed
+// channel"). Serializing both through q.mu is what rules that out: either
+// enqueue's whole critical section (closed-check, append, notify send)
+// completes before close() ever acquires the lock, or close() runs first
+// and enqueue's closed-check (also inside the lock) sees it and bails
+// before ever touching notify -- there is no third interleaving. dequeue's
+// own receive from notify is unaffected either way: a receive from an
+// already-closed channel is always safe in Go, unlike a send. The caller
+// must join the consumer (consumerWG.Wait) after close() and before any
+// finalization.
 type watchWork struct {
 	mu      sync.Mutex
 	closed  bool
@@ -164,27 +170,55 @@ func newWatchWork(log *slog.Logger) *watchWork {
 	return &watchWork{notify: make(chan struct{}, 1), log: log}
 }
 
+// logDropThreshold caps how many individual eviction warnings enqueue logs
+// before switching to a periodic summary: a burst large enough to evict
+// thousands of items (the PR's own 5000-file example, against a 1024
+// capacity, evicts ~4000) would otherwise emit one WARN line per eviction --
+// itself a form of the log-spam problem this PR's drop-oldest policy exists
+// to avoid causing elsewhere. The first few individual lines still show an
+// operator concrete dropped paths; beyond that, a running total every
+// logDropSummaryEvery evictions stays visible without flooding.
+const (
+	logDropThreshold    = 10
+	logDropSummaryEvery = 100
+)
+
 func (q *watchWork) enqueue(item watchItem) {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	if q.closed {
-		q.mu.Unlock()
 		return
 	}
 	if len(q.items) >= watchQueueCapacity {
 		oldest := q.items[0]
 		q.items = q.items[1:]
-		q.dropped.Add(1)
+		dropped := q.dropped.Add(1)
 		if q.log != nil {
-			q.log.Warn("pipeline: watch queue full, dropping oldest queued event -- a full rescan will catch up",
-				"dropped_path", oldest.path, "dropped_rec_path", oldest.rec.Path, "capacity", watchQueueCapacity)
+			switch {
+			case dropped <= logDropThreshold:
+				q.log.Warn("pipeline: watch queue full, dropping oldest queued event -- a full rescan will catch up",
+					"dropped_path", oldest.path, "dropped_rec_path", oldest.rec.Path, "capacity", watchQueueCapacity)
+			case dropped%logDropSummaryEvery == 0:
+				q.log.Warn("pipeline: watch queue still under sustained pressure, dropping oldest events -- a full rescan will catch up",
+					"dropped_total_this_run", dropped, "capacity", watchQueueCapacity)
+			}
 		}
 	}
 	q.items = append(q.items, item)
-	q.mu.Unlock()
+	// Send while still holding q.mu -- see the type doc comment for why
+	// this, not a send after unlocking, is what makes close() race-free.
 	select {
 	case q.notify <- struct{}{}:
 	default:
 	}
+}
+
+// backlogLen reports how many items are currently queued -- for tests and
+// any future observability; not used in enqueue/dequeue's own logic.
+func (q *watchWork) backlogLen() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
 }
 
 // dequeue blocks until an item is available, returning ok=false only once
@@ -211,8 +245,11 @@ func (q *watchWork) droppedCount() int64 { return q.dropped.Load() }
 
 func (q *watchWork) close() {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.closed = true
-	q.mu.Unlock()
+	// Closing notify while still holding q.mu, not after unlocking, is what
+	// serializes this against enqueue's own notify send -- see the type
+	// doc comment.
 	close(q.notify)
 }
 
