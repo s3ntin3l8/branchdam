@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AuditEntry, Config, Me, PathRewrite, ScanJob, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AuditEntry, Config, LineageResponse, Me, PathRewrite, ScanJob, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -43,6 +43,7 @@ export const api = {
   },
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
   getAssetGraph: (id: number) => request<AssetGraph>(`/api/v1/assets/${id}/graph`),
+  getAssetLineage: (id: number | string, depth = 2) => request<LineageResponse>(`/api/v1/assets/${id}/lineage?depth=${depth}`),
 
   listAuditQueue: (params: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();

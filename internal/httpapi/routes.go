@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,6 +27,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
+	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
 
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
 	huma.Post(api, "/api/v1/edges/{id}/confirm", s.handleConfirmEdge)
@@ -290,6 +292,138 @@ func (s *Server) handleAssetGraph(ctx context.Context, in *AssetPathInput) (*Ass
 	for i, e := range children {
 		out.Body.Children[i] = toEdgeDTO(e)
 	}
+	return out, nil
+}
+
+// --- /api/v1/assets/{id}/lineage ---
+
+// Deprecated: handleAssetGraph returns direct parents/children only (one hop).
+// Use /api/v1/assets/{id}/lineage for bounded multi-hop lineage traversal.
+
+type AssetLineageInput struct {
+	ID    int64 `path:"id" doc:"Asset node ID"`
+	Depth int   `query:"depth" default:"2" minimum:"1" maximum:"5" doc:"Lineage traversal depth (1-5)"`
+}
+
+type AssetLineageOutput struct {
+	Body struct {
+		RootID int64      `json:"rootId"`
+		Nodes  []assetDTO `json:"nodes"`
+		Edges  []edgeDTO  `json:"edges"`
+	}
+}
+
+func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) (*AssetLineageOutput, error) {
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error404NotFound("asset not found")
+		}
+		return nil, huma.Error500InternalServerError("get root asset", err)
+	}
+	if node.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+
+	depth := in.Depth
+	if depth < 1 {
+		depth = 2
+	} else if depth > 5 {
+		depth = 5
+	}
+
+	nodeIDs := make(map[int64]bool)
+	nodeIDs[in.ID] = true
+
+	currentLevel := []int64{in.ID}
+
+	for d := 0; d < depth; d++ {
+		if len(currentLevel) == 0 {
+			break
+		}
+		var nextLevel []int64
+		for _, nodeID := range currentLevel {
+			parents, err := s.db.Reader.ListEdgesByTarget(ctx, nodeID)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("list parent edges", err)
+			}
+			for _, p := range parents {
+				if p.ReviewState == "REJECTED" {
+					continue
+				}
+				if !nodeIDs[p.SourceNodeID] {
+					nodeIDs[p.SourceNodeID] = true
+					nextLevel = append(nextLevel, p.SourceNodeID)
+				}
+			}
+			children, err := s.db.Reader.ListEdgesBySource(ctx, nodeID)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("list child edges", err)
+			}
+			for _, c := range children {
+				if c.ReviewState == "REJECTED" {
+					continue
+				}
+				if !nodeIDs[c.TargetNodeID] {
+					nodeIDs[c.TargetNodeID] = true
+					nextLevel = append(nextLevel, c.TargetNodeID)
+				}
+			}
+		}
+		currentLevel = nextLevel
+	}
+
+	var idList []int64
+	for id := range nodeIDs {
+		idList = append(idList, id)
+	}
+
+	jsonBytes, err := json.Marshal(idList)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("marshal node ids", err)
+	}
+
+	nodes, err := s.db.Reader.ListNodesByIDs(ctx, string(jsonBytes))
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list lineage nodes", err)
+	}
+
+	validNodes := make(map[int64]bool, len(nodes))
+	outNodes := make([]assetDTO, 0, len(nodes))
+	for _, n := range nodes {
+		if n.LifecycleState == "ARCHIVED" {
+			continue
+		}
+		validNodes[n.ID] = true
+		outNodes = append(outNodes, toAssetDTO(n))
+	}
+
+	edges, err := s.db.Reader.ListEdgesForNodes(ctx, string(jsonBytes))
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list lineage edges", err)
+	}
+
+	outEdges := make([]edgeDTO, 0, len(edges))
+	for _, e := range edges {
+		if !validNodes[e.SourceNodeID] || !validNodes[e.TargetNodeID] {
+			continue
+		}
+		outEdges = append(outEdges, edgeDTO{
+			ID:               e.ID,
+			SourceNodeID:     e.SourceNodeID,
+			TargetNodeID:     e.TargetNodeID,
+			RelationshipType: e.RelationshipType,
+			Confidence:       e.Confidence,
+			ReviewState:      e.ReviewState,
+			Resolver:         e.Resolver,
+		})
+	}
+
+	out := &AssetLineageOutput{}
+	out.Body.RootID = in.ID
+	out.Body.Nodes = outNodes
+	out.Body.Edges = outEdges
+
 	return out, nil
 }
 

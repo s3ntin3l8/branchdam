@@ -3,13 +3,17 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -538,4 +542,185 @@ func TestHandleListPathRewrites(t *testing.T) {
 	if rewrites[1].From != "/Volumes/NAS" || rewrites[1].To != "/storage/nas" {
 		t.Errorf("rewrite 1 mismatch: %+v", rewrites[1])
 	}
+}
+
+func TestAssetLineageNotFound(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/999999/lineage", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAssetLineageInvalidDepth(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/1/lineage?depth=10", nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 for out-of-range depth, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAssetLineageTraversalDiamondAndDepth(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	// Seed 4-level deep graph with a diamond and rejected/archived nodes:
+	// N1 (Root) -> N2 -> N4 (Diamond)
+	// N1 (Root) -> N3 -> N4 (Diamond) -> N5 (Level 4)
+	// N6 -> N1 (REJECTED edge)
+	// N7 (ARCHIVED node)
+	var n1, n2, n3, n4, n5, n6, n7 sqlcgen.MediaNode
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "test-loc", RootPath: "/tmp/loc", Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+
+		createNode := func(name string, state string) (sqlcgen.MediaNode, error) {
+			return q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+				NodeUuid:          uuid.New().String(),
+				StorageLocationID: loc.ID,
+				FilePath:          "/tmp/" + name,
+				FileName:          name,
+				FileExt:           ".jpg",
+				SizeBytes:         100,
+				MtimeUnix:         time.Now().Unix(),
+				IndexingStatus:    "INDEXED_FULL",
+				GraphStatus:       "LINKED",
+				LifecycleState:    state,
+			})
+		}
+
+		if n1, err = createNode("n1.jpg", "ACTIVE"); err != nil {
+			return err
+		}
+		if n2, err = createNode("n2.jpg", "ACTIVE"); err != nil {
+			return err
+		}
+		if n3, err = createNode("n3.jpg", "ACTIVE"); err != nil {
+			return err
+		}
+		if n4, err = createNode("n4.jpg", "ACTIVE"); err != nil {
+			return err
+		}
+		if n5, err = createNode("n5.jpg", "ACTIVE"); err != nil {
+			return err
+		}
+		if n6, err = createNode("n6.jpg", "ACTIVE"); err != nil {
+			return err
+		}
+		if n7, err = createNode("n7.jpg", "ARCHIVED"); err != nil {
+			return err
+		}
+
+		createEdge := func(src, tgt int64, state string) error {
+			e, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+				SourceNodeID:     src,
+				TargetNodeID:     tgt,
+				RelationshipType: "DERIVED_FROM",
+				Confidence:       0.9,
+				ReviewState:      "AUTO_ACCEPTED",
+				Resolver:         "test",
+				Tier:             1,
+			})
+			if err != nil {
+				return err
+			}
+			if state == "CONFIRMED" {
+				return q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{
+					ID:         e.ID,
+					ReviewedBy: sql.NullString{String: "tester", Valid: true},
+				})
+			}
+			if state == "REJECTED" {
+				return q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{
+					ID:         e.ID,
+					ReviewedBy: sql.NullString{String: "tester", Valid: true},
+				})
+			}
+			return nil
+		}
+
+		if err := createEdge(n1.ID, n2.ID, "CONFIRMED"); err != nil {
+			return err
+		}
+		if err := createEdge(n1.ID, n3.ID, "CONFIRMED"); err != nil {
+			return err
+		}
+		if err := createEdge(n2.ID, n4.ID, "CONFIRMED"); err != nil {
+			return err
+		}
+		if err := createEdge(n3.ID, n4.ID, "CONFIRMED"); err != nil {
+			return err
+		}
+		if err := createEdge(n4.ID, n5.ID, "CONFIRMED"); err != nil {
+			return err
+		}
+		if err := createEdge(n6.ID, n1.ID, "REJECTED"); err != nil {
+			return err
+		}
+		if err := createEdge(n1.ID, n7.ID, "CONFIRMED"); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed test graph: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+toStr(n1.ID)+"/lineage?depth=3", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var got struct {
+		RootID int64      `json:"rootId"`
+		Nodes  []assetDTO `json:"nodes"`
+		Edges  []edgeDTO  `json:"edges"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.RootID != n1.ID {
+		t.Errorf("rootId = %d, want %d", got.RootID, n1.ID)
+	}
+
+	// Verify diamond deduplication: n4 should appear exactly ONCE
+	n4Count := 0
+	nodeIDs := make(map[int64]bool)
+	for _, node := range got.Nodes {
+		nodeIDs[node.ID] = true
+		if node.ID == n4.ID {
+			n4Count++
+		}
+		if node.ID == n6.ID {
+			t.Errorf("node %d (REJECTED edge source) should not be included in lineage", n6.ID)
+		}
+		if node.ID == n7.ID {
+			t.Errorf("node %d (ARCHIVED node) should not be included in lineage", n7.ID)
+		}
+	}
+
+	if n4Count != 1 {
+		t.Errorf("node n4 count = %d, want 1 (diamond deduplication failure)", n4Count)
+	}
+
+	if !nodeIDs[n1.ID] || !nodeIDs[n2.ID] || !nodeIDs[n3.ID] || !nodeIDs[n4.ID] || !nodeIDs[n5.ID] {
+		t.Errorf("nodes set missing expected graph nodes: got %+v", nodeIDs)
+	}
+
+	// Verify querying an ARCHIVED root asset returns 404
+	rrArchived := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+toStr(n7.ID)+"/lineage", nil)
+	if rrArchived.Code != http.StatusNotFound {
+		t.Errorf("GET /api/v1/assets/%d/lineage (ARCHIVED) status = %d, want 404", n7.ID, rrArchived.Code)
+	}
+}
+
+func toStr(v int64) string {
+	return fmt.Sprintf("%d", v)
 }
