@@ -29,20 +29,23 @@ const watchDebounce = 500 * time.Millisecond
 // watched -- main.go filters before Start.
 //
 // Every location's events are processed by a single consumer goroutine
-// reading an unbuffered channel, so hashing/Commit run one at a time per
-// location instead of in unbounded parallel goroutines. The consumer makes
-// no ordering assumptions about events: the debouncer's per-path
-// time.AfterFunc goroutines can deliver them in any order, and inotify on
-// Linux actually delivers a rename's IN_MOVED_TO before its IN_MOVED_FROM,
-// so rename move detection is deliberately order-independent (see
-// rebaseIfMoved). A file-level rename IS move-detected; a recursive
-// DIRECTORY rename is not (the fsnotify watch moves with the directory, so
-// no per-file remove/create events fire) -- files under it land as fresh
-// nodes on the next full scan and the old nodes sweep to MISSING, the same
-// fidelity gap as the pure-scan path: self-healing, no data loss. Batching
-// Commit calls the way a full scan does (see scan.go's batchSize/
-// batchInterval) would be a reasonable follow-up; the per-location
-// serialization itself is deliberate.
+// reading a bounded, drop-oldest queue (watchWork -- see its own doc
+// comment for why bounded and why drop-oldest), so hashing/Commit run one
+// at a time per location instead of in unbounded parallel goroutines, and
+// a debounce-timer goroutine handing off an event never blocks or parks
+// waiting for the consumer. The consumer makes no ordering assumptions
+// about events: the debouncer's per-path time.AfterFunc goroutines can
+// deliver them in any order, and inotify on Linux actually delivers a
+// rename's IN_MOVED_TO before its IN_MOVED_FROM, so rename move detection
+// is deliberately order-independent (see rebaseIfMoved). A file-level
+// rename IS move-detected; a recursive DIRECTORY rename is not (the
+// fsnotify watch moves with the directory, so no per-file remove/create
+// events fire) -- files under it land as fresh nodes on the next full scan
+// and the old nodes sweep to MISSING, the same fidelity gap as the
+// pure-scan path: self-healing, no data loss. Batching Commit calls the way
+// a full scan does (see scan.go's batchSize/batchInterval) would be a
+// reasonable follow-up; the per-location serialization itself is
+// deliberate.
 //
 // Watch-path events run processFile, so videos on a watched location go
 // through probe.FFProbe under the same probeTimeout budget as the scan path
@@ -102,26 +105,93 @@ type watchItem struct {
 	rec    indexer.Record
 }
 
-// watchWork is the handoff between indexer.Watch's debounce callbacks and a
-// location's consumer goroutine. The callbacks only ever enqueue; the
-// consumer is the sole reader and the only code that touches the database.
-// enqueue blocks until the consumer takes the item, which doubles as
-// backpressure: while the consumer is busy hashing, further events wait
-// instead of spawning more goroutines. The order items land on the channel
-// carries no semantic weight -- the debouncer fires one time.AfterFunc
-// goroutine per path and Go does not guarantee their order, so consumers
-// must not assume any event ordering (rename move detection is deliberately
-// order-independent, see rebaseIfMoved).
+// watchQueueCapacity bounds watchWork's backlog. Matches workers.Pool's
+// queueDepth default (cmd/branchdam/main.go) for consistency -- both are
+// "how much backlog can pile up behind a slower consumer" bounds. Once this
+// many items are queued and not yet drained, enqueue evicts the OLDEST
+// queued item (see watchWork's doc comment) rather than growing without
+// bound or blocking the caller.
+const watchQueueCapacity = 1024
+
+// watchWork is the bounded handoff between indexer.Watch's debounce
+// callbacks and a location's consumer goroutine. The callbacks only ever
+// enqueue; the consumer is the sole reader and the only code that touches
+// the database.
 //
-// close() records the intent to stop under the same mutex enqueue uses
-// before the channel itself is closed, so a blocked send can never race the
-// close: it either hands off or sees closed and bails. The caller must join
-// the consumer (consumerWG.Wait) after close() and before any finalization.
+// enqueue never blocks and never spawns/parks a goroutine: it either
+// appends to the backlog (a plain slice under a mutex, not a channel), or,
+// once the backlog reaches watchQueueCapacity, evicts the single oldest
+// queued item to make room. That was the actual bug this replaces -- the
+// prior design held q.mu for the entire duration of a blocking channel
+// send, so under sustained backpressure (a burst of, say, 5000 files from
+// an rsync, each costing up to three sequential 30s probe budgets to
+// drain) every fired debounce timer's goroutine parked on that mutex, one
+// per event, unboundedly. Drop-oldest is the deliberate backpressure
+// policy, not block-with-a-cap or drop-newest: a full scan is this
+// package's existing self-healing catch-up path for anything a watch event
+// misses (the same fallback already relied on for un-watched directory
+// renames, per this file's package doc), so losing the STALEST queued
+// event under sustained overload -- keeping the most recent activity
+// flowing -- is preferable to either blocking new fsnotify delivery
+// (risking the kernel's own event queue overflowing, see
+// indexer.ErrEventOverflow) or discarding the newest event a caller just
+// asked to enqueue. Every eviction is counted in dropped (readable via
+// droppedCount for tests and any future surfacing) and rate-limited-logged
+// -- see enqueue's logDropThreshold/logDropSummaryEvery comment -- not
+// silent, but not one WARN line per eviction either.
+//
+// The order items land in the backlog carries no semantic weight -- the
+// debouncer fires one time.AfterFunc goroutine per path and Go does not
+// guarantee their order, so consumers must not assume any event ordering
+// (rename move detection is deliberately order-independent, see
+// rebaseIfMoved).
+//
+// close() records the intent to stop and closes notify, both under the
+// same mutex enqueue's own append-and-signal uses -- so a concurrent
+// enqueue's non-blocking send on notify can never race close()'s close of
+// that same channel (a send racing a close panics: "send on closed
+// channel"). Serializing both through q.mu is what rules that out: either
+// enqueue's whole critical section (closed-check, append, notify send)
+// completes before close() ever acquires the lock, or close() runs first
+// and enqueue's closed-check (also inside the lock) sees it and bails
+// before ever touching notify -- there is no third interleaving. dequeue's
+// own receive from notify is unaffected either way: a receive from an
+// already-closed channel is always safe in Go, unlike a send. The caller
+// must join the consumer (consumerWG.Wait) after close() and before any
+// finalization.
 type watchWork struct {
 	mu     sync.Mutex
 	closed bool
-	ch     chan watchItem
+	// items' pop-front (both here and in dequeue) via items[1:] shrinks the
+	// slice's capacity by one each time without reusing that space, so
+	// sustained enqueue/dequeue cycling forces a full backing-array
+	// reallocation roughly every watchQueueCapacity operations. Bounded and
+	// GC'd -- not a leak, not correctness-affecting -- just not truly O(1)
+	// amortized the way a ring buffer would be; a possible future
+	// refinement if this ever shows up in profiling.
+	items    []watchItem
+	notify   chan struct{} // buffered 1: coalescing wakeup, not one-signal-per-item
+	dropped  atomic.Int64
+	log      *slog.Logger
+	location string // loc.RootPath, for attributing eviction logs in a multi-location deployment
 }
+
+func newWatchWork(log *slog.Logger, location string) *watchWork {
+	return &watchWork{notify: make(chan struct{}, 1), log: log, location: location}
+}
+
+// logDropThreshold caps how many individual eviction warnings enqueue logs
+// before switching to a periodic summary: a burst large enough to evict
+// thousands of items (the PR's own 5000-file example, against a 1024
+// capacity, evicts ~4000) would otherwise emit one WARN line per eviction --
+// itself a form of the log-spam problem this PR's drop-oldest policy exists
+// to avoid causing elsewhere. The first few individual lines still show an
+// operator concrete dropped paths; beyond that, a running total every
+// logDropSummaryEvery evictions stays visible without flooding.
+const (
+	logDropThreshold    = 10
+	logDropSummaryEvery = 100
+)
 
 func (q *watchWork) enqueue(item watchItem) {
 	q.mu.Lock()
@@ -129,14 +199,68 @@ func (q *watchWork) enqueue(item watchItem) {
 	if q.closed {
 		return
 	}
-	q.ch <- item
+	if len(q.items) >= watchQueueCapacity {
+		oldest := q.items[0]
+		q.items = q.items[1:]
+		dropped := q.dropped.Add(1)
+		if q.log != nil {
+			switch {
+			case dropped <= logDropThreshold:
+				q.log.Warn("pipeline: watch queue full, dropping oldest queued event -- run a full rescan of this location to catch up",
+					"location", q.location, "dropped_path", oldest.path, "dropped_rec_path", oldest.rec.Path, "capacity", watchQueueCapacity)
+			case dropped%logDropSummaryEvery == 0:
+				q.log.Warn("pipeline: watch queue still under sustained pressure, dropping oldest events -- run a full rescan of this location to catch up",
+					"location", q.location, "dropped_total_this_run", dropped, "capacity", watchQueueCapacity)
+			}
+		}
+	}
+	q.items = append(q.items, item)
+	// Send while still holding q.mu -- see the type doc comment for why
+	// this, not a send after unlocking, is what makes close() race-free.
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
 }
+
+// backlogLen reports how many items are currently queued -- for tests and
+// any future observability; not used in enqueue/dequeue's own logic.
+func (q *watchWork) backlogLen() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
+// dequeue blocks until an item is available, returning ok=false only once
+// the queue is both closed and drained.
+func (q *watchWork) dequeue() (watchItem, bool) {
+	for {
+		q.mu.Lock()
+		if len(q.items) > 0 {
+			item := q.items[0]
+			q.items = q.items[1:]
+			q.mu.Unlock()
+			return item, true
+		}
+		closed := q.closed
+		q.mu.Unlock()
+		if closed {
+			return watchItem{}, false
+		}
+		<-q.notify
+	}
+}
+
+func (q *watchWork) droppedCount() int64 { return q.dropped.Load() }
 
 func (q *watchWork) close() {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.closed = true
-	q.mu.Unlock()
-	close(q.ch)
+	// Closing notify while still holding q.mu, not after unlocking, is what
+	// serializes this against enqueue's own notify send -- see the type
+	// doc comment.
+	close(q.notify)
 }
 
 // watchLocation owns one location's watch lifecycle: creates the WATCH
@@ -159,19 +283,34 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 		return
 	}
 
-	work := &watchWork{ch: make(chan watchItem)}
+	work := newWatchWork(w.log, loc.RootPath)
 	var consumerWG sync.WaitGroup
 	consumerWG.Add(1)
 	go func() {
 		defer consumerWG.Done()
 		var seen, hashed, failed atomic.Int32
-		for item := range work.ch {
+		for {
+			item, ok := work.dequeue()
+			if !ok {
+				// Persist the final counts, including any items abandoned
+				// during a fast shutdown drain -- their bookkeeping wasn't
+				// written per-item (see consumeOne).
+				w.updateJob(job.ID, &seen, &hashed, &failed)
+				return
+			}
+			bumped, abandoned := w.consumeOne(ctx, loc, item, &seen, &hashed, &failed)
+			if abandoned {
+				// No per-item updateJob call here -- that would reintroduce
+				// the same shutdown-drain delay via DB round-trips instead
+				// of file I/O. The final counts land in one updateJob call
+				// once the backlog is fully drained, above.
+				continue
+			}
 			// Every item updates the job's counters -- a failure must still
 			// be persisted (files_failed), not dropped with the callback.
 			// bump only when handleWatchItem reports the item was handled: a
 			// nudge means "something changed" (a failed event or a removal
 			// with nothing to mark is not a change).
-			bumped := w.handleWatchItem(ctx, loc, item, &seen, &hashed, &failed)
 			w.updateJob(job.ID, &seen, &hashed, &failed)
 			if bumped {
 				w.bump()
@@ -199,6 +338,9 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 	// to process.
 	work.close()
 	consumerWG.Wait()
+	if n := work.droppedCount(); n > 0 {
+		w.log.Warn("pipeline: watch queue dropped events under sustained backpressure this run", "location", loc.RootPath, "dropped", n)
+	}
 
 	state, reason := "CANCELLED", "shutting down"
 	if watchErr != nil && !errors.Is(watchErr, context.Canceled) && ctx.Err() == nil {
@@ -216,6 +358,36 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 	}); ferr != nil {
 		w.log.Warn("pipeline: finalize watch job", "jobID", job.ID, "err", ferr)
 	}
+}
+
+// consumeOne dispatches one dequeued item: if ctx is already done, it's
+// abandoned rather than run through handleWatchItem, returning
+// abandoned=true; otherwise handleWatchItem runs normally and its bumped
+// result is returned as-is.
+//
+// The abandon path exists because dequeue can still return up to
+// watchQueueCapacity backlogged items after indexer.Watch has already
+// returned due to ctx.Done() -- items that were queued before shutdown
+// began but not yet processed. Running the full handleWatchItem pipeline
+// (real file I/O, hashing that isn't ctx-aware, exiftool/ffprobe
+// subprocesses, a DB write) against an already-cancelled context for
+// potentially hundreds of items would delay finalization for no benefit.
+// Mirrors workers.Pool's OnAbandon (#92) for the same reason: the next
+// full scan is this package's existing self-healing catch-up path for
+// anything a watch event misses.
+func (w *WatcherSupervisor) consumeOne(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed *atomic.Int32) (bumped, abandoned bool) {
+	if ctx.Err() != nil {
+		// Only seen, not failed: this item was never attempted, so counting
+		// it as a failure would make files_failed>0 on every ordinary
+		// shutdown that happens to catch a backlog, indistinguishable from
+		// a real processing failure to an operator or an alert watching
+		// that column. The job's own CANCELLED state already says "this
+		// didn't run to completion" -- files_failed should stay meaningful
+		// as "things that were actually attempted and broke."
+		seen.Add(1)
+		return false, true
+	}
+	return w.handleWatchItem(ctx, loc, item, seen, hashed, failed), false
 }
 
 // handleWatchItem processes one watchItem to completion, returning whether

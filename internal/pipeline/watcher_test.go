@@ -1,12 +1,17 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -593,5 +598,299 @@ func osRemove(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove %s: %v", path, err)
+	}
+}
+
+// TestConsumeOneAbandonsWhenContextAlreadyDone backs #87 (per hermes
+// review): a fast shutdown drain must never run a backlogged item through
+// the real handleWatchItem pipeline once ctx is already done -- only
+// abandon it. target is a file that WOULD be committed successfully if
+// consumeOne fell through to handleWatchItem despite the cancelled
+// context, so the absence of a node at that path is a genuine
+// discriminating signal, not just an absence of an error.
+func TestConsumeOneAbandonsWhenContextAlreadyDone(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	target := filepath.Join(resolvedRoot, "would-be-processed.txt")
+	if err := writeFileToDisk(target, "content"); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "consume-one-abandon-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	w := NewWatcherSupervisor(deps, nil)
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	item := watchItem{rec: indexer.Record{Path: target, Size: info.Size(), ModTime: info.ModTime()}}
+
+	var seen, hashed, failed atomic.Int32
+	bumped, abandoned := w.consumeOne(cancelledCtx, loc, item, &seen, &hashed, &failed)
+
+	if !abandoned {
+		t.Fatal("abandoned = false, want true (ctx already done)")
+	}
+	if bumped {
+		t.Error("bumped = true, want false for an abandoned item")
+	}
+	// failed stays 0, not 1: an abandoned item was never attempted, so
+	// counting it as a failure would make files_failed>0 on every ordinary
+	// shutdown that catches a backlog -- indistinguishable from a real
+	// processing failure to an operator or alert.
+	if seen.Load() != 1 || failed.Load() != 0 || hashed.Load() != 0 {
+		t.Errorf("counts = seen:%d failed:%d hashed:%d, want 1,0,0", seen.Load(), failed.Load(), hashed.Load())
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(context.Background(), target); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("a node was committed for an abandoned item (err=%v) -- consumeOne ran handleWatchItem despite the cancelled context", err)
+	}
+}
+
+// TestConsumeOneProcessesNormallyWhenContextLive is the positive
+// counterpart: with a live context, consumeOne must delegate to
+// handleWatchItem exactly as before, not abandon.
+func TestConsumeOneProcessesNormallyWhenContextLive(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	target := filepath.Join(resolvedRoot, "processed.txt")
+	if err := writeFileToDisk(target, "content"); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "consume-one-live-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	w := NewWatcherSupervisor(deps, nil)
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	item := watchItem{rec: indexer.Record{Path: target, Size: info.Size(), ModTime: info.ModTime()}}
+
+	var seen, hashed, failed atomic.Int32
+	bumped, abandoned := w.consumeOne(context.Background(), loc, item, &seen, &hashed, &failed)
+
+	if abandoned {
+		t.Fatal("abandoned = true, want false (ctx is live)")
+	}
+	if !bumped {
+		t.Error("bumped = false, want true for a successfully committed item")
+	}
+	if hashed.Load() != 1 || failed.Load() != 0 {
+		t.Errorf("counts = hashed:%d failed:%d, want 1,0", hashed.Load(), failed.Load())
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(context.Background(), target); err != nil {
+		t.Errorf("GetLiveNodeByPath: %v (item should have been committed normally)", err)
+	}
+}
+
+// TestWatchWorkEnqueueNeverBlocks backs #87: a burst far larger than
+// watchQueueCapacity must not make enqueue block or park the caller's
+// goroutine -- the actual bug being fixed (every fired debounce timer held
+// its own goroutine parked on watchWork's mutex for the full duration of a
+// blocking channel send). Calling enqueue this many times directly from the
+// test's own goroutine, rather than spawning one per call, proves the
+// property without needing runtime.NumGoroutine(): if enqueue blocked even
+// once, this loop would hang and the test would time out.
+func TestWatchWorkEnqueueNeverBlocks(t *testing.T) {
+	work := newWatchWork(nil, "/test/location")
+	const burst = watchQueueCapacity * 5
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < burst; i++ {
+			work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/burst/%d", i)}})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue blocked under a burst far exceeding watchQueueCapacity")
+	}
+}
+
+// TestWatchWorkDropsOldestUnderPressure backs #87's chosen backpressure
+// policy: once the backlog reaches watchQueueCapacity, a further enqueue
+// evicts the OLDEST queued item (not the newest, not an unbounded grow),
+// logs the eviction visibly, and counts it in droppedCount.
+func TestWatchWorkDropsOldestUnderPressure(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	work := newWatchWork(log, "/test/location")
+
+	const burst = watchQueueCapacity * 3
+	for i := 0; i < burst; i++ {
+		work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/burst/%d", i)}})
+	}
+
+	backlog := work.backlogLen()
+	work.mu.Lock()
+	first := work.items[0].rec.Path
+	last := work.items[len(work.items)-1].rec.Path
+	work.mu.Unlock()
+
+	if backlog != watchQueueCapacity {
+		t.Errorf("backlog = %d, want exactly %d (bounded, not growing with burst size)", backlog, watchQueueCapacity)
+	}
+	wantDropped := int64(burst - watchQueueCapacity)
+	if got := work.droppedCount(); got != wantDropped {
+		t.Errorf("droppedCount() = %d, want %d", got, wantDropped)
+	}
+	// Drop-oldest, not drop-newest: the surviving backlog must be exactly
+	// the last watchQueueCapacity items enqueued, in order.
+	if wantFirst := fmt.Sprintf("/burst/%d", burst-watchQueueCapacity); first != wantFirst {
+		t.Errorf("oldest surviving item = %q, want %q", first, wantFirst)
+	}
+	if wantLast := fmt.Sprintf("/burst/%d", burst-1); last != wantLast {
+		t.Errorf("newest item = %q, want %q", last, wantLast)
+	}
+	if !strings.Contains(buf.String(), "dropping oldest") {
+		t.Errorf("log output missing a visible drop notice: %q", buf.String())
+	}
+}
+
+// TestWatchWorkDequeueDrainsThenCloses proves dequeue's contract directly:
+// every enqueued item is eventually returned (nothing lost below capacity),
+// and dequeue only reports ok=false once the queue is both closed and
+// fully drained -- never while items remain, and never blocking forever
+// after close() with nothing left.
+func TestWatchWorkDequeueDrainsThenCloses(t *testing.T) {
+	work := newWatchWork(nil, "/test/location")
+	for i := 0; i < 5; i++ {
+		work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/item/%d", i)}})
+	}
+
+	var got []string
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			item, ok := work.dequeue()
+			if !ok {
+				close(done)
+				return
+			}
+			got = append(got, item.rec.Path)
+		}
+	}()
+
+	// Close after a moment, once the 5 items are likely already queued --
+	// dequeue must still drain them all before reporting closed.
+	time.Sleep(20 * time.Millisecond)
+	work.close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dequeue never reported closed after close()")
+	}
+	wg.Wait()
+
+	if len(got) != 5 {
+		t.Fatalf("drained %d items, want 5 (nothing lost below capacity)", len(got))
+	}
+	for i, path := range got {
+		if want := fmt.Sprintf("/item/%d", i); path != want {
+			t.Errorf("item %d = %q, want %q", i, path, want)
+		}
+	}
+}
+
+// TestWatchWorkDequeueWakesFromBlockedWait exercises the subtlest part of
+// this queue's design, which TestWatchWorkDequeueDrainsThenCloses doesn't
+// reach: the consumer must already be parked in dequeue's blocking
+// <-q.notify wait -- not merely started before enqueue happens to run --
+// or this is only proving the "items already queued" path, not the actual
+// wakeup. waitFor polls a "the consumer is now waiting" signal (set right
+// before the blocking receive) to guarantee the enqueue below genuinely
+// races a parked receiver, not a coincidentally-fast one.
+func TestWatchWorkDequeueWakesFromBlockedWait(t *testing.T) {
+	work := newWatchWork(nil, "/test/location")
+
+	var waiting atomic.Bool
+	got := make(chan string, 1)
+	go func() {
+		waiting.Store(true)
+		item, ok := work.dequeue()
+		if !ok {
+			return
+		}
+		got <- item.rec.Path
+	}()
+
+	waitFor(t, 2*time.Second, func() bool { return waiting.Load() })
+	// waiting only proves the goroutine reached dequeue, not that it's
+	// actually parked in <-q.notify yet -- give it a moment to get there.
+	time.Sleep(20 * time.Millisecond)
+
+	work.enqueue(watchItem{rec: indexer.Record{Path: "/woken/item"}})
+
+	select {
+	case path := <-got:
+		if path != "/woken/item" {
+			t.Errorf("dequeued %q, want /woken/item", path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dequeue never woke from its blocked wait after enqueue -- missed wakeup")
+	}
+}
+
+// TestWatchWorkEnqueueRaceWithClose is the regression guard for a real
+// panic an independent hermes review reproduced against an earlier version
+// of this fix: enqueue's non-blocking notify send happened AFTER releasing
+// q.mu, so a concurrent close() could close q.notify in the gap between
+// enqueue's unlock and its send -- a send racing a channel close panics
+// ("send on closed channel"), taking the whole process down (a panic in
+// any goroutine is fatal). This is reachable in production any time
+// indexer.Watch's debounce timers are still firing (they are not joined
+// before watchLocation calls work.close()) right as shutdown begins.
+//
+// The fix serializes the notify send (in enqueue) and the notify close (in
+// close()) through the same q.mu, so they can never interleave -- see the
+// watchWork type doc comment. This test doesn't assert an outcome beyond
+// "no panic, no hang": running many concurrent enqueue and close attempts
+// under -race is what would have caught the original bug (the race
+// detector flags the racing chansend/closechan access, and the run panics
+// without the fix), and a clean, race-free run under -race across many
+// iterations is the regression guard against it recurring.
+func TestWatchWorkEnqueueRaceWithClose(t *testing.T) {
+	for iter := 0; iter < 200; iter++ {
+		work := newWatchWork(nil, "/test/location")
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/race/%d", i)}})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			work.close()
+		}()
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: enqueue/close did not both return within 5s (deadlock?)", iter)
+		}
 	}
 }
