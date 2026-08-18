@@ -51,7 +51,32 @@ type ScanDeps struct {
 	// indexer.Walk. Overridable in tests to force a mid-walk error -- the
 	// data-loss failure mode the MISSING sweep must never fire on.
 	WalkFn func(ctx context.Context, root string, onFile func(indexer.Record) error) error
+
+	// Tracker, if set, is joined via Tracker.Wait() by cmd/branchdam before
+	// the deferred db.Close() -- so an in-flight scan's final writes
+	// (MISSING sweep, CompleteScanJob) always land on a still-open database,
+	// the same guarantee WatcherSupervisor.Wait already gives watch
+	// consumers. Optional: nil means untracked, which is fine for tests that
+	// don't exercise shutdown ordering.
+	Tracker *ScanTracker
 }
+
+// ScanTracker joins every in-flight RunScan goroutine, mirroring
+// WatcherSupervisor's wg/Wait pattern for the same reason: a background job
+// that outlives the request which started it also needs an explicit join
+// point during server shutdown, since nothing else waits for it.
+type ScanTracker struct {
+	wg sync.WaitGroup
+}
+
+func (t *ScanTracker) add()  { t.wg.Add(1) }
+func (t *ScanTracker) done() { t.wg.Done() }
+
+// Wait blocks until every RunScan goroutine started against this tracker
+// has finished -- including its final DB writes. Call after the pool's
+// context has been cancelled (so in-flight jobs resolve one way or another,
+// see Pool.Submit/OnAbandon) and before closing the database.
+func (t *ScanTracker) Wait() { t.wg.Wait() }
 
 // RunScan creates a scan_jobs row and returns its id immediately; the walk
 // and all hashing/committing happen in a background goroutine. Callers
@@ -75,8 +100,22 @@ func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int
 	// request context that started it, or the first canceled ctx (the walk's
 	// per-entry check, any InTx) kills it mid-flight and the job never
 	// completes. context.WithoutCancel keeps the values but drops the
-	// cancellation -- shutdown is the pool's concern, not the request's.
-	go runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt)
+	// cancellation -- shutdown is the pool's concern, not the request's
+	// (Pool.Submit/OnAbandon resolve every in-flight job at shutdown; see
+	// runScan). Tracker.add/done, if a Tracker is set, is what lets
+	// cmd/branchdam actually wait for that resolution to finish before
+	// closing the database -- add() happens synchronously here, before the
+	// goroutine starts, so a Wait() call racing immediately after RunScan
+	// returns can never miss it.
+	if deps.Tracker != nil {
+		deps.Tracker.add()
+	}
+	go func() {
+		if deps.Tracker != nil {
+			defer deps.Tracker.done()
+		}
+		runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt)
+	}()
 	return job.ID, nil
 }
 
@@ -121,6 +160,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	results := make(chan Result, batchSize*2)
 	var wg sync.WaitGroup
 	var filesSeen, filesFailed atomic.Int32
+	var abandonedCount atomic.Int32
 	uncertain := newUncertainPaths()
 
 	walkFn := deps.WalkFn
@@ -144,17 +184,17 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// this join is currently redundant with that happens-before edge, but
 	// it documents the actual requirement instead of an implicit one.
 	//
-	// That requirement matters for whoever adds shutdown handling here
-	// (#92): an early return from drainAndCommit on its own (e.g. on
-	// ctx.Done()) does NOT make this join safe to keep as-is -- pool
-	// workers still blocked on `results <- *result` have no other way out
-	// (their select's other case is jobCtx.Done(), and jobCtx comes from
-	// the pool's own long-lived Run(ctx), not this scan's ctx, per
-	// ScanDeps' doc comment), so wg.Wait() would never return, close(results)
-	// and close(walkDone) would never run, and <-walkDone below would block
-	// forever. A shutdown path needs to keep draining `results` (or reach
-	// the pool's own ctx) until the walk goroutine actually finishes, not
-	// just add an early return to drainAndCommit.
+	// This join is safe even during server shutdown (#92): a pool worker
+	// that's still blocked on `results <- *result` when the pool's Run(ctx)
+	// is cancelled unblocks via its select's `<-jobCtx.Done()` case (jobCtx
+	// is that same pool ctx), and a job still sitting in the pool's queue,
+	// never dequeued at all, has its OnAbandon hook (set on the Submit call
+	// below) release the same wg token Run() would have. Pool.Submit also
+	// refuses any further submissions once the pool's own ctx is done
+	// (independent of this scan's own ctx, which deliberately survives
+	// shutdown -- see RunScan's context.WithoutCancel), so the walk
+	// goroutine's wg.Wait() is guaranteed to see every token it handed out
+	// eventually released, one way or another, and always terminates.
 	var walkErr error
 	walkDone := make(chan struct{})
 	go func() {
@@ -185,6 +225,21 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 					}
 					return nil
 				},
+				// OnAbandon covers the case Run never even starts: the job
+				// was accepted into the pool's queue but the pool shut down
+				// before a worker dequeued it. Same bookkeeping as a refused
+				// submit, so the walk goroutine's wg.Wait() below still sees
+				// this token released. Abandons are counted, not logged
+				// individually here -- a shutdown with a full queue
+				// (queueDepth defaults to 1024) would otherwise emit one Warn
+				// line per queued file; a single summary line is logged once
+				// after wg.Wait() below instead.
+				OnAbandon: func() {
+					wg.Done()
+					uncertain.add(rec.Path)
+					filesFailed.Add(1)
+					abandonedCount.Add(1)
+				},
 			})
 			if !submitted {
 				wg.Done()
@@ -195,6 +250,9 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			return nil
 		})
 		wg.Wait()
+		if n := abandonedCount.Load(); n > 0 {
+			log.Warn("pipeline: jobs abandoned (pool shut down before they ran)", "count", n)
+		}
 		close(results)
 	}()
 

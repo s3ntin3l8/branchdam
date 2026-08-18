@@ -18,6 +18,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -37,6 +38,11 @@ type Deps struct {
 	Hub     *sse.Hub
 	SPA     fs.FS
 	Version string
+
+	// Tracker, if set, is passed through to every pipeline.ScanDeps this
+	// server builds, so cmd/branchdam can join scans started via
+	// POST /api/v1/scan before closing the database on shutdown.
+	Tracker *pipeline.ScanTracker
 }
 
 // Server bundles the dependencies handlers need.
@@ -52,6 +58,7 @@ type Server struct {
 	sseSlot *limiter
 	spa     fs.FS
 	version string
+	tracker *pipeline.ScanTracker
 }
 
 // New builds the HTTP server handler set.
@@ -76,6 +83,7 @@ func New(d Deps) *Server {
 		sseSlot: newLimiter(maxSSEClients),
 		spa:     d.SPA,
 		version: version,
+		tracker: d.Tracker,
 	}
 }
 

@@ -382,6 +382,7 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 	jobID, err := pipeline.RunScan(ctx, pipeline.ScanDeps{
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
 		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
+		Tracker: s.tracker,
 	}, location)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("start scan", err)
