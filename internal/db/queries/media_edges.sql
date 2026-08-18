@@ -27,3 +27,59 @@ FROM v_media_edges_resolved
 WHERE review_state = 'NEEDS_REVIEW'
 ORDER BY confidence DESC, id ASC
 LIMIT ?1 OFFSET ?2;
+
+-- name: ListAncestors :many
+-- Recursively list ancestor node IDs.
+-- Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
+WITH RECURSIVE ancestors(id) AS (
+    SELECT ?1 AS id
+    UNION
+    SELECT e.source_node_id
+    FROM media_edges e
+    JOIN ancestors a ON e.target_node_id = a.id
+    JOIN media_nodes n ON e.source_node_id = n.id
+    WHERE e.review_state <> 'REJECTED'
+      AND n.lifecycle_state <> 'ARCHIVED'
+)
+SELECT ancestors.id FROM ancestors;
+
+-- name: ListDescendants :many
+-- Recursively list descendant node IDs.
+-- Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
+WITH RECURSIVE descendants(id) AS (
+    SELECT ?1 AS id
+    UNION
+    SELECT e.target_node_id
+    FROM media_edges e
+    JOIN descendants d ON e.source_node_id = d.id
+    JOIN media_nodes n ON e.target_node_id = n.id
+    WHERE e.review_state <> 'REJECTED'
+      AND n.lifecycle_state <> 'ARCHIVED'
+)
+SELECT descendants.id FROM descendants;
+
+
+
+
+
+
+
+-- name: ListNodesByIDs :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE id IN (SELECT value FROM json_each(?1))
+  AND lifecycle_state <> 'ARCHIVED';
+
+-- name: ListEdgesForNodes :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       review_state, resolver
+FROM media_edges
+WHERE source_node_id IN (SELECT value FROM json_each(?1))
+  AND target_node_id IN (SELECT value FROM json_each(?1))
+  AND review_state <> 'REJECTED';

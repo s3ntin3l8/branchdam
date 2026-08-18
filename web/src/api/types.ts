@@ -89,3 +89,9 @@ export interface ScanJob {
   edgesCreated: number;
   lastError?: string;
 }
+
+export interface LineageResponse {
+  rootId: number;
+  nodes: Asset[];
+  edges: Edge[];
+}
