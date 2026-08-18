@@ -25,6 +25,35 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// http.Server.WriteTimeout (cmd/branchdam/main.go) applies a
+	// per-connection deadline meant for ordinary request/response cycles --
+	// applied unmodified to this handler, it tears the stream down at
+	// WriteTimeoutSecs (15s by default), well before this handler's own 20s
+	// heartbeat ever fires once. The client's EventSource reconnects, so
+	// this was invisible as a hard failure, just a churn of reconnects and
+	// a blind window each cycle where a nudge could be missed. Clearing the
+	// write deadline opts this one long-lived handler out of it; s.shutdown
+	// (below) and ctx.Done() are what actually bound its lifetime instead.
+	// This is the load-bearing half of the fix.
+	//
+	// The read deadline is also cleared, but that's defense-in-depth, not
+	// load-bearing for a GET handler with no request body: net/http starts
+	// a background read on the connection before the handler even runs
+	// (since the request has no body to keep reading) and that background
+	// read already clears the read deadline itself, independent of
+	// ReadTimeoutSecs -- verified against the stdlib's own
+	// startBackgroundRead. Clearing it here again is harmless and documents
+	// the intent rather than relying on that stdlib internal.
+	//
+	// Errors are deliberately ignored: SetWriteDeadline/SetReadDeadline
+	// return an error only when the underlying connection doesn't support
+	// deadlines at all (never true for a real net.Conn-backed
+	// http.ResponseWriter, only possible in some test doubles), in which
+	// case there is nothing to clear and nothing actionable to do about it.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+	_ = rc.SetReadDeadline(time.Time{})
+
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")

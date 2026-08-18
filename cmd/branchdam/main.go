@@ -153,24 +153,46 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", "err", err)
-		os.Exit(1)
+		// Deliberately NOT os.Exit(1) here: a scan or watcher goroutine
+		// started before shutdown began may still be running and holding
+		// the writer connection (pipeline.ScanTracker / WatcherSupervisor),
+		// and os.Exit skips every deferred function including the
+		// closeDatabase call above -- exiting here would tear the process
+		// down mid-write exactly like an unclean crash, the thing this
+		// whole sequence exists to avoid. httpServer.Shutdown has two
+		// distinct failure modes, not one: an early listener-Close error
+		// (returned while shutdownCtx still has most of its budget left),
+		// or -- the realistic case -- shutdownCtx's own deadline firing,
+		// which means requests/connections were still active when the
+		// timeout hit. Either way, joining the background work below is
+		// exactly what should happen next, not a reason to skip past it.
+		log.Error("shutdown error, continuing to join background work before exit", "err", err)
 	}
+
+	// The joins below get their OWN fresh deadline, deliberately NOT
+	// shutdownCtx: in the realistic failure case above, shutdownCtx is
+	// already expired by the time Shutdown returns its error, so reusing it
+	// here would give every waitBounded call effectively zero real time
+	// before giving up -- silently defeating the whole point of falling
+	// through instead of exiting immediately, while still logging
+	// "timed out" as if each component had gotten a real drain window.
+	joinCtx, joinCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer joinCancel()
 	if supervisor != nil {
 		// Watchers already stopped on ctx.Done; Wait() joins each location's
 		// consumer goroutine, which holds the writer DB and calls Commit
 		// directly (never Pool.Submit), so it must finish before db.Close.
-		if !waitBounded(shutdownCtx, log, "supervisor.Wait()", supervisor.Wait) {
+		if !waitBounded(joinCtx, log, "supervisor.Wait()", supervisor.Wait) {
 			dbUnsafeToClose = true
 		}
 	}
 	// scanTracker.Wait() joins every in-flight RunScan goroutine (started
 	// via POST /api/v1/scan) before the database closes.
-	if !waitBounded(shutdownCtx, log, "scanTracker.Wait()", scanTracker.Wait) {
+	if !waitBounded(joinCtx, log, "scanTracker.Wait()", scanTracker.Wait) {
 		dbUnsafeToClose = true
 	}
 	// Drain waits for worker goroutines to finish their current job before the database closes.
-	if !waitBounded(shutdownCtx, log, "pool.Drain()", pool.Drain) {
+	if !waitBounded(joinCtx, log, "pool.Drain()", pool.Drain) {
 		dbUnsafeToClose = true
 	}
 	log.Info("server stopped")
