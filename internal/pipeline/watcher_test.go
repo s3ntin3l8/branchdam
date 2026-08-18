@@ -311,6 +311,30 @@ func TestRebaseIfMovedBackfillsMetadata(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("metadata rows after rebase = %d, want 2 (EXIF:Make, EXIF:ISO)", len(rows))
 	}
+
+	// #105: rebaseIfMoved's own backfill uses reconcileAllMetadata, same as
+	// Commit's touched branch. A second call can't re-exercise rebaseIfMoved
+	// itself (the node is now live at newPath, so its own pre-check declines
+	// -- see rebaseIfMoved's doc comment), but a Commit pass over the
+	// now-rebased node with identical metadata takes the touched branch and
+	// exercises the exact reconcileAllMetadata call rebaseIfMoved made, with
+	// Stats available to observe it. It must write nothing and leave values
+	// unchanged.
+	stats, err := Commit(ctx, database, locationID, []Result{*result})
+	if err != nil {
+		t.Fatalf("Commit (touched, after rebase): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("stats = %+v, want Touched=1", stats)
+	}
+	if stats.MetadataWritten != 0 {
+		t.Fatalf("stats = %+v, want MetadataWritten=0 (identical metadata, nothing changed)", stats)
+	}
+	if rows, err := database.Reader.ListNodeMetadata(ctx, original.ID); err != nil {
+		t.Fatalf("ListNodeMetadata (after touched no-op): %v", err)
+	} else if len(rows) != 2 {
+		t.Fatalf("metadata rows after touched no-op = %d, want 2 (unchanged)", len(rows))
+	}
 }
 
 // TestRebaseIfMovedLeavesDuplicateAlone is the negative counterpart: the old

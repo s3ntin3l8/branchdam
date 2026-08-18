@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -685,6 +686,9 @@ func TestTouchBackfillsMetadataForProbelessFirstScan(t *testing.T) {
 	if stats.Touched != 1 {
 		t.Fatalf("stats = %+v, want Touched=1", stats)
 	}
+	if stats.MetadataWritten != 2 {
+		t.Fatalf("stats = %+v, want MetadataWritten=2 (EXIF:Make, EXIF:ISO -- the backfill pass genuinely writes)", stats)
+	}
 
 	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
 	if err != nil {
@@ -692,5 +696,174 @@ func TestTouchBackfillsMetadataForProbelessFirstScan(t *testing.T) {
 	}
 	if len(rows) != 2 {
 		t.Fatalf("metadata rows after backfill = %d, want 2 (EXIF:Make, EXIF:ISO)", len(rows))
+	}
+}
+
+// TestTouchWithUnchangedMetadataWritesNothing is #105's core regression
+// guard: a touched (unchanged fast_hash) node whose derived metadata is
+// identical to what's already stored must not re-upsert any node_metadata
+// row on that pass. Stats.MetadataWritten is the oracle -- node_metadata has
+// no updated_at column and #85 removed the raw-handle test escape hatch, so
+// there is no other way to observe "no write happened" from outside the
+// package. This fails against pre-#105 code, which always re-persists all of
+// r's derived metadata on the touched branch.
+func TestTouchWithUnchangedMetadataWritesNothing(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	result := Result{
+		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+		Make:    "CANON",
+		ExifRaw: map[string]string{"EXIF:ISO": "100"},
+	}
+	stats, err := Commit(ctx, database, locationID, []Result{result})
+	if err != nil {
+		t.Fatalf("Commit (pass 1, insert): %v", err)
+	}
+	// insertNewNode still goes through persistAllMetadata unconditionally (a
+	// brand-new node can never have prior rows, so a pre-read/diff would be
+	// pure overhead) -- MetadataWritten only accumulates on the
+	// reconcileAllMetadata (touched/rebase) paths, so it's 0 here regardless.
+	if stats.Inserted != 1 || stats.MetadataWritten != 0 {
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1, MetadataWritten=0", stats)
+	}
+
+	// Pass 2: identical Result, same content, same metadata -- the ordinary
+	// "re-scan an unchanged file" case.
+	stats, err = Commit(ctx, database, locationID, []Result{result})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("pass 2: stats = %+v, want Touched=1", stats)
+	}
+	if stats.MetadataWritten != 0 {
+		t.Fatalf("pass 2: stats = %+v, want MetadataWritten=0 (nothing changed)", stats)
+	}
+
+	node := mustGetLiveNode(t, database, "/stable.jpg")
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("metadata rows = %d, want 2 (values still correct)", len(rows))
+	}
+}
+
+// TestTouchWithChangedMetadataWritesOnlyTheDelta: a genuinely changed value
+// (e.g. an XMP:Rating edited outside this pipeline) must still be written on
+// a touched pass -- #105's diff must not become a "skip metadata on touch"
+// regression of #86's fix. Only the changed key should count toward
+// MetadataWritten, not the whole set.
+func TestTouchWithChangedMetadataWritesOnlyTheDelta(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	first := Result{
+		Path: "/rated.jpg", FileName: "rated.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+		Make:    "CANON",
+		ExifRaw: map[string]string{"EXIF:ISO": "100", "XMP:Rating": "3"},
+	}
+	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+		t.Fatalf("Commit (pass 1, insert): %v", err)
+	} else if stats.Inserted != 1 || stats.MetadataWritten != 0 {
+		// insertNewNode uses persistAllMetadata, not the counted
+		// reconcileAllMetadata path -- see TestTouchWithUnchangedMetadataWritesNothing.
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1, MetadataWritten=0", stats)
+	}
+
+	changed := first
+	changed.ExifRaw = map[string]string{"EXIF:ISO": "100", "XMP:Rating": "5"} // only the rating changed
+	stats, err := Commit(ctx, database, locationID, []Result{changed})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched, changed rating): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("pass 2: stats = %+v, want Touched=1", stats)
+	}
+	if stats.MetadataWritten != 1 {
+		t.Fatalf("pass 2: stats = %+v, want MetadataWritten=1 (only XMP:Rating changed)", stats)
+	}
+
+	node := mustGetLiveNode(t, database, "/rated.jpg")
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	got := make(map[string]string, len(rows))
+	for _, r := range rows {
+		got[r.Key] = r.Value
+	}
+	if got["XMP:Rating"] != "5" {
+		t.Errorf("XMP:Rating = %q, want %q (updated)", got["XMP:Rating"], "5")
+	}
+	if got["EXIF:ISO"] != "100" {
+		t.Errorf("EXIF:ISO = %q, want %q (unchanged)", got["EXIF:ISO"], "100")
+	}
+}
+
+// TestCapTruncatedMetadataIsStableAcrossPasses: #105's diff runs on the
+// already-sorted-and-capped key set, not the raw kv map -- otherwise a large,
+// stable metadata set past metadataCap would spuriously "change" every pass
+// as tail keys sort in and out of the capped window. Two identical passes
+// with a source over the cap must write nothing on the second.
+func TestCapTruncatedMetadataIsStableAcrossPasses(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	raw := make(map[string]string, metadataCap+10)
+	for i := 0; i < metadataCap+10; i++ {
+		raw[fmt.Sprintf("EXIF:ISO#%03d", i)] = "x" // not a real allowlisted key -- see below
+	}
+	// exifMetadata only persists the allowlisted tag set, so drive the cap
+	// through the allowlist itself isn't practical from Result; exercise
+	// reconcileMetadata/persistMetadata directly instead, exactly as
+	// TestPersistMetadataCapTruncates does.
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/capstable.jpg", FileName: "capstable.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
+	}); err != nil {
+		t.Fatalf("Commit (insert): %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/capstable.jpg")
+
+	var log = slog.New(slog.DiscardHandler)
+	written1 := 0
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		prior := map[metadataRowKey]string{}
+		written1, err = reconcileMetadata(ctx, q, node.ID, "internal", raw, metadataCap, prior, log)
+		return err
+	}); err != nil {
+		t.Fatalf("reconcileMetadata (pass 1): %v", err)
+	}
+	if written1 != metadataCap {
+		t.Fatalf("pass 1 written = %d, want %d (capped)", written1, metadataCap)
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	prior := make(map[metadataRowKey]string, len(rows))
+	for _, r := range rows {
+		prior[metadataRowKey{r.Source, r.Key}] = r.Value
+	}
+
+	written2 := 0
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		written2, err = reconcileMetadata(ctx, q, node.ID, "internal", raw, metadataCap, prior, log)
+		return err
+	}); err != nil {
+		t.Fatalf("reconcileMetadata (pass 2): %v", err)
+	}
+	if written2 != 0 {
+		t.Fatalf("pass 2 written = %d, want 0 (identical, capped set is stable)", written2)
 	}
 }

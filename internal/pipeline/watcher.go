@@ -481,8 +481,10 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 				return err
 			}
 			// Same backfill as Commit's own touched/rebase branches -- see
-			// commit.go's persistAllMetadata doc comment and #86.
-			return persistAllMetadata(ctx, q, n.ID, *result, w.log)
+			// commit.go's reconcileAllMetadata doc comment, #86, and #105.
+			// No *Stats in scope here (inside an InTx closure returning bare
+			// error) -- reconcileAllMetadata logs the written count instead.
+			return reconcileAllMetadata(ctx, q, n.ID, *result, nil, w.log)
 		}); err != nil {
 			return false, fmt.Errorf("rebase moved node %d: %w", n.ID, err)
 		}
