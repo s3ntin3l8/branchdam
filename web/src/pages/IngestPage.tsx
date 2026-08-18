@@ -38,6 +38,9 @@ export default function IngestPage() {
           {startScan.isPending ? "Starting…" : "Scan"}
         </button>
       </div>
+      {startScan.isError && (
+        <p className="mb-4 text-sm text-red-400">Failed to start scan: {String(startScan.error)}</p>
+      )}
       {isError && (
         <p className="mb-4 text-sm text-red-400">Failed to load storage locations: {String(error)}</p>
       )}

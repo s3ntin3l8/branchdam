@@ -128,4 +128,60 @@ describe("AuditQueuePage", () => {
       })
     );
   });
+
+  it("surfaces error message when confirmEdge fails", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 42,
+          sourceNodeId: 1,
+          targetNodeId: 2,
+          relationshipType: "DERIVED_FROM",
+          confidence: 0.75,
+          tier: 2,
+          resolver: "filename_stem",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: { id: 1, fileName: "s.arw", filePath: "/s.arw" },
+          targetNode: { id: 2, fileName: "t.jpg", filePath: "/t.jpg" },
+        },
+      ],
+    });
+    vi.mocked(api.confirmEdge).mockRejectedValue(new Error("Database write failure"));
+
+    renderWithClient(<AuditQueuePage />);
+    const button = await screen.findByRole("button", { name: /confirm/i });
+    await userEvent.click(button);
+
+    expect(await screen.findByText(/Failed to confirm edge: Error: Database write failure/i)).toBeInTheDocument();
+  });
+
+  it("surfaces error message when rejectEdge fails", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 43,
+          sourceNodeId: 1,
+          targetNodeId: 3,
+          relationshipType: "DERIVED_FROM",
+          confidence: 0.75,
+          tier: 2,
+          resolver: "filename_stem",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: { id: 1, fileName: "s.arw", filePath: "/s.arw" },
+          targetNode: { id: 3, fileName: "t.jpg", filePath: "/t.jpg" },
+        },
+      ],
+    });
+    vi.mocked(api.rejectEdge).mockRejectedValue(new Error("Network disconnect"));
+
+    renderWithClient(<AuditQueuePage />);
+    const button = await screen.findByRole("button", { name: /reject/i });
+    await userEvent.click(button);
+
+    expect(await screen.findByText(/Failed to reject edge: Error: Network disconnect/i)).toBeInTheDocument();
+  });
 });

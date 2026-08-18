@@ -72,4 +72,18 @@ describe("IngestPage", () => {
     expect(screen.getByText("FAILED")).toBeInTheDocument();
     expect(screen.getByText(/simulated walk failure/)).toBeInTheDocument();
   });
+
+  it("surfaces an inline error message when startScan fails", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations });
+    vi.mocked(api.listProgress).mockResolvedValue({ jobs: [] });
+    vi.mocked(api.startScan).mockRejectedValue(new Error("Storage location not found"));
+    renderWithClient(<IngestPage />);
+
+    await screen.findByRole("option", { name: /exports · TIER2_EXPORTS/ });
+    const select = await screen.findByRole("combobox");
+    await userEvent.selectOptions(select, "1");
+    await userEvent.click(screen.getByRole("button", { name: /scan/i }));
+
+    expect(await screen.findByText(/Failed to start scan: Error: Storage location not found/i)).toBeInTheDocument();
+  });
 });
