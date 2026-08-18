@@ -364,6 +364,23 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", swept)
 	}
 
+	// #89: prune node_metadata rows belonging to ARCHIVED nodes. ARCHIVED
+	// nodes are superseded versions that no longer participate in the live
+	// graph; their metadata grows monotonically with editing activity.
+	// Runs after the MISSING sweep (which may archive further nodes) so the
+	// pruning scope is as broad as possible. A failure here is non-fatal --
+	// the metadata is simply pruned on the next pass.
+	var pruned int64
+	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		pruned, err = q.PruneArchivedNodeMetadata(ctx)
+		return err
+	}); err != nil {
+		log.Error("pipeline: prune archived node_metadata failed (delayed-not-wrong)", "jobID", jobID, "err", err)
+	} else if pruned > 0 {
+		log.Info("pipeline: pruned node_metadata for archived nodes", "jobID", jobID, "count", pruned)
+	}
+
 	// #99: a scan that lost work to a mid-shutdown pool close is CANCELLED,
 	// not COMPLETED -- mirroring watchLocation's own CANCELLED-by-default
 	// convention (watcher.go) for a clean-shutdown termination, as opposed
