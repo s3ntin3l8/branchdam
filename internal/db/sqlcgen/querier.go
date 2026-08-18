@@ -56,6 +56,9 @@ type Querier interface {
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
+	// The idempotency look-before-write read for Enqueue: does (node_id, remote)
+	// already exist, and in what state?
+	GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncStateParams) (RemoteSyncState, error)
 	GetScanJob(ctx context.Context, id int64) (ScanJob, error)
 	GetStorageLocationByID(ctx context.Context, id int64) (StorageLocation, error)
 	// Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
@@ -107,6 +110,10 @@ type Querier interface {
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
+	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
+	// order, capped at one batch. Scoped to a single remote so a node's other
+	// remote rows are never listed or re-flipped.
+	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
@@ -114,6 +121,11 @@ type Querier interface {
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
 	MarkNodeMissing(ctx context.Context, id int64) error
+	// Terminal failure: records the error and the attempt time.
+	MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error
+	// Terminal success: records the remote asset id (empty for a scan-trigger
+	// push) and clears any prior error. updated_at set explicitly -- no trigger.
+	MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteSyncStatePushedParams) error
 	// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
 	// scanned storage location whose last_seen_at predates the scan's start is
 	// gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
@@ -152,6 +164,10 @@ type Querier interface {
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) error
+	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
+	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
+	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
+	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
@@ -221,6 +237,12 @@ type Querier interface {
 	// tier/resolver while keeping the old review_state -- that combination
 	// would itself be an inconsistent, self-contradicting row.
 	UpsertMediaEdge(ctx context.Context, arg UpsertMediaEdgeParams) (MediaEdge, error)
+	// Claims a node for push (or re-claims it): sets the target sync_status and
+	// bumps last_attempt_at/updated_at. On a re-claim of an existing PUSH_FAILED
+	// row, last_error is cleared and the existing remote_asset_id (if any) is
+	// kept. Every transition sets updated_at explicitly -- no triggers, per this
+	// repo's invariant. This is the ONLY way a (node_id, remote) row is created.
+	UpsertRemoteSyncState(ctx context.Context, arg UpsertRemoteSyncStateParams) (RemoteSyncState, error)
 	// Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
 	// storageLocations list is applied idempotently on every restart, keyed on
 	// root_path's UNIQUE constraint, so re-running it against an
