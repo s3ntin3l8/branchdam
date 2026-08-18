@@ -585,6 +585,257 @@ func TestResolveAndCommitCreatedCountOnlyCountsNewEdges(t *testing.T) {
 	}
 }
 
+// TestConfirmedEdgeSurvivesRescan backs H1: UpsertMediaEdge's WHERE-gated DO
+// UPDATE returns sql.ErrNoRows (not the pre-existing row) for a
+// CONFIRMED/REJECTED edge, and ResolveAndCommit must treat that as "this one
+// candidate is locked, keep going" rather than aborting the whole batch --
+// dropping every OTHER candidate edge for the same child node along with it.
+func TestConfirmedEdgeSurvivesRescan(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	p1 := seedNode(t, database, locationID, nodeFixture{Path: "/p1.jpg", FileName: "p1.jpg", FileExt: "jpg"})
+	p2 := seedNode(t, database, locationID, nodeFixture{Path: "/p2.jpg", FileName: "p2.jpg", FileExt: "jpg"})
+	c := seedNode(t, database, locationID, nodeFixture{Path: "/c.jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+	engine := NewEngine(database, nil,
+		fixedCandidateResolver{Candidate{
+			ParentID: p1.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.60, Tier: 2,
+			Resolver: "r1", Evidence: map[string]any{},
+		}},
+		fixedCandidateResolver{Candidate{
+			ParentID: p2.ID, ChildID: c.ID, Rel: "PROXY_OF", Confidence: 0.95, Tier: 1,
+			Resolver: "r2", Evidence: map[string]any{},
+		}},
+	)
+
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (first): %v", err)
+	}
+	if len(edges) != 2 {
+		t.Fatalf("first call: got %d edges, want 2", len(edges))
+	}
+
+	var p1EdgeID int64
+	for _, e := range edges {
+		if e.SourceNodeID == p1.ID {
+			p1EdgeID = e.ID
+		}
+	}
+	if p1EdgeID == 0 {
+		t.Fatalf("no edge found from p1 (%d) in %+v", p1.ID, edges)
+	}
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: p1EdgeID, ReviewedBy: sql.NullString{String: "operator", Valid: true}})
+	}); err != nil {
+		t.Fatalf("ConfirmMediaEdge: %v", err)
+	}
+
+	// Re-resolving must NOT error and must NOT drop the p2 edge just
+	// because the p1 edge is now human-locked.
+	edges, created, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (second, after confirm): %v", err)
+	}
+	if len(edges) != 2 {
+		t.Fatalf("second call: got %d edges, want 2 (confirm must not drop the other candidate)", len(edges))
+	}
+	if created != 0 {
+		t.Errorf("second call: created = %d, want 0 (both edges already existed -- the human-locked one must not be miscounted as new)", created)
+	}
+
+	for _, e := range edges {
+		if e.ID == p1EdgeID {
+			if e.ReviewState != "CONFIRMED" {
+				t.Errorf("confirmed edge review_state = %q, want CONFIRMED (must not be touched by a later resolve pass)", e.ReviewState)
+			}
+			if e.Confidence != 0.60 {
+				t.Errorf("confirmed edge confidence = %v, want unchanged 0.60", e.Confidence)
+			}
+		}
+	}
+
+	childAfter, err := database.Reader.GetMediaNodeByID(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("get child after rescan: %v", err)
+	}
+	if childAfter.GraphStatus != "LINKED" {
+		t.Errorf("child graph_status = %q, want LINKED", childAfter.GraphStatus)
+	}
+}
+
+// TestRejectedEdgeDoesNotForceGraphStatusToNeedsReview backs the
+// human-locked-edge fix's own regression: a REJECTED edge is a decision
+// about ONE candidate, not a statement that the node needs review. If the
+// only edge committed in a resolve pass happens to be a previously-REJECTED
+// one (e.g. every other candidate this pass was below needsReviewFloor or
+// would have closed a cycle), graph_status must not be forced to
+// NEEDS_REVIEW -- that would show the node as "needing review" in the asset
+// list while nothing actually appears in the audit queue to resolve it,
+// since the audit queue filters on edge-level review_state, not
+// graph_status.
+func TestRejectedEdgeDoesNotForceGraphStatusToNeedsReview(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	p := seedNode(t, database, locationID, nodeFixture{Path: "/p-reject.jpg", FileName: "p.jpg", FileExt: "jpg"})
+	c := seedNode(t, database, locationID, nodeFixture{Path: "/c-reject.jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+	engine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+		Resolver: "r1", Evidence: map[string]any{},
+	}})
+
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (first): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("first call: got %d edges, want 1", len(edges))
+	}
+	edgeID := edges[0].ID
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: edgeID, ReviewedBy: sql.NullString{String: "operator", Valid: true}})
+	}); err != nil {
+		t.Fatalf("RejectMediaEdge: %v", err)
+	}
+
+	childAfterReject, err := database.Reader.GetMediaNodeByID(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("get child after reject: %v", err)
+	}
+	statusBeforeRescan := childAfterReject.GraphStatus
+
+	// Re-resolving proposes the SAME candidate again (the resolver is
+	// deterministic), which is now human-locked -- the only edge in
+	// `committed` this pass is REJECTED.
+	edges, created, err := engine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (second, after reject): %v", err)
+	}
+	if len(edges) != 1 || edges[0].ReviewState != "REJECTED" {
+		t.Fatalf("second call: got %+v, want one REJECTED edge", edges)
+	}
+	if created != 0 {
+		t.Errorf("second call: created = %d, want 0", created)
+	}
+
+	childAfterRescan, err := database.Reader.GetMediaNodeByID(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("get child after rescan: %v", err)
+	}
+	if childAfterRescan.GraphStatus != statusBeforeRescan {
+		t.Errorf("graph_status changed from %q to %q after a REJECTED-only resolve pass, want unchanged", statusBeforeRescan, childAfterRescan.GraphStatus)
+	}
+	if childAfterRescan.GraphStatus == "NEEDS_REVIEW" {
+		t.Error("graph_status = NEEDS_REVIEW, but the only edge is REJECTED -- nothing will ever appear in the audit queue to resolve this")
+	}
+}
+
+// TestUpsertMediaEdgeKeepsStrongerPriorPass backs H2: a later resolve pass
+// that only proposes a WEAKER candidate for an edge already committed at a
+// higher confidence must not downgrade that edge's tier/resolver/
+// evidence_json/review_state, even though confidence itself (MAX'd) never
+// regresses. Simulates the concrete failure mode: a Tier-3 candidate at
+// 0.89 lands AUTO_ACCEPTED on pass 1; pass 2's pHash extraction hiccups so
+// only a Tier-2 filename_stem candidate at 0.60 fires for the same pair.
+func TestUpsertMediaEdgeKeepsStrongerPriorPass(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	p := seedNode(t, database, locationID, nodeFixture{Path: "/p-downgrade.jpg", FileName: "p.jpg", FileExt: "jpg"})
+	c := seedNode(t, database, locationID, nodeFixture{Path: "/c-downgrade.jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+	strongEngine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.89, Tier: 3,
+		Resolver: "heuristic_spatial_temporal", Evidence: map[string]any{"pass": "1"},
+	}})
+	edges, _, err := strongEngine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (pass 1, strong): %v", err)
+	}
+	if len(edges) != 1 || edges[0].ReviewState != "AUTO_ACCEPTED" || edges[0].Confidence != 0.89 {
+		t.Fatalf("pass 1: got %+v, want one AUTO_ACCEPTED edge at 0.89", edges)
+	}
+
+	weakEngine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.60, Tier: 2,
+		Resolver: "filename_stem", Evidence: map[string]any{"pass": "2"},
+	}})
+	edges, _, err = weakEngine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (pass 2, weak): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("pass 2: got %d edges, want 1", len(edges))
+	}
+	edge := edges[0]
+	if edge.Confidence != 0.89 {
+		t.Errorf("confidence = %v, want 0.89 (MAX must never regress)", edge.Confidence)
+	}
+	if edge.Tier != 3 {
+		t.Errorf("tier = %d, want 3 (the winning pass's tier, not the losing pass's)", edge.Tier)
+	}
+	if edge.Resolver != "heuristic_spatial_temporal" {
+		t.Errorf("resolver = %q, want heuristic_spatial_temporal (the winning pass's resolver)", edge.Resolver)
+	}
+	if edge.ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("review_state = %q, want AUTO_ACCEPTED (a weaker later pass must not downgrade it)", edge.ReviewState)
+	}
+}
+
+// TestUpsertMediaEdgeUpgradesOnStrongerPass is TestUpsertMediaEdgeKeepsStrongerPriorPass's
+// mirror: a genuinely STRONGER later pass must still win and its
+// tier/resolver/evidence/review_state must all be adopted together, not
+// left half-updated.
+func TestUpsertMediaEdgeUpgradesOnStrongerPass(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	p := seedNode(t, database, locationID, nodeFixture{Path: "/p-upgrade.jpg", FileName: "p.jpg", FileExt: "jpg"})
+	c := seedNode(t, database, locationID, nodeFixture{Path: "/c-upgrade.jpg", FileName: "c.jpg", FileExt: "jpg"})
+
+	weakEngine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.60, Tier: 2,
+		Resolver: "filename_stem", Evidence: map[string]any{"pass": "1"},
+	}})
+	if _, _, err := weakEngine.ResolveAndCommit(ctx, asGraphNode(c)); err != nil {
+		t.Fatalf("ResolveAndCommit (pass 1, weak): %v", err)
+	}
+
+	strongEngine := NewEngine(database, nil, fixedCandidateResolver{Candidate{
+		ParentID: p.ID, ChildID: c.ID, Rel: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+		Resolver: "xmp_original_document_id", Evidence: map[string]any{"pass": "2"},
+	}})
+	edges, _, err := strongEngine.ResolveAndCommit(ctx, asGraphNode(c))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (pass 2, strong): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("pass 2: got %d edges, want 1", len(edges))
+	}
+	edge := edges[0]
+	if edge.Confidence != 0.95 {
+		t.Errorf("confidence = %v, want 0.95", edge.Confidence)
+	}
+	if edge.Tier != 1 {
+		t.Errorf("tier = %d, want 1 (the stronger pass's tier)", edge.Tier)
+	}
+	if edge.Resolver != "xmp_original_document_id" {
+		t.Errorf("resolver = %q, want xmp_original_document_id", edge.Resolver)
+	}
+	if edge.ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("review_state = %q, want AUTO_ACCEPTED", edge.ReviewState)
+	}
+}
+
 func TestLookupBySpatialTemporal(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
