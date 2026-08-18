@@ -85,6 +85,19 @@ export function useRejectEdge() {
   });
 }
 
+export function useCreateEdge() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Parameters<typeof api.createEdge>[0]) => api.createEdge(input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-lineage"] });
+      void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
+    },
+  });
+}
+
 export function useStartScan() {
   const queryClient = useQueryClient();
   return useMutation({

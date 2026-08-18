@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AuditEntry, Config, LineageResponse, Me, PathRewrite, ScanJob, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AuditEntry, Config, CreateEdgeInput, Edge, LineageResponse, Me, PathRewrite, ScanJob, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -53,6 +53,11 @@ export const api = {
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),
   rejectEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/reject`, { method: "POST" }),
+  createEdge: (input: CreateEdgeInput) =>
+    request<Edge>("/api/v1/edges", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
 
   startScan: (storageLocationId: number) =>
     request<{ jobId: number }>("/api/v1/scan", {

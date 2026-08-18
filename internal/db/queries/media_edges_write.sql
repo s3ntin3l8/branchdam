@@ -15,6 +15,25 @@ RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
           created_at, updated_at;
 
+-- name: CreateManualMediaEdge :one
+INSERT INTO media_edges (
+    source_node_id, target_node_id, relationship_type, confidence, tier,
+    resolver, evidence_json, review_state, reviewed_by, reviewed_at
+) VALUES (
+    ?1, ?2, ?3, 1.00, 1, 'manual', '{}', 'CONFIRMED', ?4, unixepoch()
+)
+ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
+    confidence = 1.00,
+    tier = 1,
+    resolver = 'manual',
+    review_state = 'CONFIRMED',
+    reviewed_by = ?4,
+    reviewed_at = unixepoch(),
+    updated_at = unixepoch()
+RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
+          tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+          created_at, updated_at;
+
 -- name: GetMediaEdge :one
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
