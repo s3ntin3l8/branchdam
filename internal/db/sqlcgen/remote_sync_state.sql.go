@@ -39,6 +39,66 @@ func (q *Queries) GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncState
 	return i, err
 }
 
+const listLiveNodesForSync = `-- name: ListLiveNodesForSync :many
+SELECT n.id, n.file_path, n.file_name, n.file_ext, n.fast_hash, n.full_hash
+FROM media_nodes n
+LEFT JOIN remote_sync_state rs
+       ON rs.node_id = n.id AND rs.remote = ?1
+WHERE n.lifecycle_state != 'ARCHIVED'
+  AND (n.file_path = ?2 OR n.file_path LIKE ?2 || '/%')
+  AND rs.node_id IS NULL
+ORDER BY n.id ASC
+LIMIT ?3
+`
+
+type ListLiveNodesForSyncParams struct {
+	Remote   string
+	FilePath string
+	Limit    int64
+}
+
+type ListLiveNodesForSyncRow struct {
+	ID       int64
+	FilePath string
+	FileName string
+	FileExt  string
+	FastHash *string
+	FullHash *string
+}
+
+// #55: the sync worker's enqueue source -- live nodes under a path prefix
+// (the Immich export mount) that have NO remote_sync_state row for the given
+// remote yet. Once pushed, a row exists and the node drops out of this set.
+func (q *Queries) ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesForSyncParams) ([]ListLiveNodesForSyncRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodesForSync, arg.Remote, arg.FilePath, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLiveNodesForSyncRow{}
+	for rows.Next() {
+		var i ListLiveNodesForSyncRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.FastHash,
+			&i.FullHash,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRemoteSyncStateByStatus = `-- name: ListRemoteSyncStateByStatus :many
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
 FROM remote_sync_state
@@ -126,6 +186,31 @@ type MarkRemoteSyncStatePushedParams struct {
 func (q *Queries) MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteSyncStatePushedParams) error {
 	_, err := q.db.ExecContext(ctx, markRemoteSyncStatePushed, arg.NodeID, arg.Remote, arg.RemoteAssetID)
 	return err
+}
+
+const resetRemoteSyncStateFailed = `-- name: ResetRemoteSyncStateFailed :execrows
+UPDATE remote_sync_state
+SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2
+`
+
+type ResetRemoteSyncStateFailedParams struct {
+	Remote        string
+	LastAttemptAt sql.NullInt64
+}
+
+// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
+// the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
+// re-attempts them -- a transient remote failure must not strand a batch
+// forever. Scoped to a single remote. last_attempt_at is set explicitly on
+// every attempt, so this only re-claims rows that have not been retried
+// recently (bounded retry frequency, not a hot loop).
+func (q *Queries) ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, resetRemoteSyncStateFailed, arg.Remote, arg.LastAttemptAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const resetRemoteSyncStateStale = `-- name: ResetRemoteSyncStateStale :execrows

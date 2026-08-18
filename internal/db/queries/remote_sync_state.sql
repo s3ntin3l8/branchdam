@@ -54,3 +54,28 @@ WHERE node_id = ?1 AND remote = ?2;
 UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
 WHERE sync_status = 'PUSHING' AND remote = ?1 AND last_attempt_at < ?2;
+
+-- name: ListLiveNodesForSync :many
+-- #55: the sync worker's enqueue source -- live nodes under a path prefix
+-- (the Immich export mount) that have NO remote_sync_state row for the given
+-- remote yet. Once pushed, a row exists and the node drops out of this set.
+SELECT n.id, n.file_path, n.file_name, n.file_ext, n.fast_hash, n.full_hash
+FROM media_nodes n
+LEFT JOIN remote_sync_state rs
+       ON rs.node_id = n.id AND rs.remote = ?1
+WHERE n.lifecycle_state != 'ARCHIVED'
+  AND (n.file_path = ?2 OR n.file_path LIKE ?2 || '/%')
+  AND rs.node_id IS NULL
+ORDER BY n.id ASC
+LIMIT ?3;
+
+-- name: ResetRemoteSyncStateFailed :execrows
+-- #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
+-- the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
+-- re-attempts them -- a transient remote failure must not strand a batch
+-- forever. Scoped to a single remote. last_attempt_at is set explicitly on
+-- every attempt, so this only re-claims rows that have not been retried
+-- recently (bounded retry frequency, not a hot loop).
+UPDATE remote_sync_state
+SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2;

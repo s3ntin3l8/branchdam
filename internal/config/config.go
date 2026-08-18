@@ -28,6 +28,7 @@ type Config struct {
 	Workers    Workers  `yaml:"workers"`
 	Agent      Agent    `yaml:"agent"`
 	Authz      Authz    `yaml:"authz"`
+	Immich     Immich   `yaml:"immich"`
 
 	StorageLocations []StorageLocation `yaml:"storageLocations"`
 
@@ -71,11 +72,20 @@ type Workers struct {
 }
 
 // Agent configures the machine-principal auth chain (internal/auth, PR 8).
-// The key itself is never set directly in config.yaml — it is meant to be
+// The key itself is never set directly in config.yaml -- it is meant to be
 // injected via ${BRANCHDAM_AGENT_API_KEY} from a gitignored .env, per
 // docs/forward-auth.md.
 type Agent struct {
 	APIKey string `yaml:"apiKey"`
+}
+
+// Immich configures the Immich external-library scan trigger (internal/immich,
+// phase 7 #55). Leave APIURL empty to disable the sync worker entirely.
+type Immich struct {
+	APIURL     string `yaml:"apiUrl"`
+	APIKey     string `yaml:"apiKey"`
+	LibraryID  string `yaml:"libraryId"`
+	ExportPath string `yaml:"exportPath"`
 }
 
 // StorageLocation is one row to seed into storage_locations at startup.

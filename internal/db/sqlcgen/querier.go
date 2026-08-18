@@ -113,6 +113,10 @@ type Querier interface {
 	// can still produce a large same-stem batch. FilenameStemResolver logs
 	// when this cap is actually hit.
 	ListLiveNodesByFilenameStem(ctx context.Context, arg ListLiveNodesByFilenameStemParams) ([]MediaNode, error)
+	// #55: the sync worker's enqueue source -- live nodes under a path prefix
+	// (the Immich export mount) that have NO remote_sync_state row for the given
+	// remote yet. Once pushed, a row exists and the node drops out of this set.
+	ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesForSyncParams) ([]ListLiveNodesForSyncRow, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
@@ -193,6 +197,11 @@ type Querier interface {
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
 	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
+	// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older
+	// than the retry window are reset to PENDING_CLOUD_PUSH so the next worker
+	// pass re-attempts them -- a transient remote failure must not strand a
+	// batch forever. Scoped to a single remote.
+	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.

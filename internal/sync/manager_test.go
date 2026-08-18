@@ -303,3 +303,101 @@ func TestRecoverStalePushingResetsStrandedRows(t *testing.T) {
 		t.Errorf("sync_status after recovery = %q, want PENDING_CLOUD_PUSH", row.SyncStatus)
 	}
 }
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met within", timeout)
+}
+
+func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot.jpg")) // under export path -> enqueued
+	seedNode(t, database, locID, filepath.Join(root, "other.jpg"))      // outside export path -> ignored
+
+	push := &recordingPush{}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 16, 50*time.Millisecond, push.fn, nil)
+
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+
+	// Wait until the export-path node is actually PUSHED (push is invoked
+	// before the mark-pushed transaction commits, so waiting on the DB state,
+	// not the call count, is what guarantees the batch finished).
+	waitFor(t, 5*time.Second, func() bool {
+		rows, err := database.Reader.ListRemoteSyncStateByStatus(context.Background(), sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+		return err == nil && len(rows) == 1
+	})
+	cancel()
+	<-done
+
+	// Only the export-path node was pushed.
+	rows, err := database.Reader.ListRemoteSyncStateByStatus(context.Background(), sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("pushed rows = %d, want 1 (only the export-path node)", len(rows))
+	}
+}
+
+func TestWorkerRetriesFailedPushes(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	node := seedNode(t, database, locID, filepath.Join(exportPath, "shot.jpg"))
+
+	// Enqueue + force a failure so the node lands in PUSH_FAILED.
+	if err := mgr.Enqueue(ctx, Node{ID: node.ID, Checksum: "aaaaaaaaaaaaaaaa"}, RemoteImmich); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	failing := &recordingPush{err: errors.New("transient 5xx")}
+	if _, err := mgr.ProcessPending(ctx, RemoteImmich, 10, failing.fn); err == nil {
+		t.Fatal("expected the simulated push failure")
+	}
+	row, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if row.SyncStatus != "PUSH_FAILED" {
+		t.Fatalf("seed status = %q, want PUSH_FAILED", row.SyncStatus)
+	}
+
+	// Backdate the failed attempt so the worker's retry window re-claims it.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSH_FAILED",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{String: "transient", Valid: true},
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-1 * time.Hour).Unix(), Valid: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	// A worker drain with an immediate retry window re-claims and pushes it.
+	push := &recordingPush{}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 16, time.Hour, push.fn, nil)
+	w.retryWindow = 0
+	w.drain(ctx)
+
+	row, _ = database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if row.SyncStatus != "PUSHED" {
+		t.Errorf("after retry sync_status = %q, want PUSHED", row.SyncStatus)
+	}
+}
