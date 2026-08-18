@@ -276,9 +276,13 @@ func cappedSortedKeys(kv map[string]string, maxRows int, nodeID int64, source st
 // one over-tagged file must not fail a whole scan. That "logged and dropped"
 // guarantee covers cap overflow only: a hard insert error still aborts the
 // enclosing Commit transaction, so node and metadata land together or not at
-// all. Used only where the node is known brand new (insertNewNode and
+// all. Used where the node is known brand new (insertNewNode and
 // commitVersionCollision's successor) -- there every row is unconditionally
 // new, so reconcileMetadata's pre-read-and-diff below would be pure overhead.
+// The inherit-metadata backfill (PersistExifMetadata, #157) is an intentional
+// additional caller on an EXISTING node: a single on-demand request, where
+// the idempotent upsert is negligible cost next to the reconcile pre-read
+// and diff the per-scan touch/rebase path pays.
 func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, source string, kv map[string]string, maxRows int, log *slog.Logger) error {
 	for _, k := range cappedSortedKeys(kv, maxRows, nodeID, source, log) {
 		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
@@ -455,7 +459,9 @@ func ffprobeMetadata(r Result) map[string]string {
 // inherit-metadata endpoint (#54) so node_metadata stays consistent with a
 // file that was just rewritten in place -- otherwise the DB metadata store
 // and a second inheritance would re-plan from stale (empty) values until the
-// next scan.
+// next scan. The caller owns bounding ctx (the httpapi handler wraps the
+// exiftool re-read in inheritWriteTimeout): this function does no deadline
+// of its own, matching probe.Exif's contract.
 func PersistExifMetadata(ctx context.Context, database *db.DB, nodeID int64, exif *probe.ExifResult, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)

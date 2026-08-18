@@ -737,9 +737,14 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 	// an error response. Without this, node_metadata stays stale (empty)
 	// until the next scan, and a second inherit call would re-plan from
 	// stale values instead of seeing the child's own tags (#157).
-	if exif, err := s.prober.Exif(ctx, child.FilePath); err != nil {
+	// Bounded with its own inheritWriteTimeout: a hung exiftool re-read on a
+	// stalled mount must not hang the request after the write already
+	// succeeded.
+	bctx, bcancel := context.WithTimeout(ctx, inheritWriteTimeout)
+	defer bcancel()
+	if exif, err := s.prober.Exif(bctx, child.FilePath); err != nil {
 		s.log.Warn("inherit-metadata: re-read child for backfill failed", "nodeID", child.ID, "err", err)
-	} else if err := pipeline.PersistExifMetadata(ctx, s.db, child.ID, exif, s.log); err != nil {
+	} else if err := pipeline.PersistExifMetadata(bctx, s.db, child.ID, exif, s.log); err != nil {
 		s.log.Warn("inherit-metadata: backfill node_metadata failed", "nodeID", child.ID, "err", err)
 	}
 
