@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 
 export function useMe() {
@@ -72,13 +72,35 @@ export function useAuditQueue(params: { limit?: number; offset?: number } = {}) 
   });
 }
 
+// invalidateEdgeReviewQueries is shared by useConfirmEdge/useRejectEdge/
+// useCreateEdge: any write that changes an edge's review_state also
+// recomputes the target node's graph_status server-side (see
+// internal/httpapi/routes.go's recomputeGraphStatus), so every query whose
+// data depends on graph_status must be invalidated alongside the audit
+// queue -- not just the queue itself, which is what confirm/reject were
+// missing before this fix (they matched neither each other nor
+// useCreateEdge, which already invalidated all of these).
+function invalidateEdgeReviewQueries(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+  void queryClient.invalidateQueries({ queryKey: ["assets"] });
+  // "asset" (singular, useAsset's key for GET /api/v1/assets/{id}) is a
+  // DIFFERENT query key namespace from "assets" (plural, the list) --
+  // TanStack Query's prefix matching only covers keys that start with the
+  // exact given key array, so invalidating "assets" does NOT also cover
+  // "asset". AssetDetailPage renders graphStatus directly from this query,
+  // so omitting it left a mounted detail page stale for the query's full
+  // staleTime (main.tsx) after confirming/rejecting/creating an edge.
+  void queryClient.invalidateQueries({ queryKey: ["asset"] });
+  void queryClient.invalidateQueries({ queryKey: ["asset-lineage"] });
+  void queryClient.invalidateQueries({ queryKey: ["asset-graph"] });
+  void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
+}
+
 export function useConfirmEdge() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.confirmEdge(id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
-    },
+    onSuccess: () => invalidateEdgeReviewQueries(queryClient),
   });
 }
 
@@ -86,9 +108,7 @@ export function useRejectEdge() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.rejectEdge(id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
-    },
+    onSuccess: () => invalidateEdgeReviewQueries(queryClient),
   });
 }
 
@@ -96,12 +116,7 @@ export function useCreateEdge() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: Parameters<typeof api.createEdge>[0]) => api.createEdge(input),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
-      void queryClient.invalidateQueries({ queryKey: ["assets"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset-lineage"] });
-      void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
-    },
+    onSuccess: () => invalidateEdgeReviewQueries(queryClient),
   });
 }
 
