@@ -35,6 +35,15 @@ import (
 // Defaults to "dev" for local builds (see Dockerfile, added in PR 11).
 var version = "dev"
 
+// shutdownBudget is the total time SIGTERM/SIGINT gets to produce process
+// exit: httpServer.Shutdown plus every join below share this one deadline
+// (#98), not each getting their own -- an operator/orchestrator cares about
+// one contract ("this process exits within N seconds of the signal"), not
+// the internal breakdown. 30s is generous for httpServer.Shutdown's typical
+// sub-second case while still bounding a genuinely slow in-flight
+// processFile (a large-file full hash, or a stalled network mount).
+const shutdownBudget = 30 * time.Second
+
 func main() {
 	cfgPath := flag.String("config", envOr("BRANCHDAM_CONFIG", "config.yaml"), "path to config file")
 	debug := flag.Bool("debug", os.Getenv("BRANCHDAM_DEBUG") != "", "enable debug logging")
@@ -55,34 +64,49 @@ func main() {
 
 	log.Info("loaded config", "version", version, "listenAddr", cfg.ListenAddr)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	if err := run(context.Background(), cfg, log); err != nil {
+		log.Error("run", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run owns the server's full lifecycle: setup, serve, and an orderly
+// shutdown once ctx's signal fires. Extracted from main so shutdown's
+// timeout behavior (#98) is testable without going through flag parsing
+// and config loading -- see runShutdownSequence and closeDatabase below,
+// which this delegates to and which a test can drive directly with a short
+// budget and fake dependencies.
+func run(parent context.Context, cfg config.Config, log *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	database, err := db.Open(ctx, cfg.Database.Path)
 	if err != nil {
-		log.Error("open database", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("open database: %w", err)
 	}
-	defer func() {
-		if err := database.Close(); err != nil {
-			log.Error("close database", "err", err)
-		}
-	}()
+	// dbUnsafeToClose is set by runShutdownSequence below if a wait timed
+	// out -- a background goroutine may still hold the writer connection,
+	// and closing out from under it is worse than leaving it for process
+	// exit to reclaim (SQLite's WAL recovery is designed for exactly that;
+	// sql.DB.Close() racing an in-flight write is not). This single defer
+	// is the ONLY place database.Close() is called in this function --
+	// every setup failure below returns through it too, which is correct:
+	// none of those paths have started any long-lived goroutine that could
+	// be holding the writer, so closing immediately is always safe there.
+	var dbUnsafeToClose bool
+	defer func() { closeDatabase(log, database, dbUnsafeToClose) }()
 
 	if _, err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
-		log.Error("reconcile orphaned scan jobs", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("reconcile orphaned scan jobs: %w", err)
 	}
 
 	if err := seedStorageLocations(ctx, database, cfg.StorageLocations); err != nil {
-		log.Error("seed storage locations", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("seed storage locations: %w", err)
 	}
 
 	guard, err := storage.LoadGuard(ctx, database)
 	if err != nil {
-		log.Error("load storage guard", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("load storage guard: %w", err)
 	}
 
 	prober := probe.New()
@@ -108,8 +132,7 @@ func main() {
 	if watched := watchedFromConfig(cfg.StorageLocations); len(watched) > 0 {
 		watchedLocs, err := resolveWatchedLocations(ctx, database, watched)
 		if err != nil {
-			log.Error("resolve watched locations", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("resolve watched locations: %w", err)
 		}
 		supervisor = pipeline.NewWatcherSupervisor(pipeline.ScanDeps{
 			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
@@ -120,8 +143,7 @@ func main() {
 
 	spa, err := web.Dist()
 	if err != nil {
-		log.Error("embed spa", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("embed spa: %w", err)
 	}
 
 	srv := httpapi.New(httpapi.Deps{
@@ -148,17 +170,41 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer cancel()
+	shutdownErr := runShutdownSequence(shutdownCtx, log, httpServer, supervisor, scanTracker, pool, &dbUnsafeToClose)
+	log.Info("server stopped")
+	return shutdownErr
+}
+
+// runShutdownSequence performs the ordered post-signal shutdown -- HTTP
+// server shutdown, then joining the watcher supervisor, the scan tracker,
+// and the worker pool -- each bounded by shutdownCtx's remaining budget via
+// waitWithin, rather than the previously-unbounded direct calls. Every wait
+// runs regardless of whether an earlier one timed out: a later one may
+// still complete and shrink how much work is left unresolved. Sets
+// *dbUnsafeToClose (never clears it) if any wait didn't complete in time.
+//
+// Extracted from run() specifically so a test can drive it directly with a
+// short shutdownCtx budget and minimal/fake dependencies (a never-served
+// *http.Server, a real workers.Pool with a deliberately slow job, a nil
+// supervisor), without needing run()'s full config-load/db.Open/httpapi.New
+// setup -- see main_test.go.
+func runShutdownSequence(shutdownCtx context.Context, log *slog.Logger, httpServer *http.Server, supervisor *pipeline.WatcherSupervisor, scanTracker *pipeline.ScanTracker, pool *workers.Pool[string], dbUnsafeToClose *bool) error {
+	var shutdownErr error
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", "err", err)
-		os.Exit(1)
+		log.Error("shutdown: http server", "err", err)
+		shutdownErr = err
 	}
+
 	if supervisor != nil {
 		// Watchers already stopped on ctx.Done; Wait() joins each location's
 		// consumer goroutine, which holds the writer DB and calls Commit
 		// directly (never Pool.Submit), so it must finish before db.Close.
-		supervisor.Wait()
+		if !waitWithin(shutdownCtx, supervisor.Wait) {
+			log.Error("shutdown: watcher supervisor wait timed out")
+			*dbUnsafeToClose = true
+		}
 	}
 	// scanTracker.Wait() joins every in-flight RunScan goroutine (started
 	// via POST /api/v1/scan) before the database closes, the same guarantee
@@ -166,17 +212,58 @@ func main() {
 	// before pool.Drain(): a scan's own wg.Wait() (internal/pipeline/scan.go)
 	// depends on the pool's workers resolving every submitted job one way or
 	// another -- either running it or, since #92, calling its OnAbandon hook
-	// once the pool's own ctx (this same ctx) is done -- so a scan can only
-	// finish once the pool has started winding down, which is already true
-	// here since ctx is Done. Draining first would just make this wait
-	// redundant, not wrong, but ordering it this way mirrors the watcher
-	// case above and keeps "join background scan work" as one clear step.
-	scanTracker.Wait()
-	// ctx (the signal context) is already Done by this point, which is what
-	// tells the pool's worker goroutines to stop after their current job --
-	// Drain waits for that to actually finish before the database closes.
-	pool.Drain()
-	log.Info("server stopped")
+	// once the pool's own ctx (the same signal ctx) is done -- so a scan can
+	// only finish once the pool has started winding down, which is already
+	// true here since that ctx is Done. Draining first would just make this
+	// wait redundant, not wrong, but ordering it this way mirrors the
+	// watcher case above and keeps "join background scan work" as one clear
+	// step.
+	if !waitWithin(shutdownCtx, scanTracker.Wait) {
+		log.Error("shutdown: scan tracker wait timed out")
+		*dbUnsafeToClose = true
+	}
+	// The signal ctx is already Done by this point, which is what tells the
+	// pool's worker goroutines to stop after their current job -- Drain
+	// waits for that to actually finish before the database closes.
+	if !waitWithin(shutdownCtx, pool.Drain) {
+		log.Error("shutdown: worker pool drain timed out")
+		*dbUnsafeToClose = true
+	}
+	return shutdownErr
+}
+
+// waitWithin blocks on wait until it returns or ctx is done, whichever
+// comes first, returning whether wait completed within ctx's deadline. The
+// goroutine running wait is leaked if ctx's deadline wins (wait may still
+// be blocked on real work) -- acceptable here since this only runs once,
+// immediately before process exit, and is the same tradeoff the alternative
+// (no timeout at all, per #98's original bug) already made permanently.
+func waitWithin(ctx context.Context, wait func()) bool {
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// closeDatabase is run()'s single database.Close() call site, gated on
+// unsafe (set by runShutdownSequence when a wait timed out). Extracted so a
+// test can exercise the skip decision directly against a real *db.DB
+// without booting the rest of run().
+func closeDatabase(log *slog.Logger, database *db.DB, unsafe bool) {
+	if unsafe {
+		log.Error("shutdown: skipping database close -- a background goroutine may still hold the writer connection")
+		return
+	}
+	if err := database.Close(); err != nil {
+		log.Error("close database", "err", err)
+	}
 }
 
 // reconcileOrphanedScanJobs moves every scan_jobs row still RUNNING to

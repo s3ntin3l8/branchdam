@@ -4,12 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
+	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
 func TestWatchedFromConfig(t *testing.T) {
@@ -180,6 +184,117 @@ func TestReconcileOrphanedScanJobs(t *testing.T) {
 	}
 	if n2 != 0 {
 		t.Errorf("second call returned %d, want 0 (nothing left RUNNING)", n2)
+	}
+}
+
+// TestWaitWithinReturnsTrueWhenWaitCompletes is the trivial case: wait
+// returns well inside ctx's deadline.
+func TestWaitWithinReturnsTrueWhenWaitCompletes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !waitWithin(ctx, func() {}) {
+		t.Fatal("waitWithin = false, want true (wait returned immediately)")
+	}
+}
+
+// TestWaitWithinReturnsFalseOnTimeout backs #98's headline bug: a wait that
+// never returns must not hang waitWithin's caller forever -- ctx's deadline
+// must win.
+func TestWaitWithinReturnsFalseOnTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) }) // unblock the leaked goroutine so it doesn't outlive the test
+
+	start := time.Now()
+	got := waitWithin(ctx, func() { <-block })
+	if got {
+		t.Fatal("waitWithin = true, want false (wait never returns)")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("waitWithin took %s to return false, want well under ctx's 50ms deadline plus scheduling slack", elapsed)
+	}
+}
+
+// TestShutdownSequenceTerminatesWithinBudgetDespiteSlowJob is #98's
+// acceptance criterion: a deliberately slow in-flight job (standing in for
+// a large-file full hash or a stalled network mount) must not delay
+// shutdown past the budget, and must be reported via dbUnsafeToClose rather
+// than silently hanging or silently proceeding.
+func TestShutdownSequenceTerminatesWithinBudgetDespiteSlowJob(t *testing.T) {
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	pool := workers.New[string](1, 4)
+	pool.Run(poolCtx)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		cancelPool()
+		close(release) // let the stuck worker goroutine finally exit -- it can't observe cancelPool while blocked inside Run
+	})
+
+	if !pool.Submit(poolCtx, workers.Job[string]{
+		Key: "slow",
+		Run: func(context.Context) error {
+			close(started)
+			<-release // simulates a hash/probe call that doesn't respect ctx cancellation quickly
+			return nil
+		},
+	}) {
+		t.Fatal("Submit for the slow job returned false")
+	}
+	<-started // the job is genuinely running, so pool.Drain() below is guaranteed to block on it
+
+	httpServer := &http.Server{} // never ListenAndServe'd -- Shutdown returns immediately
+	scanTracker := &pipeline.ScanTracker{}
+	const budget = 200 * time.Millisecond
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	var dbUnsafeToClose bool
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- runShutdownSequence(shutdownCtx, slog.New(slog.DiscardHandler), httpServer, nil, scanTracker, pool, &dbUnsafeToClose)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runShutdownSequence returned err = %v, want nil (httpServer was never served)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runShutdownSequence did not return within 2s of a 200ms budget -- shutdown is hanging on the slow job")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("runShutdownSequence took %s, want close to the %s budget", elapsed, budget)
+	}
+	if !dbUnsafeToClose {
+		t.Error("dbUnsafeToClose = false, want true -- the pool never actually finished draining within budget")
+	}
+}
+
+// TestShutdownSkipsDBCloseWhenAWaitTimesOut is the invariant #98 is really
+// about: on a timed-out wait, the database must stay open rather than
+// racing whatever goroutine might still be writing to it. closeDatabase is
+// run()'s single close call site -- this drives it directly against a real
+// *db.DB.
+func TestShutdownSkipsDBCloseWhenAWaitTimesOut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "close-skip.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	log := slog.New(slog.DiscardHandler)
+
+	closeDatabase(log, database, true) // unsafe=true: must NOT close
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error { return nil }); err != nil {
+		t.Fatalf("database still unusable after a skipped close: %v", err)
+	}
+
+	closeDatabase(log, database, false) // unsafe=false: must close
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error { return nil }); err == nil {
+		t.Fatal("database.InTx succeeded after closeDatabase(unsafe=false) -- want the database actually closed")
 	}
 }
 
