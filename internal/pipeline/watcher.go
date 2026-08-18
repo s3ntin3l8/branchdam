@@ -158,8 +158,15 @@ const watchQueueCapacity = 1024
 // must join the consumer (consumerWG.Wait) after close() and before any
 // finalization.
 type watchWork struct {
-	mu      sync.Mutex
-	closed  bool
+	mu     sync.Mutex
+	closed bool
+	// items' pop-front (both here and in dequeue) via items[1:] shrinks the
+	// slice's capacity by one each time without reusing that space, so
+	// sustained enqueue/dequeue cycling forces a full backing-array
+	// reallocation roughly every watchQueueCapacity operations. Bounded and
+	// GC'd -- not a leak, not correctness-affecting -- just not truly O(1)
+	// amortized the way a ring buffer would be; a possible future
+	// refinement if this ever shows up in profiling.
 	items   []watchItem
 	notify  chan struct{} // buffered 1: coalescing wakeup, not one-signal-per-item
 	dropped atomic.Int64
