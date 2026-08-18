@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
@@ -55,18 +56,20 @@ export default function App() {
         )}
       </nav>
       <main className="flex-1 overflow-auto">
-        <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
-          <Routes>
-            <Route path="/" element={<AssetListPage />} />
-            <Route path="/assets" element={<AssetListPage />} />
-            <Route path="/assets/:id" element={<AssetDetailPage />} />
-            <Route path="/audit" element={<AuditQueuePage />} />
-            <Route path="/ingest" element={<IngestPage />} />
-            <Route path="/jobs" element={<IngestJobsPage />} />
-            <Route path="/storage-health" element={<StorageHealthPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-          </Routes>
-        </Suspense>
+        <ErrorBoundary>
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
+            <Routes>
+              <Route path="/" element={<AssetListPage />} />
+              <Route path="/assets" element={<AssetListPage />} />
+              <Route path="/assets/:id" element={<AssetDetailPage />} />
+              <Route path="/audit" element={<AuditQueuePage />} />
+              <Route path="/ingest" element={<IngestPage />} />
+              <Route path="/jobs" element={<IngestJobsPage />} />
+              <Route path="/storage-health" element={<StorageHealthPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Routes>
+          </Suspense>
+        </ErrorBoundary>
       </main>
     </div>
   );
