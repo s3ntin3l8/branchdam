@@ -147,6 +147,32 @@ func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJo
 	return items, nil
 }
 
+const reconcileOrphanedScanJobs = `-- name: ReconcileOrphanedScanJobs :execrows
+UPDATE scan_jobs
+SET state = 'FAILED', last_error = ?1, finished_at = unixepoch(), updated_at = unixepoch()
+WHERE state = 'RUNNING'
+`
+
+// Every row still 'RUNNING' at process startup, before this process has
+// created any scan_jobs row of its own, was left behind by a previous
+// process that never reached a terminal state -- SIGKILL, OOM-kill,
+// container hard-stop, power loss. A WATCH row is RUNNING for its entire
+// process lifetime by design, so this is the only place its state ever
+// gets cleaned up after a crash. Reuses FAILED rather than adding a new
+// enum state (see issue #88's scope note): last_error distinguishes this
+// from a genuine processing failure. Must run before
+// WatcherSupervisor.Start creates any fresh WATCH row for the same
+// location, or a reconciled row and a fresh row could momentarily both
+// claim to represent "the" watch state for it. ix_scan_jobs_active
+// (state, started_at DESC) backs this WHERE clause.
+func (q *Queries) ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reconcileOrphanedScanJobs, lastError)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateScanJobProgress = `-- name: UpdateScanJobProgress :exec
 UPDATE scan_jobs
 SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, edges_created = ?5, updated_at = unixepoch()

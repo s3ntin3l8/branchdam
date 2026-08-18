@@ -57,6 +57,75 @@ func TestResolveWatchedLocations(t *testing.T) {
 	}
 }
 
+// TestReconcileOrphanedScanJobs backs #88: a RUNNING row left behind by a
+// killed prior process (SIGKILL, OOM-kill, crash) must move to a terminal
+// state on the next startup, before it can be confused with genuinely
+// active work -- while a job that already reached a terminal state on its
+// own must be left untouched.
+func TestReconcileOrphanedScanJobs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reconcile.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	var orphanedID, completedID int64
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		orphaned, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "WATCH"})
+		if err != nil {
+			return err
+		}
+		orphanedID = orphaned.ID
+
+		completed, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "FULL_SCAN"})
+		if err != nil {
+			return err
+		}
+		completedID = completed.ID
+		return q.CompleteScanJob(ctx, completedID)
+	}); err != nil {
+		t.Fatalf("seed scan jobs: %v", err)
+	}
+
+	log := slog.New(slog.DiscardHandler)
+	if err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
+		t.Fatalf("reconcileOrphanedScanJobs: %v", err)
+	}
+
+	orphaned, err := database.Reader.GetScanJob(ctx, orphanedID)
+	if err != nil {
+		t.Fatalf("GetScanJob(orphaned): %v", err)
+	}
+	if orphaned.State != "FAILED" {
+		t.Errorf("orphaned job state = %q, want FAILED", orphaned.State)
+	}
+	if !orphaned.LastError.Valid || orphaned.LastError.String == "" {
+		t.Errorf("orphaned job last_error = %v, want a non-empty explanation", orphaned.LastError)
+	}
+	if !orphaned.FinishedAt.Valid {
+		t.Error("orphaned job finished_at is still null after reconciliation")
+	}
+
+	completed, err := database.Reader.GetScanJob(ctx, completedID)
+	if err != nil {
+		t.Fatalf("GetScanJob(completed): %v", err)
+	}
+	if completed.State != "COMPLETED" {
+		t.Errorf("already-completed job state = %q, want COMPLETED (must not be touched)", completed.State)
+	}
+	if completed.LastError.Valid {
+		t.Errorf("already-completed job last_error = %v, want still null", completed.LastError)
+	}
+
+	// Idempotent: running it again with nothing left RUNNING must be a
+	// no-op, not an error.
+	if err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
+		t.Fatalf("reconcileOrphanedScanJobs (second call, nothing to reconcile): %v", err)
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	cases := map[string]slog.Level{
 		"info": slog.LevelInfo, "debug": slog.LevelDebug,

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -67,6 +68,11 @@ func main() {
 			log.Error("close database", "err", err)
 		}
 	}()
+
+	if err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
+		log.Error("reconcile orphaned scan jobs", "err", err)
+		os.Exit(1)
+	}
 
 	if err := seedStorageLocations(ctx, database, cfg.StorageLocations); err != nil {
 		log.Error("seed storage locations", "err", err)
@@ -171,6 +177,38 @@ func main() {
 	// Drain waits for that to actually finish before the database closes.
 	pool.Drain()
 	log.Info("server stopped")
+}
+
+// reconcileOrphanedScanJobs moves every scan_jobs row still RUNNING to
+// FAILED before this process creates any scan_jobs row of its own --
+// neither seedStorageLocations nor anything before this call writes
+// scan_jobs, and the two producers that do (WatcherSupervisor.Start,
+// POST /api/v1/scan) both run later in startup -- so every RUNNING row
+// found here unambiguously predates this process. It was left behind by a
+// crash (SIGKILL, OOM-kill, container hard-stop, power loss), not
+// genuinely still in flight: a WATCH row is RUNNING for its entire process
+// lifetime by design, and a FULL_SCAN row only reaches a terminal state
+// via the same process that created it. Must run before
+// WatcherSupervisor.Start below, or a reconciled row and a fresh row for
+// the same location could momentarily both claim to represent "the" watch
+// state for it.
+func reconcileOrphanedScanJobs(ctx context.Context, database *db.DB, log *slog.Logger) error {
+	var n int64
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		n, err = q.ReconcileOrphanedScanJobs(ctx, sql.NullString{
+			String: "reconciled at startup: process restarted while this job was still RUNNING",
+			Valid:  true,
+		})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Warn("pipeline: reconciled orphaned scan_jobs rows from a previous process", "count", n)
+	}
+	return nil
 }
 
 // seedStorageLocations applies config.yaml's storageLocations list
