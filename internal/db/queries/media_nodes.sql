@@ -14,6 +14,37 @@ WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
+-- name: ListMediaNodesFiltered :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE (sqlc.narg('lifecycle_state') IS NULL OR lifecycle_state = sqlc.narg('lifecycle_state'))
+  AND (sqlc.narg('camera_model') IS NULL OR camera_model = sqlc.narg('camera_model'))
+  AND (sqlc.narg('graph_status') IS NULL OR graph_status = sqlc.narg('graph_status'))
+  AND (sqlc.narg('storage_location_id') IS NULL OR storage_location_id = sqlc.narg('storage_location_id'))
+ORDER BY id DESC
+LIMIT ?1 OFFSET ?2;
+
+-- name: CountMediaNodesFiltered :one
+SELECT COUNT(*)
+FROM media_nodes
+WHERE (sqlc.narg('lifecycle_state') IS NULL OR lifecycle_state = sqlc.narg('lifecycle_state'))
+  AND (sqlc.narg('camera_model') IS NULL OR camera_model = sqlc.narg('camera_model'))
+  AND (sqlc.narg('graph_status') IS NULL OR graph_status = sqlc.narg('graph_status'))
+  AND (sqlc.narg('storage_location_id') IS NULL OR storage_location_id = sqlc.narg('storage_location_id'));
+
+-- name: ListCameraModelFacets :many
+SELECT DISTINCT camera_model
+FROM media_nodes
+WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state != 'ARCHIVED'
+ORDER BY camera_model ASC;
+
+
 -- name: GetMediaNodeByID :one
 -- Includes archived rows, unlike GetLiveNodeByPath -- used to verify a
 -- superseded node's post-archive state (superseded_by, lifecycle_state).

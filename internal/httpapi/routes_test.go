@@ -893,6 +893,120 @@ func TestStorageHealth(t *testing.T) {
 	}
 }
 
+func TestFilteredAssetsAndFacets(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "scratch", RootPath: "/scratch", Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 1,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-c1", FilePath: "/scratch/c1.jpg", FileName: "c1.jpg", FileExt: ".jpg",
+			IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE", CameraModel: sql.NullString{String: "Sony A7IV", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-c2", FilePath: "/scratch/c2.jpg", FileName: "c2.jpg", FileExt: ".jpg",
+			IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE", CameraModel: sql.NullString{String: "Canon R5", Valid: true},
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed test nodes: %v", err)
+	}
+
+	// 1. Facets endpoint
+	rrFacets := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/facets", nil)
+	if rrFacets.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/assets/facets status = %d, want 200", rrFacets.Code)
+	}
+	var facets struct {
+		CameraModels []string `json:"cameraModels"`
+	}
+	if err := json.Unmarshal(rrFacets.Body.Bytes(), &facets); err != nil {
+		t.Fatalf("unmarshal facets: %v", err)
+	}
+	if len(facets.CameraModels) != 2 {
+		t.Errorf("got %d camera models, want 2", len(facets.CameraModels))
+	}
+
+	// 2. Filtered assets: unlinkedOnly=true
+	rrUnlinked := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets?unlinkedOnly=true", nil)
+	if rrUnlinked.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/assets?unlinkedOnly=true status = %d, want 200", rrUnlinked.Code)
+	}
+	var unlinkedRes struct {
+		Assets []assetDTO `json:"assets"`
+		Total  int64      `json:"total"`
+	}
+	if err := json.Unmarshal(rrUnlinked.Body.Bytes(), &unlinkedRes); err != nil {
+		t.Fatalf("unmarshal unlinked res: %v", err)
+	}
+	if len(unlinkedRes.Assets) != 1 || unlinkedRes.Total != 1 {
+		t.Errorf("unlinked filter got %d assets (total %d), want 1", len(unlinkedRes.Assets), unlinkedRes.Total)
+	}
+
+	// 3. Filtered assets: cameraModel=Canon R5
+	rrCamera := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets?cameraModel=Canon+R5", nil)
+	if rrCamera.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/assets?cameraModel=Canon+R5 status = %d, want 200", rrCamera.Code)
+	}
+	var cameraRes struct {
+		Assets []assetDTO `json:"assets"`
+		Total  int64      `json:"total"`
+	}
+	if err := json.Unmarshal(rrCamera.Body.Bytes(), &cameraRes); err != nil {
+		t.Fatalf("unmarshal camera res: %v", err)
+	}
+	if len(cameraRes.Assets) != 1 || cameraRes.Assets[0].CameraModel != "Canon R5" {
+		t.Errorf("camera filter got %+v, want Canon R5", cameraRes.Assets)
+	}
+}
+
+func TestListJobsFiltered(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: "/loc", Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 1,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: loc.ID, Valid: true}, Kind: "FULL_SCAN",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed scan job: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/jobs?kind=FULL_SCAN", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/jobs status = %d, want 200", rr.Code)
+	}
+
+	var res struct {
+		Jobs  []scanJobDTO `json:"jobs"`
+		Total int64        `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal jobs res: %v", err)
+	}
+
+	if len(res.Jobs) != 1 || res.Total != 1 || res.Jobs[0].Kind != "FULL_SCAN" {
+		t.Errorf("jobs filter got %+v (total %d), want 1 FULL_SCAN job", res.Jobs, res.Total)
+	}
+}
+
 func toStr(v int64) string {
 	return fmt.Sprintf("%d", v)
 }

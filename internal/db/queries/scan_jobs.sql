@@ -52,3 +52,18 @@ LIMIT ?1;
 
 -- name: CountRunningScanJobs :one
 SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH';
+
+-- name: ListScanJobsFiltered :many
+SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+FROM scan_jobs
+WHERE (sqlc.narg('kind') IS NULL OR kind = sqlc.narg('kind'))
+  AND (sqlc.narg('state') IS NULL OR state = sqlc.narg('state'))
+ORDER BY started_at DESC
+LIMIT ?1 OFFSET ?2;
+
+-- name: CountScanJobsFiltered :one
+SELECT COUNT(*)
+FROM scan_jobs
+WHERE (sqlc.narg('kind') IS NULL OR kind = sqlc.narg('kind'))
+  AND (sqlc.narg('state') IS NULL OR state = sqlc.narg('state'));

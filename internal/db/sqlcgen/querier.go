@@ -20,7 +20,9 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
+	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
+	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) error
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
@@ -68,6 +70,7 @@ type Querier interface {
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
+	ListCameraModelFacets(ctx context.Context) ([]string, error)
 	// Recursively list descendant node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
 	ListDescendants(ctx context.Context, id int64) ([]int64, error)
@@ -92,11 +95,13 @@ type Querier interface {
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
+	ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
+	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
 	// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,

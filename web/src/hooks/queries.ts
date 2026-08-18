@@ -17,10 +17,17 @@ export function useStorageLocations() {
   return useQuery({ queryKey: ["storage-locations"], queryFn: api.listStorageLocations });
 }
 
-export function useAssets(params: { limit?: number; offset?: number } = {}) {
+export function useAssets(params: import("../api/types").AssetQueryParams = {}) {
   return useQuery({
     queryKey: ["assets", params],
     queryFn: () => api.listAssets(params),
+  });
+}
+
+export function useAssetFacets() {
+  return useQuery({
+    queryKey: ["asset-facets"],
+    queryFn: api.getAssetFacets,
   });
 }
 
@@ -124,5 +131,13 @@ export function useStorageHealth() {
     queryKey: ["storage-health"],
     queryFn: api.getStorageHealth,
     refetchInterval: 10_000,
+  });
+}
+
+export function useJobs(params: import("../api/types").JobsQueryParams = {}) {
+  return useQuery({
+    queryKey: ["jobs", params],
+    queryFn: () => api.listJobs(params),
+    refetchInterval: 15_000,
   });
 }

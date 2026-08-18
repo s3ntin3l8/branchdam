@@ -619,6 +619,148 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 	return items, nil
 }
 
+const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
+SELECT COUNT(*)
+FROM media_nodes
+WHERE (?1 IS NULL OR lifecycle_state = ?1)
+  AND (?2 IS NULL OR camera_model = ?2)
+  AND (?3 IS NULL OR graph_status = ?3)
+  AND (?4 IS NULL OR storage_location_id = ?4)
+`
+
+type CountMediaNodesFilteredParams struct {
+	LifecycleState    sql.NullString
+	CameraModel       sql.NullString
+	GraphStatus       sql.NullString
+	StorageLocationID sql.NullInt64
+}
+
+func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMediaNodesFiltered,
+		arg.LifecycleState,
+		arg.CameraModel,
+		arg.GraphStatus,
+		arg.StorageLocationID,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const listCameraModelFacets = `-- name: ListCameraModelFacets :many
+SELECT DISTINCT camera_model
+FROM media_nodes
+WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state != 'ARCHIVED'
+ORDER BY camera_model ASC
+`
+
+func (q *Queries) ListCameraModelFacets(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listCameraModelFacets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var camera_model string
+		if err := rows.Scan(&camera_model); err != nil {
+			return nil, err
+		}
+		items = append(items, camera_model)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMediaNodesFiltered = `-- name: ListMediaNodesFiltered :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model
+FROM media_nodes
+WHERE (?3 IS NULL OR lifecycle_state = ?3)
+  AND (?4 IS NULL OR camera_model = ?4)
+  AND (?5 IS NULL OR graph_status = ?5)
+  AND (?6 IS NULL OR storage_location_id = ?6)
+ORDER BY id DESC
+LIMIT ?1 OFFSET ?2
+`
+
+type ListMediaNodesFilteredParams struct {
+	Limit             int64
+	Offset            int64
+	LifecycleState    sql.NullString
+	CameraModel       sql.NullString
+	GraphStatus       sql.NullString
+	StorageLocationID sql.NullInt64
+}
+
+func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listMediaNodesFiltered,
+		arg.Limit,
+		arg.Offset,
+		arg.LifecycleState,
+		arg.CameraModel,
+		arg.GraphStatus,
+		arg.StorageLocationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTier3Candidates = `-- name: ListTier3Candidates :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,

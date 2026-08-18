@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AuditEntry, Config, CreateEdgeInput, Edge, LineageResponse, Me, PathRewrite, ScanJob, StorageHealth, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, ScanJob, StorageHealth, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -35,12 +35,18 @@ export const api = {
 
   listStorageLocations: () => request<{ locations: StorageLocation[] }>("/api/v1/storage-locations"),
 
-  listAssets: (params: { limit?: number; offset?: number } = {}) => {
+  listAssets: (params: AssetQueryParams = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
-    return request<{ assets: Asset[] }>(`/api/v1/assets?${qs}`);
+    if (params.cameraModel) qs.set("cameraModel", params.cameraModel);
+    if (params.graphStatus) qs.set("graphStatus", params.graphStatus);
+    if (params.storageLocationId) qs.set("storageLocationId", String(params.storageLocationId));
+    if (params.lifecycleState) qs.set("lifecycleState", params.lifecycleState);
+    if (params.unlinkedOnly) qs.set("unlinkedOnly", "true");
+    return request<{ assets: Asset[]; total: number }>(`/api/v1/assets?${qs.toString()}`);
   },
+  getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
   getAssetGraph: (id: number) => request<AssetGraph>(`/api/v1/assets/${id}/graph`),
   getAssetLineage: (id: number | string, depth = 2) => request<LineageResponse>(`/api/v1/assets/${id}/lineage?depth=${depth}`),
@@ -65,6 +71,14 @@ export const api = {
       body: JSON.stringify({ storageLocationId }),
     }),
   listProgress: (limit = 10) => request<{ jobs: ScanJob[] }>(`/api/v1/progress?limit=${limit}`),
+  listJobs: (params: JobsQueryParams = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.state) qs.set("state", params.state);
+    return request<{ jobs: ScanJob[]; total: number }>(`/api/v1/jobs?${qs.toString()}`);
+  },
 
   getStorageHealth: () => request<StorageHealth>("/api/v1/storage-health"),
 };

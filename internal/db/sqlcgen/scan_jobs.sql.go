@@ -41,6 +41,25 @@ func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const countScanJobsFiltered = `-- name: CountScanJobsFiltered :one
+SELECT COUNT(*)
+FROM scan_jobs
+WHERE (?1 IS NULL OR kind = ?1)
+  AND (?2 IS NULL OR state = ?2)
+`
+
+type CountScanJobsFilteredParams struct {
+	Kind  interface{}
+	State interface{}
+}
+
+func (q *Queries) CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countScanJobsFiltered, arg.Kind, arg.State)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createScanJob = `-- name: CreateScanJob :one
 INSERT INTO scan_jobs (storage_location_id, kind, state, started_at, updated_at)
 VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch())
@@ -124,6 +143,64 @@ LIMIT ?1
 
 func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error) {
 	rows, err := q.db.QueryContext(ctx, listRecentScanJobs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ScanJob{}
+	for rows.Next() {
+		var i ScanJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.StorageLocationID,
+			&i.Kind,
+			&i.State,
+			&i.FilesSeen,
+			&i.FilesHashed,
+			&i.FilesFailed,
+			&i.EdgesCreated,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.LastError,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScanJobsFiltered = `-- name: ListScanJobsFiltered :many
+SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+FROM scan_jobs
+WHERE (?3 IS NULL OR kind = ?3)
+  AND (?4 IS NULL OR state = ?4)
+ORDER BY started_at DESC
+LIMIT ?1 OFFSET ?2
+`
+
+type ListScanJobsFilteredParams struct {
+	Limit  int64
+	Offset int64
+	Kind   interface{}
+	State  interface{}
+}
+
+func (q *Queries) ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error) {
+	rows, err := q.db.QueryContext(ctx, listScanJobsFiltered,
+		arg.Limit,
+		arg.Offset,
+		arg.Kind,
+		arg.State,
+	)
 	if err != nil {
 		return nil, err
 	}
