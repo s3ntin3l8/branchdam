@@ -308,7 +308,7 @@ func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB,
 		func(ctx context.Context, nodes []sync.Node) error {
 			return immichClient.TriggerScan(ctx)
 		}, log)
-	go worker.Run(ctx)
+	worker.Start(ctx)
 	log.Info("sync: immich worker started", "libraryID", cfg.Immich.LibraryID, "exportPath", exportPath)
 	return worker
 }

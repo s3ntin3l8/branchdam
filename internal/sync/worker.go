@@ -33,8 +33,8 @@ type Worker struct {
 	retryWindow time.Duration
 	push        PushFunc
 	log         *slog.Logger
-	// wg tracks the Run goroutine so Wait can join it before the database
-	// closes during shutdown.
+	// wg tracks the run goroutine started by Start so Wait can join it before
+	// the database closes during shutdown.
 	wg sync.WaitGroup
 }
 
@@ -53,13 +53,19 @@ func NewWorker(manager *Manager, remote, exportPath string, batchSize int, inter
 		push: push, log: log}
 }
 
-// Run blocks until ctx is cancelled. Call in a goroutine from main.go.
-func (w *Worker) Run(ctx context.Context) {
-	w.wg.Add(1)
-	defer w.wg.Done()
+// Start launches the drain loop in a goroutine that Wait joins. Safe to call
+// once. Returns immediately if there is nothing to run (nil manager or empty
+// exportPath) -- in that case Wait has nothing to join.
+func (w *Worker) Start(ctx context.Context) {
 	if w.manager == nil || w.exportPath == "" {
 		return
 	}
+	w.wg.Add(1)
+	go w.run(ctx)
+}
+
+func (w *Worker) run(ctx context.Context) {
+	defer w.wg.Done()
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	w.drain(ctx)
@@ -73,8 +79,8 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// Wait blocks until the Run goroutine has returned. Call during shutdown,
-// after ctx is cancelled, before the database closes.
+// Wait blocks until the goroutine started by Start has returned. Call during
+// shutdown, after ctx is cancelled, before the database closes.
 func (w *Worker) Wait() { w.wg.Wait() }
 
 func (w *Worker) drain(ctx context.Context) {
