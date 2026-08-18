@@ -11,9 +11,6 @@ import (
 )
 
 const listAncestors = `-- name: ListAncestors :many
-;
-
-
 WITH RECURSIVE ancestors(id) AS (
     SELECT ?1 AS id
     UNION
@@ -24,20 +21,20 @@ WITH RECURSIVE ancestors(id) AS (
     WHERE e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
-SELECT ancestors.id FROM ancestor
+SELECT ancestors.id FROM ancestors
 `
 
 // Recursively list ancestor node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]interface{}, error) {
+func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]int64, error) {
 	rows, err := q.db.QueryContext(ctx, listAncestors, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []interface{}{}
+	items := []int64{}
 	for rows.Next() {
-		var id interface{}
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
@@ -116,8 +113,6 @@ func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) 
 }
 
 const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
-;
-
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
        sn.file_name AS source_file_name, sn.file_path AS source_file_path,
@@ -207,8 +202,6 @@ func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueue
 }
 
 const listDescendants = `-- name: ListDescendants :many
-;
-
 WITH RECURSIVE descendants(id) AS (
     SELECT ?1 AS id
     UNION
@@ -224,15 +217,15 @@ SELECT descendants.id FROM descendants
 
 // Recursively list descendant node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]interface{}, error) {
+func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]int64, error) {
 	rows, err := q.db.QueryContext(ctx, listDescendants, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []interface{}{}
+	items := []int64{}
 	for rows.Next() {
-		var id interface{}
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
@@ -248,8 +241,6 @@ func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]interface{},
 }
 
 const listEdgesForNodes = `-- name: ListEdgesForNodes :many
-;
-
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        review_state, resolver
 FROM media_edges
@@ -268,7 +259,7 @@ type ListEdgesForNodesRow struct {
 	Resolver         string
 }
 
-func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach interface{}) ([]ListEdgesForNodesRow, error) {
+func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error) {
 	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, jsonEach)
 	if err != nil {
 		return nil, err
@@ -300,8 +291,6 @@ func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach interface{}) (
 }
 
 const listNodesByIDs = `-- name: ListNodesByIDs :many
-;
-
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -314,7 +303,7 @@ WHERE id IN (SELECT value FROM json_each(?1))
   AND lifecycle_state <> 'ARCHIVED'
 `
 
-func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach interface{}) ([]MediaNode, error) {
+func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listNodesByIDs, jsonEach)
 	if err != nil {
 		return nil, err
