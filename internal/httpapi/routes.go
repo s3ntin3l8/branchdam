@@ -17,6 +17,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/metadata"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
@@ -1043,33 +1044,13 @@ func reviewerName(ctx context.Context) sql.NullString {
 	return sql.NullString{String: p.Name, Valid: true}
 }
 
-// recomputeGraphStatus re-derives nodeID's graph_status from ALL of its
-// current live parent edges (ListEdgesByTarget), not just the one edge a
-// confirm/reject call just touched -- a human decision on one candidate
-// says nothing by itself about whether the node overall is linked. Mirrors
-// internal/graph.Engine.ResolveAndCommit's LINKED/NEEDS_REVIEW precedence
-// (an AUTO_ACCEPTED or CONFIRMED edge wins outright; a REJECTED edge is
-// never enough on its own to justify NEEDS_REVIEW), extended with the
-// no-edges-at-all-considered case Engine never has to handle (it only ever
-// runs after at least one candidate existed): if every edge is REJECTED,
-// or the node has none, the status reverts to UNLINKED rather than being
-// left stuck at whatever it was before.
+// recomputeGraphStatus delegates to graph.RecomputeStatusFromPersistedEdges,
+// which now also backs internal/agent's applyEdgeAttached -- see that
+// function's doc comment for why this is a distinct computation from
+// Engine.ResolveAndCommit's inline status update, and not something to
+// "unify" with it.
 func recomputeGraphStatus(ctx context.Context, q *sqlcgen.Queries, nodeID int64) error {
-	edges, err := q.ListEdgesByTarget(ctx, nodeID)
-	if err != nil {
-		return fmt.Errorf("list edges for graph_status recompute: %w", err)
-	}
-	status := "UNLINKED"
-	for _, e := range edges {
-		if e.ReviewState == "AUTO_ACCEPTED" || e.ReviewState == "CONFIRMED" {
-			status = "LINKED"
-			break
-		}
-		if e.ReviewState != "REJECTED" {
-			status = "NEEDS_REVIEW"
-		}
-	}
-	return q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{ID: nodeID, GraphStatus: status})
+	return graph.RecomputeStatusFromPersistedEdges(ctx, q, nodeID)
 }
 
 func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
@@ -1453,10 +1434,20 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		mtime = time.Now().Unix()
 	}
 
+	var archivedNode bool
 	out := &AgentRebaseOutput{}
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, err := q.GetMediaNodeByUUID(ctx, in.Body.NodeUUID)
 		if err == nil {
+			// An ARCHIVED node is a superseded version. RebaseNodePathByUUID
+			// sets lifecycle_state='ACTIVE' unconditionally with no
+			// lifecycle filter of its own -- rebasing here would resurrect
+			// it. Refuse before that happens, same as internal/agent's
+			// drainer for the two event-driven rebase paths.
+			if existing.LifecycleState == "ARCHIVED" {
+				archivedNode = true
+				return nil
+			}
 			// Known node: rebase path in place, preserving id, content hashes, and lineage edges.
 			// Note: Content hashes are not overwritten on path rebase; only location/path/mtime are updated.
 			if err := q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
@@ -1516,6 +1507,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("rebase operation failed", err)
+	}
+	if archivedNode {
+		return nil, huma.Error404NotFound("asset not found")
 	}
 
 	return out, nil

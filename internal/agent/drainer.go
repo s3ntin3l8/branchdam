@@ -14,6 +14,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -107,10 +108,16 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		}
 
 		// Handle error: check if fatal poison-pill or exceeded retry limit.
+		// ErrArchivedNode and ErrWouldCreateCycle join the fatal set for the
+		// same reason as the rest: retrying doesn't change the outcome --
+		// an ARCHIVED node doesn't un-archive itself and the graph doesn't
+		// un-cycle itself.
 		isFatal := errors.Is(processErr, ErrMalformedPayload) ||
 			errors.Is(processErr, ErrUnknownEventType) ||
 			errors.Is(processErr, ErrInvalidNodeUUID) ||
 			errors.Is(processErr, ErrReadOnlyRebase) ||
+			errors.Is(processErr, ErrArchivedNode) ||
+			errors.Is(processErr, ErrWouldCreateCycle) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
 		attempts := int(ev.RetryCount) + 1
@@ -245,20 +252,21 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		return fmt.Errorf("lookup node by uuid: %w", err)
 	}
 
-	// Resolve storage location if needed.
-	locID := p.StorageLocationID
-	if d.guard != nil {
-		loc, err := d.guard.Resolve(p.FilePath)
-		if err != nil && locID == 0 {
-			return fmt.Errorf("%w: file path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
-		}
-		if err == nil {
-			locID = loc.ID
-		}
+	// storage_location_id always comes from Guard.Resolve(FilePath), never
+	// from the payload -- storage.Guard exposes no lookup-by-ID, so a
+	// payload-supplied StorageLocationID is fundamentally unverifiable and
+	// is ignored (see NodeCreatedPayload.StorageLocationID). A nil guard is
+	// a server misconfiguration, not a poison-pill payload, so it's a
+	// plain (non-fatal) error: the event stays PENDING/retries rather than
+	// being marked FAILED for a problem the payload didn't cause.
+	if d.guard == nil {
+		return fmt.Errorf("agent: storage guard not configured, deferring node create for %q", p.FilePath)
 	}
-	if locID == 0 {
-		locID = 1
+	loc, err := d.guard.Resolve(p.FilePath)
+	if err != nil {
+		return fmt.Errorf("%w: file path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
 	}
+	locID := loc.ID
 
 	fileName := p.FileName
 	if fileName == "" {
@@ -325,7 +333,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		mtime = time.Now().Unix()
 	}
 
-	_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+	_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           p.NodeUUID,
 		StorageLocationID:  locID,
 		FilePath:           p.FilePath,
@@ -384,10 +392,6 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 	if p.RelationshipType == "" {
 		p.RelationshipType = "DERIVED_FROM"
 	}
-	confidence := p.Confidence
-	if confidence <= 0 {
-		confidence = 1.0
-	}
 	tier := p.Tier
 	if tier <= 0 {
 		tier = 1
@@ -400,18 +404,62 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 	if evidenceJSON == "" {
 		evidenceJSON = "{}"
 	}
-	reviewState := p.ReviewState
-	if reviewState == "" {
+
+	// A human review decision (CONFIRMED/REJECTED) is never the agent's to
+	// make -- reject it loudly rather than let it silently fail the
+	// reviewed_at CHECK constraint as an opaque "constraint failed".
+	if p.ReviewState == "CONFIRMED" || p.ReviewState == "REJECTED" {
+		return fmt.Errorf("%w: reviewState %q is a human-only review decision, not settable by an agent event", ErrMalformedPayload, p.ReviewState)
+	}
+
+	// confidence and review_state are never taken from the payload as-is:
+	// an agent minting its own AUTO_ACCEPTED at any confidence would bypass
+	// graph.AutoAcceptThresholdForTier, the same per-tier threshold every
+	// other resolver is held to. Require an explicit, in-range confidence
+	// and derive review_state exactly as graph.Engine does.
+	if p.Confidence <= 0 || p.Confidence > 1 {
+		return fmt.Errorf("%w: confidence must be in (0, 1], got %v", ErrMalformedPayload, p.Confidence)
+	}
+	if p.Confidence < graph.NeedsReviewFloor {
+		return fmt.Errorf("%w: confidence %v is below needsReviewFloor %v, refusing to create edge", ErrMalformedPayload, p.Confidence, graph.NeedsReviewFloor)
+	}
+	reviewState := "NEEDS_REVIEW"
+	if p.Confidence >= graph.AutoAcceptThresholdForTier(int(tier)) {
 		reviewState = "AUTO_ACCEPTED"
 	}
 
-	// Create edge. If edge already exists with this source, target, and relationship,
-	// CreateMediaEdge or conflict handling ensures idempotency.
-	_, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+	// Cycle guard: applyEdgeAttached is otherwise the only edge-creation
+	// path in the codebase without one (graph.Engine has it at the
+	// candidate-merge step, the manual-edge HTTP route has it too). The
+	// schema only blocks a direct self-loop; a longer cycle is Go-side
+	// only. Parent=source, child=target -- verified against both existing
+	// callers (graph.Engine and the manual-edge route agree on that
+	// mapping).
+	wouldCycle, err := q.WouldCreateCycle(ctx, sqlcgen.WouldCreateCycleParams{
+		ParentNodeID: sourceID,
+		ChildNodeID:  targetID,
+	})
+	if err != nil {
+		return fmt.Errorf("cycle check %d->%d: %w", sourceID, targetID, err)
+	}
+	if wouldCycle {
+		return fmt.Errorf("%w: %d->%d (%s)", ErrWouldCreateCycle, sourceID, targetID, p.RelationshipType)
+	}
+
+	// Create edge. CreateMediaEdge has no ON CONFLICT by design: a UNIQUE
+	// violation below (already-exists) is swallowed as idempotent success
+	// rather than upserted, which is what preserves the human
+	// CONFIRMED/REJECTED invariant here -- an agent event can never
+	// overwrite a human-reviewed edge's confidence/evidence, only no-op
+	// against it. UpsertMediaEdge's ON CONFLICT ... WHERE review_state NOT
+	// IN (...) exists for exactly that guarantee; this reaches the same
+	// place by a different mechanism. A side effect: an agent re-sending
+	// the same edge with different evidence never refreshes it.
+	_, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
 		SourceNodeID:     sourceID,
 		TargetNodeID:     targetID,
 		RelationshipType: p.RelationshipType,
-		Confidence:       confidence,
+		Confidence:       p.Confidence,
 		Tier:             tier,
 		Resolver:         resolver,
 		EvidenceJson:     evidenceJSON,
@@ -419,12 +467,17 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 	})
 	if err != nil {
 		// SQLite UNIQUE constraint violation -> already exists, treat as idempotent success.
-		if isDuplicateEdgeError(err) {
-			return nil
+		if !isDuplicateEdgeError(err) {
+			return fmt.Errorf("insert media edge: %w", err)
 		}
-		return fmt.Errorf("insert media edge: %w", err)
 	}
-	return nil
+
+	// graph_status must be recomputed from ALL of the target's live parent
+	// edges, not just this one -- see RecomputeStatusFromPersistedEdges's
+	// doc comment. Runs on both the fresh-insert and idempotent-duplicate
+	// paths so a target left UNLINKED by a pre-fix run of this code self-heals
+	// on the next retry of the same event.
+	return graph.RecomputeStatusFromPersistedEdges(ctx, q, targetID)
 }
 
 func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
@@ -446,20 +499,31 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 		}
 		return fmt.Errorf("lookup node for move: %w", err)
 	}
+	// An ARCHIVED node is a superseded version. RebaseNodePathByUUID sets
+	// lifecycle_state='ACTIVE' unconditionally with no lifecycle filter of
+	// its own -- rebasing here would resurrect it, silently if the target
+	// path happens to be free (loudly, via a CHECK/unique-index failure,
+	// otherwise). Refuse before that happens.
+	if node.LifecycleState == "ARCHIVED" {
+		return fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
+	}
 
-	locID := p.NewStorageLocationID
-	if d.guard != nil {
-		loc, err := d.guard.Resolve(p.NewFilePath)
-		if err == nil {
-			if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
-				return fmt.Errorf("%w: move target %q resolves to read-only tier %s", ErrReadOnlyRebase, p.NewFilePath, loc.Tier)
-			}
-			locID = loc.ID
-		}
+	// storage_location_id always comes from Guard.Resolve(NewFilePath),
+	// never from the payload or the node's prior location -- see
+	// NodeCreatedPayload.StorageLocationID for why a payload-supplied ID is
+	// unverifiable. Resolve failure and a nil guard are both refused rather
+	// than silently defaulted, matching handleAgentRebase's HTTP behavior.
+	if d.guard == nil {
+		return fmt.Errorf("agent: storage guard not configured, deferring node move for %q", p.NewFilePath)
 	}
-	if locID == 0 {
-		locID = node.StorageLocationID
+	loc, err := d.guard.Resolve(p.NewFilePath)
+	if err != nil {
+		return fmt.Errorf("%w: move target %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.NewFilePath, err)
 	}
+	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+		return fmt.Errorf("%w: move target %q resolves to read-only tier %s", ErrReadOnlyRebase, p.NewFilePath, loc.Tier)
+	}
+	locID := loc.ID
 
 	fileName := p.NewFileName
 	if fileName == "" {
@@ -512,22 +576,22 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		return fmt.Errorf("%w: missing targetFilePath in path rebased payload", ErrMalformedPayload)
 	}
 
-	locID := p.TargetStorageLocationID
-	if d.guard != nil {
-		loc, err := d.guard.Resolve(p.TargetFilePath)
-		if err != nil && locID == 0 {
-			return fmt.Errorf("%w: target path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.TargetFilePath, err)
-		}
-		if err == nil {
-			if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
-				return fmt.Errorf("%w: %q resolves to read-only tier %s", ErrReadOnlyRebase, p.TargetFilePath, loc.Tier)
-			}
-			locID = loc.ID
-		}
+	// storage_location_id always comes from Guard.Resolve(TargetFilePath),
+	// never from the payload -- see NodeCreatedPayload.StorageLocationID.
+	// Resolve failure and a nil guard are both refused, matching
+	// handleAgentRebase's HTTP behavior; there is no locID==0 fallback to a
+	// magic default location.
+	if d.guard == nil {
+		return fmt.Errorf("agent: storage guard not configured, deferring path rebase for %q", p.TargetFilePath)
 	}
-	if locID == 0 {
-		locID = 1
+	loc, err := d.guard.Resolve(p.TargetFilePath)
+	if err != nil {
+		return fmt.Errorf("%w: target path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.TargetFilePath, err)
 	}
+	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+		return fmt.Errorf("%w: %q resolves to read-only tier %s", ErrReadOnlyRebase, p.TargetFilePath, loc.Tier)
+	}
+	locID := loc.ID
 
 	fileName := p.TargetFileName
 	if fileName == "" {
@@ -538,9 +602,14 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		mtime = time.Now().Unix()
 	}
 
-	_, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	existing, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
 	if err == nil {
-		// Existing node: rebase path in place.
+		// Existing node: rebase path in place. Refuse an ARCHIVED node for
+		// the same reason as applyNodeMoved -- RebaseNodePathByUUID would
+		// resurrect a superseded version.
+		if existing.LifecycleState == "ARCHIVED" {
+			return fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
+		}
 		return q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
 			NodeUuid:          p.NodeUUID,
 			FilePath:          p.TargetFilePath,
@@ -587,7 +656,8 @@ func isDuplicateEdgeError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed: media_edges") ||
-		strings.Contains(msg, "UNIQUE constraint failed")
+	// Scoped to media_edges specifically -- a bare "UNIQUE constraint
+	// failed" match here would swallow any unique violation this function
+	// might ever see, not just an already-exists edge.
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: media_edges")
 }

@@ -24,11 +24,25 @@ var (
 	ErrNodeNotFound     = errors.New("agent: media node not found")
 	ErrInvalidNodeUUID  = errors.New("agent: invalid or empty node_uuid")
 	ErrReadOnlyRebase   = errors.New("agent: rebase target resolves to read-only tier")
+
+	// ErrArchivedNode is fatal, not transient: an ARCHIVED node never
+	// becomes un-archived by retrying. Rebasing one in place would resurrect
+	// a superseded version -- see RebaseNodePathByUUID's lack of a
+	// lifecycle_state guard and media_nodes' superseded_by/ARCHIVED CHECK.
+	ErrArchivedNode = errors.New("agent: node is archived, refusing to rebase")
+
+	// ErrWouldCreateCycle is fatal, not transient: the graph does not
+	// un-cycle itself by retrying the same edge.
+	ErrWouldCreateCycle = errors.New("agent: edge would create a cycle")
 )
 
 // NodeCreatedPayload represents the payload for EVENT_NODE_CREATED.
 type NodeCreatedPayload struct {
-	NodeUUID           string  `json:"nodeUuid"`
+	NodeUUID string `json:"nodeUuid"`
+	// StorageLocationID is deprecated and ignored: storage_location_id is
+	// always derived from FilePath via storage.Guard.Resolve, the only
+	// verifiable source -- Guard exposes no lookup-by-ID, so an
+	// agent-supplied ID is fundamentally unverifiable.
 	StorageLocationID  int64   `json:"storageLocationId,omitempty"`
 	FilePath           string  `json:"filePath"`
 	FileName           string  `json:"fileName,omitempty"`
@@ -59,16 +73,24 @@ type EdgeAttachedPayload struct {
 	Tier             int64           `json:"tier,omitempty"`
 	Resolver         string          `json:"resolver,omitempty"`
 	EvidenceJSON     json.RawMessage `json:"evidenceJson,omitempty"`
-	ReviewState      string          `json:"reviewState,omitempty"`
+
+	// ReviewState is deprecated and ignored: review_state is now always
+	// derived from (Confidence, Tier) via graph.AutoAcceptThresholdForTier,
+	// the same way every other resolver's candidate is judged. A human
+	// review decision (CONFIRMED/REJECTED) is never the agent's to make.
+	// The field is kept so an existing agent payload still parses.
+	ReviewState string `json:"reviewState,omitempty"`
 }
 
 // NodeMovedPayload represents the payload for EVENT_NODE_MOVED.
 type NodeMovedPayload struct {
-	NodeUUID             string `json:"nodeUuid"`
-	NewFilePath          string `json:"newFilePath"`
-	NewFileName          string `json:"newFileName,omitempty"`
-	NewStorageLocationID int64  `json:"newStorageLocationId,omitempty"`
-	MtimeUnix            int64  `json:"mtimeUnix,omitempty"`
+	NodeUUID    string `json:"nodeUuid"`
+	NewFilePath string `json:"newFilePath"`
+	NewFileName string `json:"newFileName,omitempty"`
+	// NewStorageLocationID is deprecated and ignored -- see
+	// NodeCreatedPayload.StorageLocationID.
+	NewStorageLocationID int64 `json:"newStorageLocationId,omitempty"`
+	MtimeUnix            int64 `json:"mtimeUnix,omitempty"`
 }
 
 // NodeDeletedPayload represents the payload for EVENT_NODE_DELETED.
@@ -78,9 +100,11 @@ type NodeDeletedPayload struct {
 
 // PathRebasedPayload represents the payload for EVENT_PATH_REBASED.
 type PathRebasedPayload struct {
-	NodeUUID                string  `json:"nodeUuid"`
-	TargetFilePath          string  `json:"targetFilePath"`
-	TargetFileName          string  `json:"targetFileName,omitempty"`
+	NodeUUID       string `json:"nodeUuid"`
+	TargetFilePath string `json:"targetFilePath"`
+	TargetFileName string `json:"targetFileName,omitempty"`
+	// TargetStorageLocationID is deprecated and ignored -- see
+	// NodeCreatedPayload.StorageLocationID.
 	TargetStorageLocationID int64   `json:"targetStorageLocationId,omitempty"`
 	MtimeUnix               int64   `json:"mtimeUnix,omitempty"`
 	FastHash                *string `json:"fastHash,omitempty"`

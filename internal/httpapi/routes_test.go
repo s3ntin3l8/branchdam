@@ -2037,3 +2037,60 @@ func TestPickWinningParentTieBreaksByID(t *testing.T) {
 		t.Errorf("winning edge id = %d, want 1 (higher confidence beats the tie-break)", got.ID)
 	}
 }
+
+func TestAgentRebase_RefusesArchivedNode(t *testing.T) {
+	srv, database, _, staging, exports, _ := serverWithGuard(t)
+	ctx := context.Background()
+
+	archivedUUID := "018f0000-0000-7000-8000-0000000000aa"
+	originalPath := filepath.Join(staging, "old_version.mov")
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          archivedUUID,
+			StorageLocationID: 1,
+			FilePath:          originalPath,
+			FileName:          "old_version.mov",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		if err != nil {
+			return err
+		}
+		return q.ArchiveMediaNode(ctx, n.ID)
+	})
+	if err != nil {
+		t.Fatalf("seed archived node: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   archivedUUID,
+		"targetPath": filepath.Join(exports, "resurrected.mov"),
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("rebase of archived node status = %d, want 404 Not Found, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// The row must be untouched: still ARCHIVED, still at its original path.
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.GetMediaNodeByUUID(ctx, archivedUUID)
+		if err != nil {
+			return err
+		}
+		if node.LifecycleState != "ARCHIVED" {
+			t.Errorf("archived node lifecycle_state = %q, want ARCHIVED", node.LifecycleState)
+		}
+		if node.FilePath != originalPath {
+			t.Errorf("archived node file_path = %q, want unchanged %q", node.FilePath, originalPath)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify archived node untouched: %v", err)
+	}
+}

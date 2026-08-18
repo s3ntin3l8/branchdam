@@ -77,11 +77,21 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
   ```
 
 #### C. The Five Event Payloads (`payload` JSON)
+
+> **`storageLocationId` / `newStorageLocationId` / `targetStorageLocationId` are advisory and
+> ignored.** `storage.Guard` exposes no lookup-by-ID, so a payload-supplied location ID is
+> fundamentally unverifiable server-side; `storage_location_id` is always re-derived from the
+> event's own file path via `storage.Guard.Resolve`. The fields are kept in the wire format so
+> an existing agent payload still parses, but the server never trusts them. Similarly,
+> `EVENT_EDGE_ATTACHED`'s `reviewState` is advisory and ignored for `AUTO_ACCEPTED`/empty (the
+> server always derives `AUTO_ACCEPTED` vs. `NEEDS_REVIEW` from `confidence` and `tier` via the
+> same per-tier threshold every other resolver uses) and is an outright error for
+> `CONFIRMED`/`REJECTED` -- a human review decision is never the agent's to make.
+
 1. **`EVENT_NODE_CREATED`:**
    ```json
    {
      "nodeUuid": "018f...",
-     "storageLocationId": 1,
      "filePath": "/storage/staging/raw_001.arw",
      "fileName": "raw_001.arw",
      "fileExt": ".arw",
@@ -93,7 +103,8 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
      "lensModel": "FE 24-70mm F2.8 GM II"
    }
    ```
-2. **`EVENT_EDGE_ATTACHED`:**
+2. **`EVENT_EDGE_ATTACHED`:** `confidence` is required, in `(0, 1]`, and must be `>=` the
+   `needsReviewFloor` (0.50) or the event fails outright.
    ```json
    {
      "sourceNodeUuid": "018f...-parent",
