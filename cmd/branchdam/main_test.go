@@ -218,12 +218,15 @@ func TestWaitBounded(t *testing.T) {
 		defer cancel()
 
 		completed := false
-		waitBounded(ctx, log, "quickComponent", func() {
+		ok := waitBounded(ctx, log, "quickComponent", func() {
 			completed = true
 		})
 
 		if !completed {
 			t.Errorf("expected waitBounded function to complete")
+		}
+		if !ok {
+			t.Error("waitBounded returned false, want true (the func returned well within the deadline)")
 		}
 		if bytes.Contains(buf.Bytes(), []byte("shutdown wait timed out")) {
 			t.Errorf("unexpected timeout warning in logs")
@@ -240,13 +243,16 @@ func TestWaitBounded(t *testing.T) {
 		defer close(slowDone)
 
 		start := time.Now()
-		waitBounded(ctx, log, "slowComponent", func() {
+		ok := waitBounded(ctx, log, "slowComponent", func() {
 			<-slowDone
 		})
 		elapsed := time.Since(start)
 
 		if elapsed < 40*time.Millisecond || elapsed > 500*time.Millisecond {
 			t.Errorf("waitBounded did not respect context deadline: took %v", elapsed)
+		}
+		if ok {
+			t.Error("waitBounded returned true, want false (the func never returned)")
 		}
 		if !bytes.Contains(buf.Bytes(), []byte("shutdown wait timed out")) {
 			t.Errorf("expected timeout log warning, got: %s", buf.String())
@@ -255,4 +261,27 @@ func TestWaitBounded(t *testing.T) {
 			t.Errorf("expected component name in log output, got: %s", buf.String())
 		}
 	})
+}
+
+// TestCloseDatabaseSkipsCloseWhenUnsafe is the invariant this fix is really
+// about: when a shutdown wait times out, a background goroutine may still
+// hold the writer connection, so the database must stay open rather than
+// racing it -- closeDatabase is main()'s single database.Close() call site.
+func TestCloseDatabaseSkipsCloseWhenUnsafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "close-skip.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	log := slog.New(slog.DiscardHandler)
+
+	closeDatabase(log, database, true) // unsafe=true: must NOT close
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error { return nil }); err != nil {
+		t.Fatalf("database still unusable after a skipped close: %v", err)
+	}
+
+	closeDatabase(log, database, false) // unsafe=false: must close
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error { return nil }); err == nil {
+		t.Fatal("database.InTx succeeded after closeDatabase(unsafe=false) -- want the database actually closed")
+	}
 }
