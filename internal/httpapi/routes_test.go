@@ -1122,6 +1122,95 @@ func TestRejectEdgeRecomputesGraphStatus(t *testing.T) {
 	}
 }
 
+// TestRejectEdgeRecomputesGraphStatus_MixedEdges verifies that when a node
+// has multiple parent candidate edges, rejecting one while another remains
+// pending (NEEDS_REVIEW) recomputes graph_status to NEEDS_REVIEW (not UNLINKED).
+func TestRejectEdgeRecomputesGraphStatus_MixedEdges(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var loc sqlcgen.StorageLocation
+	var n1, n2, n3 sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: t.Name(), RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		n1, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-" + t.Name() + "-1", FilePath: "/p1-" + t.Name() + ".raw",
+			FileName: "p1.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		n2, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-" + t.Name() + "-2", FilePath: "/target-" + t.Name() + ".jpg",
+			FileName: "target.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		n3, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-" + t.Name() + "-3", FilePath: "/p2-" + t.Name() + ".raw",
+			FileName: "p2.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	var edge1, edge2 sqlcgen.MediaEdge
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		edge1, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: n1.ID, TargetNodeID: n2.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.95, Tier: 1, Resolver: "test", ReviewState: "AUTO_ACCEPTED",
+		})
+		if err != nil {
+			return err
+		}
+		edge2, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: n3.ID, TargetNodeID: n2.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.60, Tier: 2, Resolver: "test", ReviewState: "NEEDS_REVIEW",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed edges: %v", err)
+	}
+
+	// Reject edge1 (the AUTO_ACCEPTED one). Edge2 is still pending (NEEDS_REVIEW).
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/reject", edge1.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reject status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	after, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target after reject: %v", err)
+	}
+	if after.GraphStatus != "NEEDS_REVIEW" {
+		t.Errorf("target graph_status after reject = %q, want NEEDS_REVIEW (edge2 is still pending review)", after.GraphStatus)
+	}
+
+	// 2. Reject edge2 as well: all parent candidate edges are now REJECTED -> graph_status reverts to UNLINKED.
+	rr2 := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/reject", edge2.ID), nil)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("reject edge2 status = %d, want 200, body = %s", rr2.Code, rr2.Body.String())
+	}
+
+	afterAllRejected, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target after all rejected: %v", err)
+	}
+	if afterAllRejected.GraphStatus != "UNLINKED" {
+		t.Errorf("target graph_status after all edges rejected = %q, want UNLINKED", afterAllRejected.GraphStatus)
+	}
+}
+
 func TestStorageHealth(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()
