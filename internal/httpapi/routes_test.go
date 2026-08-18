@@ -876,6 +876,21 @@ func TestStorageHealth(t *testing.T) {
 	if !invalidLoc.IsDegraded || invalidLoc.DegradedMessage == nil {
 		t.Errorf("invalid location should be degraded: %+v", invalidLoc)
 	}
+
+	if got.Queues.WorkerPoolCapacity != 16 {
+		t.Errorf("got WorkerPoolCapacity = %d, want 16", got.Queues.WorkerPoolCapacity)
+	}
+
+	if got.Queues.RunningScanJobs != 0 {
+		t.Errorf("got RunningScanJobs = %d, want 0", got.Queues.RunningScanJobs)
+	}
+
+	// Verify server with nil pool handles request cleanly
+	nilPoolServer := New(Deps{DB: database})
+	rrNil := doJSON(t, nilPoolServer.Handler(), http.MethodGet, "/api/v1/storage-health", nil)
+	if rrNil.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/storage-health nil pool status = %d, want 200", rrNil.Code)
+	}
 }
 
 func toStr(v int64) string {

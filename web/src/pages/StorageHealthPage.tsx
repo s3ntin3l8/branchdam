@@ -23,6 +23,11 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
           <p className="mt-1 text-xs font-mono text-neutral-400 break-all">{loc.rootPath}</p>
         </div>
         <div className="flex flex-wrap gap-1.5 justify-end">
+          {!loc.isActive && (
+            <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs font-medium text-neutral-400 border border-neutral-700">
+              INACTIVE
+            </span>
+          )}
           {loc.isDegraded ? (
             <span className="rounded bg-red-950 px-2 py-0.5 text-xs font-medium text-red-300 border border-red-800">
               DEGRADED

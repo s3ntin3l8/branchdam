@@ -51,4 +51,4 @@ ORDER BY started_at DESC
 LIMIT ?1;
 
 -- name: CountRunningScanJobs :one
-SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING';
+SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH';

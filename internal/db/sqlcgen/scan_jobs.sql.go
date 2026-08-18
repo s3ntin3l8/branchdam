@@ -31,7 +31,7 @@ func (q *Queries) CompleteScanJob(ctx context.Context, id int64) error {
 }
 
 const countRunningScanJobs = `-- name: CountRunningScanJobs :one
-SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING'
+SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
 `
 
 func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
