@@ -332,7 +332,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	}
 	log.Info("pipeline: scan complete", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"inserted", total.Inserted, "touched", total.Touched, "versionCollisions", total.VersionCollisions,
-		"moved", total.Moved, "edgesCreated", total.EdgesCreated)
+		"moved", total.Moved, "edgesCreated", total.EdgesCreated, "metadataWritten", total.MetadataWritten)
 }
 
 // drainAndCommit reads results as they arrive and commits every batchSize
@@ -358,6 +358,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 			total.Touched += stats.Touched
 			total.VersionCollisions += stats.VersionCollisions
 			total.Moved += stats.Moved
+			total.MetadataWritten += stats.MetadataWritten
 			if err != nil {
 				// The whole batch failed to land -- every path in it stays
 				// seen-but-uncertain and must be excluded from the MISSING

@@ -1054,6 +1054,53 @@ func TestDrainAndCommitReportsFilesSeenOnEmptyTick(t *testing.T) {
 	<-done
 }
 
+// TestDrainAndCommitAggregatesMetadataWritten backs #105's hermes-review
+// follow-up: drainAndCommit's returned Stats must roll up MetadataWritten
+// across every committed batch the same way it already does for
+// Inserted/Touched/VersionCollisions/Moved/EdgesCreated, not silently drop
+// it -- the aggregate is what runScan's completion log line reports.
+func TestDrainAndCommitAggregatesMetadataWritten(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, t.TempDir())
+
+	// Seed a node with one metadata key already stored, so the batch below
+	// takes the touched (reconcile) branch, not insert.
+	seeded := Result{
+		Path: "/seeded.jpg", FileName: "seeded.jpg", FileExt: "jpg",
+		Size: 10, ModTime: time.Now(), FastHash: "cccccccccccccccc",
+		ExifRaw: map[string]string{"EXIF:ISO": "100"},
+	}
+	if _, err := Commit(ctx, database, locationID, []Result{seeded}); err != nil {
+		t.Fatalf("seed Commit: %v", err)
+	}
+
+	jobID := seedScanJob(t, database, locationID)
+	results := make(chan Result, 1)
+	var filesSeen, filesFailed atomic.Int32
+	uncertain := newUncertainPaths()
+	deps := ScanDeps{DB: database}
+
+	done := make(chan Stats, 1)
+	go func() {
+		done <- drainAndCommit(ctx, deps, locationID, jobID, results, &filesSeen, &filesFailed, uncertain, deps.logOrDiscard())
+	}()
+
+	changed := seeded
+	changed.ExifRaw = map[string]string{"EXIF:ISO": "200"} // the one key that actually changed
+	filesSeen.Add(1)
+	results <- changed
+	close(results)
+
+	total := <-done
+	if total.Touched != 1 {
+		t.Fatalf("total = %+v, want Touched=1", total)
+	}
+	if total.MetadataWritten != 1 {
+		t.Errorf("total.MetadataWritten = %d, want 1 (drainAndCommit must aggregate it, not drop it)", total.MetadataWritten)
+	}
+}
+
 // testFixedParentResolver is a test-only graph.Resolver that always
 // proposes parentPath as the parent of any other node in the same scan --
 // used to force a real edge through the real graph.Engine (not a fake),

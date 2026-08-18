@@ -324,6 +324,20 @@ type metadataRowKey struct {
 // called from inside an InTx closure returning bare error) -- in that case
 // the written count is logged at DEBUG instead of accumulated.
 func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, r Result, stats *Stats, log *slog.Logger) error {
+	exif := exifMetadata(r)
+	ffprobe := ffprobeMetadata(r)
+	if len(exif) == 0 && len(ffprobe) == 0 {
+		// Nothing this Result derives at all -- exiftool/ffprobe absent from
+		// PATH, or a non-media file. The pre-#105 persistAllMetadata path
+		// made zero DB calls in this case (cappedSortedKeys' len(kv)==0
+		// short-circuit); reconcileAllMetadata must preserve that, not spend
+		// a ListNodeMetadata read on the writer connection for nothing to
+		// reconcile against. A node that already has metadata from an
+		// earlier pass (tools installed then later removed, or genuinely
+		// probe-less content) simply keeps its existing rows untouched.
+		return nil
+	}
+
 	existing, err := q.ListNodeMetadata(ctx, nodeID)
 	if err != nil {
 		return fmt.Errorf("list node_metadata for reconcile: %w", err)
@@ -333,11 +347,11 @@ func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64,
 		prior[metadataRowKey{row.Source, row.Key}] = row.Value
 	}
 
-	written, err := reconcileMetadata(ctx, q, nodeID, "exiftool", exifMetadata(r), metadataCap, prior, log)
+	written, err := reconcileMetadata(ctx, q, nodeID, "exiftool", exif, metadataCap, prior, log)
 	if err != nil {
 		return err
 	}
-	n, err := reconcileMetadata(ctx, q, nodeID, "ffprobe", ffprobeMetadata(r), metadataCap, prior, log)
+	n, err := reconcileMetadata(ctx, q, nodeID, "ffprobe", ffprobe, metadataCap, prior, log)
 	if err != nil {
 		return err
 	}
