@@ -319,3 +319,35 @@ func TestCloseDatabaseSkipsCloseWhenUnsafe(t *testing.T) {
 		t.Fatal("database.InTx succeeded after closeDatabase(unsafe=false) -- want the database actually closed")
 	}
 }
+
+func TestStartImmichWorkerDisabledWhenNotConfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	database := mainTestOpenDB(t)
+	w := startImmichWorker(ctx, &config.Config{}, database, slog.New(slog.DiscardHandler))
+	if w != nil {
+		t.Fatalf("startImmichWorker with empty APIURL = %v, want nil", w)
+	}
+}
+
+func TestStartImmichWorkerEnabledWhenConfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	database := mainTestOpenDB(t)
+	cfg := &config.Config{Immich: config.Immich{APIURL: "http://immich:2283", APIKey: "k", LibraryID: "lib", ExportPath: "/e"}}
+	w := startImmichWorker(ctx, cfg, database, slog.New(slog.DiscardHandler))
+	if w == nil {
+		t.Fatal("startImmichWorker with APIURL set = nil, want a worker")
+	}
+}
+
+func mainTestOpenDB(t *testing.T) *db.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "main.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	return database
+}

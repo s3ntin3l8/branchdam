@@ -23,10 +23,12 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/httpapi"
+	"github.com/s3ntin3l8/branchdam/internal/immich"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
+	"github.com/s3ntin3l8/branchdam/internal/sync"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 	"github.com/s3ntin3l8/branchdam/web"
 )
@@ -105,6 +107,8 @@ func main() {
 	engine := graph.NewEngine(database, log, graph.NewProjectSidecarResolver(cfg.PathRewrites), graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{}, graph.HeuristicSpatialTemporalResolver{})
 	hub := sse.New()
 	scanTracker := &pipeline.ScanTracker{}
+
+	startImmichWorker(ctx, &cfg, database, log)
 
 	var supervisor *pipeline.WatcherSupervisor
 	if watched := watchedFromConfig(cfg.StorageLocations); len(watched) > 0 {
@@ -229,6 +233,35 @@ func closeDatabase(log *slog.Logger, database *db.DB, unsafe bool) {
 	if err := database.Close(); err != nil {
 		log.Error("close database", "err", err)
 	}
+}
+
+// startImmichWorker wires the Immich sync worker and returns it, or nil when
+// Immich is not configured (apiUrl empty). Runs RecoverStalePushing at startup
+// so a crashed mid-push doesn't strand nodes in PUSHING forever.
+func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB, log *slog.Logger) *sync.Worker {
+	if cfg.Immich.APIURL == "" {
+		return nil
+	}
+	immichClient := immich.New(immich.Config{
+		APIURL: cfg.Immich.APIURL, APIKey: cfg.Immich.APIKey, LibraryID: cfg.Immich.LibraryID,
+	})
+	syncManager := sync.NewManager(database, log)
+	if n, err := syncManager.RecoverStalePushing(ctx, sync.RemoteImmich, 5*time.Minute); err != nil {
+		log.Warn("sync: recover stale pushing", "err", err)
+	} else if n > 0 {
+		log.Warn("sync: recovered stale PUSHING rows", "count", n)
+	}
+	exportPath := cfg.Immich.ExportPath
+	if exportPath == "" {
+		exportPath = "/storage/exports/immich"
+	}
+	worker := sync.NewWorker(syncManager, sync.RemoteImmich, exportPath, 16, 10*time.Second,
+		func(ctx context.Context, nodes []sync.Node) error {
+			return immichClient.TriggerScan(ctx)
+		}, log)
+	go worker.Run(ctx)
+	log.Info("sync: immich worker started", "libraryID", cfg.Immich.LibraryID, "exportPath", exportPath)
+	return worker
 }
 
 // reconcileOrphanedScanJobs moves every scan_jobs row still RUNNING to
