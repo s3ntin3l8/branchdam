@@ -1,5 +1,5 @@
-import { useParams } from "react-router";
-import { useAsset, useAssetGraph } from "../hooks/queries";
+import { useParams, useSearchParams } from "react-router";
+import { useAsset, useAssetLineage } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
@@ -14,13 +14,24 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 export default function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const assetId = id ? Number(id) : undefined;
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const rawDepth = Number(searchParams.get("depth"));
+  const depth = !Number.isNaN(rawDepth) && rawDepth >= 1 && rawDepth <= 5 ? rawDepth : 2;
 
   const { data: asset, isLoading, isError } = useAsset(assetId);
-  const { data: graph } = useAssetGraph(assetId);
+  const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(assetId, depth);
 
   if (!assetId || Number.isNaN(assetId)) return <div className="p-6 text-red-400">Invalid asset id.</div>;
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
   if (isError || !asset) return <div className="p-6 text-red-400">Asset not found.</div>;
+
+  const handleDepthChange = (newDepth: number) => {
+    setSearchParams((prev) => {
+      prev.set("depth", String(newDepth));
+      return prev;
+    });
+  };
 
   return (
     <div className="space-y-6 p-6">
@@ -44,8 +55,30 @@ export default function AssetDetailPage() {
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium text-neutral-400">Lineage (direct parents/children)</h2>
-        {graph ? <AssetGraphCanvas assetId={asset.id} graph={graph} /> : <p className="text-sm text-neutral-500">Loading graph…</p>}
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-medium text-neutral-400">Multi-hop Lineage Graph</h2>
+          <div className="flex items-center gap-2 text-sm text-neutral-400">
+            <span>Traversal Depth:</span>
+            <select
+              value={depth}
+              onChange={(e) => handleDepthChange(Number(e.target.value))}
+              className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value={1}>1 hop</option>
+              <option value={2}>2 hops</option>
+              <option value={3}>3 hops</option>
+              <option value={4}>4 hops</option>
+              <option value={5}>5 hops</option>
+            </select>
+          </div>
+        </div>
+        {isLineageLoading ? (
+          <p className="text-sm text-neutral-500">Loading lineage graph…</p>
+        ) : lineage ? (
+          <AssetGraphCanvas assetId={asset.id} lineage={lineage} />
+        ) : (
+          <p className="text-sm text-neutral-500">No known lineage data.</p>
+        )}
       </section>
     </div>
   );

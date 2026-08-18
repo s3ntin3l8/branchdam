@@ -1,7 +1,7 @@
 import { lazy, Suspense } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import { useEventStream } from "./hooks/useEventStream";
-import { useMe } from "./hooks/queries";
+import { useMe, useUnlinkedCount } from "./hooks/queries";
 
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
@@ -14,7 +14,7 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `block rounded px-3 py-2 text-sm font-medium ${
+        `flex items-center justify-between rounded px-3 py-2 text-sm font-medium ${
           isActive ? "bg-neutral-800 text-white" : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
         }`
       }
@@ -27,13 +27,21 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 export default function App() {
   useEventStream();
   const { data: me } = useMe();
+  const { data: unlinkedCount } = useUnlinkedCount();
 
   return (
     <div className="flex h-screen">
       <nav className="w-56 shrink-0 border-r border-neutral-800 p-4">
         <div className="mb-6 text-lg font-semibold">branchDAM</div>
         <div className="space-y-1">
-          <NavItem to="/assets">Assets</NavItem>
+          <NavItem to="/assets">
+            <span>Assets</span>
+            {unlinkedCount && unlinkedCount > 0 ? (
+              <span className="rounded bg-amber-900/80 px-1.5 py-0.5 text-xs text-amber-200" title={`${unlinkedCount} unlinked nodes`}>
+                {unlinkedCount}
+              </span>
+            ) : null}
+          </NavItem>
           <NavItem to="/audit">Audit Queue</NavItem>
           <NavItem to="/ingest">Ingest</NavItem>
           <NavItem to="/settings">Settings</NavItem>
