@@ -147,6 +147,9 @@ type Querier interface {
 	// both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
 	// ProcessPending(remote) must never list (or re-flip) another remote's rows.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
+	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row
+	// for a node (both remotes), ordered by remote for a stable DTO.
+	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing

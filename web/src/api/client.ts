@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, ScanJob, StorageHealth, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, ScanJob, StorageHealth, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -50,6 +50,8 @@ export const api = {
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
   getAssetGraph: (id: number) => request<AssetGraph>(`/api/v1/assets/${id}/graph`),
   getAssetLineage: (id: number | string, depth = 2) => request<LineageResponse>(`/api/v1/assets/${id}/lineage?depth=${depth}`),
+  getAssetSyncStatus: (id: number) => request<AssetSyncStatus>(`/api/v1/assets/${id}/sync-status`),
+  retrySync: (id: number) => request<{ requeued: number }>(`/api/v1/assets/${id}/sync/retry`, { method: "POST" }),
 
   listAuditQueue: (params: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();

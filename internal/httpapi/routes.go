@@ -37,6 +37,8 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
+	huma.Get(api, "/api/v1/assets/{id}/sync-status", s.handleAssetSyncStatus)
+	huma.Post(api, "/api/v1/assets/{id}/sync/retry", s.handleSyncRetry)
 	huma.Post(api, "/api/v1/assets/{id}/inherit-metadata", s.handleInheritMetadata)
 
 	huma.Get(api, "/api/v1/jobs", s.handleListJobs)
@@ -533,6 +535,113 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 	out.Body.Nodes = outNodes
 	out.Body.Edges = outEdges
 
+	return out, nil
+}
+
+// --- /api/v1/assets/{id}/sync-status ---
+
+type syncStateDTO struct {
+	Remote        string  `json:"remote"`
+	SyncStatus    string  `json:"syncStatus"`
+	RemoteAssetID *string `json:"remoteAssetId,omitempty"`
+	LastError     *string `json:"lastError,omitempty"`
+	LastAttemptAt *int64  `json:"lastAttemptAt,omitempty"`
+}
+
+type AssetSyncStatusInput struct {
+	ID int64 `path:"id"`
+}
+
+type AssetSyncStatusOutput struct {
+	Body struct {
+		Sync []syncStateDTO `json:"sync"`
+	}
+}
+
+func (s *Server) handleAssetSyncStatus(ctx context.Context, in *AssetSyncStatusInput) (*AssetSyncStatusOutput, error) {
+	if _, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error404NotFound("asset not found")
+		}
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+	rows, err := s.db.Reader.ListRemoteSyncStateByNode(ctx, in.ID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list sync state", err)
+	}
+	out := &AssetSyncStatusOutput{}
+	out.Body.Sync = make([]syncStateDTO, len(rows))
+	for i, r := range rows {
+		dto := syncStateDTO{Remote: r.Remote, SyncStatus: r.SyncStatus}
+		if r.RemoteAssetID.Valid {
+			dto.RemoteAssetID = &r.RemoteAssetID.String
+		}
+		if r.LastError.Valid {
+			dto.LastError = &r.LastError.String
+		}
+		if r.LastAttemptAt.Valid {
+			dto.LastAttemptAt = &r.LastAttemptAt.Int64
+		}
+		out.Body.Sync[i] = dto
+	}
+	return out, nil
+}
+
+// --- /api/v1/assets/{id}/sync/retry ---
+
+type SyncRetryInput struct {
+	ID int64 `path:"id"`
+}
+
+type SyncRetryOutput struct {
+	Body struct {
+		Requeued int64 `json:"requeued"`
+	}
+}
+
+func (s *Server) handleSyncRetry(ctx context.Context, in *SyncRetryInput) (*SyncRetryOutput, error) {
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+	if node.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+
+	var requeued int64
+	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// Read + re-claim inside ONE write transaction on the writer pool's
+		// single connection. A concurrent ProcessPending that claims the same
+		// row (PUSH_FAILED -> PUSHING) cannot interleave between the read and
+		// the upsert and be regressed back to PENDING_CLOUD_PUSH (which would
+		// duplicate the push) -- the writer connection serializes the two.
+		rows, err := q.ListRemoteSyncStateByNode(ctx, in.ID)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			if r.SyncStatus != "PUSH_FAILED" {
+				continue
+			}
+			if _, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+				NodeID: r.NodeID, Remote: r.Remote, SyncStatus: "PENDING_CLOUD_PUSH",
+				RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+				LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			}); err != nil {
+				return err
+			}
+			requeued++
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("requeue failed sync", err)
+	}
+	out := &SyncRetryOutput{}
+	out.Body.Requeued = requeued
 	return out, nil
 }
 

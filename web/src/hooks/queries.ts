@@ -55,6 +55,27 @@ export function useAssetLineage(id: number | string | undefined, depth = 2) {
   });
 }
 
+export function useAssetSyncStatus(id: number | undefined) {
+  return useQuery({
+    queryKey: ["asset-sync-status", id],
+    queryFn: () => api.getAssetSyncStatus(id as number),
+    enabled: id !== undefined,
+    // Poll so the status stays fresh while the sync worker progresses
+    // (useEventStream only nudges on SSE events, not on worker drain ticks).
+    refetchInterval: 15_000,
+  });
+}
+
+export function useRetrySync() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.retrySync(id),
+    onSuccess: (_data, id) => {
+      void queryClient.invalidateQueries({ queryKey: ["asset-sync-status", id] });
+    },
+  });
+}
+
 export function useUnlinkedCount() {
   return useQuery({
     queryKey: ["unlinked-count"],
