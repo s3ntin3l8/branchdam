@@ -58,6 +58,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.shutdown:
+			// http.Server.Shutdown does not cancel in-flight request
+			// contexts -- it only waits for connections to go idle -- and
+			// this handler's loop never returns on its own as long as the
+			// client stays connected. Without this case, a single open
+			// dashboard tab would keep ctx.Done() from ever firing, so
+			// Shutdown would block for the entire shutdown timeout on every
+			// routine restart (cmd/branchdam/main.go).
+			return
 		case <-notify:
 			send()
 		case <-ping.C:

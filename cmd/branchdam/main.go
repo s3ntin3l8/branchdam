@@ -63,11 +63,13 @@ func main() {
 		log.Error("open database", "err", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := database.Close(); err != nil {
-			log.Error("close database", "err", err)
-		}
-	}()
+	// dbUnsafeToClose is set below if a shutdown wait times out -- a
+	// background goroutine may still hold the writer connection, and
+	// closing out from under it is worse than leaving it for process exit
+	// to reclaim (SQLite's WAL recovery is designed for exactly that;
+	// sql.DB.Close() racing an in-flight write is not).
+	var dbUnsafeToClose bool
+	defer func() { closeDatabase(log, database, dbUnsafeToClose) }()
 
 	if _, err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
 		log.Error("reconcile orphaned scan jobs", "err", err)
@@ -158,17 +160,28 @@ func main() {
 		// Watchers already stopped on ctx.Done; Wait() joins each location's
 		// consumer goroutine, which holds the writer DB and calls Commit
 		// directly (never Pool.Submit), so it must finish before db.Close.
-		waitBounded(shutdownCtx, log, "supervisor.Wait()", supervisor.Wait)
+		if !waitBounded(shutdownCtx, log, "supervisor.Wait()", supervisor.Wait) {
+			dbUnsafeToClose = true
+		}
 	}
 	// scanTracker.Wait() joins every in-flight RunScan goroutine (started
 	// via POST /api/v1/scan) before the database closes.
-	waitBounded(shutdownCtx, log, "scanTracker.Wait()", scanTracker.Wait)
+	if !waitBounded(shutdownCtx, log, "scanTracker.Wait()", scanTracker.Wait) {
+		dbUnsafeToClose = true
+	}
 	// Drain waits for worker goroutines to finish their current job before the database closes.
-	waitBounded(shutdownCtx, log, "pool.Drain()", pool.Drain)
+	if !waitBounded(shutdownCtx, log, "pool.Drain()", pool.Drain) {
+		dbUnsafeToClose = true
+	}
 	log.Info("server stopped")
 }
 
-func waitBounded(ctx context.Context, log *slog.Logger, name string, waitFunc func()) {
+// waitBounded blocks on waitFunc until it returns or ctx is done, whichever
+// comes first, returning whether waitFunc completed within ctx's deadline.
+// The goroutine running waitFunc is leaked if ctx's deadline wins (it may
+// still be blocked on real work) -- acceptable here since this only runs
+// once, immediately before process exit.
+func waitBounded(ctx context.Context, log *slog.Logger, name string, waitFunc func()) bool {
 	done := make(chan struct{})
 	go func() {
 		waitFunc()
@@ -177,8 +190,22 @@ func waitBounded(ctx context.Context, log *slog.Logger, name string, waitFunc fu
 
 	select {
 	case <-done:
+		return true
 	case <-ctx.Done():
 		log.Warn("shutdown wait timed out", "component", name, "err", ctx.Err())
+		return false
+	}
+}
+
+// closeDatabase is main()'s single database.Close() call site, skipped
+// when unsafe is true (see dbUnsafeToClose's doc comment above).
+func closeDatabase(log *slog.Logger, database *db.DB, unsafe bool) {
+	if unsafe {
+		log.Error("shutdown: skipping database close -- a background goroutine may still hold the writer connection")
+		return
+	}
+	if err := database.Close(); err != nil {
+		log.Error("close database", "err", err)
 	}
 }
 
