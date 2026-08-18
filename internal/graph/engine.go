@@ -94,6 +94,13 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 				continue
 			}
 
+			// Exact, not approximate: media_edges' UNIQUE (source_node_id,
+			// target_node_id, relationship_type) constraint -- the same one
+			// UpsertMediaEdge's ON CONFLICT target relies on -- guarantees at
+			// most one row per key, so this check and the upsert can never
+			// disagree about whether the row already existed. A future
+			// schema change dropping that constraint would silently bias
+			// this count without breaking either query.
 			existed, err := q.MediaEdgeExists(ctx, sqlcgen.MediaEdgeExistsParams{
 				SourceNodeID:     c.ParentID,
 				TargetNodeID:     c.ChildID,

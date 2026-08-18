@@ -378,7 +378,6 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		if !committedBatch && seen == lastReportedSeen {
 			return // nothing changed since the last report: no write, no nudge
 		}
-		lastReportedSeen = seen
 
 		err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
@@ -391,8 +390,9 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		})
 		if err != nil {
 			log.Error("pipeline: update scan job progress", "err", err)
-			return // the write didn't land -- nothing changed for the SPA to refetch
+			return // the write didn't land -- retry on the next tick, so don't advance lastReportedSeen
 		}
+		lastReportedSeen = seen
 		if deps.Nudge != nil {
 			deps.Nudge()
 		}
