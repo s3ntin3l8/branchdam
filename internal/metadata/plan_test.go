@@ -84,6 +84,23 @@ func TestPlan(t *testing.T) {
 		}
 	})
 
+	t.Run("offset is not inherited alone onto a child with its own timestamp", func(t *testing.T) {
+		child := TagSet{
+			DateTimeOriginal: "2019:01:01 00:00:00", // own time, no offset
+			Identifier:       "uuid-child", DerivedFrom: "uuid-parent",
+		}
+		got, err := Plan(parent, child)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		if _, ok := got["EXIF:DateTimeOriginal"]; ok {
+			t.Errorf("child's own DateTimeOriginal must not be overwritten, got %v", got)
+		}
+		if _, ok := got["EXIF:OffsetTimeOriginal"]; ok {
+			t.Errorf("parent's OffsetTimeOriginal must not be written without DateTimeOriginal (misinterprets the child's time), got %v", got)
+		}
+	})
+
 	t.Run("missing parent writes only injected tags", func(t *testing.T) {
 		noParent := TagSet{Identifier: "uuid-parent", DerivedFrom: ""}
 		got, err := Plan(noParent, childNoParent)

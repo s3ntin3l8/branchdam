@@ -210,6 +210,42 @@ func TestInheritMetadataConflicts(t *testing.T) {
 			t.Errorf("status = %d, want 409", rr.Code)
 		}
 	})
+	t.Run("needs-review parent edge 409s", func(t *testing.T) {
+		srv, database, _, child := inheritTestServer(t, t.TempDir())
+		// Reject the seeded AUTO_ACCEPTED edge, then add a NEEDS_REVIEW edge
+		// from a second parent -- an unconfirmed lineage must never be used as
+		// an identity source.
+		var locID int64
+		_ = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			rows, err := q.ListEdgesByTarget(context.Background(), child.ID)
+			if err != nil {
+				return err
+			}
+			for _, e := range rows {
+				if err := q.RejectMediaEdge(context.Background(), sqlcgen.RejectMediaEdgeParams{ID: e.ID, ReviewedBy: sql.NullString{}}); err != nil {
+					return err
+				}
+			}
+			locID = child.StorageLocationID
+			return nil
+		})
+		nrParent := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "nr-parent.jpg"), "uuid-nr-parent")
+		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+				SourceNodeID: nrParent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+				Confidence: 0.8, Tier: 2, Resolver: "test", EvidenceJson: "{}", ReviewState: "NEEDS_REVIEW",
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("seed needs-review edge: %v", err)
+		}
+
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409", rr.Code)
+		}
+	})
 }
 
 func TestMeReflectsBrowserPrincipal(t *testing.T) {

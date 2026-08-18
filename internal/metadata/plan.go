@@ -41,8 +41,17 @@ func Plan(parent, child TagSet) (map[string]string, error) {
 			tags[tag] = parentVal
 		}
 	}
-	inherit("EXIF:DateTimeOriginal", parent.DateTimeOriginal, child.DateTimeOriginal)
-	inherit("EXIF:OffsetTimeOriginal", parent.OffsetTimeOriginal, child.OffsetTimeOriginal)
+	// DateTimeOriginal + OffsetTimeOriginal are a coupled pair: the offset is
+	// only meaningful alongside the timestamp it modifies. Inherit them
+	// together, and never write the parent's offset alone onto a child that
+	// already carries its own DateTimeOriginal -- that would silently
+	// reinterpret the child's capture time in the parent's timezone.
+	if parent.DateTimeOriginal != "" && child.DateTimeOriginal == "" {
+		tags["EXIF:DateTimeOriginal"] = parent.DateTimeOriginal
+		if parent.OffsetTimeOriginal != "" && child.OffsetTimeOriginal == "" {
+			tags["EXIF:OffsetTimeOriginal"] = parent.OffsetTimeOriginal
+		}
+	}
 	inherit("EXIF:Make", parent.Make, child.Make)
 	inherit("EXIF:Model", parent.Model, child.Model)
 	inherit("EXIF:LensModel", parent.LensModel, child.LensModel)

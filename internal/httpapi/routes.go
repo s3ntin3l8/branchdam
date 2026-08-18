@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
@@ -590,7 +591,9 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error409Conflict("nothing to inherit: child already carries all inheritable metadata")
 	}
 
-	if err := s.prober.WriteTags(ctx, child.FilePath, tags); err != nil {
+	wctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
+	defer cancel()
+	if err := s.prober.WriteTags(wctx, child.FilePath, tags); err != nil {
 		if errors.Is(err, probe.ErrToolUnavailable) {
 			return nil, huma.Error503ServiceUnavailable("exiftool not available")
 		}
@@ -602,13 +605,21 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 	return out, nil
 }
 
-// pickWinningParent returns the highest-confidence non-REJECTED parent edge,
-// or nil when the node has none.
+// inheritWriteTimeout bounds the exiftool write subprocess, mirroring the
+// scan path's per-file probe deadline -- a hung exiftool on a stalled network
+// mount must not hang the HTTP request indefinitely.
+const inheritWriteTimeout = 30 * time.Second
+
+// pickWinningParent returns the highest-confidence parent edge that is
+// AUTO_ACCEPTED or CONFIRMED, or nil when the node has none. A NEEDS_REVIEW
+// (unconfirmed) or REJECTED edge is never a valid identity source: stamping an
+// unconfirmed parent's metadata into the child's file would cement a
+// possibly-wrong lineage with no recovery path.
 func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 	var best *sqlcgen.MediaEdge
 	for i := range edges {
 		e := &edges[i]
-		if e.ReviewState == "REJECTED" {
+		if e.ReviewState != "AUTO_ACCEPTED" && e.ReviewState != "CONFIRMED" {
 			continue
 		}
 		if best == nil || e.Confidence > best.Confidence {
@@ -653,6 +664,15 @@ func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode)
 				ts.GPSLongitude = &f
 			}
 		}
+	}
+	// Fall back to the promoted captured_at_unix column for the raw
+	// DateTimeOriginal when it isn't in node_metadata (a catalog indexed
+	// before EXIF:DateTimeOriginal was allowlisted in #54). This preserves
+	// the "never overwrite a child's own capture time" rule for pre-PR rows:
+	// the offset is lost (captured_at is UTC), but the child's actual time is
+	// kept rather than silently replaced by the parent's.
+	if ts.DateTimeOriginal == "" && node.CapturedAtUnix.Valid {
+		ts.DateTimeOriginal = time.Unix(node.CapturedAtUnix.Int64, 0).UTC().Format("2006:01:02 15:04:05")
 	}
 	return ts
 }
