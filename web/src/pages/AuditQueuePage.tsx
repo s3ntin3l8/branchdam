@@ -74,6 +74,12 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         </div>
       </div>
 
+      {(confirm.isError || reject.isError) && (
+        <div className="mb-3 text-xs text-red-400">
+          Failed to {confirm.isError ? "confirm" : "reject"} edge: {String(confirm.error || reject.error)}
+        </div>
+      )}
+
       {/* Side-by-side comparison */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {/* Source Node (Parent) */}
