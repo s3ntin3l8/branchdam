@@ -54,7 +54,7 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
 FROM v_media_edges_resolved
 WHERE review_state = 'NEEDS_REVIEW'
 ORDER BY confidence DESC, id ASC
-LIMIT ?1 OFFSET ?
+LIMIT ?1 OFFSET ?2
 `
 
 type ListAuditQueueParams struct {

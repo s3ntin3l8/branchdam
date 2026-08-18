@@ -314,12 +314,15 @@ type AssetLineageOutput struct {
 }
 
 func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) (*AssetLineageOutput, error) {
-	_, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, huma.Error404NotFound("asset not found")
 		}
 		return nil, huma.Error500InternalServerError("get root asset", err)
+	}
+	if node.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
 	}
 
 	depth := in.Depth
@@ -385,24 +388,27 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 		return nil, huma.Error500InternalServerError("list lineage nodes", err)
 	}
 
+	validNodes := make(map[int64]bool, len(nodes))
+	outNodes := make([]assetDTO, 0, len(nodes))
+	for _, n := range nodes {
+		if n.LifecycleState == "ARCHIVED" {
+			continue
+		}
+		validNodes[n.ID] = true
+		outNodes = append(outNodes, toAssetDTO(n))
+	}
+
 	edges, err := s.db.Reader.ListEdgesForNodes(ctx, string(jsonBytes))
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list lineage edges", err)
 	}
 
-	out := &AssetLineageOutput{}
-	out.Body.RootID = in.ID
-	out.Body.Nodes = make([]assetDTO, 0, len(nodes))
-	for _, n := range nodes {
-		if n.LifecycleState == "ARCHIVED" {
+	outEdges := make([]edgeDTO, 0, len(edges))
+	for _, e := range edges {
+		if !validNodes[e.SourceNodeID] || !validNodes[e.TargetNodeID] {
 			continue
 		}
-		out.Body.Nodes = append(out.Body.Nodes, toAssetDTO(n))
-	}
-
-	out.Body.Edges = make([]edgeDTO, 0, len(edges))
-	for _, e := range edges {
-		out.Body.Edges = append(out.Body.Edges, edgeDTO{
+		outEdges = append(outEdges, edgeDTO{
 			ID:               e.ID,
 			SourceNodeID:     e.SourceNodeID,
 			TargetNodeID:     e.TargetNodeID,
@@ -412,6 +418,11 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 			Resolver:         e.Resolver,
 		})
 	}
+
+	out := &AssetLineageOutput{}
+	out.Body.RootID = in.ID
+	out.Body.Nodes = outNodes
+	out.Body.Edges = outEdges
 
 	return out, nil
 }

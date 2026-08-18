@@ -713,6 +713,12 @@ func TestAssetLineageTraversalDiamondAndDepth(t *testing.T) {
 	if !nodeIDs[n1.ID] || !nodeIDs[n2.ID] || !nodeIDs[n3.ID] || !nodeIDs[n4.ID] || !nodeIDs[n5.ID] {
 		t.Errorf("nodes set missing expected graph nodes: got %+v", nodeIDs)
 	}
+
+	// Verify querying an ARCHIVED root asset returns 404
+	rrArchived := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+toStr(n7.ID)+"/lineage", nil)
+	if rrArchived.Code != http.StatusNotFound {
+		t.Errorf("GET /api/v1/assets/%d/lineage (ARCHIVED) status = %d, want 404", n7.ID, rrArchived.Code)
+	}
 }
 
 func toStr(v int64) string {
