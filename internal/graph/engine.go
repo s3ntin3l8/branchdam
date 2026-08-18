@@ -2,7 +2,9 @@ package graph
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -54,13 +56,18 @@ func NewEngine(database *db.DB, log *slog.Logger, resolvers ...Resolver) *Engine
 // and commits survivors inside one write transaction. Each candidate is
 // cycle-checked against the writer's single connection before insert --
 // see docs/schema.md fix #7 -- and the upsert itself never downgrades a
-// human CONFIRMED/REJECTED decision (media_edges_resolve.sql). Returns the
-// edges actually committed (empty if every candidate was below
-// needsReviewFloor or would have closed a cycle) and how many of those were
-// genuinely new rows, as opposed to an existing edge whose
-// confidence/evidence was merely refreshed -- UpsertMediaEdge's RETURNING
-// row looks the same either way, so the caller can't tell the two apart
-// without this. Backs scan_jobs.edges_created.
+// human CONFIRMED/REJECTED decision (media_edges_resolve.sql). A candidate
+// matching an already CONFIRMED/REJECTED edge makes UpsertMediaEdge return
+// sql.ErrNoRows (its WHERE-gated DO UPDATE emitted no row); that is not an
+// error here -- the edge is re-fetched as-is and included in committed, so
+// graph_status recomputation below still accounts for it and one
+// human-locked edge can never abort resolution for the rest of the node's
+// candidates. Returns the edges actually committed (empty if every
+// candidate was below needsReviewFloor or would have closed a cycle) and
+// how many of those were genuinely new rows, as opposed to an existing edge
+// whose confidence/evidence was merely refreshed -- UpsertMediaEdge's
+// RETURNING row looks the same either way, so the caller can't tell the two
+// apart without this. Backs scan_jobs.edges_created.
 func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.MediaEdge, int, error) {
 	var all []Candidate
 	for _, r := range e.resolvers {
@@ -131,7 +138,25 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 				ReviewState:      reviewState,
 			})
 			if err != nil {
-				return fmt.Errorf("upsert edge %d->%d: %w", c.ParentID, c.ChildID, err)
+				if !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("upsert edge %d->%d: %w", c.ParentID, c.ChildID, err)
+				}
+				// Human-locked (CONFIRMED/REJECTED): the WHERE-gated DO
+				// UPDATE emitted no row. Re-fetch the edge as it stands so
+				// it's still counted toward graph_status below, and move on
+				// to the next candidate instead of aborting the batch --
+				// see ResolveAndCommit's doc comment and
+				// media_edges_resolve.sql.
+				locked, getErr := q.GetMediaEdgeBySourceTargetRel(ctx, sqlcgen.GetMediaEdgeBySourceTargetRelParams{
+					SourceNodeID:     c.ParentID,
+					TargetNodeID:     c.ChildID,
+					RelationshipType: c.Rel,
+				})
+				if getErr != nil {
+					return fmt.Errorf("get human-locked edge %d->%d: %w", c.ParentID, c.ChildID, getErr)
+				}
+				committed = append(committed, locked)
+				continue
 			}
 			committed = append(committed, edge)
 			if !existed {
@@ -140,18 +165,34 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 		}
 
 		if len(committed) > 0 {
-			status := "NEEDS_REVIEW"
+			// A REJECTED edge is a human decision that this specific
+			// candidate is wrong -- it says nothing about whether the node
+			// as a whole is linked, so it must not by itself push
+			// graph_status to NEEDS_REVIEW (the pre-fix code could never
+			// reach this branch with a REJECTED edge in committed at all,
+			// since the old UpsertMediaEdge treated a human-locked edge as
+			// a hard error and aborted before this point -- see H1). status
+			// stays "" (skip the write) only when every committed edge is
+			// REJECTED; any non-REJECTED edge sets it to at least
+			// NEEDS_REVIEW, and any AUTO_ACCEPTED/CONFIRMED edge wins
+			// outright regardless of order.
+			status := ""
 			for _, edge := range committed {
 				if edge.ReviewState == "AUTO_ACCEPTED" || edge.ReviewState == "CONFIRMED" {
 					status = "LINKED"
 					break
 				}
+				if edge.ReviewState != "REJECTED" {
+					status = "NEEDS_REVIEW"
+				}
 			}
-			if err := q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{
-				ID:          child.ID,
-				GraphStatus: status,
-			}); err != nil {
-				return fmt.Errorf("update graph_status: %w", err)
+			if status != "" {
+				if err := q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{
+					ID:          child.ID,
+					GraphStatus: status,
+				}); err != nil {
+					return fmt.Errorf("update graph_status: %w", err)
+				}
 			}
 		}
 		return nil

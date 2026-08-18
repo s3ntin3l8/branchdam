@@ -1,12 +1,54 @@
 -- name: UpsertMediaEdge :one
 -- A human decision outranks any resolver, permanently: the UPDATE branch is
--- gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely
--- (SQLite's upsert semantics: when the WHERE evaluates false, DO UPDATE is
--- skipped and the pre-existing row is returned unmodified). confidence only
--- ever increases (MAX), never regresses if a later resolve pass finds a
--- weaker signal for the same edge; review_state is recomputed from that
--- same MAX'd confidence rather than trusting the just-inserted value, so
--- the two can never disagree about which confidence they describe.
+-- gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely.
+-- IMPORTANT: when that WHERE evaluates false, SQLite's RETURNING emits NO
+-- ROW at all -- it does NOT return the pre-existing row unmodified (verified
+-- against SQLite directly; an earlier version of this comment claimed
+-- otherwise and was wrong). Because this query is :one, a human-locked edge
+-- therefore surfaces to the caller as sql.ErrNoRows, which internal/graph's
+-- Engine.ResolveAndCommit must treat as "edge intentionally left untouched,
+-- re-fetch it and continue" -- NOT as a failure to roll the whole batch
+-- back on.
+--
+-- confidence only ever increases (MAX), never regresses if a later resolve
+-- pass finds a weaker signal for the same edge. tier/resolver/evidence_json/
+-- review_state are each keyed on WHICH SIDE actually supplied that MAX'd
+-- confidence (excluded, i.e. this call's candidate, vs. the row as it stood
+-- before this call) rather than being taken unconditionally from excluded or
+-- re-derived from a hardcoded threshold -- both of those independently let a
+-- later, weaker resolver pass silently overwrite a stronger earlier one:
+-- unconditional excluded.tier/resolver/evidence_json could stamp a losing
+-- pass's provenance next to a winning MAX'd confidence, and a hardcoded
+-- ">= 0.90" ignored internal/graph's per-tier auto-accept threshold (0.85
+-- for Tier 3), downgrading a Tier-3 AUTO_ACCEPTED edge back to NEEDS_REVIEW
+-- on every subsequent scan pass. review_state is never independently
+-- recomputed here at all: excluded.review_state (bind ?8) already carries
+-- the tier-correct value Engine computed for this candidate, so keying it
+-- the same way as confidence keeps the two permanently consistent. On an
+-- exact confidence tie, `>=` deliberately favors the incoming candidate
+-- (excluded) -- that's what refreshes evidence_json/resolver/timestamps on
+-- an identical same-resolver re-fire, the common case. Do not tighten this
+-- to `>` outright (Hermes review on PR #128 suggested exactly that for
+-- review_state alone; rejected below).
+--
+-- One exception carves into that `>=`: because the per-tier auto-accept
+-- threshold differs by tier (0.85 for Tier 3, 0.90 otherwise), an exact
+-- confidence tie between a HIGHER tier (already AUTO_ACCEPTED) and a LOWER
+-- tier candidate at that same confidence (computed NEEDS_REVIEW, since it
+-- doesn't clear ITS tier's higher threshold) would otherwise let the
+-- lower-tier candidate win the tie and downgrade review_state -- confidence
+-- doesn't regress, but review_state does, which is exactly the class of bug
+-- this query exists to prevent. Each CASE below therefore adds one more
+-- clause on top of the `>=` tie rule: excluded still wins ties EXCEPT the
+-- specific one where the stored row is AUTO_ACCEPTED and the incoming
+-- candidate computed NEEDS_REVIEW at that same confidence. Applying that
+-- same exception to ALL FOUR fields together (not just review_state, as
+-- Hermes' suggestion would have done) is deliberate: tier/resolver/
+-- evidence_json/review_state must always
+-- describe the SAME pass, so on a blocked tie the stored row's provenance
+-- stays fully intact too, rather than adopting the incoming candidate's
+-- tier/resolver while keeping the old review_state -- that combination
+-- would itself be an inconsistent, self-contradicting row.
 INSERT INTO media_edges (
     source_node_id, target_node_id, relationship_type, confidence, tier,
     resolver, evidence_json, review_state
@@ -15,18 +57,42 @@ INSERT INTO media_edges (
 )
 ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     confidence    = MAX(excluded.confidence, media_edges.confidence),
-    tier          = excluded.tier,
-    resolver      = excluded.resolver,
-    evidence_json = excluded.evidence_json,
-    review_state  = CASE
-                        WHEN MAX(excluded.confidence, media_edges.confidence) >= 0.90 THEN 'AUTO_ACCEPTED'
-                        ELSE 'NEEDS_REVIEW'
-                    END,
+    tier          = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.tier ELSE media_edges.tier END,
+    resolver      = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.resolver ELSE media_edges.resolver END,
+    evidence_json = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.evidence_json ELSE media_edges.evidence_json END,
+    review_state  = CASE WHEN excluded.confidence >= media_edges.confidence
+                            AND NOT (excluded.confidence = media_edges.confidence
+                                     AND media_edges.review_state = 'AUTO_ACCEPTED'
+                                     AND excluded.review_state = 'NEEDS_REVIEW')
+                          THEN excluded.review_state ELSE media_edges.review_state END,
     updated_at    = unixepoch()
 WHERE media_edges.review_state NOT IN ('CONFIRMED', 'REJECTED')
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
           created_at, updated_at;
+
+-- name: GetMediaEdgeBySourceTargetRel :one
+-- Used by internal/graph.Engine.ResolveAndCommit when UpsertMediaEdge
+-- returns sql.ErrNoRows -- the edge is CONFIRMED/REJECTED and was
+-- intentionally left untouched, so the caller re-fetches its current state
+-- here rather than treating the no-row RETURNING as an error.
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3;
 
 -- name: MediaEdgeExists :one
 -- Checked before UpsertMediaEdge so the caller can tell a genuinely new
