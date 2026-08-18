@@ -668,7 +668,8 @@ func TestConfirmedEdgeSurvivesRescan(t *testing.T) {
 	}
 
 	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: p1EdgeID, ReviewedBy: sql.NullString{String: "operator", Valid: true}})
+		_, err := q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: p1EdgeID, ReviewedBy: sql.NullString{String: "operator", Valid: true}})
+		return err
 	}); err != nil {
 		t.Fatalf("ConfirmMediaEdge: %v", err)
 	}
@@ -739,7 +740,8 @@ func TestRejectedEdgeDoesNotForceGraphStatusToNeedsReview(t *testing.T) {
 	edgeID := edges[0].ID
 
 	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: edgeID, ReviewedBy: sql.NullString{String: "operator", Valid: true}})
+		_, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: edgeID, ReviewedBy: sql.NullString{String: "operator", Valid: true}})
+		return err
 	}); err != nil {
 		t.Fatalf("RejectMediaEdge: %v", err)
 	}

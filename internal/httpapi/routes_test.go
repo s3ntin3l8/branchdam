@@ -799,16 +799,18 @@ func TestAssetLineageTraversalDiamondAndDepth(t *testing.T) {
 				return err
 			}
 			if state == "CONFIRMED" {
-				return q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{
+				_, err := q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{
 					ID:         e.ID,
 					ReviewedBy: sql.NullString{String: "tester", Valid: true},
 				})
+				return err
 			}
 			if state == "REJECTED" {
-				return q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{
+				_, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{
 					ID:         e.ID,
 					ReviewedBy: sql.NullString{String: "tester", Valid: true},
 				})
+				return err
 			}
 			return nil
 		}
@@ -958,6 +960,165 @@ func TestCreateManualEdge(t *testing.T) {
 	rrCycle := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", cycleBody)
 	if rrCycle.Code != http.StatusConflict {
 		t.Errorf("cycle status = %d, want 409, body = %s", rrCycle.Code, rrCycle.Body.String())
+	}
+}
+
+// TestCreateManualEdgeSetsGraphStatusLinked backs M3's third fix: a manual
+// edge is CONFIRMED at insert time (CreateManualMediaEdge), the same
+// review_state write confirm/reject makes -- the target node's
+// graph_status must reflect that immediately, not stay UNLINKED until an
+// unrelated resolve pass happens to touch it.
+func TestCreateManualEdgeSetsGraphStatusLinked(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	n1, n2 := seedTwoUnlinkedNodes(t, database)
+
+	body := map[string]any{
+		"sourceNodeId":     n1.ID,
+		"targetNodeId":     n2.ID,
+		"relationshipType": "DERIVED_FROM",
+	}
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/edges status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	target, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target node: %v", err)
+	}
+	if target.GraphStatus != "LINKED" {
+		t.Errorf("target graph_status = %q, want LINKED", target.GraphStatus)
+	}
+}
+
+// seedTwoUnlinkedNodes is a small shared fixture for the confirm/reject/
+// manual-create tests below: two UNLINKED nodes in one storage location, no
+// edge between them yet.
+func seedTwoUnlinkedNodes(t *testing.T, database *db.DB) (n1, n2 sqlcgen.MediaNode) {
+	t.Helper()
+	ctx := context.Background()
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: t.Name(), RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		n1, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-" + t.Name() + "-1", FilePath: "/p-" + t.Name() + ".raw",
+			FileName: "p.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		n2, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-" + t.Name() + "-2", FilePath: "/c-" + t.Name() + ".jpg",
+			FileName: "c.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+	return n1, n2
+}
+
+func TestConfirmRejectEdgeNotFoundReturns404(t *testing.T) {
+	srv, _ := fullTestServer(t)
+
+	rrConfirm := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges/999999/confirm", nil)
+	if rrConfirm.Code != http.StatusNotFound {
+		t.Errorf("confirm nonexistent edge status = %d, want 404, body = %s", rrConfirm.Code, rrConfirm.Body.String())
+	}
+
+	rrReject := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges/999999/reject", nil)
+	if rrReject.Code != http.StatusNotFound {
+		t.Errorf("reject nonexistent edge status = %d, want 404, body = %s", rrReject.Code, rrReject.Body.String())
+	}
+}
+
+// TestConfirmEdgeRecomputesGraphStatus backs M3: confirming a NEEDS_REVIEW
+// edge must flip the target node's graph_status to LINKED in the same
+// request, not leave it stale until the next scan happens to re-resolve it.
+func TestConfirmEdgeRecomputesGraphStatus(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	n1, n2 := seedTwoUnlinkedNodes(t, database)
+
+	var edge sqlcgen.MediaEdge
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		edge, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: n1.ID, TargetNodeID: n2.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.60, Tier: 2, Resolver: "test", ReviewState: "NEEDS_REVIEW",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed edge: %v", err)
+	}
+
+	before, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target before confirm: %v", err)
+	}
+	if before.GraphStatus != "UNLINKED" {
+		t.Fatalf("target graph_status before confirm = %q, want UNLINKED", before.GraphStatus)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	after, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target after confirm: %v", err)
+	}
+	if after.GraphStatus != "LINKED" {
+		t.Errorf("target graph_status after confirm = %q, want LINKED", after.GraphStatus)
+	}
+}
+
+// TestRejectEdgeRecomputesGraphStatus backs M3: rejecting a node's only
+// AUTO_ACCEPTED edge must revert graph_status to UNLINKED, not leave it
+// stuck at LINKED with nothing in the audit queue to explain why.
+func TestRejectEdgeRecomputesGraphStatus(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	n1, n2 := seedTwoUnlinkedNodes(t, database)
+
+	var edge sqlcgen.MediaEdge
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		edge, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: n1.ID, TargetNodeID: n2.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.95, Tier: 1, Resolver: "test", ReviewState: "AUTO_ACCEPTED",
+		})
+		if err != nil {
+			return err
+		}
+		// Simulate the graph engine having already set LINKED for this
+		// AUTO_ACCEPTED edge, the state a real resolve pass would leave.
+		return q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{ID: n2.ID, GraphStatus: "LINKED"})
+	}); err != nil {
+		t.Fatalf("seed edge: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/reject", edge.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reject status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	after, err := database.Reader.GetMediaNodeByID(ctx, n2.ID)
+	if err != nil {
+		t.Fatalf("get target after reject: %v", err)
+	}
+	if after.GraphStatus != "UNLINKED" {
+		t.Errorf("target graph_status after reject = %q, want UNLINKED (its only edge was just rejected)", after.GraphStatus)
 	}
 }
 

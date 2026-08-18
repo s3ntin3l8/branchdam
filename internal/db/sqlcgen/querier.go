@@ -23,7 +23,12 @@ type Querier interface {
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
 	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
-	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) error
+	// RETURNING target_node_id (rather than plain :exec) doubles as the
+	// existence check: sql.ErrNoRows means id didn't match any row, which the
+	// caller (internal/httpapi) turns into a 404 instead of a silent no-op
+	// 200. The returned target_node_id is what the caller re-derives
+	// graph_status from -- see routes.go's recomputeGraphStatus.
+	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
 	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
@@ -168,7 +173,8 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
-	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) error
+	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
+	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
 	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
