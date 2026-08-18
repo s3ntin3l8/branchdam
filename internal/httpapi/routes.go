@@ -762,7 +762,9 @@ const inheritWriteTimeout = 30 * time.Second
 // AUTO_ACCEPTED or CONFIRMED, or nil when the node has none. A NEEDS_REVIEW
 // (unconfirmed) or REJECTED edge is never a valid identity source: stamping an
 // unconfirmed parent's metadata into the child's file would cement a
-// possibly-wrong lineage with no recovery path.
+// possibly-wrong lineage with no recovery path. Equal-confidence ties break by
+// lowest edge id (ListEdgesByTarget has no ORDER BY), keeping the result
+// deterministic.
 func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 	var best *sqlcgen.MediaEdge
 	for i := range edges {
