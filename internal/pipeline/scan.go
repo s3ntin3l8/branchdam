@@ -380,7 +380,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		}
 		lastReportedSeen = seen
 
-		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
 				ID:           jobID,
 				FilesSeen:    int64(seen),
@@ -388,8 +388,10 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 				FilesFailed:  int64(filesFailed.Load()),
 				EdgesCreated: int64(total.EdgesCreated),
 			})
-		}); err != nil {
+		})
+		if err != nil {
 			log.Error("pipeline: update scan job progress", "err", err)
+			return // the write didn't land -- nothing changed for the SPA to refetch
 		}
 		if deps.Nudge != nil {
 			deps.Nudge()

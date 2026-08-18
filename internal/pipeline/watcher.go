@@ -343,6 +343,13 @@ func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen
 }
 
 func (w *WatcherSupervisor) updateJob(jobID int64, seen, hashed, failed *atomic.Int32) {
+	// EdgesCreated is left at its zero value here -- UpdateScanJobProgress
+	// SETs an absolute value, not an increment, and the watch path never
+	// calls graph.Engine.ResolveAndCommit, so 0 is correct today. If a
+	// future change wires edge resolution into the watcher, this call site
+	// will need its own accumulated count threaded in the same way
+	// runScan's drainAndCommit does (see scan.go), or every watch-job
+	// progress update will silently reset edges_created back to 0.
 	if err := w.deps.DB.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		return q.UpdateScanJobProgress(context.Background(), sqlcgen.UpdateScanJobProgressParams{
 			ID: jobID, FilesSeen: int64(seen.Load()), FilesHashed: int64(hashed.Load()), FilesFailed: int64(failed.Load()),

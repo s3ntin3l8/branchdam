@@ -1019,12 +1019,17 @@ func TestDrainAndCommitReportsFilesSeenOnEmptyTick(t *testing.T) {
 		done <- drainAndCommit(ctx, deps, locationID, jobID, results, &filesSeen, &filesFailed, uncertain, deps.logOrDiscard())
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
+	// Poll for both the DB write and the nudge together -- flush() does the
+	// InTx commit and then calls Nudge as two sequential, unsynchronized
+	// steps in the producer goroutine, so breaking on FilesSeen alone and
+	// only then reading nudges could observe the write before Nudge has
+	// run yet, even though it always follows shortly after.
+	deadline := time.Now().Add(5 * time.Second)
 	var job sqlcgen.ScanJob
 	var err error
 	for time.Now().Before(deadline) {
 		job, err = database.Reader.GetScanJob(ctx, jobID)
-		if err == nil && job.FilesSeen == 7 {
+		if err == nil && job.FilesSeen == 7 && nudges.Load() > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
