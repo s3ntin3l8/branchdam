@@ -79,7 +79,10 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			// while exiftool/ffprobe were absent from PATH would otherwise
 			// stay permanently metadata-less, since its fast_hash never
 			// changes and it always takes this branch (see #86).
-			return persistAllMetadata(ctx, q, existing.ID, r, log)
+			// reconcileAllMetadata (not persistAllMetadata) here: this branch
+			// runs on EVERY unchanged file on EVERY scan pass, so skipping the
+			// write when nothing actually changed matters (see #105).
+			return reconcileAllMetadata(ctx, q, existing.ID, r, stats, log)
 		}
 		return commitVersionCollision(ctx, q, locationID, existing, r, stats, log)
 
@@ -125,8 +128,8 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 				return err
 			}
 			// A rebased node backfills metadata the same way a touched one
-			// does -- see the touched branch above and #86.
-			return persistAllMetadata(ctx, q, missing.ID, r, log)
+			// does -- see the touched branch above, #86, and #105.
+			return reconcileAllMetadata(ctx, q, missing.ID, r, stats, log)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("get missing node by fast_hash: %w", err)
@@ -221,14 +224,13 @@ func filenameStem(fileName string) string {
 
 const metadataCap = 64 // per-node metadata row cap -- overflow is logged, never fatal
 
-// persistMetadata writes kv as node_metadata rows inside the caller's write
-// transaction, in sorted-key order so cap truncation is deterministic.
-// Overflow past maxRows is logged at DEBUG and dropped, never an error --
-// one over-tagged file must not fail a whole scan. That "logged and dropped"
-// guarantee covers cap overflow only: a hard insert error still aborts the
-// enclosing Commit transaction, so node and metadata land together or not at
-// all.
-func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, source string, kv map[string]string, maxRows int, log *slog.Logger) error {
+// cappedSortedKeys returns kv's keys in sorted order, truncated to maxRows.
+// Sorting first makes truncation deterministic; logging the drop at DEBUG
+// (never an error) means one over-tagged file can't fail a whole scan.
+// Shared by persistMetadata and reconcileMetadata so the cap is applied
+// identically regardless of which write path is used -- see reconcileMetadata's
+// doc comment for why the cap must be applied BEFORE any unchanged-value diff.
+func cappedSortedKeys(kv map[string]string, maxRows int, nodeID int64, source string, log *slog.Logger) []string {
 	if len(kv) == 0 || maxRows <= 0 {
 		return nil
 	}
@@ -237,11 +239,24 @@ func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, sour
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	for i, k := range keys {
-		if i >= maxRows {
-			log.Debug("pipeline: node_metadata overflow dropped", "nodeID", nodeID, "source", source, "dropped", len(keys)-i)
-			break
-		}
+	if len(keys) > maxRows {
+		log.Debug("pipeline: node_metadata overflow dropped", "nodeID", nodeID, "source", source, "dropped", len(keys)-maxRows)
+		keys = keys[:maxRows]
+	}
+	return keys
+}
+
+// persistMetadata writes kv as node_metadata rows inside the caller's write
+// transaction, in sorted-key order so cap truncation is deterministic.
+// Overflow past maxRows is logged at DEBUG and dropped, never an error --
+// one over-tagged file must not fail a whole scan. That "logged and dropped"
+// guarantee covers cap overflow only: a hard insert error still aborts the
+// enclosing Commit transaction, so node and metadata land together or not at
+// all. Used only where the node is known brand new (insertNewNode and
+// commitVersionCollision's successor) -- there every row is unconditionally
+// new, so reconcileMetadata's pre-read-and-diff below would be pure overhead.
+func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, source string, kv map[string]string, maxRows int, log *slog.Logger) error {
+	for _, k := range cappedSortedKeys(kv, maxRows, nodeID, source, log) {
 		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
 			NodeID: nodeID, Source: source, Key: k, Value: kv[k],
 		}); err != nil {
@@ -252,20 +267,102 @@ func persistMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, sour
 }
 
 // persistAllMetadata writes both r's exiftool and ffprobe metadata against
-// nodeID. Called on every branch that lands a node in the DB with r's data
-// available -- new insert, version-collision successor, touched (unchanged
-// fast_hash), and rebase/move -- not only on insert: a node first indexed
-// while exiftool/ffprobe were absent from PATH would otherwise stay
-// permanently metadata-less, since its fast_hash never changes on later
-// scans and it always takes the touched branch. InsertNodeMetadata is an
-// upsert (ON CONFLICT (node_id, source, key) DO UPDATE), so calling this
-// repeatedly for an already-populated node is a no-op past the first write,
-// not a duplicate-row risk.
+// nodeID unconditionally. Only for the two call sites where nodeID is known
+// brand new (insertNewNode, commitVersionCollision's successor) -- for a
+// touched/rebased node (see #86), use reconcileAllMetadata instead so an
+// unchanged file doesn't rewrite every row on every scan pass (#105).
 func persistAllMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, r Result, log *slog.Logger) error {
 	if err := persistMetadata(ctx, q, nodeID, "exiftool", exifMetadata(r), metadataCap, log); err != nil {
 		return err
 	}
 	return persistMetadata(ctx, q, nodeID, "ffprobe", ffprobeMetadata(r), metadataCap, log)
+}
+
+// reconcileMetadata writes only the rows in kv (after the same sort+cap
+// persistMetadata applies) whose value differs from -- or is absent from --
+// prior. prior is keyed by (source, key) and covers the node's full existing
+// row set, read once by reconcileAllMetadata before either source is
+// reconciled. The cap MUST be applied before this diff, not after: a key
+// truncated past metadataCap must never be compared against prior, or a
+// large, stable metadata set would spuriously "change" every pass as its
+// tail keys sort in and out of the capped window. Returns the number of rows
+// actually upserted, for Stats.MetadataWritten.
+func reconcileMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, source string, kv map[string]string, maxRows int, prior map[metadataRowKey]string, log *slog.Logger) (int, error) {
+	written := 0
+	for _, k := range cappedSortedKeys(kv, maxRows, nodeID, source, log) {
+		v := kv[k]
+		if old, ok := prior[metadataRowKey{source, k}]; ok && old == v {
+			continue // unchanged -- see #105, skip the redundant write
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: nodeID, Source: source, Key: k, Value: v,
+		}); err != nil {
+			return written, fmt.Errorf("insert node_metadata %s/%s: %w", source, k, err)
+		}
+		written++
+	}
+	return written, nil
+}
+
+// metadataRowKey is node_metadata's natural key minus node_id (the read in
+// reconcileAllMetadata is already scoped to one node_id).
+type metadataRowKey struct {
+	source string
+	key    string
+}
+
+// reconcileAllMetadata is persistAllMetadata's counterpart for a node that
+// might already have metadata: the touched branch (commitOne) and the
+// rebase/move branch (commitNoLiveNode, watcher.rebaseIfMoved), both #86's
+// backfill paths. It pre-reads the node's existing rows in the same write
+// transaction and only upserts rows that are new or genuinely changed --
+// InsertNodeMetadata's ON CONFLICT DO UPDATE keeps a naive persistAllMetadata
+// call correct here too, just wastefully so: every unchanged file on every
+// scan pass was otherwise rewriting its full metadata set (#105).
+//
+// stats may be nil (watcher.rebaseIfMoved has no *Stats in scope, being
+// called from inside an InTx closure returning bare error) -- in that case
+// the written count is logged at DEBUG instead of accumulated.
+func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, r Result, stats *Stats, log *slog.Logger) error {
+	exif := exifMetadata(r)
+	ffprobe := ffprobeMetadata(r)
+	if len(exif) == 0 && len(ffprobe) == 0 {
+		// Nothing this Result derives at all -- exiftool/ffprobe absent from
+		// PATH, or a non-media file. The pre-#105 persistAllMetadata path
+		// made zero DB calls in this case (cappedSortedKeys' len(kv)==0
+		// short-circuit); reconcileAllMetadata must preserve that, not spend
+		// a ListNodeMetadata read on the writer connection for nothing to
+		// reconcile against. A node that already has metadata from an
+		// earlier pass (tools installed then later removed, or genuinely
+		// probe-less content) simply keeps its existing rows untouched.
+		return nil
+	}
+
+	existing, err := q.ListNodeMetadata(ctx, nodeID)
+	if err != nil {
+		return fmt.Errorf("list node_metadata for reconcile: %w", err)
+	}
+	prior := make(map[metadataRowKey]string, len(existing))
+	for _, row := range existing {
+		prior[metadataRowKey{row.Source, row.Key}] = row.Value
+	}
+
+	written, err := reconcileMetadata(ctx, q, nodeID, "exiftool", exif, metadataCap, prior, log)
+	if err != nil {
+		return err
+	}
+	n, err := reconcileMetadata(ctx, q, nodeID, "ffprobe", ffprobe, metadataCap, prior, log)
+	if err != nil {
+		return err
+	}
+	written += n
+
+	if stats != nil {
+		stats.MetadataWritten += written
+	} else if written > 0 {
+		log.Debug("pipeline: node_metadata reconciled", "nodeID", nodeID, "written", written)
+	}
+	return nil
 }
 
 // exifMetadata assembles the source='exiftool' rows for a fresh node: the
