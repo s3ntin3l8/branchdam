@@ -120,7 +120,7 @@ func main() {
 	hub := sse.New()
 	scanTracker := &pipeline.ScanTracker{}
 
-	startImmichWorker(ctx, &cfg, database, log)
+	immichWorker := startImmichWorker(ctx, &cfg, database, log)
 
 	watched := watchedFromConfig(cfg.StorageLocations)
 	swept := sweptFromConfig(cfg.StorageLocations)
@@ -233,6 +233,13 @@ func main() {
 	// via POST /api/v1/scan) before the database closes.
 	if !waitBounded(joinCtx, log, "scanTracker.Wait()", scanTracker.Wait) {
 		dbUnsafeToClose = true
+	}
+	if immichWorker != nil {
+		// The Immich worker is ctx-bound (Run returns on ctx.Done); Wait joins
+		// it before the database closes, matching the supervisor/scan paths.
+		if !waitBounded(joinCtx, log, "syncWorker.Wait()", immichWorker.Wait) {
+			dbUnsafeToClose = true
+		}
 	}
 	// Drain waits for worker goroutines to finish their current job before the database closes.
 	if !waitBounded(joinCtx, log, "pool.Drain()", pool.Drain) {
