@@ -521,6 +521,75 @@ func TestCommitPersistsExifMetadataExactly(t *testing.T) {
 	}
 }
 
+// TestPersistExifMetadataWritesExiftoolRows backs #157: the inherit-metadata
+// endpoint rewrites a child's file in place, so after the write succeeds the
+// node's node_metadata must be backfilled from the file's current EXIF --
+// otherwise the DB store stays stale (empty) until the next scan and a second
+// inherit call re-plans from stale values. The rows must be keyed source=
+// 'exiftool' with the same grouped tag names loadTagSet reads
+// (EXIF:Make, EXIF:LensModel, EXIF:SerialNumber, EXIF:ISO,
+// Composite:GPSLatitude, ...), and the raw-tag allowlist must still apply.
+func TestPersistExifMetadataWritesExiftoolRows(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/inherited.jpg", FileName: "inherited.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
+	}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/inherited.jpg")
+
+	gpsLat, gpsLong := -33.9151, 18.4115
+	exif := &probe.ExifResult{
+		Make:         "SONY",
+		LensModel:    "FE 24-70mm",
+		SerialNumber: "123",
+		// Mirrors real probe.Exif output: the Composite GPS coordinates land
+		// in the typed fields, while Raw also carries the same strings.
+		GPSLatitude:  &gpsLat,
+		GPSLongitude: &gpsLong,
+		Raw: map[string]string{
+			"EXIF:ISO":               "100",
+			"EXIF:JunkTag":           "must-not-persist",
+			"Composite:GPSLatitude":  "-33.9151",
+			"Composite:GPSLongitude": "18.4115",
+		},
+	}
+	if err := PersistExifMetadata(ctx, database, node.ID, exif, nil); err != nil {
+		t.Fatalf("PersistExifMetadata: %v", err)
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Source+"\x00"+r.Key] = r.Value
+	}
+	want := map[string]string{
+		"exiftool\x00EXIF:Make":              "SONY",
+		"exiftool\x00EXIF:LensModel":         "FE 24-70mm",
+		"exiftool\x00EXIF:SerialNumber":      "123",
+		"exiftool\x00EXIF:ISO":               "100",
+		"exiftool\x00Composite:GPSLatitude":  "-33.9151",
+		"exiftool\x00Composite:GPSLongitude": "18.4115",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("metadata rows = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if _, ok := got["exiftool\x00EXIF:JunkTag"]; ok {
+		t.Error("EXIF:JunkTag persisted, want the allowlist to drop it")
+	}
+}
+
 func TestIsVideoExt(t *testing.T) {
 	video := []string{"mp4", "mov", "mkv", "m2ts"}
 	for _, ext := range video {
