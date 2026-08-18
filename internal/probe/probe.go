@@ -82,8 +82,8 @@ func exiftoolArgs(path string) []string {
 var exiftoolWriteAllowlist = map[string]bool{
 	"EXIF:DateTimeOriginal":   true,
 	"EXIF:OffsetTimeOriginal": true,
-	"EXIF:GPSLatitude":        true,
-	"EXIF:GPSLongitude":       true,
+	"Composite:GPSLatitude":   true, // signed decimal degrees -> exiftool derives value + hemisphere ref
+	"Composite:GPSLongitude":  true,
 	"EXIF:Make":               true,
 	"EXIF:Model":              true,
 	"EXIF:LensModel":          true,

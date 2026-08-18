@@ -28,8 +28,8 @@ func TestPlan(t *testing.T) {
 		want := map[string]string{
 			"EXIF:DateTimeOriginal":   "2023:05:01 12:34:56",
 			"EXIF:OffsetTimeOriginal": "+02:00",
-			"EXIF:GPSLatitude":        "-33.9151",
-			"EXIF:GPSLongitude":       "18.4115",
+			"Composite:GPSLatitude":   "-33.9151",
+			"Composite:GPSLongitude":  "18.4115",
 			"EXIF:Make":               "SONY",
 			"EXIF:Model":              "ILCE-7M4",
 			"EXIF:LensModel":          "FE 24-70mm F2.8 GM",
@@ -70,7 +70,7 @@ func TestPlan(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Plan: %v", err)
 		}
-		for _, tag := range []string{"EXIF:DateTimeOriginal", "EXIF:OffsetTimeOriginal", "EXIF:GPSLatitude", "EXIF:GPSLongitude", "EXIF:Make", "EXIF:Model", "EXIF:LensModel", "EXIF:SerialNumber"} {
+		for _, tag := range []string{"EXIF:DateTimeOriginal", "EXIF:OffsetTimeOriginal", "Composite:GPSLatitude", "Composite:GPSLongitude", "EXIF:Make", "EXIF:Model", "EXIF:LensModel", "EXIF:SerialNumber"} {
 			if _, ok := got[tag]; ok {
 				t.Errorf("tag %q should NOT be overwritten, got %v", tag, got)
 			}

@@ -294,8 +294,10 @@ func TestWriteTagsRoundTrip(t *testing.T) {
 	}
 
 	tags := map[string]string{
-		"EXIF:Make":         "SONY",
-		"XMP-dc:Identifier": "uuid-child",
+		"EXIF:Make":              "SONY",
+		"Composite:GPSLatitude":  "-33.9151",
+		"Composite:GPSLongitude": "18.4115",
+		"XMP-dc:Identifier":      "uuid-child",
 	}
 	if err := prober.WriteTags(context.Background(), fixture, tags); err != nil {
 		t.Fatalf("WriteTags: %v", err)
@@ -307,6 +309,15 @@ func TestWriteTagsRoundTrip(t *testing.T) {
 	}
 	if res.Make != "SONY" {
 		t.Errorf("EXIF:Make = %q, want SONY", res.Make)
+	}
+	// GPS is the most format-sensitive write (signed decimal degrees): it must
+	// survive a write via EXIF:GPS* and read back via the signed Composite
+	// group (not flipped to the wrong hemisphere by a lost ref).
+	if res.GPSLatitude == nil || *res.GPSLatitude != -33.9151 {
+		t.Errorf("GPSLatitude = %v, want -33.9151", res.GPSLatitude)
+	}
+	if res.GPSLongitude == nil || *res.GPSLongitude != 18.4115 {
+		t.Errorf("GPSLongitude = %v, want 18.4115", res.GPSLongitude)
 	}
 	// exiftool reports the dc:identifier field (written via -XMP-dc:Identifier)
 	// under the generic XMP group when reading back with -G.

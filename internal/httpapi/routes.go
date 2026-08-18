@@ -579,17 +579,24 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error500InternalServerError("get parent asset", err)
 	}
 
-	parentTags := loadTagSet(ctx, s.db.Reader, parent)
-	childTags := loadTagSet(ctx, s.db.Reader, child)
+	parentTags, err := loadTagSet(ctx, s.db.Reader, parent)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("read parent metadata", err)
+	}
+	childTags, err := loadTagSet(ctx, s.db.Reader, child)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("read child metadata", err)
+	}
 	childTags.DerivedFrom = parent.NodeUuid // XMP-xmpMM:DerivedFrom = parent node_uuid
 
 	tags, err := metadata.Plan(parentTags, childTags)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("plan metadata inheritance", err)
 	}
-	if len(tags) == 0 {
-		return nil, huma.Error409Conflict("nothing to inherit: child already carries all inheritable metadata")
-	}
+	// Plan always emits the two identity tags (XMP-dc:Identifier /
+	// XMP-xmpMM:DerivedFrom), so this write is idempotent in value: repeating
+	// it leaves the file's inheritable metadata unchanged and re-asserts the
+	// child's identity tags.
 
 	wctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
 	defer cancel()
@@ -630,15 +637,17 @@ func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 }
 
 // loadTagSet assembles a node's inheritable tag values from its promoted
-// columns and node_metadata rows (source='exiftool').
-func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) metadata.TagSet {
+// columns and node_metadata rows (source='exiftool'). A read failure is
+// surfaced, not swallowed -- a partial/empty tagset would silently produce a
+// partial inheritance.
+func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) (metadata.TagSet, error) {
 	ts := metadata.TagSet{
 		Identifier: node.NodeUuid, // XMP-dc:Identifier is always the node's own uuid
 		Model:      node.CameraModel.String,
 	}
 	rows, err := q.ListNodeMetadata(ctx, node.ID)
 	if err != nil {
-		return ts
+		return ts, err
 	}
 	for _, r := range rows {
 		if r.Source != "exiftool" {
@@ -674,7 +683,7 @@ func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode)
 	if ts.DateTimeOriginal == "" && node.CapturedAtUnix.Valid {
 		ts.DateTimeOriginal = time.Unix(node.CapturedAtUnix.Int64, 0).UTC().Format("2006:01:02 15:04:05")
 	}
-	return ts
+	return ts, nil
 }
 
 // --- /api/v1/edges ---

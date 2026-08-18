@@ -58,10 +58,13 @@ func Plan(parent, child TagSet) (map[string]string, error) {
 	inherit("EXIF:SerialNumber", parent.SerialNumber, child.SerialNumber)
 
 	if parent.GPSLatitude != nil && child.GPSLatitude == nil {
-		tags["EXIF:GPSLatitude"] = formatFloat(*parent.GPSLatitude)
+		// Composite:GPS* is signed decimal degrees; writing it (not the raw
+		// EXIF:GPS* magnitude) is what makes exiftool emit the correct
+		// GPSLatitudeRef/GPSLongitudeRef hemisphere and preserve the sign.
+		tags["Composite:GPSLatitude"] = formatFloat(*parent.GPSLatitude)
 	}
 	if parent.GPSLongitude != nil && child.GPSLongitude == nil {
-		tags["EXIF:GPSLongitude"] = formatFloat(*parent.GPSLongitude)
+		tags["Composite:GPSLongitude"] = formatFloat(*parent.GPSLongitude)
 	}
 
 	if child.Identifier != "" {

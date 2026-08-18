@@ -78,8 +78,8 @@ func TestExiftoolWriteArgsAllowlist(t *testing.T) {
 		"EXIF:SerialNumber":       "1234567",
 		"EXIF:DateTimeOriginal":   "2026:07:15 14:30:00",
 		"EXIF:OffsetTimeOriginal": "+02:00",
-		"EXIF:GPSLatitude":        "-33.9151",
-		"EXIF:GPSLongitude":       "18.4115",
+		"Composite:GPSLatitude":   "-33.9151",
+		"Composite:GPSLongitude":  "18.4115",
 		"XMP-dc:Identifier":       "uuid-abc",
 		"XMP-xmpMM:DerivedFrom":   "uuid-parent",
 	}
