@@ -97,8 +97,13 @@ type Querier interface {
 	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error)
 	// Tier-2 filenameStem resolver: candidate parents sharing a normalized
 	// filename stem with the child, scored further by capture day / camera /
-	// directory match in internal/graph.
-	ListLiveNodesByFilenameStem(ctx context.Context, filenameStem sql.NullString) ([]MediaNode, error)
+	// directory match in internal/graph. Capped at ?2 rows -- defense in depth
+	// on top of (not instead of) versionSuffixRe's own -\d{1,2} bound
+	// (internal/pipeline/commit.go), which narrows but does not close the
+	// over-collapse bug class: an unpadded 1-2 digit hyphen-numbering scheme
+	// can still produce a large same-stem batch. FilenameStemResolver logs
+	// when this cap is actually hit.
+	ListLiveNodesByFilenameStem(ctx context.Context, arg ListLiveNodesByFilenameStemParams) ([]MediaNode, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.

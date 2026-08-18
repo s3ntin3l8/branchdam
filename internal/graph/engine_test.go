@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -75,7 +76,11 @@ type nodeFixture struct {
 // simpler and safer than restructuring package boundaries just to share it,
 // and it keeps these fixtures behaving exactly like real ingested nodes
 // without reintroducing the import cycle seedNode's doc comment explains.
-var fixtureVersionSuffixRe = regexp.MustCompile(`(?i)(_edit|_proxy|_v\d+|-\d+| copy|\(\d+\))+$`)
+// Must be kept in sync with commit.go's versionSuffixRe -- in particular the
+// -\d{1,2} bound (not unbounded -\d+), which is what keeps camera default
+// filenames like DSC-0001.JPG from collapsing to a shared "dsc" stem; see
+// commit.go's doc comment.
+var fixtureVersionSuffixRe = regexp.MustCompile(`(?i)(_edit|_proxy|_v\d+|-\d{1,2}| copy|\(\d+\))+$`)
 
 func fixtureFilenameStem(fileName string) string {
 	stem := fileName
@@ -292,6 +297,40 @@ func TestFilenameStemWeakMatchNeedsReview(t *testing.T) {
 	}
 	if !found {
 		t.Error("the NEEDS_REVIEW edge does not appear in the audit queue")
+	}
+}
+
+// TestFilenameStemDistinctCameraNumbersDoNotCollapse backs H3: a batch of
+// camera-default-named files sharing capture day, camera model, and
+// directory -- the common case for one memory-card import -- must not
+// collapse to a single shared filename_stem and produce an O(n^2)
+// auto-accepted DERIVED_FROM mesh. Before the fix (unbounded -\d+ in
+// versionSuffixRe), every DSC-NNNN.JPG in this batch shared the bare stem
+// "dsc"; with the -\d{1,2} bound, each keeps its own 4-digit suffix and
+// FilenameStemResolver finds no candidates at all among siblings that share
+// nothing but a camera-generated frame number.
+func TestFilenameStemDistinctCameraNumbersDoNotCollapse(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	var last sqlcgen.MediaNode
+	for i := 1; i <= 20; i++ {
+		name := fmt.Sprintf("DSC-%04d.JPG", i)
+		last = seedNode(t, database, locationID, nodeFixture{
+			Path: "/2026-07-15/" + name, FileName: name, FileExt: "jpg",
+			CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+		})
+	}
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(last))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("got %d edges among 20 distinct DSC-NNNN siblings, want 0 -- each keeps its own numeric suffix, not a shared stem: %+v", len(edges), edges)
 	}
 }
 
