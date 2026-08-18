@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,6 +346,104 @@ func TestStartImmichWorkerEnabledWhenConfigured(t *testing.T) {
 	w := startImmichWorker(ctx, cfg, database, slog.New(slog.DiscardHandler))
 	if w == nil {
 		t.Fatal("startImmichWorker with APIURL set = nil, want a worker")
+	}
+}
+
+func TestSweptFromConfig(t *testing.T) {
+	cfg := []config.StorageLocation{
+		{Name: "nas", RootPath: "/n", Tier: "TIER2_EXPORTS", Sweep: true},
+		{Name: "archive", RootPath: "/a", Tier: "TIER3_MASTER_ARCHIVE", Sweep: true}, // never swept
+		{Name: "projects", RootPath: "/p", Tier: "PROJECTS", Sweep: false},           // not opted in
+	}
+	got := sweptFromConfig(cfg)
+	if len(got) != 1 || got[0].Name != "nas" {
+		t.Fatalf("sweptFromConfig = %+v, want only nas", got)
+	}
+}
+
+func TestResolveSweptLocations(t *testing.T) {
+	database := mainTestOpenDB(t)
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	cfg := config.StorageLocation{Name: "nas", RootPath: resolved, Tier: "TIER2_EXPORTS", Sweep: true, SweepIntervalSecs: 42}
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertStorageLocation(context.Background(), sqlcgen.UpsertStorageLocationParams{
+			Name: "nas", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	locs, err := resolveSweptLocations(context.Background(), database, []config.StorageLocation{cfg})
+	if err != nil {
+		t.Fatalf("resolveSweptLocations: %v", err)
+	}
+	if len(locs) != 1 || locs[0].Location.Tier != "TIER2_EXPORTS" || locs[0].Location.ID == 0 {
+		t.Fatalf("locs = %+v, want one TIER2_EXPORTS with a real id", locs)
+	}
+	if locs[0].Interval != 42*time.Second {
+		t.Errorf("locs[0].Interval = %v, want 42s", locs[0].Interval)
+	}
+}
+
+func TestResolveSweptLocationsZeroIntervalMeansDefault(t *testing.T) {
+	database := mainTestOpenDB(t)
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	cfg := config.StorageLocation{Name: "nas", RootPath: resolved, Tier: "TIER2_EXPORTS", Sweep: true} // SweepIntervalSecs unset
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertStorageLocation(context.Background(), sqlcgen.UpsertStorageLocationParams{
+			Name: "nas", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	locs, err := resolveSweptLocations(context.Background(), database, []config.StorageLocation{cfg})
+	if err != nil {
+		t.Fatalf("resolveSweptLocations: %v", err)
+	}
+	if len(locs) != 1 || locs[0].Interval != 0 {
+		t.Fatalf("locs = %+v, want Interval=0 (SweeperSupervisor.Start resolves 0 to its own default)", locs)
+	}
+}
+
+// TestWarnOverlappingWatchAndSweep proves a location with both watch and
+// sweep enabled logs a WARN naming that location, rather than being
+// silently accepted or rejected as a config error -- #60's AC #3 is not
+// literally true (the worker pool's per-key dedup never sees watcher work,
+// since the watcher calls Commit directly), so this is the honest
+// alternative: surface the combination, don't pretend it's unreachable.
+func TestWarnOverlappingWatchAndSweep(t *testing.T) {
+	buf := &bytes.Buffer{}
+	log := slog.New(slog.NewTextHandler(buf, nil))
+
+	watched := []config.StorageLocation{
+		{Name: "both", RootPath: "/both", Tier: "TIER2_EXPORTS", Watch: true, Sweep: true},
+		{Name: "watch-only", RootPath: "/w", Tier: "TIER2_EXPORTS", Watch: true},
+	}
+	swept := []config.StorageLocation{
+		{Name: "both", RootPath: "/both", Tier: "TIER2_EXPORTS", Watch: true, Sweep: true},
+		{Name: "sweep-only", RootPath: "/s", Tier: "TIER2_EXPORTS", Sweep: true},
+	}
+
+	warnOverlappingWatchAndSweep(log, watched, swept)
+
+	out := buf.String()
+	if !strings.Contains(out, "rootPath=/both") {
+		t.Errorf("log output = %q, want a WARN naming /both", out)
+	}
+	if strings.Contains(out, "rootPath=/w") || strings.Contains(out, "rootPath=/s") {
+		t.Errorf("log output = %q, want no warning for locations with only one of watch/sweep", out)
 	}
 }
 
