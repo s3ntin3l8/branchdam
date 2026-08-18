@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"net"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -271,6 +272,83 @@ func TestShutdownSequenceTerminatesWithinBudgetDespiteSlowJob(t *testing.T) {
 	}
 	if !dbUnsafeToClose {
 		t.Error("dbUnsafeToClose = false, want true -- the pool never actually finished draining within budget")
+	}
+}
+
+// TestShutdownSetsDBUnsafeWhenHTTPServerShutdownTimesOut backs the same
+// hazard the pool/scanTracker/supervisor waits guard against: several HTTP
+// handlers (handleConfirmEdge, handleRejectEdge, handleCreateEdge,
+// handleAgentEvent in internal/httpapi/routes.go) call s.db.InTx directly on
+// the writer connection from the request goroutine, never routed through
+// pool/supervisor/scanTracker. A stuck one is exactly the "goroutine may
+// still hold the writer" case, so httpServer.Shutdown timing out must also
+// set dbUnsafeToClose, not just log and fall through.
+func TestShutdownSetsDBUnsafeWhenHTTPServerShutdownTimesOut(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release // simulates a handler mid-InTx that outlives the shutdown budget
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	httpServer := &http.Server{Handler: mux}
+	serveDone := make(chan struct{})
+	go func() {
+		_ = httpServer.Serve(ln)
+		close(serveDone)
+	}()
+
+	reqDone := make(chan struct{})
+	go func() {
+		defer close(reqDone)
+		resp, err := http.Get("http://" + ln.Addr().String() + "/slow")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	// A single Cleanup, not three separate ones: t.Cleanup runs LIFO, and
+	// reqDone/serveDone can only ever close AFTER release does (the handler
+	// is blocked on it) -- registering them as independent Cleanups would
+	// let a later-registered one run first and deadlock waiting on a
+	// goroutine that's still blocked on an unclosed release.
+	t.Cleanup(func() {
+		close(release)
+		<-reqDone
+		<-serveDone
+	})
+	<-started // the handler is genuinely in flight, so Shutdown below is guaranteed to wait on it
+
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	pool := workers.New[string](1, 1)
+	pool.Run(poolCtx)
+	cancelPool() // no work submitted -- Drain returns almost immediately, isolating the http server's contribution
+	scanTracker := &pipeline.ScanTracker{}
+
+	const budget = 200 * time.Millisecond
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	var dbUnsafeToClose bool
+	done := make(chan error, 1)
+	go func() {
+		done <- runShutdownSequence(shutdownCtx, slog.New(slog.DiscardHandler), httpServer, nil, scanTracker, pool, &dbUnsafeToClose)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("runShutdownSequence returned nil err, want the shutdownCtx deadline error from the stuck handler")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runShutdownSequence did not return within 2s of a 200ms budget -- shutdown is hanging on the stuck handler")
+	}
+	if !dbUnsafeToClose {
+		t.Error("dbUnsafeToClose = false, want true -- httpServer.Shutdown timed out with a handler still running")
 	}
 }
 

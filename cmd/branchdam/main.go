@@ -193,8 +193,17 @@ func run(parent context.Context, cfg config.Config, log *slog.Logger) error {
 func runShutdownSequence(shutdownCtx context.Context, log *slog.Logger, httpServer *http.Server, supervisor *pipeline.WatcherSupervisor, scanTracker *pipeline.ScanTracker, pool *workers.Pool[string], dbUnsafeToClose *bool) error {
 	var shutdownErr error
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		// Shutdown returns shutdownCtx's error (not e.g. a Listener.Close
+		// failure) whenever a handler goroutine is still running past the
+		// deadline -- and several handlers (handleConfirmEdge,
+		// handleRejectEdge, handleCreateEdge, handleAgentEvent) call
+		// s.db.InTx directly on the writer connection, never routed through
+		// pool/supervisor/scanTracker. A stuck one is exactly the "goroutine
+		// may still hold the writer" hazard this whole function exists to
+		// avoid, so this must set dbUnsafeToClose too, not just log.
 		log.Error("shutdown: http server", "err", err)
 		shutdownErr = err
+		*dbUnsafeToClose = true
 	}
 
 	if supervisor != nil {
