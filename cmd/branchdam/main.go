@@ -158,25 +158,28 @@ func main() {
 		// Watchers already stopped on ctx.Done; Wait() joins each location's
 		// consumer goroutine, which holds the writer DB and calls Commit
 		// directly (never Pool.Submit), so it must finish before db.Close.
-		supervisor.Wait()
+		waitBounded(shutdownCtx, log, "supervisor.Wait()", supervisor.Wait)
 	}
 	// scanTracker.Wait() joins every in-flight RunScan goroutine (started
-	// via POST /api/v1/scan) before the database closes, the same guarantee
-	// supervisor.Wait() above already gives the watch path. This must come
-	// before pool.Drain(): a scan's own wg.Wait() (internal/pipeline/scan.go)
-	// depends on the pool's workers resolving every submitted job one way or
-	// another -- either running it or, since #92, calling its OnAbandon hook
-	// once the pool's own ctx (this same ctx) is done -- so a scan can only
-	// finish once the pool has started winding down, which is already true
-	// here since ctx is Done. Draining first would just make this wait
-	// redundant, not wrong, but ordering it this way mirrors the watcher
-	// case above and keeps "join background scan work" as one clear step.
-	scanTracker.Wait()
-	// ctx (the signal context) is already Done by this point, which is what
-	// tells the pool's worker goroutines to stop after their current job --
-	// Drain waits for that to actually finish before the database closes.
-	pool.Drain()
+	// via POST /api/v1/scan) before the database closes.
+	waitBounded(shutdownCtx, log, "scanTracker.Wait()", scanTracker.Wait)
+	// Drain waits for worker goroutines to finish their current job before the database closes.
+	waitBounded(shutdownCtx, log, "pool.Drain()", pool.Drain)
 	log.Info("server stopped")
+}
+
+func waitBounded(ctx context.Context, log *slog.Logger, name string, waitFunc func()) {
+	done := make(chan struct{})
+	go func() {
+		waitFunc()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		log.Warn("shutdown wait timed out", "component", name, "err", ctx.Err())
+	}
 }
 
 // reconcileOrphanedScanJobs moves every scan_jobs row still RUNNING to
