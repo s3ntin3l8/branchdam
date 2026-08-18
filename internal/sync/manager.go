@@ -72,25 +72,41 @@ func NewManager(database *db.DB, log *slog.Logger) *Manager {
 }
 
 // Enqueue claims a node for push to remote. Idempotent: if (node_id, remote)
-// is already PUSHED or PUSHING, it is a no-op returning ErrAlreadyPushed --
-// replaying the same logical push never queues a duplicate. A PUSH_FAILED row
-// is re-claimed (retry); a PENDING row is a no-op (already queued).
+// is already PUSHED or PUSHING it is a no-op returning ErrAlreadyPushed, and
+// an already-PENDING row is left untouched -- replaying the same logical push
+// never queues a duplicate or re-orders the FIFO. A PUSH_FAILED row is
+// re-claimed (retry).
+//
+// The look-up and the upsert run inside ONE write transaction on the writer
+// pool's single connection, so a concurrent ProcessPending that claims and
+// pushes the same row cannot interleave between them and regress it back to
+// PENDING (which would duplicate the push).
 func (m *Manager) Enqueue(ctx context.Context, node Node, remote string) error {
 	key := pushKey(node.Checksum, remote)
-	row, err := m.db.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{
-		NodeID: node.ID, Remote: remote,
-	})
-	if err == nil {
-		if row.SyncStatus == "PUSHED" || row.SyncStatus == "PUSHING" {
-			m.log.Debug("sync: enqueue is a no-op (already in flight or pushed)",
-				"nodeID", node.ID, "remote", remote, "pushKey", key)
-			return ErrAlreadyPushed
+	return m.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		row, err := q.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{
+			NodeID: node.ID, Remote: remote,
+		})
+		if err == nil {
+			switch row.SyncStatus {
+			case "PUSHED", "PUSHING":
+				m.log.Debug("sync: enqueue is a no-op (already in flight or pushed)",
+					"nodeID", node.ID, "remote", remote, "pushKey", key)
+				return ErrAlreadyPushed
+			case "PENDING_CLOUD_PUSH":
+				return nil // already queued -- no-op, leave last_attempt_at alone
+			}
+			// PUSH_FAILED -- fall through to re-claim below.
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("sync: get remote sync state: %w", err)
 		}
-		// PENDING_CLOUD_PUSH or PUSH_FAILED -- fall through to (re-)claim.
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("sync: get remote sync state: %w", err)
-	}
-	return m.setBatchStatus(ctx, []int64{node.ID}, remote, "PENDING_CLOUD_PUSH", "", nil)
+		_, err = q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: remote, SyncStatus: "PENDING_CLOUD_PUSH",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+		})
+		return err
+	})
 }
 
 // ProcessPending claims up to batchSize PENDING_CLOUD_PUSH rows for remote,
@@ -186,9 +202,13 @@ func (m *Manager) setBatchStatus(ctx context.Context, nodeIDs []int64, remote, s
 					return err
 				}
 			case "PUSH_FAILED":
+				msg := "sync: push failed"
+				if lastErr != nil {
+					msg = *lastErr
+				}
 				if err := q.MarkRemoteSyncStateFailed(ctx, sqlcgen.MarkRemoteSyncStateFailedParams{
 					NodeID: id, Remote: remote,
-					LastError: sql.NullString{String: *lastErr, Valid: true},
+					LastError: sql.NullString{String: msg, Valid: true},
 				}); err != nil {
 					return err
 				}

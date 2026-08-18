@@ -177,6 +177,46 @@ func TestProcessPendingFailureMarksPushFailed(t *testing.T) {
 	}
 }
 
+func TestEnqueuePendingIsNoOpAndPushingShortCircuits(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	node := seedNode(t, database, locID, "/exports/immich/shot.jpg")
+	n := Node{ID: node.ID, Checksum: "aaaaaaaaaaaaaaaa"}
+
+	if err := mgr.Enqueue(ctx, n, RemoteImmich); err != nil {
+		t.Fatalf("Enqueue (1): %v", err)
+	}
+	first, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	firstAttempt := first.LastAttemptAt
+
+	// Re-enqueueing an already-PENDING row is a no-op and must NOT bump
+	// last_attempt_at (re-ordering the FIFO) nor duplicate the row.
+	if err := mgr.Enqueue(ctx, n, RemoteImmich); err != nil {
+		t.Fatalf("Enqueue (2, pending) should be a no-op: %v", err)
+	}
+	after, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if !after.LastAttemptAt.Valid || after.LastAttemptAt.Int64 != firstAttempt.Int64 {
+		t.Errorf("last_attempt_at changed on a no-op enqueue: %+v -> %+v", firstAttempt, after.LastAttemptAt)
+	}
+
+	// A PUSHING row short-circuits with ErrAlreadyPushed.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSHING",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("force PUSHING: %v", err)
+	}
+	if err := mgr.Enqueue(ctx, n, RemoteImmich); !errors.Is(err, ErrAlreadyPushed) {
+		t.Fatalf("Enqueue on PUSHING = %v, want ErrAlreadyPushed", err)
+	}
+}
+
 func TestProcessPendingIsRemoteScoped(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)
