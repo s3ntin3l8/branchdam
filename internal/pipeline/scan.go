@@ -105,17 +105,36 @@ func (t *ScanTracker) Wait() { t.wg.Wait() }
 // (internal/httpapi, PR 9) are expected to respond 202 with the returned
 // job id right away -- this function never blocks on the scan itself.
 func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int64, error) {
-	var job sqlcgen.ScanJob
-	err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-		j, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
-			StorageLocationID: sql.NullInt64{Int64: location.ID, Valid: true},
-			Kind:              "FULL_SCAN",
-		})
-		job = j
-		return err
-	})
+	return startScanAsync(ctx, deps, location, "FULL_SCAN", false)
+}
+
+// RunSweep is RunScan's low-priority differential counterpart (#60): a file
+// whose (mtime_unix, size_bytes) still match its stored node is
+// TouchMediaNode'd directly and never opened, hashed, or routed through
+// Commit; a changed or new file takes the ordinary hash+Commit path.
+// Creates a scan_jobs row with kind='INCREMENTAL' and reuses the exact same
+// clean-completion-gated MISSING sweep and #89 node_metadata pruning as a
+// full scan -- see runScan's differential parameter and sweep.go's
+// sweepUnchanged/touchBatcher.
+//
+// SweeperSupervisor does not call this: its own per-location loop calls
+// createScanJob + runScan directly and synchronously, so passes can never
+// overlap (see sweeper.go). RunSweep exists for symmetry with RunScan and
+// so callers that want a single fire-and-forget sweep (tests, a future
+// manual-trigger endpoint) don't need to reach into pipeline internals.
+func RunSweep(ctx context.Context, deps ScanDeps, location storage.Location) (int64, error) {
+	return startScanAsync(ctx, deps, location, "INCREMENTAL", true)
+}
+
+// startScanAsync creates the scan_jobs row synchronously, then runs the
+// walk/hash/commit work in a background goroutine and returns the job id
+// immediately. differential is passed through to runScan explicitly rather
+// than derived from kind -- an unrecognized kind string must never silently
+// fall back to FULL_SCAN semantics under a mislabeled row.
+func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Location, kind string, differential bool) (int64, error) {
+	job, err := createScanJob(ctx, deps, location, kind)
 	if err != nil {
-		return 0, fmt.Errorf("create scan job: %w", err)
+		return 0, err
 	}
 
 	// The scan is a background job, not a request: it must outlive the HTTP
@@ -127,8 +146,8 @@ func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int
 	// runScan). Tracker.add/done, if a Tracker is set, is what lets
 	// cmd/branchdam actually wait for that resolution to finish before
 	// closing the database -- add() happens synchronously here, before the
-	// goroutine starts, so a Wait() call racing immediately after RunScan
-	// returns can never miss it.
+	// goroutine starts, so a Wait() call racing immediately after this
+	// function returns can never miss it.
 	if deps.Tracker != nil {
 		deps.Tracker.add()
 	}
@@ -136,9 +155,28 @@ func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int
 		if deps.Tracker != nil {
 			defer deps.Tracker.done()
 		}
-		runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt)
+		runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt, differential)
 	}()
 	return job.ID, nil
+}
+
+// createScanJob inserts the scan_jobs row for a new pass. Shared by
+// startScanAsync (FULL_SCAN/INCREMENTAL, fire-and-forget) and
+// SweeperSupervisor.runOneSweep (INCREMENTAL, synchronous).
+func createScanJob(ctx context.Context, deps ScanDeps, location storage.Location, kind string) (sqlcgen.ScanJob, error) {
+	var job sqlcgen.ScanJob
+	err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		j, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: location.ID, Valid: true},
+			Kind:              kind,
+		})
+		job = j
+		return err
+	})
+	if err != nil {
+		return sqlcgen.ScanJob{}, fmt.Errorf("create scan job: %w", err)
+	}
+	return job, nil
 }
 
 // uncertainPaths is the pass's seen-but-uncertain set: every path the walk
@@ -173,7 +211,16 @@ func (u *uncertainPaths) list() []string {
 	return out
 }
 
-func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobID, startedAt int64) {
+// runScan is the shared core behind both RunScan (FULL_SCAN) and RunSweep
+// (INCREMENTAL): differential, when true, makes the walk callback check
+// each file against its stored node before ever submitting it to the pool
+// -- see sweepUnchanged and touchBatcher in sweep.go. Everything after the
+// walk (drainAndCommit, the walk-error guard, the seen-but-uncertain
+// exclusion, MarkUnseenNodesMissing, PruneArchivedNodeMetadata,
+// terminalization) is identical for both kinds; that's deliberate -- #60's
+// entire point is reusing the same clean-completion-gated MISSING sweep,
+// not approximating it.
+func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobID, startedAt int64, differential bool) {
 	log := deps.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -200,6 +247,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// unambiguous.
 	var interrupted atomic.Bool
 	uncertain := newUncertainPaths()
+	touchBatch := newTouchBatcher(deps.DB, uncertain, &filesFailed, log)
 
 	walkFn := deps.WalkFn
 	if walkFn == nil {
@@ -242,6 +290,13 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				return nil // following a symlink is a storage.Guard-mediated decision elsewhere, not this pass's
 			}
 			filesSeen.Add(1)
+
+			if differential {
+				if node, unchanged := sweepUnchanged(ctx, deps, rec); unchanged {
+					touchBatch.add(ctx, node.ID, rec.Path, rec.ModTime.Unix())
+					return nil
+				}
+			}
 
 			wg.Add(1)
 			submitted := deps.Pool.Submit(ctx, workers.Job[string]{
@@ -301,6 +356,11 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			}
 			return nil
 		})
+		// Flush whatever's left in the touch batch regardless of walkErr --
+		// every file that reached this point was genuinely seen and matched,
+		// so those touches are valid even when the walk failed partway and
+		// the MISSING sweep below never runs.
+		touchBatch.flush(ctx)
 		wg.Wait()
 		if n := abandonedCount.Load(); n > 0 {
 			log.Warn("pipeline: jobs abandoned (pool shut down before they ran)", "count", n)
@@ -433,7 +493,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	log.Info("pipeline: scan finished", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"cancelled", interruptedByShutdown, "inserted", total.Inserted, "touched", total.Touched,
 		"versionCollisions", total.VersionCollisions, "moved", total.Moved, "edgesCreated", total.EdgesCreated,
-		"metadataWritten", total.MetadataWritten)
+		"metadataWritten", total.MetadataWritten, "differential", differential, "sweepTouched", touchBatch.total)
 }
 
 // isClosed reports whether ch has been closed, without blocking. A nil

@@ -99,9 +99,26 @@ type StorageLocation struct {
 	// Watch opts this location into a continuous fsnotify watcher at startup
 	// (kind='WATCH' scan job), off by default. Never honored for Tier 3 --
 	// the master archive is never watched regardless of this flag. Local NVMe
-	// volumes only; fsnotify does not fire reliably over SMB/NFS (that
-	// differential mtime sweep is a separate, later issue).
+	// volumes only; fsnotify does not fire reliably over SMB/NFS -- Sweep
+	// below is the polling adjunct for those mounts instead (#60).
 	Watch bool `yaml:"watch"`
+
+	// Sweep opts this location into a low-priority differential mtime sweep
+	// (kind='INCREMENTAL' scan job), off by default. Never honored for
+	// Tier 3 -- the master archive is read-only, so nothing on it can ever
+	// be ingested, and a sweep there would only ever drive the MISSING
+	// sweep, which a manual scan already covers. Intended for SMB/NFS
+	// shares where fsnotify (Watch above) does not fire reliably: unchanged
+	// files (matching mtime_unix and size_bytes) are touched, never
+	// re-hashed (#60).
+	Sweep bool `yaml:"sweep"`
+
+	// SweepIntervalSecs overrides the 10-minute default between sweep
+	// passes for this location. Zero (the default) means "use the default";
+	// a negative value also falls back to the default (SweeperSupervisor.Start
+	// treats interval<=0 uniformly) rather than producing a busy-looping
+	// sweep, but is not itself a meaningful config value -- avoid it.
+	SweepIntervalSecs int `yaml:"sweepIntervalSecs"`
 }
 
 func defaultConfig() Config {

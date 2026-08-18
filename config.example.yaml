@@ -53,7 +53,8 @@ storageLocations:
     rootPath: /storage/archive
     tier: TIER3_MASTER_ARCHIVE
     readOnly: true                # enforced in the DB CHECK too; Tier 3 is always read-only
-    # watch is never honored here: the Tier 3 master archive is not watched
+    # watch and sweep are never honored here: the Tier 3 master archive is
+    # read-only, so nothing on it can ever be ingested
 
   - name: exports
     rootPath: /storage/exports
@@ -70,3 +71,11 @@ storageLocations:
     prunable: true                # only Tier 1 may be prunable
     # watch: false                # off by default
     watch: true                   # example: watch continuous ingest on working tiers
+
+  - name: nas-share
+    rootPath: /storage/nas-share
+    tier: TIER2_EXPORTS
+    # fsnotify does not fire reliably over SMB/NFS -- sweep is the polling
+    # adjunct for those mounts instead of watch (#60).
+    sweep: true
+    sweepIntervalSecs: 600        # 10 minutes (the default; shown explicitly here)

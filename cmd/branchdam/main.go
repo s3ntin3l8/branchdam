@@ -122,8 +122,12 @@ func main() {
 
 	startImmichWorker(ctx, &cfg, database, log)
 
+	watched := watchedFromConfig(cfg.StorageLocations)
+	swept := sweptFromConfig(cfg.StorageLocations)
+	warnOverlappingWatchAndSweep(log, watched, swept)
+
 	var supervisor *pipeline.WatcherSupervisor
-	if watched := watchedFromConfig(cfg.StorageLocations); len(watched) > 0 {
+	if len(watched) > 0 {
 		watchedLocs, err := resolveWatchedLocations(ctx, database, watched)
 		if err != nil {
 			log.Error("resolve watched locations", "err", err)
@@ -134,6 +138,21 @@ func main() {
 			FullHashPolicy: cfg.Workers.FullHashPolicy, DisablePerceptualHash: !cfg.Workers.PerceptualHash, Log: log,
 		}, func() { hub.Broadcast() })
 		supervisor.Start(ctx, watchedLocs, 0)
+	}
+
+	var sweeper *pipeline.SweeperSupervisor
+	if len(swept) > 0 {
+		sweptLocs, err := resolveSweptLocations(ctx, database, swept)
+		if err != nil {
+			log.Error("resolve swept locations", "err", err)
+			os.Exit(1)
+		}
+		sweeper = pipeline.NewSweeperSupervisor(pipeline.ScanDeps{
+			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
+			FullHashPolicy: cfg.Workers.FullHashPolicy, DisablePerceptualHash: !cfg.Workers.PerceptualHash, Log: log,
+			Nudge: func() { hub.Broadcast() }, Shutdown: ctx.Done(),
+		})
+		sweeper.Start(ctx, sweptLocs)
 	}
 
 	spa, err := web.Dist()
@@ -199,6 +218,14 @@ func main() {
 		// consumer goroutine, which holds the writer DB and calls Commit
 		// directly (never Pool.Submit), so it must finish before db.Close.
 		if !waitBounded(joinCtx, log, "supervisor.Wait()", supervisor.Wait) {
+			dbUnsafeToClose = true
+		}
+	}
+	if sweeper != nil {
+		// Sweepers already stopped scheduling new passes on ctx.Done; Wait()
+		// joins each location's in-flight pass (runOneSweep), which holds
+		// the writer DB, so it must finish before db.Close.
+		if !waitBounded(joinCtx, log, "sweeper.Wait()", sweeper.Wait) {
 			dbUnsafeToClose = true
 		}
 	}
@@ -282,16 +309,16 @@ func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB,
 // reconcileOrphanedScanJobs moves every scan_jobs row still RUNNING to
 // FAILED before this process creates any scan_jobs row of its own --
 // neither seedStorageLocations nor anything before this call writes
-// scan_jobs, and the two producers that do (WatcherSupervisor.Start,
-// POST /api/v1/scan) both run later in startup -- so every RUNNING row
-// found here unambiguously predates this process. It was left behind by a
-// crash (SIGKILL, OOM-kill, container hard-stop, power loss), not
-// genuinely still in flight: a WATCH row is RUNNING for its entire process
-// lifetime by design, and a FULL_SCAN row only reaches a terminal state
-// via the same process that created it. Must run before
-// WatcherSupervisor.Start below, or a reconciled row and a fresh row for
-// the same location could momentarily both claim to represent "the" watch
-// state for it.
+// scan_jobs, and the three producers that do (WatcherSupervisor.Start,
+// SweeperSupervisor.Start, POST /api/v1/scan) all run later in startup --
+// so every RUNNING row found here unambiguously predates this process. It
+// was left behind by a crash (SIGKILL, OOM-kill, container hard-stop,
+// power loss), not genuinely still in flight: a WATCH row is RUNNING for
+// its entire process lifetime by design, and a FULL_SCAN/INCREMENTAL row
+// only reaches a terminal state via the same process that created it. Must
+// run before WatcherSupervisor.Start/SweeperSupervisor.Start below, or a
+// reconciled row and a fresh row for the same location could momentarily
+// both claim to represent "the" watch/sweep state for it.
 //
 // This assumes exclusive single-process ownership of the database file --
 // there is no flock/pid guard anywhere in this codebase, and SQLite's WAL
@@ -440,4 +467,67 @@ func resolveWatchedLocations(ctx context.Context, database *db.DB, cfgs []config
 		})
 	}
 	return out, nil
+}
+
+// sweptFromConfig returns the config locations to sweep: opt-in via config
+// (`sweep: true`) and never Tier 3, regardless of config. Unlike
+// watchedFromConfig's rationale (continuous ingest is for working tiers),
+// the reason here is structural: Tier 3 is read_only=1 by schema CHECK, so
+// nothing on it can ever be ingested, and a differential sweep there would
+// only ever drive the MISSING sweep -- which a manual POST /api/v1/scan
+// already covers.
+func sweptFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
+	out := make([]config.StorageLocation, 0, len(cfgs))
+	for _, c := range cfgs {
+		if c.Sweep && c.Tier != "TIER3_MASTER_ARCHIVE" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// resolveSweptLocations mirrors resolveWatchedLocations for swept
+// locations, pairing each resolved storage.Location with its configured
+// (or zero, meaning "use SweeperSupervisor's default") sweep interval.
+func resolveSweptLocations(ctx context.Context, database *db.DB, cfgs []config.StorageLocation) ([]pipeline.SweptLocation, error) {
+	out := make([]pipeline.SweptLocation, 0, len(cfgs))
+	for _, c := range cfgs {
+		row, err := database.Reader.GetStorageLocationByPath(ctx, c.RootPath)
+		if err != nil {
+			return nil, fmt.Errorf("swept location %q (%s): %w", c.Name, c.RootPath, err)
+		}
+		out = append(out, pipeline.SweptLocation{
+			Location: storage.Location{
+				ID: row.ID, Name: row.Name, RootPath: row.RootPath, Tier: row.Tier, ReadOnly: row.ReadOnly != 0,
+			},
+			Interval: time.Duration(c.SweepIntervalSecs) * time.Second,
+		})
+	}
+	return out, nil
+}
+
+// warnOverlappingWatchAndSweep logs when a location has both fsnotify
+// watching and the differential sweep enabled. Not a config error: the
+// watcher bypasses the worker pool entirely (handleWatchItem calls
+// processFile/Commit directly on its own consumer goroutine, never
+// Pool.Submit), so the two mechanisms' per-key dedup windows never overlap
+// -- a location can legitimately want both, e.g. while migrating a share
+// from local disk to SMB. The combination is merely wasteful, not
+// corrupting, for a quiescent file: the writer connection is
+// SetMaxOpenConns(1), so both Commits serialize and the second sees a
+// matching fast_hash and takes the Touch branch, not a version collision.
+// A file still being copied mid-write is a pre-existing watcher exposure
+// either way (handleWatchItem already hashes mid-copy files) -- not
+// something this combination introduces.
+func warnOverlappingWatchAndSweep(log *slog.Logger, watched, swept []config.StorageLocation) {
+	sweptPaths := make(map[string]bool, len(swept))
+	for _, c := range swept {
+		sweptPaths[c.RootPath] = true
+	}
+	for _, c := range watched {
+		if sweptPaths[c.RootPath] {
+			log.Warn("pipeline: location has both watch and sweep enabled -- wasteful but not corrupting for a quiescent file (see CLAUDE.md)",
+				"location", c.Name, "rootPath", c.RootPath)
+		}
+	}
 }
