@@ -79,3 +79,11 @@ LIMIT ?3;
 UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
 WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2;
+
+-- name: ListRemoteSyncStateByNode :many
+-- Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
+-- a node (both remotes), ordered by remote for a stable DTO.
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+FROM remote_sync_state
+WHERE node_id = ?1
+ORDER BY remote ASC;

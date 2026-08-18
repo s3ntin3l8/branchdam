@@ -99,6 +99,47 @@ func (q *Queries) ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesFor
 	return items, nil
 }
 
+const listRemoteSyncStateByNode = `-- name: ListRemoteSyncStateByNode :many
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+FROM remote_sync_state
+WHERE node_id = ?1
+ORDER BY remote ASC
+`
+
+// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
+// a node (both remotes), ordered by remote for a stable DTO.
+func (q *Queries) ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error) {
+	rows, err := q.db.QueryContext(ctx, listRemoteSyncStateByNode, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RemoteSyncState{}
+	for rows.Next() {
+		var i RemoteSyncState
+		if err := rows.Scan(
+			&i.NodeID,
+			&i.Remote,
+			&i.SyncStatus,
+			&i.RemoteAssetID,
+			&i.LastError,
+			&i.LastAttemptAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRemoteSyncStateByStatus = `-- name: ListRemoteSyncStateByStatus :many
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
 FROM remote_sync_state
