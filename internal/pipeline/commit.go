@@ -15,6 +15,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
 )
 
 // Commit applies results to media_nodes inside a single write transaction
@@ -447,4 +448,30 @@ func ffprobeMetadata(r Result) map[string]string {
 		kv["height"] = strconv.Itoa(f.Height)
 	}
 	return kv
+}
+
+// PersistExifMetadata upserts a node's exiftool-derived metadata rows from a
+// probe.ExifResult, reusing the scan's own allowlist + row cap. Used by the
+// inherit-metadata endpoint (#54) so node_metadata stays consistent with a
+// file that was just rewritten in place -- otherwise the DB metadata store
+// and a second inheritance would re-plan from stale (empty) values until the
+// next scan.
+func PersistExifMetadata(ctx context.Context, database *db.DB, nodeID int64, exif *probe.ExifResult, log *slog.Logger) error {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	if exif == nil {
+		return nil
+	}
+	r := Result{
+		Make:         exif.Make,
+		LensModel:    exif.LensModel,
+		SerialNumber: exif.SerialNumber,
+		GPSLatitude:  exif.GPSLatitude,
+		GPSLongitude: exif.GPSLongitude,
+		ExifRaw:      selectExifRaw(exif.Raw),
+	}
+	return database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return persistMetadata(ctx, q, nodeID, "exiftool", exifMetadata(r), metadataCap, log)
+	})
 }
