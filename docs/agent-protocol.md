@@ -87,6 +87,14 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
 > server always derives `AUTO_ACCEPTED` vs. `NEEDS_REVIEW` from `confidence` and `tier` via the
 > same per-tier threshold every other resolver uses) and is an outright error for
 > `CONFIRMED`/`REJECTED` -- a human review decision is never the agent's to make.
+>
+> **A rebase targeting an `ARCHIVED` node_uuid always fails.** `EVENT_NODE_MOVED`,
+> `EVENT_PATH_REBASED`, and `POST /api/v1/agent/rebase` all refuse to rebase a node whose
+> `lifecycle_state` is `ARCHIVED` -- that node_uuid identifies a superseded version, and rebasing
+> it in place would resurrect it. `EVENT_NODE_MOVED`/`EVENT_PATH_REBASED` mark the event `FAILED`
+> with `error_log` describing the refusal; `POST /api/v1/agent/rebase` returns `404 Not Found`. An
+> agent holding a stale `node_uuid` from before a version collision should treat either as
+> terminal, not retry.
 
 1. **`EVENT_NODE_CREATED`:**
    ```json
