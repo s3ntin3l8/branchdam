@@ -169,14 +169,15 @@ type watchWork struct {
 	// GC'd -- not a leak, not correctness-affecting -- just not truly O(1)
 	// amortized the way a ring buffer would be; a possible future
 	// refinement if this ever shows up in profiling.
-	items   []watchItem
-	notify  chan struct{} // buffered 1: coalescing wakeup, not one-signal-per-item
-	dropped atomic.Int64
-	log     *slog.Logger
+	items    []watchItem
+	notify   chan struct{} // buffered 1: coalescing wakeup, not one-signal-per-item
+	dropped  atomic.Int64
+	log      *slog.Logger
+	location string // loc.RootPath, for attributing eviction logs in a multi-location deployment
 }
 
-func newWatchWork(log *slog.Logger) *watchWork {
-	return &watchWork{notify: make(chan struct{}, 1), log: log}
+func newWatchWork(log *slog.Logger, location string) *watchWork {
+	return &watchWork{notify: make(chan struct{}, 1), log: log, location: location}
 }
 
 // logDropThreshold caps how many individual eviction warnings enqueue logs
@@ -206,10 +207,10 @@ func (q *watchWork) enqueue(item watchItem) {
 			switch {
 			case dropped <= logDropThreshold:
 				q.log.Warn("pipeline: watch queue full, dropping oldest queued event -- run a full rescan of this location to catch up",
-					"dropped_path", oldest.path, "dropped_rec_path", oldest.rec.Path, "capacity", watchQueueCapacity)
+					"location", q.location, "dropped_path", oldest.path, "dropped_rec_path", oldest.rec.Path, "capacity", watchQueueCapacity)
 			case dropped%logDropSummaryEvery == 0:
 				q.log.Warn("pipeline: watch queue still under sustained pressure, dropping oldest events -- run a full rescan of this location to catch up",
-					"dropped_total_this_run", dropped, "capacity", watchQueueCapacity)
+					"location", q.location, "dropped_total_this_run", dropped, "capacity", watchQueueCapacity)
 			}
 		}
 	}
@@ -282,7 +283,7 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 		return
 	}
 
-	work := newWatchWork(w.log)
+	work := newWatchWork(w.log, loc.RootPath)
 	var consumerWG sync.WaitGroup
 	consumerWG.Add(1)
 	go func() {
@@ -376,8 +377,14 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 // anything a watch event misses.
 func (w *WatcherSupervisor) consumeOne(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed *atomic.Int32) (bumped, abandoned bool) {
 	if ctx.Err() != nil {
+		// Only seen, not failed: this item was never attempted, so counting
+		// it as a failure would make files_failed>0 on every ordinary
+		// shutdown that happens to catch a backlog, indistinguishable from
+		// a real processing failure to an operator or an alert watching
+		// that column. The job's own CANCELLED state already says "this
+		// didn't run to completion" -- files_failed should stay meaningful
+		// as "things that were actually attempted and broke."
 		seen.Add(1)
-		failed.Add(1)
 		return false, true
 	}
 	return w.handleWatchItem(ctx, loc, item, seen, hashed, failed), false

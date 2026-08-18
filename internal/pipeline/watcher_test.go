@@ -642,8 +642,12 @@ func TestConsumeOneAbandonsWhenContextAlreadyDone(t *testing.T) {
 	if bumped {
 		t.Error("bumped = true, want false for an abandoned item")
 	}
-	if seen.Load() != 1 || failed.Load() != 1 || hashed.Load() != 0 {
-		t.Errorf("counts = seen:%d failed:%d hashed:%d, want 1,1,0", seen.Load(), failed.Load(), hashed.Load())
+	// failed stays 0, not 1: an abandoned item was never attempted, so
+	// counting it as a failure would make files_failed>0 on every ordinary
+	// shutdown that catches a backlog -- indistinguishable from a real
+	// processing failure to an operator or alert.
+	if seen.Load() != 1 || failed.Load() != 0 || hashed.Load() != 0 {
+		t.Errorf("counts = seen:%d failed:%d hashed:%d, want 1,0,0", seen.Load(), failed.Load(), hashed.Load())
 	}
 	if _, err := database.Reader.GetLiveNodeByPath(context.Background(), target); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("a node was committed for an abandoned item (err=%v) -- consumeOne ran handleWatchItem despite the cancelled context", err)
@@ -701,7 +705,7 @@ func TestConsumeOneProcessesNormallyWhenContextLive(t *testing.T) {
 // property without needing runtime.NumGoroutine(): if enqueue blocked even
 // once, this loop would hang and the test would time out.
 func TestWatchWorkEnqueueNeverBlocks(t *testing.T) {
-	work := newWatchWork(nil)
+	work := newWatchWork(nil, "/test/location")
 	const burst = watchQueueCapacity * 5
 	done := make(chan struct{})
 	go func() {
@@ -724,7 +728,7 @@ func TestWatchWorkEnqueueNeverBlocks(t *testing.T) {
 func TestWatchWorkDropsOldestUnderPressure(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	work := newWatchWork(log)
+	work := newWatchWork(log, "/test/location")
 
 	const burst = watchQueueCapacity * 3
 	for i := 0; i < burst; i++ {
@@ -763,7 +767,7 @@ func TestWatchWorkDropsOldestUnderPressure(t *testing.T) {
 // fully drained -- never while items remain, and never blocking forever
 // after close() with nothing left.
 func TestWatchWorkDequeueDrainsThenCloses(t *testing.T) {
-	work := newWatchWork(nil)
+	work := newWatchWork(nil, "/test/location")
 	for i := 0; i < 5; i++ {
 		work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/item/%d", i)}})
 	}
@@ -815,7 +819,7 @@ func TestWatchWorkDequeueDrainsThenCloses(t *testing.T) {
 // before the blocking receive) to guarantee the enqueue below genuinely
 // races a parked receiver, not a coincidentally-fast one.
 func TestWatchWorkDequeueWakesFromBlockedWait(t *testing.T) {
-	work := newWatchWork(nil)
+	work := newWatchWork(nil, "/test/location")
 
 	var waiting atomic.Bool
 	got := make(chan string, 1)
@@ -865,7 +869,7 @@ func TestWatchWorkDequeueWakesFromBlockedWait(t *testing.T) {
 // iterations is the regression guard against it recurring.
 func TestWatchWorkEnqueueRaceWithClose(t *testing.T) {
 	for iter := 0; iter < 200; iter++ {
-		work := newWatchWork(nil)
+		work := newWatchWork(nil, "/test/location")
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
