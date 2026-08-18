@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
@@ -15,7 +16,9 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/metadata"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -32,6 +35,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
+	huma.Post(api, "/api/v1/assets/{id}/inherit-metadata", s.handleInheritMetadata)
 
 	huma.Get(api, "/api/v1/jobs", s.handleListJobs)
 
@@ -514,6 +518,143 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 	out.Body.Edges = outEdges
 
 	return out, nil
+}
+
+// --- /api/v1/assets/{id}/inherit-metadata ---
+
+type InheritMetadataInput struct {
+	ID int64 `path:"id"`
+}
+
+type InheritMetadataOutput struct {
+	Body struct {
+		Inherited map[string]string `json:"inherited"`
+	}
+}
+
+// handleInheritMetadata copies identity metadata (EXIF/XMP, spec Pillar 4)
+// from a node's winning parent edge into the child's file on disk, on demand.
+// This is the project's first real filesystem writer: storage.Guard.CheckWrite
+// is called BEFORE any exiftool subprocess, and a read-only location (Tier 3
+// is always read-only) or a Tier-3-resolved parent edge is refused with 409.
+func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataInput) (*InheritMetadataOutput, error) {
+	child, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+	if child.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+
+	// Refuse a write into a read-only location BEFORE spawning exiftool.
+	if s.guard != nil {
+		if err := s.guard.CheckWrite(child.FilePath); err != nil {
+			var roErr *storage.ErrReadOnlyTier
+			if errors.As(err, &roErr) {
+				return nil, huma.Error409Conflict("cannot inherit metadata into a read-only location (tier " + roErr.Tier + ")")
+			}
+			return nil, huma.Error422UnprocessableEntity(err.Error())
+		}
+	}
+
+	parents, err := s.db.Reader.ListEdgesByTarget(ctx, child.ID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list parent edges", err)
+	}
+	winning := pickWinningParent(parents)
+	if winning == nil {
+		return nil, huma.Error409Conflict("asset has no resolved parent edge to inherit from")
+	}
+	// Never inherit identity metadata from a Tier-3 (heuristic) match.
+	if winning.Tier == 3 {
+		return nil, huma.Error409Conflict("cannot inherit from a Tier-3-resolved parent edge (heuristic matches are not identity)")
+	}
+
+	parent, err := s.db.Reader.GetMediaNodeByID(ctx, winning.SourceNodeID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get parent asset", err)
+	}
+
+	parentTags := loadTagSet(ctx, s.db.Reader, parent)
+	childTags := loadTagSet(ctx, s.db.Reader, child)
+	childTags.DerivedFrom = parent.NodeUuid // XMP-xmpMM:DerivedFrom = parent node_uuid
+
+	tags, err := metadata.Plan(parentTags, childTags)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("plan metadata inheritance", err)
+	}
+	if len(tags) == 0 {
+		return nil, huma.Error409Conflict("nothing to inherit: child already carries all inheritable metadata")
+	}
+
+	if err := s.prober.WriteTags(ctx, child.FilePath, tags); err != nil {
+		if errors.Is(err, probe.ErrToolUnavailable) {
+			return nil, huma.Error503ServiceUnavailable("exiftool not available")
+		}
+		return nil, huma.Error500InternalServerError("write metadata", err)
+	}
+
+	out := &InheritMetadataOutput{}
+	out.Body.Inherited = tags
+	return out, nil
+}
+
+// pickWinningParent returns the highest-confidence non-REJECTED parent edge,
+// or nil when the node has none.
+func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
+	var best *sqlcgen.MediaEdge
+	for i := range edges {
+		e := &edges[i]
+		if e.ReviewState == "REJECTED" {
+			continue
+		}
+		if best == nil || e.Confidence > best.Confidence {
+			best = e
+		}
+	}
+	return best
+}
+
+// loadTagSet assembles a node's inheritable tag values from its promoted
+// columns and node_metadata rows (source='exiftool').
+func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) metadata.TagSet {
+	ts := metadata.TagSet{
+		Identifier: node.NodeUuid, // XMP-dc:Identifier is always the node's own uuid
+		Model:      node.CameraModel.String,
+	}
+	rows, err := q.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		return ts
+	}
+	for _, r := range rows {
+		if r.Source != "exiftool" {
+			continue
+		}
+		switch r.Key {
+		case "EXIF:Make":
+			ts.Make = r.Value
+		case "EXIF:LensModel":
+			ts.LensModel = r.Value
+		case "EXIF:SerialNumber":
+			ts.SerialNumber = r.Value
+		case "EXIF:DateTimeOriginal":
+			ts.DateTimeOriginal = r.Value
+		case "EXIF:OffsetTimeOriginal":
+			ts.OffsetTimeOriginal = r.Value
+		case "Composite:GPSLatitude":
+			if f, err := strconv.ParseFloat(r.Value, 64); err == nil {
+				ts.GPSLatitude = &f
+			}
+		case "Composite:GPSLongitude":
+			if f, err := strconv.ParseFloat(r.Value, 64); err == nil {
+				ts.GPSLongitude = &f
+			}
+		}
+	}
+	return ts
 }
 
 // --- /api/v1/edges ---

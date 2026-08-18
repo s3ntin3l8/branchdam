@@ -79,6 +79,139 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body any) *httpte
 	return rr
 }
 
+// inheritTestServer builds a Server whose Guard covers rootPath and seeds a
+// Tier-2 location + parent/child nodes + a parent edge.
+func inheritTestServer(t *testing.T, rootPath string) (*Server, *db.DB, sqlcgen.MediaNode, sqlcgen.MediaNode) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "inherit.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	resolved, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	var locID int64
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		locID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+
+	srv := New(Deps{
+		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		DB:     database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	parent := seedInheritNode(t, database, locID, filepath.Join(resolved, "parent.jpg"), "uuid-parent")
+	child := seedInheritNode(t, database, locID, filepath.Join(resolved, "child.jpg"), "uuid-child")
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.9, Tier: 2, Resolver: "test", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed edge: %v", err)
+	}
+	return srv, database, parent, child
+}
+
+func seedInheritNode(t *testing.T, database *db.DB, locID int64, path, uuid string) sqlcgen.MediaNode {
+	t.Helper()
+	var node sqlcgen.MediaNode
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: uuid, StorageLocationID: locID, FilePath: path, FileName: filepath.Base(path),
+			FileExt: "jpg", SizeBytes: 1, MtimeUnix: time.Now().Unix(),
+			FastHash: &[]string{"aaaaaaaaaaaaaaaa"}[0], IndexingStatus: "INDEXED_SHALLOW",
+			GraphStatus: "LINKED", LifecycleState: "ACTIVE", FilenameStem: sql.NullString{String: "x", Valid: true},
+		})
+		node = n
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+	return node
+}
+
+func TestInheritMetadataConflicts(t *testing.T) {
+	t.Run("unknown asset 404s", func(t *testing.T) {
+		srv, _, _, _ := inheritTestServer(t, t.TempDir())
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/999999/inherit-metadata", nil)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", rr.Code)
+		}
+	})
+
+	t.Run("read-only location 409s before exiftool", func(t *testing.T) {
+		srv, database, _, child := inheritTestServer(t, t.TempDir())
+		roRoot := t.TempDir()
+		resolved, _ := filepath.EvalSymlinks(roRoot)
+		var roLocID int64
+		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+				Name: "inherit-t3", RootPath: resolved, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+			})
+			roLocID = loc.ID
+			return err
+		})
+		if err != nil {
+			t.Fatalf("seed ro location: %v", err)
+		}
+		err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.RebaseMissingNodePath(context.Background(), sqlcgen.RebaseMissingNodePathParams{
+				ID: child.ID, FilePath: filepath.Join(resolved, "child.jpg"), FileName: "child.jpg",
+				StorageLocationID: roLocID, MtimeUnix: time.Now().Unix(),
+			})
+		})
+		if err != nil {
+			t.Fatalf("rebase child: %v", err)
+		}
+		srv.guard = storage.NewGuard([]storage.Location{{ID: roLocID, Name: "inherit-t3", RootPath: resolved, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true}})
+
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409", rr.Code)
+		}
+	})
+
+	t.Run("tier-3 parent edge 409s", func(t *testing.T) {
+		srv, database, _, child := inheritTestServer(t, t.TempDir())
+		// A second parent edge resolved at tier 3 with higher confidence than
+		// the seeded 0.9/2 edge becomes the winning parent -- and must be refused.
+		locID := child.StorageLocationID
+		t3Parent := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "t3-parent.jpg"), "uuid-t3-parent")
+		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+				SourceNodeID: t3Parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+				Confidence: 0.99, Tier: 3, Resolver: "heuristic", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("seed tier-3 edge: %v", err)
+		}
+
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409", rr.Code)
+		}
+	})
+}
+
 func TestMeReflectsBrowserPrincipal(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
