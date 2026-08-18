@@ -2014,6 +2014,7 @@ func TestPickWinningParentTieBreaksByID(t *testing.T) {
 		{ID: 3, Confidence: 0.9, ReviewState: "CONFIRMED"},
 		{ID: 7, Confidence: 0.9, ReviewState: "REJECTED"},
 		{ID: 9, Confidence: 0.9, ReviewState: "NEEDS_REVIEW"},
+		{ID: 2, Confidence: 0.99, ReviewState: "REJECTED"},
 	}
 
 	got := pickWinningParent(edges)
@@ -2021,7 +2022,7 @@ func TestPickWinningParentTieBreaksByID(t *testing.T) {
 		t.Fatal("pickWinningParent = nil, want the lowest-ID eligible edge")
 	}
 	if got.ID != 3 {
-		t.Errorf("winning edge id = %d, want 3 (lowest-ID eligible on equal confidence)", got.ID)
+		t.Errorf("winning edge id = %d, want 3 (id 2's 0.99 REJECTED edge must be excluded by the review_state filter, not the tie-break)", got.ID)
 	}
 	if got.ReviewState != "CONFIRMED" {
 		t.Errorf("winning review state = %q, want CONFIRMED", got.ReviewState)
