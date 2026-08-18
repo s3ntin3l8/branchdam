@@ -186,13 +186,18 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// interrupted is set (only) from OnAbandon, which fires exclusively from
 	// Pool.closeOnDone after the pool's own ctx.Done() -- shutdown is its
 	// only possible cause (see #99's terminalization predicate below). It is
-	// NOT set from the "submit refused" branch: Pool.Submit returns false the
-	// instant closeOnDone takes its lock, racing this scan's own read of
-	// deps.Shutdown -- a per-file check there could observe backpressure
-	// before observing shutdown, misclassifying files. That's why
-	// terminalization checks deps.Shutdown itself, once, after the walk and
-	// drain are both joined, rather than trusting a flag threaded through
-	// the racy per-file path.
+	// NOT set from the "submit refused" branch: Pool.Submit's bare bool
+	// conflates three distinct causes (duplicate key in flight, queue full,
+	// pool closed) with no way to tell which one fired -- not a timing race
+	// (deps.Shutdown and the pool's Run ctx observe the identical channel in
+	// production, and a channel close is a single globally-visible event, so
+	// there is nothing to race), but causal ambiguity: attributing every
+	// refusal to shutdown would misclassify ordinary backpressure that has
+	// nothing to do with it. Terminalization instead checks deps.Shutdown
+	// itself, once, after the walk and drain are both joined -- a strictly
+	// simpler and equally sufficient signal, since interrupted's own two
+	// setters already cover every case where a specific file's outcome is
+	// unambiguous.
 	var interrupted atomic.Bool
 	uncertain := newUncertainPaths()
 
@@ -288,10 +293,10 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				// This can be ordinary backpressure (duplicate in flight,
 				// queue full) OR the pool refusing because it's shutting
 				// down -- Pool.Submit's bare bool return doesn't distinguish
-				// them, and per-file deps.Shutdown checks here would race
-				// closeOnDone (see interrupted's doc comment above). Not
-				// logged as a shutdown event; terminalization decides that
-				// once, after the fact.
+				// them (see interrupted's doc comment above for why that
+				// ambiguity, not a timing race, is what keeps this branch
+				// from setting interrupted). Not logged as a shutdown event;
+				// terminalization decides that once, after the fact.
 				log.Warn("pipeline: submit refused (duplicate in flight, queue full, or pool shutting down)", "path", rec.Path)
 			}
 			return nil
@@ -366,14 +371,23 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// returned before this point). Evaluated ONCE here, after both the walk
 	// goroutine and drainAndCommit have been joined (walkDone above, and
 	// drainAndCommit's own return already happened-before total was
-	// assigned) -- not per-file during the walk, where interrupted's own doc
-	// comment explains the race that would cause. isClosed(deps.Shutdown) is
-	// the fallback for jobs that were entirely enumerated and refused via
-	// the ambiguous "submit refused" branch, which never sets interrupted
-	// itself; filesFailed > 0 is what keeps a scan that finished all its
-	// work just as SIGTERM arrived recording as COMPLETED rather than
-	// CANCELLED (isClosed alone can't tell "shutdown happened" from
-	// "shutdown happened after we were already done").
+	// assigned) -- not per-file during the walk; interrupted's own doc
+	// comment explains why per-file attribution isn't trustworthy anyway.
+	// isClosed(deps.Shutdown) is the fallback for jobs that were entirely
+	// enumerated and refused via the ambiguous "submit refused" branch,
+	// which never sets interrupted itself; filesFailed > 0 is what keeps a
+	// scan that finished all its work just as SIGTERM arrived recording as
+	// COMPLETED rather than CANCELLED (isClosed alone can't tell "shutdown
+	// happened" from "shutdown happened after we were already done").
+	//
+	// Accepted imprecision: a genuine per-file error (e.g. a file vanishing
+	// mid-scan, processFile failing) that merely coincides with an unrelated
+	// shutdown signal also satisfies this predicate and reads CANCELLED, not
+	// something that preserves the real-failure signal the way FAILED's
+	// last_error would. Both CANCELLED and COMPLETED-with-failures already
+	// mean "not a fully clean pass" -- the files_failed count itself, not
+	// the state label, is where the detail lives; this predicate's job is
+	// only to distinguish "shutdown was involved" from "it wasn't."
 	//
 	// The three-state contract this produces, now that #88 is also merged:
 	//   CANCELLED  -- clean shutdown; the scan terminalized itself here.
@@ -399,7 +413,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	}); err != nil {
 		log.Error("pipeline: terminalize scan job", "jobID", jobID, "cancelled", interruptedByShutdown, "err", err)
 	}
-	log.Info("pipeline: scan complete", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
+	log.Info("pipeline: scan finished", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"cancelled", interruptedByShutdown, "inserted", total.Inserted, "touched", total.Touched,
 		"versionCollisions", total.VersionCollisions, "moved", total.Moved, "edgesCreated", total.EdgesCreated,
 		"metadataWritten", total.MetadataWritten)

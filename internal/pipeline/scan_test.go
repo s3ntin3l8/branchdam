@@ -904,6 +904,15 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 		pool.Drain()
 	})
 
+	// Wired to close alongside cancelPool below, mirroring production
+	// (main.go passes the same ctx.Done() to both Pool.Run and
+	// ScanDeps.Shutdown). This is what makes the CANCELLED assertion below
+	// deterministic by construction via isClosed(deps.Shutdown), rather than
+	// resting entirely on `interrupted` -- which depends on which of
+	// `results <- *result` / `<-jobCtx.Done()` a dequeued post-gate job's
+	// select happens to pick, an outcome the runtime doesn't guarantee.
+	shutdown := make(chan struct{})
+
 	tracker := &ScanTracker{}
 	deps := ScanDeps{
 		DB:             database,
@@ -912,6 +921,7 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 		Pool:           pool,
 		FullHashPolicy: "never",
 		Tracker:        tracker,
+		Shutdown:       shutdown,
 	}
 	deps.WalkFn = func(_ context.Context, _ string, onFile func(indexer.Record) error) error {
 		for i, p := range paths {
@@ -927,6 +937,7 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 				// the pool's Run context is cancelled while the walk still
 				// has postGateCount files left to enumerate.
 				cancelPool()
+				close(shutdown)
 			}
 		}
 		return nil
@@ -961,12 +972,16 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 		t.Fatalf("GetScanJob: %v", err)
 	}
 	// #99: a mid-walk pool shutdown must terminalize CANCELLED, not
-	// COMPLETED-with-inflated-files_failed -- cancelPool() above stands in
-	// for cmd/branchdam's shutdown signal, so every post-gate file resolves
-	// via OnAbandon, the jobCtx.Done() results-send race, or (once the pool
-	// is fully closed) the ambiguous submit-refused branch, and at least one
-	// of the first two is guaranteed to fire given queueDepth=300 comfortably
-	// exceeds postGateCount=20.
+	// COMPLETED-with-inflated-files_failed. This is deterministic by
+	// construction, not by luck: close(shutdown) above (mirroring
+	// cmd/branchdam's ctx.Done() being passed to both Pool.Run and
+	// ScanDeps.Shutdown) guarantees isClosed(deps.Shutdown) is true by the
+	// time terminalization runs, regardless of how any individual post-gate
+	// job's OnAbandon-vs-jobCtx.Done()-vs-submit-refused outcome shakes out
+	// -- flagged by hermes review as a real gap in an earlier revision that
+	// left Shutdown nil and relied solely on `interrupted`, whose select
+	// between a ready results-send and a closed jobCtx.Done() is not
+	// guaranteed to pick the latter.
 	if job.State != "CANCELLED" {
 		t.Fatalf("scan job state = %q, want CANCELLED (shutdown-interrupted, not a clean completion)", job.State)
 	}
@@ -1092,6 +1107,61 @@ func TestCleanScanCompletesEvenIfShutdownSignalsAtTheEnd(t *testing.T) {
 	}
 	if job.FilesFailed != 0 {
 		t.Fatalf("FilesFailed = %d, want 0", job.FilesFailed)
+	}
+}
+
+// TestScanCancelledWhenPoolAlreadyClosedReliesOnShutdownFallback is the
+// second hermes-flagged gap: a scan whose pool is ALREADY fully closed and
+// drained before the walk even starts never has a single job queued or
+// abandoned -- every Submit call hits the ambiguous "submit refused" branch,
+// so `interrupted` (set only by OnAbandon and the jobCtx.Done() results
+// race) stays false for the entire scan. Without isClosed(deps.Shutdown) as
+// a fallback, this scan would misclassify as COMPLETED despite being purely
+// shutdown-caused. This test exercises that fallback in isolation: it is
+// the ONLY signal available here, not a supplement to `interrupted`.
+func TestScanCancelledWhenPoolAlreadyClosedReliesOnShutdownFallback(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "alpha")
+	writeFile(t, filepath.Join(root, "b.txt"), "bravo")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	pool := workers.New[string](2, 16)
+	pool.Run(poolCtx)
+	cancelPool()
+	pool.Drain() // the pool is fully closed BEFORE RunScan is even called -- every Submit below hits Pool.closed, not a live worker
+
+	shutdown := make(chan struct{})
+	close(shutdown)
+
+	deps := ScanDeps{
+		DB:             database,
+		Guard:          storage.NewGuard([]storage.Location{{ID: locationID, Name: "test-already-closed", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}}),
+		Prober:         probe.New(),
+		Pool:           pool,
+		FullHashPolicy: "never",
+		Shutdown:       shutdown,
+	}
+	location := storage.Location{ID: locationID, Name: "test-already-closed", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	job := waitJobDone(t, database, jobID)
+
+	if job.State != "CANCELLED" {
+		t.Fatalf("scan job state = %q, want CANCELLED -- every submit was refused by an already-closed pool, so `interrupted` was never set; only isClosed(deps.Shutdown) can catch this", job.State)
+	}
+	if job.FilesFailed != 2 {
+		t.Fatalf("FilesFailed = %d, want 2 (both files refused -- the pool never ran anything)", job.FilesFailed)
 	}
 }
 
