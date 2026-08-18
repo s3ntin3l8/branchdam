@@ -731,6 +731,18 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error500InternalServerError("write metadata", err)
 	}
 
+	// The file on disk now carries the inherited tags; backfill the child's
+	// node_metadata so the DB reflects it. Best-effort -- the write already
+	// succeeded, so a re-read/backfill failure is surfaced as a warning, not
+	// an error response. Without this, node_metadata stays stale (empty)
+	// until the next scan, and a second inherit call would re-plan from
+	// stale values instead of seeing the child's own tags (#157).
+	if exif, err := s.prober.Exif(ctx, child.FilePath); err != nil {
+		s.log.Warn("inherit-metadata: re-read child for backfill failed", "nodeID", child.ID, "err", err)
+	} else if err := pipeline.PersistExifMetadata(ctx, s.db, child.ID, exif, s.log); err != nil {
+		s.log.Warn("inherit-metadata: backfill node_metadata failed", "nodeID", child.ID, "err", err)
+	}
+
 	out := &InheritMetadataOutput{}
 	out.Body.Inherited = tags
 	return out, nil
