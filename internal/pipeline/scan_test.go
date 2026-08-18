@@ -1131,3 +1131,87 @@ func TestScanPersistsEdgesCreated(t *testing.T) {
 		t.Errorf("second scan EdgesCreated = %d, want 0 (the edge already existed from the first scan)", job2.EdgesCreated)
 	}
 }
+
+// TestProjectSidecarScanIntegration verifies end-to-end scanner pipeline
+// integration with ProjectSidecarResolver, ensuring that scanning a storage
+// location containing project sidecars (.dam.json, .edl) automatically resolves
+// and persists PROJECT_SIDECAR edges into the database.
+func TestProjectSidecarScanIntegration(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("eval symlinks root: %v", err)
+	}
+
+	mediaDir := filepath.Join(resolvedRoot, "01_media")
+	projDir := filepath.Join(resolvedRoot, "projects")
+
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		t.Fatalf("mkdir media: %v", err)
+	}
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+
+	mediaPath := filepath.Join(mediaDir, "A001_C001.mov")
+	damJsonPath := filepath.Join(projDir, "project.dam.json")
+	edlPath := filepath.Join(projDir, "timeline.edl")
+
+	writeFile(t, mediaPath, "raw video payload")
+	damJsonContent := `{"version":"1.0","project_name":"Test","media_references":[{"raw_path":"../01_media/A001_C001.mov","role":"media"}]}`
+	writeFile(t, damJsonPath, damJsonContent)
+
+	edlContent := "TITLE: TEST\n* FROM CLIP WITH TRANSFER: ../01_media/A001_C001.mov\n"
+	writeFile(t, edlPath, edlContent)
+
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+
+	sidecarResolver := graph.NewProjectSidecarResolver(nil)
+	deps.Engine = graph.NewEngine(database, nil, sidecarResolver)
+
+	location := storage.Location{
+		ID:       locationID,
+		Name:     "test-sidecar-scan",
+		RootPath: resolvedRoot,
+		Tier:     "PROJECTS",
+		ReadOnly: false,
+	}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+
+	job := waitJobDone(t, database, jobID)
+	if job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q, want COMPLETED (last_error=%v)", job.State, job.LastError)
+	}
+	if job.EdgesCreated != 2 {
+		t.Fatalf("job.EdgesCreated = %d, want 2 PROJECT_SIDECAR edges (.dam.json and .edl)", job.EdgesCreated)
+	}
+
+	// Verify edges in database
+	mediaNode, err := database.Reader.GetLiveNodeByPath(ctx, filepath.Join(resolvedRoot, "01_media", "A001_C001.mov"))
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath media: %v", err)
+	}
+
+	children, err := database.Reader.ListEdgesBySource(ctx, mediaNode.ID)
+	if err != nil {
+		t.Fatalf("ListEdgesBySource: %v", err)
+	}
+
+	if len(children) != 2 {
+		t.Fatalf("expected 2 child edges for media node, got %d", len(children))
+	}
+
+	for _, edge := range children {
+		if edge.RelationshipType != "PROJECT_SIDECAR" || edge.Confidence != 1.00 {
+			t.Errorf("unexpected edge properties: %+v", edge)
+		}
+	}
+}
