@@ -40,6 +40,24 @@ export function useAssetGraph(id: number | undefined) {
   });
 }
 
+export function useAssetLineage(id: number | string | undefined, depth = 2) {
+  return useQuery({
+    queryKey: ["asset-lineage", id, depth],
+    queryFn: () => api.getAssetLineage(id as number | string, depth),
+    enabled: id !== undefined && id !== "",
+  });
+}
+
+export function useUnlinkedCount() {
+  return useQuery({
+    queryKey: ["unlinked-count"],
+    queryFn: async () => {
+      const res = await api.listAssets({ limit: 500 });
+      return res.assets.filter((a) => a.graphStatus === "UNLINKED").length;
+    },
+  });
+}
+
 export function useAuditQueue(params: { limit?: number; offset?: number } = {}) {
   return useQuery({
     queryKey: ["audit-queue", params],
