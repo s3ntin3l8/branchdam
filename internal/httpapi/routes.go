@@ -1179,6 +1179,10 @@ type AgentEventOutput struct {
 // deferred workstation-agent increment (see internal/db's event_queue
 // migration comment).
 func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*AgentEventOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, huma.Error500InternalServerError("mint event id", err)

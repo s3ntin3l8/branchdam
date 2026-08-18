@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
 	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
-	"github.com/stretchr/testify/require"
 )
 
 type testEnv struct {
@@ -390,6 +391,70 @@ func TestDrainer_RefuseTier3Rebase(t *testing.T) {
 		require.Equal(t, "FAILED", ev.Status)
 		require.True(t, ev.ErrorLog.Valid)
 		require.Contains(t, ev.ErrorLog.String, "read-only")
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_RefuseTier3NodeMoved(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "clip.mov"),
+	})
+	// Attempt to move node directly into Tier 3 archive
+	tier3Path := filepath.Join(env.archive, "clip.mov")
+	moveEvent := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
+		NodeUUID:    nodeUUID,
+		NewFilePath: tier3Path,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, moveEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", ev.Status)
+		require.True(t, ev.ErrorLog.Valid)
+		require.Contains(t, ev.ErrorLog.String, "read-only")
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_EdgeAttached_SelfLoopFails(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "self.raw"),
+	})
+	// Attach self-loop edge (source == target)
+	selfLoopEvent := enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID:   nodeUUID,
+		TargetNodeUUID:   nodeUUID,
+		RelationshipType: "DERIVED_FROM",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, selfLoopEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", ev.Status)
+		require.True(t, ev.ErrorLog.Valid)
+		require.Contains(t, ev.ErrorLog.String, "CHECK constraint failed")
 		return nil
 	})
 	require.NoError(t, err)

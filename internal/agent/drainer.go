@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,7 +104,8 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		isFatal := errors.Is(processErr, ErrMalformedPayload) ||
 			errors.Is(processErr, ErrUnknownEventType) ||
 			errors.Is(processErr, ErrInvalidNodeUUID) ||
-			errors.Is(processErr, ErrReadOnlyRebase)
+			errors.Is(processErr, ErrReadOnlyRebase) ||
+			strings.Contains(processErr.Error(), "constraint failed")
 
 		d.mu.Lock()
 		d.retries[ev.ID]++
@@ -388,7 +390,7 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 	})
 	if err != nil {
 		// SQLite UNIQUE constraint violation -> already exists, treat as idempotent success.
-		if isConstraintError(err) {
+		if isDuplicateEdgeError(err) {
 			return nil
 		}
 		return fmt.Errorf("insert media edge: %w", err)
@@ -417,9 +419,12 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 	}
 
 	locID := p.NewStorageLocationID
-	if locID == 0 && d.guard != nil {
+	if d.guard != nil {
 		loc, err := d.guard.Resolve(p.NewFilePath)
 		if err == nil {
+			if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+				return fmt.Errorf("%w: move target %q resolves to read-only tier %s", ErrReadOnlyRebase, p.NewFilePath, loc.Tier)
+			}
 			locID = loc.ID
 		}
 	}
@@ -546,24 +551,11 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	return insertErr
 }
 
-func isConstraintError(err error) bool {
+func isDuplicateEdgeError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return errors.Is(err, sql.ErrNoRows) ||
-		(len(msg) > 0 && (contains(msg, "UNIQUE constraint failed") || contains(msg, "constraint failed")))
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || (len(s) > 0 && len(substr) > 0 && searchSubstr(s, substr)))
-}
-
-func searchSubstr(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(msg, "UNIQUE constraint failed: media_edges") ||
+		strings.Contains(msg, "UNIQUE constraint failed")
 }
