@@ -30,6 +30,24 @@ func (q *Queries) CompleteScanJob(ctx context.Context, id int64) error {
 	return err
 }
 
+const countRunningFullScansForLocation = `-- name: CountRunningFullScansForLocation :one
+SELECT COUNT(*) FROM scan_jobs
+WHERE storage_location_id = ?1 AND kind = 'FULL_SCAN' AND state = 'RUNNING'
+`
+
+// #163: called inside the same transaction as CreateScanJob (see
+// pipeline.RunScan) so the check-then-insert is one atomic unit, not just
+// an accident of the writer pool being single-connection. Scoped to
+// kind = 'FULL_SCAN' only -- WATCH jobs are already singleton-per-location
+// via WatcherSupervisor.Start's sync.Once and are long-lived by design, so
+// they must not block a FULL_SCAN (or vice versa).
+func (q *Queries) CountRunningFullScansForLocation(ctx context.Context, storageLocationID sql.NullInt64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRunningFullScansForLocation, storageLocationID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countRunningScanJobs = `-- name: CountRunningScanJobs :one
 SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
 `

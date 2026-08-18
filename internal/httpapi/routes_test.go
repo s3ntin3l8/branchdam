@@ -515,6 +515,61 @@ func TestScanEndToEndThroughHTTP(t *testing.T) {
 	}
 }
 
+// TestStartScanRejectsDuplicateRunningScan backs #163: POSTing /api/v1/scan
+// for a location that already has a RUNNING FULL_SCAN job must return 409,
+// not silently start a second walk that starves on workers.Pool.Submit's
+// per-path dedup. A terminalized prior job must not block a following scan.
+func TestStartScanRejectsDuplicateRunningScan(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	var locationID int64
+	var runningJobID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "http-scan-dup-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locationID = loc.ID
+		job, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: loc.ID, Valid: true},
+			Kind:              "FULL_SCAN",
+		})
+		runningJobID = job.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location + running job: %v", err)
+	}
+	srv.guard = storage.NewGuard([]storage.Location{
+		{ID: locationID, Name: "http-scan-dup-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false},
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]int64{"storageLocationId": locationID})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("POST /api/v1/scan while a FULL_SCAN is RUNNING: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.CompleteScanJob(ctx, runningJobID)
+	}); err != nil {
+		t.Fatalf("terminalize seeded job: %v", err)
+	}
+
+	rr = doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]int64{"storageLocationId": locationID})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/v1/scan after prior job terminalized: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 // TestScanJobOutlivesRequestContext is the C1 regression guard: the scan
 // goroutine must outlive the HTTP request context that started it. A real TCP
 // server (httptest.NewServer) cancels the request's context the moment the
