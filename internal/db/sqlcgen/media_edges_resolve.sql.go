@@ -26,6 +26,30 @@ func (q *Queries) ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgePara
 	return err
 }
 
+const mediaEdgeExists = `-- name: MediaEdgeExists :one
+SELECT EXISTS(
+    SELECT 1 FROM media_edges
+    WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3
+) AS edge_exists
+`
+
+type MediaEdgeExistsParams struct {
+	SourceNodeID     int64
+	TargetNodeID     int64
+	RelationshipType string
+}
+
+// Checked before UpsertMediaEdge so the caller can tell a genuinely new
+// edge apart from an existing one whose confidence/evidence was merely
+// refreshed -- UpsertMediaEdge's RETURNING row looks the same either way.
+// Backs scan_jobs.edges_created (fix(pipeline): #90).
+func (q *Queries) MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, mediaEdgeExists, arg.SourceNodeID, arg.TargetNodeID, arg.RelationshipType)
+	var edge_exists bool
+	err := row.Scan(&edge_exists)
+	return edge_exists, err
+}
+
 const rejectMediaEdge = `-- name: RejectMediaEdge :exec
 UPDATE media_edges
 SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()

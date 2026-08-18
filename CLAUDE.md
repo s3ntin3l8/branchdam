@@ -75,6 +75,20 @@ parser needs every column in a recursive CTE's anchor `SELECT` explicitly named 
 (`SELECT sqlc.arg(x) AS id`, not `SELECT sqlc.arg(x)`) or it fails with `*ast.ResTarget has nil
 name`.
 
+**`sqlc generate` (v1.31.1, pinned) silently corrupts unrelated files -- always diff file-by-file
+and revert anything you didn't intend to touch.** Running it after editing only
+`internal/db/queries/scan_jobs.sql` and `media_edges_resolve.sql` also rewrote
+`media_nodes.sql.go` -- a file whose own `.sql` source wasn't touched -- and the rewrite dropped
+characters inside embedded SQL string constants (`'ARCHIVED` missing its closing quote,
+`lens_model` truncated to `lens_mode`, `WHERE id = ?1` losing its `1`). Reproduced on a clean
+`origin/main` checkout with zero edits, so it's a real regen bug in this sqlc version against
+this schema, not something introduced by any one PR. The corrupted Go still compiles (the SQL
+lives inside a backtick string), so `go build`/`go vet` won't catch it -- only a query that hits
+the broken string at runtime would. After any `sqlc generate`, `git diff --stat
+internal/db/sqlcgen/` and manually inspect every file you did not deliberately change; harmless
+drift (interface method reordering, previously-missing doc comments) is fine to keep, but revert
+any file with unexplained diffs and re-add only the query you actually meant to add/change.
+
 ### Frontend (Vite + React + TypeScript)
 
 ```sh

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"image"
 	"image/png"
@@ -9,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/indexer"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -965,5 +968,166 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 	}
 	if got := job.FilesHashed + job.FilesFailed; got != int64(total) {
 		t.Errorf("FilesHashed(%d) + FilesFailed(%d) = %d, want %d -- every file the walk saw must resolve to exactly one outcome; a mismatch means a file was lost during the mid-walk shutdown", job.FilesHashed, job.FilesFailed, got, total)
+	}
+}
+
+// seedScanJob creates a bare scan_jobs row directly, for tests that drive
+// drainAndCommit itself rather than going through RunScan.
+func seedScanJob(t *testing.T, database *db.DB, locationID int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	var jobID int64
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		job, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: locationID, Valid: true},
+			Kind:              "FULL_SCAN",
+		})
+		jobID = job.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed scan job: %v", err)
+	}
+	return jobID
+}
+
+// TestDrainAndCommitReportsFilesSeenOnEmptyTick backs #90 cause A: with
+// hashWorkers capped and a single video's probes able to run for tens of
+// seconds, a scan can go a long stretch between committed batches even
+// while the walk itself keeps advancing -- filesSeen (incremented by the
+// walk callback, independent of hashing) must still reach scan_jobs on the
+// batchInterval ticker, not only when a batch actually commits. Drives
+// drainAndCommit directly (same package) with a results channel nothing is
+// ever sent on, so every observed progress write can only have come from an
+// empty-buffer ticker tick, not a commit.
+func TestDrainAndCommitReportsFilesSeenOnEmptyTick(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, t.TempDir())
+	jobID := seedScanJob(t, database, locationID)
+
+	results := make(chan Result)
+	var filesSeen, filesFailed atomic.Int32
+	filesSeen.Store(7) // the walk has "seen" 7 files; none have been hashed or committed yet
+	uncertain := newUncertainPaths()
+
+	var nudges atomic.Int32
+	deps := ScanDeps{DB: database, Nudge: func() { nudges.Add(1) }}
+
+	done := make(chan Stats, 1)
+	go func() {
+		done <- drainAndCommit(ctx, deps, locationID, jobID, results, &filesSeen, &filesFailed, uncertain, deps.logOrDiscard())
+	}()
+
+	// Poll for both the DB write and the nudge together -- flush() does the
+	// InTx commit and then calls Nudge as two sequential, unsynchronized
+	// steps in the producer goroutine, so breaking on FilesSeen alone and
+	// only then reading nudges could observe the write before Nudge has
+	// run yet, even though it always follows shortly after.
+	deadline := time.Now().Add(5 * time.Second)
+	var job sqlcgen.ScanJob
+	var err error
+	for time.Now().Before(deadline) {
+		job, err = database.Reader.GetScanJob(ctx, jobID)
+		if err == nil && job.FilesSeen == 7 && nudges.Load() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job.FilesSeen != 7 {
+		t.Fatalf("files_seen was never persisted from an empty-buffer ticker tick (last read: %d)", job.FilesSeen)
+	}
+	if nudges.Load() == 0 {
+		t.Error("Nudge was never called for a files_seen-only progress report")
+	}
+
+	// A further tick with nothing new (filesSeen unchanged, still no
+	// results) must not write or nudge again -- only advancing state
+	// warrants a report.
+	nudgesAfterFirstReport := nudges.Load()
+	time.Sleep(3 * batchInterval)
+	if got := nudges.Load(); got != nudgesAfterFirstReport {
+		t.Errorf("nudges = %d after idle ticks, want %d (no new state to report)", got, nudgesAfterFirstReport)
+	}
+
+	close(results)
+	<-done
+}
+
+// testFixedParentResolver is a test-only graph.Resolver that always
+// proposes parentPath as the parent of any other node in the same scan --
+// used to force a real edge through the real graph.Engine (not a fake),
+// so TestScanPersistsEdgesCreated exercises the actual
+// resolveEdgesForBatch/ResolveAndCommit path #90 wires scan_jobs.edges_created
+// through, not just drainAndCommit's bookkeeping in isolation.
+type testFixedParentResolver struct{ parentPath string }
+
+func (testFixedParentResolver) Name() string { return "test-fixed-parent" }
+func (testFixedParentResolver) Tier() int    { return 1 }
+func (r testFixedParentResolver) Resolve(ctx context.Context, child graph.Node, lookup graph.Lookup) ([]graph.Candidate, error) {
+	if child.FilePath == r.parentPath {
+		return nil, nil // don't propose the parent as its own parent
+	}
+	parent, err := lookup.ByPath(ctx, r.parentPath)
+	if err != nil || parent == nil {
+		return nil, nil
+	}
+	return []graph.Candidate{{
+		ParentID: parent.ID, ChildID: child.ID, Rel: "DERIVED_FROM",
+		Confidence: 0.95, Tier: 1, Resolver: "test-fixed-parent", Evidence: map[string]any{},
+	}}, nil
+}
+
+// TestScanPersistsEdgesCreated backs #90's third fix: edges_created must
+// reflect real edges the scan's graph.Engine pass creates, not stay
+// permanently 0. Runs two scans over the same two files: the first creates
+// the edge (edges_created == 1), the second re-resolves the same pair --
+// UpsertMediaEdge refreshes the existing row rather than inserting a new
+// one, so edges_created on the second scan must be 0, not another 1.
+func TestScanPersistsEdgesCreated(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "parent.jpg")
+	childPath := filepath.Join(root, "child.jpg")
+	writeFile(t, parentPath, "parent content")
+	writeFile(t, childPath, "child content")
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	resolvedParentPath, err := filepath.EvalSymlinks(parentPath)
+	if err != nil {
+		t.Fatalf("resolve parent path: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.Engine = graph.NewEngine(database, nil, testFixedParentResolver{parentPath: resolvedParentPath})
+	location := storage.Location{ID: locationID, Name: "test-edges-created", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan (first): %v", err)
+	}
+	job := waitJobDone(t, database, jobID)
+	if job.State != "COMPLETED" {
+		t.Fatalf("first scan state = %q, want COMPLETED (last_error=%v)", job.State, job.LastError)
+	}
+	if job.EdgesCreated != 1 {
+		t.Errorf("first scan EdgesCreated = %d, want 1", job.EdgesCreated)
+	}
+
+	jobID2, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan (second): %v", err)
+	}
+	job2 := waitJobDone(t, database, jobID2)
+	if job2.State != "COMPLETED" {
+		t.Fatalf("second scan state = %q, want COMPLETED (last_error=%v)", job2.State, job2.LastError)
+	}
+	if job2.EdgesCreated != 0 {
+		t.Errorf("second scan EdgesCreated = %d, want 0 (the edge already existed from the first scan)", job2.EdgesCreated)
 	}
 }

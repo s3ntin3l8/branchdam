@@ -59,6 +59,13 @@ type ScanDeps struct {
 	// consumers. Optional: nil means untracked, which is fine for tests that
 	// don't exercise shutdown ordering.
 	Tracker *ScanTracker
+
+	// Nudge, if set, is called by drainAndCommit after any flush that
+	// changed something -- a committed batch, or files_seen advancing since
+	// the last report -- so the SSE hub can prompt the SPA to re-fetch
+	// instead of waiting on the 15s poll safety net. Mirrors
+	// WatcherSupervisor's nudge parameter. Optional: nil is a no-op.
+	Nudge func()
 }
 
 // ScanTracker joins every in-flight RunScan goroutine, mirroring
@@ -324,48 +331,70 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		log.Error("pipeline: complete scan job", "jobID", jobID, "err", err)
 	}
 	log.Info("pipeline: scan complete", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
-		"inserted", total.Inserted, "touched", total.Touched, "versionCollisions", total.VersionCollisions, "moved", total.Moved)
+		"inserted", total.Inserted, "touched", total.Touched, "versionCollisions", total.VersionCollisions,
+		"moved", total.Moved, "edgesCreated", total.EdgesCreated)
 }
 
 // drainAndCommit reads results as they arrive and commits every batchSize
 // items or batchInterval, whichever comes first, updating scan_jobs
-// progress after each flush.
+// progress -- and nudging the SSE hub, if deps.Nudge is set -- after each
+// flush that changed anything. A ticker firing over an empty buf still
+// reports files_seen alone rather than doing nothing: with hashWorkers
+// capped and a single video's probes able to run for tens of seconds
+// (processFile's doc comment), a scan can go a long stretch between
+// committed batches even while the walk itself keeps advancing, and the old
+// "empty buf means nothing to do" early return left files_seen -- already
+// incrementing in memory -- unreported for that entire stretch.
 func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64, results <-chan Result, filesSeen, filesFailed *atomic.Int32, uncertain *uncertainPaths, log *slog.Logger) Stats {
 	var total Stats
 	buf := make([]Result, 0, batchSize)
+	var lastReportedSeen int32 = -1 // forces the very first flush to always report
 
 	flush := func() {
-		if len(buf) == 0 {
-			return
-		}
-		stats, err := Commit(ctx, deps.DB, locationID, buf, log)
-		total.Inserted += stats.Inserted
-		total.Touched += stats.Touched
-		total.VersionCollisions += stats.VersionCollisions
-		total.Moved += stats.Moved
-		if err != nil {
-			// The whole batch failed to land -- every path in it stays
-			// seen-but-uncertain and must be excluded from the MISSING
-			// sweep, or a live file with a stale last_seen_at gets flipped
-			// to MISSING and can feed a spurious RebaseMissingNodePath steal.
-			log.Error("pipeline: commit batch", "err", err)
-			filesFailed.Add(int32(len(buf)))
-			for _, r := range buf {
-				uncertain.add(r.Path)
+		committedBatch := len(buf) > 0
+		if committedBatch {
+			stats, err := Commit(ctx, deps.DB, locationID, buf, log)
+			total.Inserted += stats.Inserted
+			total.Touched += stats.Touched
+			total.VersionCollisions += stats.VersionCollisions
+			total.Moved += stats.Moved
+			if err != nil {
+				// The whole batch failed to land -- every path in it stays
+				// seen-but-uncertain and must be excluded from the MISSING
+				// sweep, or a live file with a stale last_seen_at gets flipped
+				// to MISSING and can feed a spurious RebaseMissingNodePath steal.
+				log.Error("pipeline: commit batch", "err", err)
+				filesFailed.Add(int32(len(buf)))
+				for _, r := range buf {
+					uncertain.add(r.Path)
+				}
+			} else if deps.Engine != nil {
+				total.EdgesCreated += resolveEdgesForBatch(ctx, deps, buf, log)
 			}
-		} else if deps.Engine != nil {
-			resolveEdgesForBatch(ctx, deps, buf, log)
+			buf = buf[:0]
 		}
-		buf = buf[:0]
-		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+
+		seen := filesSeen.Load()
+		if !committedBatch && seen == lastReportedSeen {
+			return // nothing changed since the last report: no write, no nudge
+		}
+
+		err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 			return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
-				ID:          jobID,
-				FilesSeen:   int64(filesSeen.Load()),
-				FilesHashed: int64(total.Inserted + total.Touched + total.VersionCollisions + total.Moved),
-				FilesFailed: int64(filesFailed.Load()),
+				ID:           jobID,
+				FilesSeen:    int64(seen),
+				FilesHashed:  int64(total.Inserted + total.Touched + total.VersionCollisions + total.Moved),
+				FilesFailed:  int64(filesFailed.Load()),
+				EdgesCreated: int64(total.EdgesCreated),
 			})
-		}); err != nil {
+		})
+		if err != nil {
 			log.Error("pipeline: update scan job progress", "err", err)
+			return // the write didn't land -- retry on the next tick, so don't advance lastReportedSeen
+		}
+		lastReportedSeen = seen
+		if deps.Nudge != nil {
+			deps.Nudge()
 		}
 	}
 
@@ -390,23 +419,30 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 }
 
 // resolveEdgesForBatch runs edge resolution for every node just committed
-// in buf. This is the join point between node ingestion (this package) and
-// lineage resolution (internal/graph) -- Commit only ever writes
-// media_nodes rows; nothing else in the scan flow would otherwise ever call
-// graph.Engine. One extra read per node (re-fetching the live row by path)
-// keeps this decoupled from Commit's internals rather than threading node
-// IDs back out of it.
-func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log *slog.Logger) {
+// in buf, returning how many of the resulting edges were newly created --
+// as opposed to an existing edge whose confidence/evidence was merely
+// refreshed -- which is what scan_jobs.edges_created reports. This is the
+// join point between node ingestion (this package) and lineage resolution
+// (internal/graph) -- Commit only ever writes media_nodes rows; nothing
+// else in the scan flow would otherwise ever call graph.Engine. One extra
+// read per node (re-fetching the live row by path) keeps this decoupled
+// from Commit's internals rather than threading node IDs back out of it.
+func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log *slog.Logger) int {
+	var created int
 	for _, r := range buf {
 		node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, r.Path)
 		if err != nil {
 			log.Warn("pipeline: resolve edges: re-fetch node", "path", r.Path, "err", err)
 			continue
 		}
-		if _, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node)); err != nil {
+		_, n, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node))
+		if err != nil {
 			log.Warn("pipeline: resolve edges", "path", r.Path, "err", err)
+			continue
 		}
+		created += n
 	}
+	return created
 }
 
 func toGraphNode(n sqlcgen.MediaNode) graph.Node {

@@ -69,6 +69,7 @@ type Stats struct {
 	Touched           int // same content at the same path, no new row
 	VersionCollisions int // docs/schema.md fix #3: old archived, new inserted
 	Moved             int // Pillar 5: MISSING node's path rebased
+	EdgesCreated      int // graph.Engine.ResolveAndCommit's newly-created (not merely refreshed) edges
 }
 
 // exifRawAllowlist is the closed set of exiftool tag names persisted into

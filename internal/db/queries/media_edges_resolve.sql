@@ -28,6 +28,16 @@ RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
           created_at, updated_at;
 
+-- name: MediaEdgeExists :one
+-- Checked before UpsertMediaEdge so the caller can tell a genuinely new
+-- edge apart from an existing one whose confidence/evidence was merely
+-- refreshed -- UpsertMediaEdge's RETURNING row looks the same either way.
+-- Backs scan_jobs.edges_created (fix(pipeline): #90).
+SELECT EXISTS(
+    SELECT 1 FROM media_edges
+    WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3
+) AS edge_exists;
+
 -- name: ConfirmMediaEdge :exec
 UPDATE media_edges
 SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
