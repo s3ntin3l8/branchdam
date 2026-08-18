@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -600,6 +601,97 @@ func osRemove(t *testing.T, path string) {
 	}
 }
 
+// TestConsumeOneAbandonsWhenContextAlreadyDone backs #87 (per hermes
+// review): a fast shutdown drain must never run a backlogged item through
+// the real handleWatchItem pipeline once ctx is already done -- only
+// abandon it. target is a file that WOULD be committed successfully if
+// consumeOne fell through to handleWatchItem despite the cancelled
+// context, so the absence of a node at that path is a genuine
+// discriminating signal, not just an absence of an error.
+func TestConsumeOneAbandonsWhenContextAlreadyDone(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	target := filepath.Join(resolvedRoot, "would-be-processed.txt")
+	if err := writeFileToDisk(target, "content"); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "consume-one-abandon-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	w := NewWatcherSupervisor(deps, nil)
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	item := watchItem{rec: indexer.Record{Path: target, Size: info.Size(), ModTime: info.ModTime()}}
+
+	var seen, hashed, failed atomic.Int32
+	bumped, abandoned := w.consumeOne(cancelledCtx, loc, item, &seen, &hashed, &failed)
+
+	if !abandoned {
+		t.Fatal("abandoned = false, want true (ctx already done)")
+	}
+	if bumped {
+		t.Error("bumped = true, want false for an abandoned item")
+	}
+	if seen.Load() != 1 || failed.Load() != 1 || hashed.Load() != 0 {
+		t.Errorf("counts = seen:%d failed:%d hashed:%d, want 1,1,0", seen.Load(), failed.Load(), hashed.Load())
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(context.Background(), target); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("a node was committed for an abandoned item (err=%v) -- consumeOne ran handleWatchItem despite the cancelled context", err)
+	}
+}
+
+// TestConsumeOneProcessesNormallyWhenContextLive is the positive
+// counterpart: with a live context, consumeOne must delegate to
+// handleWatchItem exactly as before, not abandon.
+func TestConsumeOneProcessesNormallyWhenContextLive(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	target := filepath.Join(resolvedRoot, "processed.txt")
+	if err := writeFileToDisk(target, "content"); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "consume-one-live-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	w := NewWatcherSupervisor(deps, nil)
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	item := watchItem{rec: indexer.Record{Path: target, Size: info.Size(), ModTime: info.ModTime()}}
+
+	var seen, hashed, failed atomic.Int32
+	bumped, abandoned := w.consumeOne(context.Background(), loc, item, &seen, &hashed, &failed)
+
+	if abandoned {
+		t.Fatal("abandoned = true, want false (ctx is live)")
+	}
+	if !bumped {
+		t.Error("bumped = false, want true for a successfully committed item")
+	}
+	if hashed.Load() != 1 || failed.Load() != 0 {
+		t.Errorf("counts = hashed:%d failed:%d, want 1,0", hashed.Load(), failed.Load())
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(context.Background(), target); err != nil {
+		t.Errorf("GetLiveNodeByPath: %v (item should have been committed normally)", err)
+	}
+}
+
 // TestWatchWorkEnqueueNeverBlocks backs #87: a burst far larger than
 // watchQueueCapacity must not make enqueue block or park the caller's
 // goroutine -- the actual bug being fixed (every fired debounce timer held
@@ -711,6 +803,45 @@ func TestWatchWorkDequeueDrainsThenCloses(t *testing.T) {
 		if want := fmt.Sprintf("/item/%d", i); path != want {
 			t.Errorf("item %d = %q, want %q", i, path, want)
 		}
+	}
+}
+
+// TestWatchWorkDequeueWakesFromBlockedWait exercises the subtlest part of
+// this queue's design, which TestWatchWorkDequeueDrainsThenCloses doesn't
+// reach: the consumer must already be parked in dequeue's blocking
+// <-q.notify wait -- not merely started before enqueue happens to run --
+// or this is only proving the "items already queued" path, not the actual
+// wakeup. waitFor polls a "the consumer is now waiting" signal (set right
+// before the blocking receive) to guarantee the enqueue below genuinely
+// races a parked receiver, not a coincidentally-fast one.
+func TestWatchWorkDequeueWakesFromBlockedWait(t *testing.T) {
+	work := newWatchWork(nil)
+
+	var waiting atomic.Bool
+	got := make(chan string, 1)
+	go func() {
+		waiting.Store(true)
+		item, ok := work.dequeue()
+		if !ok {
+			return
+		}
+		got <- item.rec.Path
+	}()
+
+	waitFor(t, 2*time.Second, func() bool { return waiting.Load() })
+	// waiting only proves the goroutine reached dequeue, not that it's
+	// actually parked in <-q.notify yet -- give it a moment to get there.
+	time.Sleep(20 * time.Millisecond)
+
+	work.enqueue(watchItem{rec: indexer.Record{Path: "/woken/item"}})
+
+	select {
+	case path := <-got:
+		if path != "/woken/item" {
+			t.Errorf("dequeued %q, want /woken/item", path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dequeue never woke from its blocked wait after enqueue -- missed wakeup")
 	}
 }
 

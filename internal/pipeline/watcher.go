@@ -135,8 +135,10 @@ const watchQueueCapacity = 1024
 // flowing -- is preferable to either blocking new fsnotify delivery
 // (risking the kernel's own event queue overflowing, see
 // indexer.ErrEventOverflow) or discarding the newest event a caller just
-// asked to enqueue. Every eviction is logged (never silent) and counted in
-// dropped, readable via droppedCount for tests and any future surfacing.
+// asked to enqueue. Every eviction is counted in dropped (readable via
+// droppedCount for tests and any future surfacing) and rate-limited-logged
+// -- see enqueue's logDropThreshold/logDropSummaryEvery comment -- not
+// silent, but not one WARN line per eviction either.
 //
 // The order items land in the backlog carries no semantic weight -- the
 // debouncer fires one time.AfterFunc goroutine per path and Go does not
@@ -203,10 +205,10 @@ func (q *watchWork) enqueue(item watchItem) {
 		if q.log != nil {
 			switch {
 			case dropped <= logDropThreshold:
-				q.log.Warn("pipeline: watch queue full, dropping oldest queued event -- a full rescan will catch up",
+				q.log.Warn("pipeline: watch queue full, dropping oldest queued event -- run a full rescan of this location to catch up",
 					"dropped_path", oldest.path, "dropped_rec_path", oldest.rec.Path, "capacity", watchQueueCapacity)
 			case dropped%logDropSummaryEvery == 0:
-				q.log.Warn("pipeline: watch queue still under sustained pressure, dropping oldest events -- a full rescan will catch up",
+				q.log.Warn("pipeline: watch queue still under sustained pressure, dropping oldest events -- run a full rescan of this location to catch up",
 					"dropped_total_this_run", dropped, "capacity", watchQueueCapacity)
 			}
 		}
@@ -289,14 +291,25 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 		for {
 			item, ok := work.dequeue()
 			if !ok {
+				// Persist the final counts, including any items abandoned
+				// during a fast shutdown drain -- their bookkeeping wasn't
+				// written per-item (see consumeOne).
+				w.updateJob(job.ID, &seen, &hashed, &failed)
 				return
+			}
+			bumped, abandoned := w.consumeOne(ctx, loc, item, &seen, &hashed, &failed)
+			if abandoned {
+				// No per-item updateJob call here -- that would reintroduce
+				// the same shutdown-drain delay via DB round-trips instead
+				// of file I/O. The final counts land in one updateJob call
+				// once the backlog is fully drained, above.
+				continue
 			}
 			// Every item updates the job's counters -- a failure must still
 			// be persisted (files_failed), not dropped with the callback.
 			// bump only when handleWatchItem reports the item was handled: a
 			// nudge means "something changed" (a failed event or a removal
 			// with nothing to mark is not a change).
-			bumped := w.handleWatchItem(ctx, loc, item, &seen, &hashed, &failed)
 			w.updateJob(job.ID, &seen, &hashed, &failed)
 			if bumped {
 				w.bump()
@@ -344,6 +357,30 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 	}); ferr != nil {
 		w.log.Warn("pipeline: finalize watch job", "jobID", job.ID, "err", ferr)
 	}
+}
+
+// consumeOne dispatches one dequeued item: if ctx is already done, it's
+// abandoned rather than run through handleWatchItem, returning
+// abandoned=true; otherwise handleWatchItem runs normally and its bumped
+// result is returned as-is.
+//
+// The abandon path exists because dequeue can still return up to
+// watchQueueCapacity backlogged items after indexer.Watch has already
+// returned due to ctx.Done() -- items that were queued before shutdown
+// began but not yet processed. Running the full handleWatchItem pipeline
+// (real file I/O, hashing that isn't ctx-aware, exiftool/ffprobe
+// subprocesses, a DB write) against an already-cancelled context for
+// potentially hundreds of items would delay finalization for no benefit.
+// Mirrors workers.Pool's OnAbandon (#92) for the same reason: the next
+// full scan is this package's existing self-healing catch-up path for
+// anything a watch event misses.
+func (w *WatcherSupervisor) consumeOne(ctx context.Context, loc storage.Location, item watchItem, seen, hashed, failed *atomic.Int32) (bumped, abandoned bool) {
+	if ctx.Err() != nil {
+		seen.Add(1)
+		failed.Add(1)
+		return false, true
+	}
+	return w.handleWatchItem(ctx, loc, item, seen, hashed, failed), false
 }
 
 // handleWatchItem processes one watchItem to completion, returning whether

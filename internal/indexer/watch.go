@@ -74,7 +74,7 @@ func logWatcherError(log *slog.Logger, werr error) {
 		return
 	}
 	if errors.Is(werr, fsnotify.ErrEventOverflow) {
-		log.Error("indexer: watch queue overflowed, filesystem events were dropped by the kernel -- a full rescan will catch up", "err", werr)
+		log.Error("indexer: watch queue overflowed, filesystem events were dropped by the kernel -- run a full rescan of this location to catch up", "err", werr)
 		return
 	}
 	log.Warn("indexer: watcher error", "err", werr)
