@@ -37,7 +37,7 @@ func TestListStorageLocationsSatisfiesGuardLoader(t *testing.T) {
 		t.Fatalf("seed storage_locations: %v", err)
 	}
 
-	guard, err := storage.LoadGuard(ctx, database)
+	guard, _, err := storage.LoadGuard(ctx, database, nil)
 	if err != nil {
 		t.Fatalf("LoadGuard(ctx, *db.DB): %v", err)
 	}

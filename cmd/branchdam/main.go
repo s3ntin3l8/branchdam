@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -81,10 +82,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	guard, err := storage.LoadGuard(ctx, database)
+	// A single unresolvable mount (M6) does not abort startup -- see
+	// storage.LoadGuard's doc comment. skippedLocationIDs are the
+	// locations LoadGuard excluded; deactivateStorageLocations persists
+	// that (non-fatal if it fails: is_active is an observability field,
+	// not a safety gate -- LoadGuard already excluded them from the Guard
+	// regardless of whether this write lands).
+	guard, skippedLocationIDs, err := storage.LoadGuard(ctx, database, log)
 	if err != nil {
 		log.Error("load storage guard", "err", err)
 		os.Exit(1)
+	}
+	if len(skippedLocationIDs) > 0 {
+		if err := deactivateStorageLocations(ctx, database, skippedLocationIDs); err != nil {
+			log.Error("mark unresolvable storage locations inactive", "err", err)
+		}
 	}
 
 	prober := probe.New()
@@ -283,6 +295,7 @@ func seedStorageLocations(ctx context.Context, database *db.DB, locations []conf
 		return nil
 	}
 	return database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		rootPaths := make([]string, 0, len(locations))
 		for _, loc := range locations {
 			readOnly := int64(0)
 			if loc.ReadOnly {
@@ -296,6 +309,36 @@ func seedStorageLocations(ctx context.Context, database *db.DB, locations []conf
 				Name: loc.Name, RootPath: loc.RootPath, Tier: loc.Tier,
 				ReadOnly: readOnly, Prunable: prunable,
 			}); err != nil {
+				return err
+			}
+			rootPaths = append(rootPaths, loc.RootPath)
+		}
+		// M6: deactivate any previously active location whose root_path is
+		// no longer configured -- an operator removing a location from
+		// config.yaml should self-heal storage-health/UI state without a
+		// manual DB edit, the same as a mount that simply vanished
+		// (storage.LoadGuard, below). Safe to call unconditionally here:
+		// rootPaths has at least one entry because of the len(locations)
+		// == 0 early return above -- see DeactivateStorageLocationsNotIn's
+		// doc comment for why an empty array would be dangerous.
+		jsonRootPaths, err := json.Marshal(rootPaths)
+		if err != nil {
+			return fmt.Errorf("marshal configured root paths: %w", err)
+		}
+		_, err = q.DeactivateStorageLocationsNotIn(ctx, string(jsonRootPaths))
+		return err
+	})
+}
+
+// deactivateStorageLocations marks each given storage_locations row
+// inactive (M6) -- called for locations storage.LoadGuard could not
+// resolve at startup. A separate transaction from seedStorageLocations'
+// since it depends on LoadGuard's result, which itself runs after (and
+// depends on) seedStorageLocations having already committed.
+func deactivateStorageLocations(ctx context.Context, database *db.DB, ids []int64) error {
+	return database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, id := range ids {
+			if err := q.SetStorageLocationActive(ctx, sqlcgen.SetStorageLocationActiveParams{ID: id, IsActive: 0}); err != nil {
 				return err
 			}
 		}

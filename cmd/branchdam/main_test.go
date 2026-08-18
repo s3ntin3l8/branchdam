@@ -60,6 +60,152 @@ func TestResolveWatchedLocations(t *testing.T) {
 	}
 }
 
+// TestSeedStorageLocationsDeactivatesRemovedLocations backs M6: a location
+// removed from config.yaml (not merely failing to resolve -- storage.
+// LoadGuard handles that case) must self-heal storage-health/UI state to
+// inactive without a manual DB edit.
+func TestSeedStorageLocationsDeactivatesRemovedLocations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed-deactivate.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	both := []config.StorageLocation{
+		{Name: "keep", RootPath: "/keep", Tier: "TIER1_LOCAL_SCRATCH"},
+		{Name: "drop", RootPath: "/drop", Tier: "TIER1_LOCAL_SCRATCH"},
+	}
+	if err := seedStorageLocations(ctx, database, both); err != nil {
+		t.Fatalf("seed both: %v", err)
+	}
+
+	keepLoc, err := database.Reader.GetStorageLocationByPath(ctx, "/keep")
+	if err != nil {
+		t.Fatalf("get keep location: %v", err)
+	}
+	dropLoc, err := database.Reader.GetStorageLocationByPath(ctx, "/drop")
+	if err != nil {
+		t.Fatalf("get drop location: %v", err)
+	}
+	if keepLoc.IsActive != 1 || dropLoc.IsActive != 1 {
+		t.Fatalf("both locations should start active: keep=%d drop=%d", keepLoc.IsActive, dropLoc.IsActive)
+	}
+
+	// Re-seed with only "keep" configured -- "drop" was removed from
+	// config.yaml.
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{both[0]}); err != nil {
+		t.Fatalf("re-seed with drop removed: %v", err)
+	}
+
+	keepAfter, err := database.Reader.GetStorageLocationByPath(ctx, "/keep")
+	if err != nil {
+		t.Fatalf("get keep location after re-seed: %v", err)
+	}
+	dropAfter, err := database.Reader.GetStorageLocationByPath(ctx, "/drop")
+	if err != nil {
+		t.Fatalf("get drop location after re-seed: %v", err)
+	}
+	if keepAfter.IsActive != 1 {
+		t.Errorf("keep.IsActive = %d, want 1 (still configured)", keepAfter.IsActive)
+	}
+	if dropAfter.IsActive != 0 {
+		t.Errorf("drop.IsActive = %d, want 0 (removed from config)", dropAfter.IsActive)
+	}
+}
+
+// TestSeedStorageLocationsReactivatesReturningLocation is the self-heal in
+// the other direction: a location previously deactivated (e.g. by
+// storage.LoadGuard after a mount vanished) must become active again once
+// it's seeded from config successfully -- UpsertStorageLocation's ON
+// CONFLICT branch unconditionally resets is_active to 1.
+func TestSeedStorageLocationsReactivatesReturningLocation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed-reactivate.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	cfg := []config.StorageLocation{{Name: "returning", RootPath: "/returning", Tier: "TIER1_LOCAL_SCRATCH"}}
+	if err := seedStorageLocations(ctx, database, cfg); err != nil {
+		t.Fatalf("initial seed: %v", err)
+	}
+	loc, err := database.Reader.GetStorageLocationByPath(ctx, "/returning")
+	if err != nil {
+		t.Fatalf("get location: %v", err)
+	}
+	if err := deactivateStorageLocations(ctx, database, []int64{loc.ID}); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	deactivated, err := database.Reader.GetStorageLocationByID(ctx, loc.ID)
+	if err != nil {
+		t.Fatalf("get after deactivate: %v", err)
+	}
+	if deactivated.IsActive != 0 {
+		t.Fatalf("IsActive after deactivate = %d, want 0", deactivated.IsActive)
+	}
+
+	if err := seedStorageLocations(ctx, database, cfg); err != nil {
+		t.Fatalf("re-seed: %v", err)
+	}
+	reactivated, err := database.Reader.GetStorageLocationByID(ctx, loc.ID)
+	if err != nil {
+		t.Fatalf("get after re-seed: %v", err)
+	}
+	if reactivated.IsActive != 1 {
+		t.Errorf("IsActive after re-seed = %d, want 1 (self-healed)", reactivated.IsActive)
+	}
+}
+
+// TestDeactivateStorageLocations is the direct unit test for the helper
+// storage.LoadGuard's skippedLocationIDs feed into.
+func TestDeactivateStorageLocations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deactivate.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{
+		{Name: "a", RootPath: "/a", Tier: "TIER1_LOCAL_SCRATCH"},
+		{Name: "b", RootPath: "/b", Tier: "TIER1_LOCAL_SCRATCH"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	locA, err := database.Reader.GetStorageLocationByPath(ctx, "/a")
+	if err != nil {
+		t.Fatalf("get a: %v", err)
+	}
+	locB, err := database.Reader.GetStorageLocationByPath(ctx, "/b")
+	if err != nil {
+		t.Fatalf("get b: %v", err)
+	}
+
+	if err := deactivateStorageLocations(ctx, database, []int64{locA.ID}); err != nil {
+		t.Fatalf("deactivateStorageLocations: %v", err)
+	}
+
+	aAfter, err := database.Reader.GetStorageLocationByID(ctx, locA.ID)
+	if err != nil {
+		t.Fatalf("get a after: %v", err)
+	}
+	bAfter, err := database.Reader.GetStorageLocationByID(ctx, locB.ID)
+	if err != nil {
+		t.Fatalf("get b after: %v", err)
+	}
+	if aAfter.IsActive != 0 {
+		t.Errorf("a.IsActive = %d, want 0", aAfter.IsActive)
+	}
+	if bAfter.IsActive != 1 {
+		t.Errorf("b.IsActive = %d, want 1 (not in the deactivate list)", bAfter.IsActive)
+	}
+}
+
 // TestReconcileOrphanedScanJobs backs #88: a RUNNING row left behind by a
 // killed prior process (SIGKILL, OOM-kill, crash) must move to a terminal
 // state on the next startup, before it can be confused with genuinely

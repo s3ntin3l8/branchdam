@@ -1426,6 +1426,41 @@ type storageHealthOutput struct {
 	Body storageHealthDTO
 }
 
+// statfsTimeout bounds how long handleStorageHealth waits on any single
+// location's unix.Statfs call. A hung NFS/SMB mount makes Statfs block
+// indefinitely with no cancellation mechanism of its own -- this is what
+// stops one bad mount from hanging the whole /api/v1/storage-health
+// response (and, transitively, delaying shutdown: httpServer.Shutdown
+// waits for in-flight requests).
+const statfsTimeout = 2 * time.Second
+
+// statfsWithTimeout runs unix.Statfs on its own goroutine and returns a
+// timeout error if it doesn't complete within timeout. The goroutine is
+// NOT cancelled if the deadline is hit -- there is no way to interrupt a
+// blocked Statfs syscall in Go, so a genuinely wedged mount leaks one
+// goroutine per timed-out probe until it eventually unblocks (or the
+// process exits). That is the acceptable trade-off here: a leaked
+// goroutine on a rare, already-degraded mount is far better than every
+// caller of this handler hanging until the mount recovers.
+func statfsWithTimeout(path string, timeout time.Duration) (unix.Statfs_t, error) {
+	type result struct {
+		stat unix.Statfs_t
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var r result
+		r.err = unix.Statfs(path, &r.stat)
+		done <- r
+	}()
+	select {
+	case r := <-done:
+		return r.stat, r.err
+	case <-time.After(timeout):
+		return unix.Statfs_t{}, fmt.Errorf("storage probe timed out after %s", timeout)
+	}
+}
+
 func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storageHealthOutput, error) {
 	out := &storageHealthOutput{}
 	out.Body.Locations = []storageLocationHealthDTO{}
@@ -1468,8 +1503,8 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 			NodeCount: countMap[loc.ID],
 		}
 
-		var stat unix.Statfs_t
-		if err := unix.Statfs(loc.RootPath, &stat); err != nil {
+		stat, err := statfsWithTimeout(loc.RootPath, statfsTimeout)
+		if err != nil {
 			dto.IsDegraded = true
 			msg := err.Error()
 			dto.DegradedMessage = &msg

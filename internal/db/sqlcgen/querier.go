@@ -40,6 +40,19 @@ type Querier interface {
 	CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams) (MediaEdge, error)
 	CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error)
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
+	// Backs M6: after seeding every location config.yaml currently lists,
+	// deactivate any PREVIOUSLY active location whose root_path is no longer
+	// among them -- an operator removing a location from config, rather than
+	// it merely failing to resolve, is a deliberate decision that should also
+	// self-heal storage-health/UI state without a manual DB edit. MUST NOT be
+	// called with an empty currentRootPaths (cmd/branchdam guards this):
+	// json_each(?1) returns ZERO rows for both NULL and '[]' (verified against
+	// SQLite directly), which makes `root_path NOT IN (SELECT ... FROM
+	// json_each(?1))` true for EVERY row -- the opposite failure direction
+	// from MarkUnseenNodesMissing's empty-array gotcha (that one silently
+	// matches nothing; this one would silently deactivate every location in
+	// the database on a misconfigured or empty config.yaml).
+	DeactivateStorageLocationsNotIn(ctx context.Context, jsonEach interface{}) (int64, error)
 	// Backs POST /api/v1/agent/events: persists and returns 202 in increment 1.
 	// Actually draining/processing these rows ships with the deferred
 	// workstation-agent increment -- this table and endpoint exist now so that
@@ -197,6 +210,11 @@ type Querier interface {
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
 	ResolvedEdgeParentMissing(ctx context.Context, id int64) (bool, error)
+	// Backs M6: storage.LoadGuard calls this to deactivate a location whose
+	// root_path can't be resolved at startup (mount vanished) rather than
+	// treating that as a fatal error that prevents the whole server from
+	// booting -- see LoadGuard's doc comment.
+	SetStorageLocationActive(ctx context.Context, arg SetStorageLocationActiveParams) error
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
@@ -272,7 +290,11 @@ type Querier interface {
 	// storageLocations list is applied idempotently on every restart, keyed on
 	// root_path's UNIQUE constraint, so re-running it against an
 	// already-seeded database updates tier/read_only/prunable in place rather
-	// than failing on the second startup.
+	// than failing on the second startup. is_active is unconditionally reset
+	// to 1 here -- a location present in config is presumed active until
+	// storage.LoadGuard's post-seed resolvability check (M6) says otherwise
+	// via SetStorageLocationActive, which is what makes a location that
+	// vanished and came back self-heal on the next successful startup.
 	UpsertStorageLocation(ctx context.Context, arg UpsertStorageLocationParams) (StorageLocation, error)
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used

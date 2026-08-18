@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -98,20 +99,37 @@ type StorageLocationRow struct {
 
 // LoadGuard reads storage_locations via lister and canonicalizes every
 // RootPath with EvalSymlinks. Root paths are operator-configured mount
-// points and are expected to exist at startup -- a missing or unresolvable
-// root is a configuration error, surfaced immediately rather than silently
-// producing a Guard that can't protect the path it claims to.
-func LoadGuard(ctx context.Context, lister locationLister) (*Guard, error) {
+// points and are normally expected to exist at startup, but a single
+// missing or unresolvable root (M6: an unplugged drive, a dead NFS/SMB
+// mount) is NOT treated as fatal -- that would brick the entire server,
+// including the UI an operator would use to diagnose it, over one bad
+// mount out of potentially several. That location is instead excluded from
+// the returned Guard (so no write can ever be routed to a path Guard
+// cannot actually protect) and its id is returned in skippedLocationIDs
+// for the caller to mark inactive (cmd/branchdam calls
+// sqlcgen.SetStorageLocationActive) -- LoadGuard itself only reads via
+// lister (this package has no dependency on internal/db/sqlcgen at all),
+// so it cannot perform that write itself. A lister-level failure (the
+// ListStorageLocations call itself erroring) is still fatal: that means
+// the database is unreachable, not that one mount is unavailable.
+func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*Guard, []int64, error) {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	rows, err := lister.ListStorageLocations(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list storage locations: %w", err)
+		return nil, nil, fmt.Errorf("list storage locations: %w", err)
 	}
 
 	locs := make([]Location, 0, len(rows))
+	var skipped []int64
 	for _, row := range rows {
 		resolved, err := filepath.EvalSymlinks(row.RootPath)
 		if err != nil {
-			return nil, fmt.Errorf("storage location %q root_path %q: %w", row.Name, row.RootPath, err)
+			log.Error("storage: location root_path unresolvable, excluding from Guard and marking inactive",
+				"location", row.Name, "rootPath", row.RootPath, "err", err)
+			skipped = append(skipped, row.ID)
+			continue
 		}
 		locs = append(locs, Location{
 			ID:       row.ID,
@@ -121,7 +139,7 @@ func LoadGuard(ctx context.Context, lister locationLister) (*Guard, error) {
 			ReadOnly: row.ReadOnly,
 		})
 	}
-	return NewGuard(locs), nil
+	return NewGuard(locs), skipped, nil
 }
 
 // Resolve canonicalizes path and returns the Location it falls under.
