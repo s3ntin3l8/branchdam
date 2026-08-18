@@ -66,6 +66,21 @@ type ScanDeps struct {
 	// instead of waiting on the 15s poll safety net. Mirrors
 	// WatcherSupervisor's nudge parameter. Optional: nil is a no-op.
 	Nudge func()
+
+	// Shutdown, if set, is closed when the server begins an orderly
+	// shutdown -- cmd/branchdam wires this to its signal context's Done()
+	// channel, the same context passed to Pool.Run. It is deliberately NOT
+	// the context runScan does its work under: RunScan wraps the caller's
+	// ctx in context.WithoutCancel precisely so a request cancellation (or
+	// this scan's own ctx) can't kill a scan, and reusing that ctx here
+	// would silently reintroduce the thing WithoutCancel exists to prevent.
+	// A plain <-chan struct{} rather than a context makes that mixing
+	// structurally impossible -- there's no cancellation to accidentally
+	// pass through. Used only to distinguish a shutdown-interrupted scan
+	// (terminalized CANCELLED) from ordinary backpressure (terminalized
+	// COMPLETED with a nonzero files_failed) -- see runScan's #99 note.
+	// Optional: nil means never shutting down, matching every existing test.
+	Shutdown <-chan struct{}
 }
 
 // ScanTracker joins every in-flight RunScan goroutine, mirroring
@@ -168,6 +183,17 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	var wg sync.WaitGroup
 	var filesSeen, filesFailed atomic.Int32
 	var abandonedCount atomic.Int32
+	// interrupted is set (only) from OnAbandon, which fires exclusively from
+	// Pool.closeOnDone after the pool's own ctx.Done() -- shutdown is its
+	// only possible cause (see #99's terminalization predicate below). It is
+	// NOT set from the "submit refused" branch: Pool.Submit returns false the
+	// instant closeOnDone takes its lock, racing this scan's own read of
+	// deps.Shutdown -- a per-file check there could observe backpressure
+	// before observing shutdown, misclassifying files. That's why
+	// terminalization checks deps.Shutdown itself, once, after the walk and
+	// drain are both joined, rather than trusting a flag threaded through
+	// the racy per-file path.
+	var interrupted atomic.Bool
 	uncertain := newUncertainPaths()
 
 	walkFn := deps.WalkFn
@@ -227,8 +253,14 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 					select {
 					case results <- *result:
 					case <-jobCtx.Done():
+						// Unlike the submit-refused branch below, this is
+						// unambiguous: jobCtx is the pool's own Run context,
+						// so its Done() firing can only mean the pool is
+						// shutting down -- safe to record directly, no race
+						// with deps.Shutdown to worry about.
 						uncertain.add(rec.Path)
 						filesFailed.Add(1)
+						interrupted.Store(true)
 					}
 					return nil
 				},
@@ -246,13 +278,21 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 					uncertain.add(rec.Path)
 					filesFailed.Add(1)
 					abandonedCount.Add(1)
+					interrupted.Store(true)
 				},
 			})
 			if !submitted {
 				wg.Done()
 				uncertain.add(rec.Path)
 				filesFailed.Add(1)
-				log.Warn("pipeline: submit refused (duplicate in flight or queue full)", "path", rec.Path)
+				// This can be ordinary backpressure (duplicate in flight,
+				// queue full) OR the pool refusing because it's shutting
+				// down -- Pool.Submit's bare bool return doesn't distinguish
+				// them, and per-file deps.Shutdown checks here would race
+				// closeOnDone (see interrupted's doc comment above). Not
+				// logged as a shutdown event; terminalization decides that
+				// once, after the fact.
+				log.Warn("pipeline: submit refused (duplicate in flight, queue full, or pool shutting down)", "path", rec.Path)
 			}
 			return nil
 		})
@@ -319,20 +359,62 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", swept)
 	}
 
-	// CompleteScanJob runs in its own transaction, after the sweep: the two
-	// are deliberately not atomic. A crash between them leaves the job RUNNING
-	// with already-swept nodes -- status-only rows, the swept rows are already
-	// correctly MISSING, and the next scan re-sweeps harmlessly. Gating the
-	// sweep and the terminal write behind one transaction would instead widen
-	// the "RUNNING forever" failure window on a mid-write crash.
+	// #99: a scan that lost work to a mid-shutdown pool close is CANCELLED,
+	// not COMPLETED -- mirroring watchLocation's own CANCELLED-by-default
+	// convention (watcher.go) for a clean-shutdown termination, as opposed
+	// to FAILED for a genuine error (the walkErr branch above, which already
+	// returned before this point). Evaluated ONCE here, after both the walk
+	// goroutine and drainAndCommit have been joined (walkDone above, and
+	// drainAndCommit's own return already happened-before total was
+	// assigned) -- not per-file during the walk, where interrupted's own doc
+	// comment explains the race that would cause. isClosed(deps.Shutdown) is
+	// the fallback for jobs that were entirely enumerated and refused via
+	// the ambiguous "submit refused" branch, which never sets interrupted
+	// itself; filesFailed > 0 is what keeps a scan that finished all its
+	// work just as SIGTERM arrived recording as COMPLETED rather than
+	// CANCELLED (isClosed alone can't tell "shutdown happened" from
+	// "shutdown happened after we were already done").
+	//
+	// The three-state contract this produces, now that #88 is also merged:
+	//   CANCELLED  -- clean shutdown; the scan terminalized itself here.
+	//   FAILED     -- a genuine walk error (above), OR the process died
+	//                 before terminalizing at all and reconcileOrphanedScanJobs
+	//                 (cmd/branchdam, #88) flipped the orphaned RUNNING row
+	//                 at the next boot.
+	//   COMPLETED  -- ran to completion, whether or not shutdown began after.
+	interruptedByShutdown := (interrupted.Load() || isClosed(deps.Shutdown)) && filesFailed.Load() > 0
+
+	// CompleteScanJob/CancelScanJob runs in its own transaction, after the
+	// sweep: the two are deliberately not atomic. A crash between them
+	// leaves the job RUNNING with already-swept nodes -- status-only rows,
+	// the swept rows are already correctly MISSING, and the next scan
+	// re-sweeps harmlessly. Gating the sweep and the terminal write behind
+	// one transaction would instead widen the "RUNNING forever" failure
+	// window on a mid-write crash.
 	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if interruptedByShutdown {
+			return q.CancelScanJob(ctx, jobID)
+		}
 		return q.CompleteScanJob(ctx, jobID)
 	}); err != nil {
-		log.Error("pipeline: complete scan job", "jobID", jobID, "err", err)
+		log.Error("pipeline: terminalize scan job", "jobID", jobID, "cancelled", interruptedByShutdown, "err", err)
 	}
 	log.Info("pipeline: scan complete", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
-		"inserted", total.Inserted, "touched", total.Touched, "versionCollisions", total.VersionCollisions,
-		"moved", total.Moved, "edgesCreated", total.EdgesCreated, "metadataWritten", total.MetadataWritten)
+		"cancelled", interruptedByShutdown, "inserted", total.Inserted, "touched", total.Touched,
+		"versionCollisions", total.VersionCollisions, "moved", total.Moved, "edgesCreated", total.EdgesCreated,
+		"metadataWritten", total.MetadataWritten)
+}
+
+// isClosed reports whether ch has been closed, without blocking. A nil
+// channel (ScanDeps.Shutdown unset) reads as never closed -- select on a nil
+// channel case simply never fires, so this is nil-safe by construction.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // drainAndCommit reads results as they arrive and commits every batchSize
