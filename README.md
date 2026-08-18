@@ -46,3 +46,9 @@ Copy `config.example.yaml` to `config.yaml` and `.env.example` to `.env`
 before running locally. See [`CLAUDE.md`](CLAUDE.md) for frontend and Docker
 commands, and [`docs/forward-auth.md`](docs/forward-auth.md) for the
 Authentik/Traefik setup.
+
+Run at most one branchdam instance per database file. Startup reconciles any
+`scan_jobs` row left `RUNNING` by a crashed prior process, on the assumption
+that this process is the only writer -- `make dev` pointed at a database a
+running Docker container already owns would mark that container's live jobs
+as failed.

@@ -20,6 +20,23 @@ UPDATE scan_jobs SET state = 'FAILED', last_error = ?2, finished_at = unixepoch(
 -- not FAILED -- only a watcher that died on its own is a failure.
 UPDATE scan_jobs SET state = 'CANCELLED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
 
+-- name: ReconcileOrphanedScanJobs :execrows
+-- Every row still 'RUNNING' at process startup, before this process has
+-- created any scan_jobs row of its own, was left behind by a previous
+-- process that never reached a terminal state -- SIGKILL, OOM-kill,
+-- container hard-stop, power loss. A WATCH row is RUNNING for its entire
+-- process lifetime by design, so this is the only place its state ever
+-- gets cleaned up after a crash. Reuses FAILED rather than adding a new
+-- enum state (see issue #88's scope note): last_error distinguishes this
+-- from a genuine processing failure. Must run before
+-- WatcherSupervisor.Start creates any fresh WATCH row for the same
+-- location, or a reconciled row and a fresh row could momentarily both
+-- claim to represent "the" watch state for it. ix_scan_jobs_active
+-- (state, started_at DESC) backs this WHERE clause.
+UPDATE scan_jobs
+SET state = 'FAILED', last_error = ?1, finished_at = unixepoch(), updated_at = unixepoch()
+WHERE state = 'RUNNING';
+
 -- name: GetScanJob :one
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
        files_failed, edges_created, started_at, finished_at, last_error, updated_at

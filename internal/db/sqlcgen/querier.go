@@ -115,6 +115,19 @@ type Querier interface {
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
+	// Every row still 'RUNNING' at process startup, before this process has
+	// created any scan_jobs row of its own, was left behind by a previous
+	// process that never reached a terminal state -- SIGKILL, OOM-kill,
+	// container hard-stop, power loss. A WATCH row is RUNNING for its entire
+	// process lifetime by design, so this is the only place its state ever
+	// gets cleaned up after a crash. Reuses FAILED rather than adding a new
+	// enum state (see issue #88's scope note): last_error distinguishes this
+	// from a genuine processing failure. Must run before
+	// WatcherSupervisor.Start creates any fresh WATCH row for the same
+	// location, or a reconciled row and a fresh row could momentarily both
+	// claim to represent "the" watch state for it. ix_scan_jobs_active
+	// (state, started_at DESC) backs this WHERE clause.
+	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) error
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
