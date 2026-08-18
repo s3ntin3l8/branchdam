@@ -24,6 +24,7 @@ import (
 	_ "image/png"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"time"
 
@@ -72,6 +73,73 @@ func (p *Prober) HasFFProbe() bool { return p.ffprobePath != "" }
 // whatever exec.CommandContext does with the result.
 func exiftoolArgs(path string) []string {
 	return []string{"-j", "-n", "-G", "--", path}
+}
+
+// exiftoolWriteAllowlist is the closed set of tags the write path may emit.
+// It bounds what exiftool can do when invoked for metadata inheritance --
+// see TestExiftoolWriteArgsAllowlist. It is deliberately separate from the
+// read path's persistence allowlist (exifRawAllowlist in internal/pipeline).
+var exiftoolWriteAllowlist = map[string]bool{
+	"EXIF:DateTimeOriginal":   true,
+	"EXIF:OffsetTimeOriginal": true,
+	"Composite:GPSLatitude":   true, // signed decimal degrees -> exiftool derives value + hemisphere ref
+	"Composite:GPSLongitude":  true,
+	"EXIF:Make":               true,
+	"EXIF:Model":              true,
+	"EXIF:LensModel":          true,
+	"EXIF:SerialNumber":       true,
+	"XMP-dc:Identifier":       true,
+	"XMP-xmpMM:DerivedFrom":   true,
+}
+
+// ErrTagNotAllowed is returned by exiftoolWriteArgs when a caller asks to
+// write a tag outside exiftoolWriteAllowlist. Surfaced as a hard error (not a
+// silent drop) because a tag outside the allowlist is a programming error.
+var ErrTagNotAllowed = errors.New("probe: tag not on exiftool write allowlist")
+
+// exiftoolWriteArgs builds exiftool's argv for an in-place metadata write:
+// -overwrite_original -TAG=value ... -- path. Deliberately SEPARATE from
+// exiftoolArgs (the read path), so the read path's prove-never-writes
+// property is never contaminated -- TestExiftoolArgsNeverWrite must keep
+// passing unchanged. Tags are sorted for a deterministic argv, and every tag
+// is validated against exiftoolWriteAllowlist before it is emitted.
+func exiftoolWriteArgs(tags map[string]string, path string) ([]string, error) {
+	keys := make([]string, 0, len(tags))
+	for k := range tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	args := []string{"-overwrite_original"}
+	for _, k := range keys {
+		if !exiftoolWriteAllowlist[k] {
+			return nil, fmt.Errorf("%w: %s", ErrTagNotAllowed, k)
+		}
+		args = append(args, "-"+k+"="+tags[k])
+	}
+	args = append(args, "--", path)
+	return args, nil
+}
+
+// WriteTags writes tags into the file at path in place, via exiftool. The
+// caller is responsible for storage.Guard.CheckWrite BEFORE calling this --
+// this method only shells out and never resolves storage tiers. Returns
+// ErrToolUnavailable when exiftool is absent.
+func (p *Prober) WriteTags(ctx context.Context, path string, tags map[string]string) error {
+	if !p.HasExiftool() {
+		return fmt.Errorf("%w: exiftool", ErrToolUnavailable)
+	}
+	args, err := exiftoolWriteArgs(tags, path)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, p.exiftoolPath, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("probe: exiftool write %s: %w (stderr: %s)", path, err, stderr.String())
+	}
+	return nil
 }
 
 // ffprobeArgs mirrors exiftoolArgs' path-injection protection even though

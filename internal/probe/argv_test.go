@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"errors"
 	"regexp"
 	"testing"
 )
@@ -65,6 +66,73 @@ func TestExiftoolArgsNeverWrite(t *testing.T) {
 			t.Errorf("exiftoolArgs(%q) does not end with the path: %v", path, args)
 		}
 	}
+}
+
+func TestExiftoolWriteArgsAllowlist(t *testing.T) {
+	t.Parallel()
+	// Only allowlisted tags may be emitted.
+	allowlistOK := map[string]string{
+		"EXIF:Make":               "SONY",
+		"EXIF:Model":              "ILCE-7M4",
+		"EXIF:LensModel":          "FE 24-70mm F2.8 GM",
+		"EXIF:SerialNumber":       "1234567",
+		"EXIF:DateTimeOriginal":   "2026:07:15 14:30:00",
+		"EXIF:OffsetTimeOriginal": "+02:00",
+		"Composite:GPSLatitude":   "-33.9151",
+		"Composite:GPSLongitude":  "18.4115",
+		"XMP-dc:Identifier":       "uuid-abc",
+		"XMP-xmpMM:DerivedFrom":   "uuid-parent",
+	}
+	args, err := exiftoolWriteArgs(allowlistOK, "/path/shot.jpg")
+	if err != nil {
+		t.Fatalf("exiftoolWriteArgs(allowlisted): %v", err)
+	}
+	sawOverwrite := false
+	sawSep := false
+	for _, a := range args {
+		if a == "-overwrite_original" {
+			sawOverwrite = true
+			continue
+		}
+		if a == "--" {
+			sawSep = true
+			continue
+		}
+		if sawSep {
+			continue // the path (and anything after --) is a literal positional arg
+		}
+		if !tagAssignmentRe.MatchString(a) {
+			t.Errorf("write argv contains unexpected argument %q", a)
+			continue
+		}
+		tag := a[1:indexOf(a, '=')]
+		if !exiftoolWriteAllowlist[tag] {
+			t.Errorf("write argv contains non-allowlisted tag %q", tag)
+		}
+	}
+	if !sawOverwrite {
+		t.Error("write argv missing -overwrite_original")
+	}
+	if !sawSep {
+		t.Error("write argv missing -- separator")
+	}
+	if args[len(args)-1] != "/path/shot.jpg" {
+		t.Errorf("write argv does not end with the path: %v", args)
+	}
+
+	// A disallowed tag is a hard error, not a silent drop.
+	if _, err := exiftoolWriteArgs(map[string]string{"EXIF:MakerNotes": "hack"}, "/x.jpg"); !errors.Is(err, ErrTagNotAllowed) {
+		t.Errorf("disallowed tag error = %v, want ErrTagNotAllowed", err)
+	}
+}
+
+func indexOf(s string, r rune) int {
+	for i, c := range s {
+		if c == r {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestFFProbeArgsPathAfterSeparator(t *testing.T) {

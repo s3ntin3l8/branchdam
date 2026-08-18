@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
@@ -15,7 +17,9 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/metadata"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -32,6 +36,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
+	huma.Post(api, "/api/v1/assets/{id}/inherit-metadata", s.handleInheritMetadata)
 
 	huma.Get(api, "/api/v1/jobs", s.handleListJobs)
 
@@ -514,6 +519,171 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 	out.Body.Edges = outEdges
 
 	return out, nil
+}
+
+// --- /api/v1/assets/{id}/inherit-metadata ---
+
+type InheritMetadataInput struct {
+	ID int64 `path:"id"`
+}
+
+type InheritMetadataOutput struct {
+	Body struct {
+		Inherited map[string]string `json:"inherited"`
+	}
+}
+
+// handleInheritMetadata copies identity metadata (EXIF/XMP, spec Pillar 4)
+// from a node's winning parent edge into the child's file on disk, on demand.
+// This is the project's first real filesystem writer: storage.Guard.CheckWrite
+// is called BEFORE any exiftool subprocess, and a read-only location (Tier 3
+// is always read-only) or a Tier-3-resolved parent edge is refused with 409.
+func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataInput) (*InheritMetadataOutput, error) {
+	child, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+	if child.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+
+	// Refuse a write into a read-only location BEFORE spawning exiftool.
+	if s.guard != nil {
+		if err := s.guard.CheckWrite(child.FilePath); err != nil {
+			var roErr *storage.ErrReadOnlyTier
+			if errors.As(err, &roErr) {
+				return nil, huma.Error409Conflict("cannot inherit metadata into a read-only location (tier " + roErr.Tier + ")")
+			}
+			return nil, huma.Error422UnprocessableEntity(err.Error())
+		}
+	}
+
+	parents, err := s.db.Reader.ListEdgesByTarget(ctx, child.ID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list parent edges", err)
+	}
+	winning := pickWinningParent(parents)
+	if winning == nil {
+		return nil, huma.Error409Conflict("asset has no resolved parent edge to inherit from")
+	}
+	// Never inherit identity metadata from a Tier-3 (heuristic) match.
+	if winning.Tier == 3 {
+		return nil, huma.Error409Conflict("cannot inherit from a Tier-3-resolved parent edge (heuristic matches are not identity)")
+	}
+
+	parent, err := s.db.Reader.GetMediaNodeByID(ctx, winning.SourceNodeID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get parent asset", err)
+	}
+
+	parentTags, err := loadTagSet(ctx, s.db.Reader, parent)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("read parent metadata", err)
+	}
+	childTags, err := loadTagSet(ctx, s.db.Reader, child)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("read child metadata", err)
+	}
+	childTags.DerivedFrom = parent.NodeUuid // XMP-xmpMM:DerivedFrom = parent node_uuid
+
+	tags, err := metadata.Plan(parentTags, childTags)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("plan metadata inheritance", err)
+	}
+	// Plan always emits the two identity tags (XMP-dc:Identifier /
+	// XMP-xmpMM:DerivedFrom), so this write is idempotent in value: repeating
+	// it leaves the file's inheritable metadata unchanged and re-asserts the
+	// child's identity tags.
+
+	wctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
+	defer cancel()
+	if err := s.prober.WriteTags(wctx, child.FilePath, tags); err != nil {
+		if errors.Is(err, probe.ErrToolUnavailable) {
+			return nil, huma.Error503ServiceUnavailable("exiftool not available")
+		}
+		return nil, huma.Error500InternalServerError("write metadata", err)
+	}
+
+	out := &InheritMetadataOutput{}
+	out.Body.Inherited = tags
+	return out, nil
+}
+
+// inheritWriteTimeout bounds the exiftool write subprocess, mirroring the
+// scan path's per-file probe deadline -- a hung exiftool on a stalled network
+// mount must not hang the HTTP request indefinitely.
+const inheritWriteTimeout = 30 * time.Second
+
+// pickWinningParent returns the highest-confidence parent edge that is
+// AUTO_ACCEPTED or CONFIRMED, or nil when the node has none. A NEEDS_REVIEW
+// (unconfirmed) or REJECTED edge is never a valid identity source: stamping an
+// unconfirmed parent's metadata into the child's file would cement a
+// possibly-wrong lineage with no recovery path.
+func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
+	var best *sqlcgen.MediaEdge
+	for i := range edges {
+		e := &edges[i]
+		if e.ReviewState != "AUTO_ACCEPTED" && e.ReviewState != "CONFIRMED" {
+			continue
+		}
+		if best == nil || e.Confidence > best.Confidence {
+			best = e
+		}
+	}
+	return best
+}
+
+// loadTagSet assembles a node's inheritable tag values from its promoted
+// columns and node_metadata rows (source='exiftool'). A read failure is
+// surfaced, not swallowed -- a partial/empty tagset would silently produce a
+// partial inheritance.
+func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) (metadata.TagSet, error) {
+	ts := metadata.TagSet{
+		Identifier: node.NodeUuid, // XMP-dc:Identifier is always the node's own uuid
+		Model:      node.CameraModel.String,
+	}
+	rows, err := q.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		return ts, err
+	}
+	for _, r := range rows {
+		if r.Source != "exiftool" {
+			continue
+		}
+		switch r.Key {
+		case "EXIF:Make":
+			ts.Make = r.Value
+		case "EXIF:LensModel":
+			ts.LensModel = r.Value
+		case "EXIF:SerialNumber":
+			ts.SerialNumber = r.Value
+		case "EXIF:DateTimeOriginal":
+			ts.DateTimeOriginal = r.Value
+		case "EXIF:OffsetTimeOriginal":
+			ts.OffsetTimeOriginal = r.Value
+		case "Composite:GPSLatitude":
+			if f, err := strconv.ParseFloat(r.Value, 64); err == nil {
+				ts.GPSLatitude = &f
+			}
+		case "Composite:GPSLongitude":
+			if f, err := strconv.ParseFloat(r.Value, 64); err == nil {
+				ts.GPSLongitude = &f
+			}
+		}
+	}
+	// Fall back to the promoted captured_at_unix column for the raw
+	// DateTimeOriginal when it isn't in node_metadata (a catalog indexed
+	// before EXIF:DateTimeOriginal was allowlisted in #54). This preserves
+	// the "never overwrite a child's own capture time" rule for pre-PR rows:
+	// the offset is lost (captured_at is UTC), but the child's actual time is
+	// kept rather than silently replaced by the parent's.
+	if ts.DateTimeOriginal == "" && node.CapturedAtUnix.Valid {
+		ts.DateTimeOriginal = time.Unix(node.CapturedAtUnix.Int64, 0).UTC().Format("2006:01:02 15:04:05")
+	}
+	return ts, nil
 }
 
 // --- /api/v1/edges ---

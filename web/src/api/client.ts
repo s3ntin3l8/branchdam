@@ -65,6 +65,9 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
+  inheritMetadata: (id: number) =>
+    request<{ inherited: Record<string, string> }>(`/api/v1/assets/${id}/inherit-metadata`, { method: "POST" }),
+
   startScan: (storageLocationId: number) =>
     request<{ jobId: number }>("/api/v1/scan", {
       method: "POST",

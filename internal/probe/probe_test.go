@@ -281,6 +281,51 @@ func TestExtractPHashNonImageFile(t *testing.T) {
 	}
 }
 
+func TestWriteTagsRoundTrip(t *testing.T) {
+	exiftool := requireTool(t, "exiftool")
+	requireTool(t, "ffmpeg")
+	prober := &Prober{exiftoolPath: exiftool}
+
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "fixture.jpg")
+	out, err := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64", "-frames:v", "1", fixture).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate fixture: %v\n%s", err, out)
+	}
+
+	tags := map[string]string{
+		"EXIF:Make":              "SONY",
+		"Composite:GPSLatitude":  "-33.9151",
+		"Composite:GPSLongitude": "18.4115",
+		"XMP-dc:Identifier":      "uuid-child",
+	}
+	if err := prober.WriteTags(context.Background(), fixture, tags); err != nil {
+		t.Fatalf("WriteTags: %v", err)
+	}
+
+	res, err := prober.Exif(context.Background(), fixture)
+	if err != nil {
+		t.Fatalf("Exif: %v", err)
+	}
+	if res.Make != "SONY" {
+		t.Errorf("EXIF:Make = %q, want SONY", res.Make)
+	}
+	// GPS is the most format-sensitive write (signed decimal degrees): it must
+	// survive a write via EXIF:GPS* and read back via the signed Composite
+	// group (not flipped to the wrong hemisphere by a lost ref).
+	if res.GPSLatitude == nil || *res.GPSLatitude != -33.9151 {
+		t.Errorf("GPSLatitude = %v, want -33.9151", res.GPSLatitude)
+	}
+	if res.GPSLongitude == nil || *res.GPSLongitude != 18.4115 {
+		t.Errorf("GPSLongitude = %v, want 18.4115", res.GPSLongitude)
+	}
+	// exiftool reports the dc:identifier field (written via -XMP-dc:Identifier)
+	// under the generic XMP group when reading back with -G.
+	if res.Raw["XMP:Identifier"] != "uuid-child" {
+		t.Errorf("XMP:Identifier = %q, want uuid-child (raw=%v)", res.Raw["XMP:Identifier"], res.Raw)
+	}
+}
+
 func TestMain(m *testing.M) {
 	// Fail fast with a clear signal if TMPDIR itself is unwritable, rather
 	// than every fixture-generating test failing with a confusing ffmpeg

@@ -89,6 +89,8 @@ var exifRawAllowlist = map[string]bool{
 	"EXIF:Artist":                  true,
 	"EXIF:Copyright":               true,
 	"EXIF:ImageDescription":        true,
+	"EXIF:DateTimeOriginal":        true, // persisted so #54 can inherit the parent's raw capture time + offset
+	"EXIF:OffsetTimeOriginal":      true,
 	"XMP:Rating":                   true,
 	"XMP:Label":                    true,
 	"XMP:Subject":                  true,
