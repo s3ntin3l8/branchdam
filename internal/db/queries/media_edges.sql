@@ -28,6 +28,23 @@ WHERE review_state = 'NEEDS_REVIEW'
 ORDER BY confidence DESC, id ASC
 LIMIT ?1 OFFSET ?2;
 
+-- name: ListAuditQueueDetailed :many
+SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
+       e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
+       sn.file_name AS source_file_name, sn.file_path AS source_file_path,
+       sn.captured_at_unix AS source_captured_at_unix, sn.camera_model AS source_camera_model,
+       sn.phash AS source_phash,
+       tn.file_name AS target_file_name, tn.file_path AS target_file_path,
+       tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
+       tn.phash AS target_phash
+FROM v_media_edges_resolved e
+JOIN media_nodes sn ON e.source_node_id = sn.id
+JOIN media_nodes tn ON e.target_node_id = tn.id
+WHERE e.review_state = 'NEEDS_REVIEW'
+ORDER BY e.confidence DESC, e.id ASC
+LIMIT ?1 OFFSET ?2;
+
+
 -- name: ListAncestors :many
 -- Recursively list ancestor node IDs.
 -- Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.

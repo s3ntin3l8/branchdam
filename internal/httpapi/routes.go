@@ -13,6 +13,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
@@ -29,6 +30,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
 
+	huma.Post(api, "/api/v1/edges", s.handleCreateEdge)
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
 	huma.Post(api, "/api/v1/edges/{id}/confirm", s.handleConfirmEdge)
 	huma.Post(api, "/api/v1/edges/{id}/reject", s.handleRejectEdge)
@@ -427,6 +429,82 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 	return out, nil
 }
 
+// --- /api/v1/edges ---
+
+type CreateEdgeInput struct {
+	Body struct {
+		SourceNodeID     int64  `json:"sourceNodeId" doc:"Source node ID (parent)"`
+		TargetNodeID     int64  `json:"targetNodeId" doc:"Target node ID (child)"`
+		RelationshipType string `json:"relationshipType" doc:"Relationship type"`
+	}
+}
+
+type CreateEdgeOutput struct {
+	Body edgeDTO
+}
+
+func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*CreateEdgeOutput, error) {
+	if in.Body.SourceNodeID == in.Body.TargetNodeID {
+		return nil, huma.Error422UnprocessableEntity("self-loop edge is forbidden")
+	}
+
+	validRels := map[string]bool{
+		"DERIVED_FROM":    true,
+		"FINAL_EXPORT":    true,
+		"PROXY_OF":        true,
+		"PROJECT_SIDECAR": true,
+		"DUPLICATE_OF":    true,
+	}
+	if !validRels[in.Body.RelationshipType] {
+		return nil, huma.Error422UnprocessableEntity("invalid relationship type")
+	}
+
+	var createdEdge sqlcgen.MediaEdge
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		wouldCycle, err := q.WouldCreateCycle(ctx, sqlcgen.WouldCreateCycleParams{
+			ParentNodeID: in.Body.SourceNodeID,
+			ChildNodeID:  in.Body.TargetNodeID,
+		})
+		if err != nil {
+			return err
+		}
+		if wouldCycle {
+			return huma.Error409Conflict("creating this edge would close a cycle")
+		}
+
+		edge, err := q.CreateManualMediaEdge(ctx, sqlcgen.CreateManualMediaEdgeParams{
+			SourceNodeID:     in.Body.SourceNodeID,
+			TargetNodeID:     in.Body.TargetNodeID,
+			RelationshipType: in.Body.RelationshipType,
+			ReviewedBy:       reviewerName(ctx),
+		})
+		if err != nil {
+			return err
+		}
+		createdEdge = edge
+		return nil
+	})
+	if err != nil {
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return nil, humaErr
+		}
+		return nil, huma.Error500InternalServerError("create manual edge", err)
+	}
+
+	out := &CreateEdgeOutput{}
+	out.Body = edgeDTO{
+		ID:               createdEdge.ID,
+		SourceNodeID:     createdEdge.SourceNodeID,
+		TargetNodeID:     createdEdge.TargetNodeID,
+		RelationshipType: createdEdge.RelationshipType,
+		Confidence:       createdEdge.Confidence,
+		ReviewState:      createdEdge.ReviewState,
+		Resolver:         createdEdge.Resolver,
+	}
+	return out, nil
+}
+
 // --- /api/v1/edges/audit ---
 
 type AuditQueueInput struct {
@@ -434,16 +512,30 @@ type AuditQueueInput struct {
 	Offset int64 `query:"offset" default:"0" minimum:"0"`
 }
 
+type auditNodeDTO struct {
+	ID             int64   `json:"id"`
+	FileName       string  `json:"fileName"`
+	FilePath       string  `json:"filePath"`
+	CapturedAtUnix *int64  `json:"capturedAtUnix,omitempty"`
+	CameraModel    *string `json:"cameraModel,omitempty"`
+	Phash          *int64  `json:"phash,omitempty"`
+}
+
 type auditEntryDTO struct {
-	ID               int64   `json:"id"`
-	SourceNodeID     int64   `json:"sourceNodeId"`
-	TargetNodeID     int64   `json:"targetNodeId"`
-	RelationshipType string  `json:"relationshipType"`
-	Confidence       float64 `json:"confidence"`
-	Resolver         string  `json:"resolver"`
-	EvidenceJSON     string  `json:"evidenceJson"`
-	ParentAlive      bool    `json:"parentAlive"`
-	ParentMissing    bool    `json:"parentMissing"`
+	ID                  int64        `json:"id"`
+	SourceNodeID        int64        `json:"sourceNodeId"`
+	TargetNodeID        int64        `json:"targetNodeId"`
+	RelationshipType    string       `json:"relationshipType"`
+	Confidence          float64      `json:"confidence"`
+	Tier                int64        `json:"tier"`
+	Resolver            string       `json:"resolver"`
+	EvidenceJSON        string       `json:"evidenceJson"`
+	ParentAlive         bool         `json:"parentAlive"`
+	ParentMissing       bool         `json:"parentMissing"`
+	SourceNode          auditNodeDTO `json:"sourceNode"`
+	TargetNode          auditNodeDTO `json:"targetNode"`
+	CaptureDeltaSeconds *int64       `json:"captureDeltaSeconds,omitempty"`
+	PhashDistance       *int         `json:"phashDistance,omitempty"`
 }
 
 type AuditQueueOutput struct {
@@ -453,18 +545,73 @@ type AuditQueueOutput struct {
 }
 
 func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*AuditQueueOutput, error) {
-	rows, err := s.db.Reader.ListAuditQueue(ctx, sqlcgen.ListAuditQueueParams{Limit: in.Limit, Offset: in.Offset})
+	rows, err := s.db.Reader.ListAuditQueueDetailed(ctx, sqlcgen.ListAuditQueueDetailedParams{Limit: in.Limit, Offset: in.Offset})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list audit queue", err)
 	}
 	out := &AuditQueueOutput{}
 	out.Body.Entries = make([]auditEntryDTO, len(rows))
 	for i, r := range rows {
+		sn := auditNodeDTO{
+			ID:       r.SourceNodeID,
+			FileName: r.SourceFileName,
+			FilePath: r.SourceFilePath,
+		}
+		if r.SourceCapturedAtUnix.Valid {
+			sn.CapturedAtUnix = &r.SourceCapturedAtUnix.Int64
+		}
+		if r.SourceCameraModel.Valid {
+			sn.CameraModel = &r.SourceCameraModel.String
+		}
+		if r.SourcePhash.Valid {
+			sn.Phash = &r.SourcePhash.Int64
+		}
+
+		tn := auditNodeDTO{
+			ID:       r.TargetNodeID,
+			FileName: r.TargetFileName,
+			FilePath: r.TargetFilePath,
+		}
+		if r.TargetCapturedAtUnix.Valid {
+			tn.CapturedAtUnix = &r.TargetCapturedAtUnix.Int64
+		}
+		if r.TargetCameraModel.Valid {
+			tn.CameraModel = &r.TargetCameraModel.String
+		}
+		if r.TargetPhash.Valid {
+			tn.Phash = &r.TargetPhash.Int64
+		}
+
+		var captureDelta *int64
+		if r.SourceCapturedAtUnix.Valid && r.TargetCapturedAtUnix.Valid {
+			d := r.SourceCapturedAtUnix.Int64 - r.TargetCapturedAtUnix.Int64
+			if d < 0 {
+				d = -d
+			}
+			captureDelta = &d
+		}
+
+		var phashDist *int
+		if r.SourcePhash.Valid && r.TargetPhash.Valid {
+			dist := hashing.HammingDistance(r.SourcePhash.Int64, r.TargetPhash.Int64)
+			phashDist = &dist
+		}
+
 		out.Body.Entries[i] = auditEntryDTO{
-			ID: r.ID, SourceNodeID: r.SourceNodeID, TargetNodeID: r.TargetNodeID,
-			RelationshipType: r.RelationshipType, Confidence: r.Confidence,
-			Resolver: r.Resolver, EvidenceJSON: r.EvidenceJson,
-			ParentAlive: r.ParentAlive, ParentMissing: r.ParentMissing,
+			ID:                  r.ID,
+			SourceNodeID:        r.SourceNodeID,
+			TargetNodeID:        r.TargetNodeID,
+			RelationshipType:    r.RelationshipType,
+			Confidence:          r.Confidence,
+			Tier:                r.Tier,
+			Resolver:            r.Resolver,
+			EvidenceJSON:        r.EvidenceJson,
+			ParentAlive:         r.ParentAlive,
+			ParentMissing:       r.ParentMissing,
+			SourceNode:          sn,
+			TargetNode:          tn,
+			CaptureDeltaSeconds: captureDelta,
+			PhashDistance:       phashDist,
 		}
 	}
 	return out, nil

@@ -21,6 +21,7 @@ type Querier interface {
 	CancelScanJob(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) error
+	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
 	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
 	// source node (docs/schema.md fix #6: RESTRICT, never CASCADE). Full edge
@@ -59,18 +60,19 @@ type Querier interface {
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
 	// Recursively list ancestor node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-	ListAncestors(ctx context.Context, id int64) ([]int64, error)
+	ListAncestors(ctx context.Context, id int64) ([]interface{}, error)
 	// The audit queue (spec §7) is this query over review_state, not a second
 	// table. v_media_edges_resolved's parent_missing works for every
 	// relationship_type -- the spec's deleted trigger never did. See
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
+	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
 	// Recursively list descendant node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-	ListDescendants(ctx context.Context, id int64) ([]int64, error)
+	ListDescendants(ctx context.Context, id int64) ([]interface{}, error)
 	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
 	ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error)
-	ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error)
+	ListEdgesForNodes(ctx context.Context, jsonEach interface{}) ([]ListEdgesForNodesRow, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
@@ -91,7 +93,7 @@ type Querier interface {
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
-	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
+	ListNodesByIDs(ctx context.Context, jsonEach interface{}) ([]MediaNode, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing

@@ -7,9 +7,13 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
 
 const listAncestors = `-- name: ListAncestors :many
+;
+
+
 WITH RECURSIVE ancestors(id) AS (
     SELECT ?1 AS id
     UNION
@@ -20,20 +24,20 @@ WITH RECURSIVE ancestors(id) AS (
     WHERE e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
-SELECT ancestors.id FROM ancestors
+SELECT ancestors.id FROM ancestor
 `
 
 // Recursively list ancestor node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]int64, error) {
+func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]interface{}, error) {
 	rows, err := q.db.QueryContext(ctx, listAncestors, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []int64{}
+	items := []interface{}{}
 	for rows.Next() {
-		var id int64
+		var id interface{}
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
@@ -111,7 +115,100 @@ func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) 
 	return items, nil
 }
 
+const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
+;
+
+SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
+       e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
+       sn.file_name AS source_file_name, sn.file_path AS source_file_path,
+       sn.captured_at_unix AS source_captured_at_unix, sn.camera_model AS source_camera_model,
+       sn.phash AS source_phash,
+       tn.file_name AS target_file_name, tn.file_path AS target_file_path,
+       tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
+       tn.phash AS target_phash
+FROM v_media_edges_resolved e
+JOIN media_nodes sn ON e.source_node_id = sn.id
+JOIN media_nodes tn ON e.target_node_id = tn.id
+WHERE e.review_state = 'NEEDS_REVIEW'
+ORDER BY e.confidence DESC, e.id ASC
+LIMIT ?1 OFFSET ?2
+`
+
+type ListAuditQueueDetailedParams struct {
+	Limit  int64
+	Offset int64
+}
+
+type ListAuditQueueDetailedRow struct {
+	ID                   int64
+	SourceNodeID         int64
+	TargetNodeID         int64
+	RelationshipType     string
+	Confidence           float64
+	Tier                 int64
+	Resolver             string
+	EvidenceJson         string
+	ParentAlive          bool
+	ParentMissing        bool
+	SourceFileName       string
+	SourceFilePath       string
+	SourceCapturedAtUnix sql.NullInt64
+	SourceCameraModel    sql.NullString
+	SourcePhash          sql.NullInt64
+	TargetFileName       string
+	TargetFilePath       string
+	TargetCapturedAtUnix sql.NullInt64
+	TargetCameraModel    sql.NullString
+	TargetPhash          sql.NullInt64
+}
+
+func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditQueueDetailed, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAuditQueueDetailedRow{}
+	for rows.Next() {
+		var i ListAuditQueueDetailedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ParentAlive,
+			&i.ParentMissing,
+			&i.SourceFileName,
+			&i.SourceFilePath,
+			&i.SourceCapturedAtUnix,
+			&i.SourceCameraModel,
+			&i.SourcePhash,
+			&i.TargetFileName,
+			&i.TargetFilePath,
+			&i.TargetCapturedAtUnix,
+			&i.TargetCameraModel,
+			&i.TargetPhash,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDescendants = `-- name: ListDescendants :many
+;
+
 WITH RECURSIVE descendants(id) AS (
     SELECT ?1 AS id
     UNION
@@ -127,15 +224,15 @@ SELECT descendants.id FROM descendants
 
 // Recursively list descendant node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]int64, error) {
+func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]interface{}, error) {
 	rows, err := q.db.QueryContext(ctx, listDescendants, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []int64{}
+	items := []interface{}{}
 	for rows.Next() {
-		var id int64
+		var id interface{}
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
@@ -151,6 +248,8 @@ func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]int64, error
 }
 
 const listEdgesForNodes = `-- name: ListEdgesForNodes :many
+;
+
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        review_state, resolver
 FROM media_edges
@@ -169,7 +268,7 @@ type ListEdgesForNodesRow struct {
 	Resolver         string
 }
 
-func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error) {
+func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach interface{}) ([]ListEdgesForNodesRow, error) {
 	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, jsonEach)
 	if err != nil {
 		return nil, err
@@ -201,6 +300,8 @@ func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach string) ([]Lis
 }
 
 const listNodesByIDs = `-- name: ListNodesByIDs :many
+;
+
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -213,7 +314,7 @@ WHERE id IN (SELECT value FROM json_each(?1))
   AND lifecycle_state <> 'ARCHIVED'
 `
 
-func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error) {
+func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach interface{}) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listNodesByIDs, jsonEach)
 	if err != nil {
 		return nil, err

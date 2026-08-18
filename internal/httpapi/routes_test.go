@@ -721,6 +721,77 @@ func TestAssetLineageTraversalDiamondAndDepth(t *testing.T) {
 	}
 }
 
+func TestCreateManualEdge(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var loc sqlcgen.StorageLocation
+	var n1, n2 sqlcgen.MediaNode
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		n1, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-m1", FilePath: "/m1.raw", FileName: "m1.raw", FileExt: ".raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		n2, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-m2", FilePath: "/m2.jpg", FileName: "m2.jpg", FileExt: ".jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// 1. Create valid manual edge n1 -> n2
+	body := map[string]any{
+		"sourceNodeId":     n1.ID,
+		"targetNodeId":     n2.ID,
+		"relationshipType": "DERIVED_FROM",
+	}
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/edges status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var created edgeDTO
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if created.SourceNodeID != n1.ID || created.TargetNodeID != n2.ID || created.Resolver != "manual" || created.ReviewState != "CONFIRMED" {
+		t.Errorf("created edge = %+v, unexpected fields", created)
+	}
+
+	// 2. Self-loop attempt n1 -> n1 returns 422
+	selfLoopBody := map[string]any{
+		"sourceNodeId":     n1.ID,
+		"targetNodeId":     n1.ID,
+		"relationshipType": "DERIVED_FROM",
+	}
+	rrSelf := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", selfLoopBody)
+	if rrSelf.Code != http.StatusUnprocessableEntity {
+		t.Errorf("self-loop status = %d, want 422", rrSelf.Code)
+	}
+
+	// 3. Cycle attempt n2 -> n1 (when n1 -> n2 exists) returns 409 Conflict
+	cycleBody := map[string]any{
+		"sourceNodeId":     n2.ID,
+		"targetNodeId":     n1.ID,
+		"relationshipType": "DERIVED_FROM",
+	}
+	rrCycle := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", cycleBody)
+	if rrCycle.Code != http.StatusConflict {
+		t.Errorf("cycle status = %d, want 409, body = %s", rrCycle.Code, rrCycle.Body.String())
+	}
+}
+
 func toStr(v int64) string {
 	return fmt.Sprintf("%d", v)
 }

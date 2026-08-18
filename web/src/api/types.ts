@@ -67,16 +67,36 @@ export interface AssetGraph {
   children: Edge[];
 }
 
+export interface AuditNode {
+  id: number;
+  fileName: string;
+  filePath: string;
+  capturedAtUnix?: number;
+  cameraModel?: string;
+  phash?: number;
+}
+
 export interface AuditEntry {
   id: number;
   sourceNodeId: number;
   targetNodeId: number;
   relationshipType: Edge["relationshipType"];
   confidence: number;
+  tier: number;
   resolver: string;
   evidenceJson: string;
   parentAlive: boolean;
   parentMissing: boolean;
+  sourceNode: AuditNode;
+  targetNode: AuditNode;
+  captureDeltaSeconds?: number;
+  phashDistance?: number;
+}
+
+export interface CreateEdgeInput {
+  sourceNodeId: number;
+  targetNodeId: number;
+  relationshipType: Edge["relationshipType"];
 }
 
 export interface ScanJob {
