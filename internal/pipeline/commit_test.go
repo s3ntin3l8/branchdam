@@ -699,14 +699,24 @@ func TestTouchBackfillsMetadataForProbelessFirstScan(t *testing.T) {
 	}
 }
 
-// TestTouchWithUnchangedMetadataWritesNothing is #105's core regression
-// guard: a touched (unchanged fast_hash) node whose derived metadata is
-// identical to what's already stored must not re-upsert any node_metadata
-// row on that pass. Stats.MetadataWritten is the oracle -- node_metadata has
-// no updated_at column and #85 removed the raw-handle test escape hatch, so
-// there is no other way to observe "no write happened" from outside the
-// package. This fails against pre-#105 code, which always re-persists all of
-// r's derived metadata on the touched branch.
+// TestTouchWithUnchangedMetadataWritesNothing pins the all-unchanged case: a
+// touched (unchanged fast_hash) node whose derived metadata is identical to
+// what's already stored must report zero rows written on that pass, and its
+// values must stay correct. Stats.MetadataWritten is the oracle --
+// node_metadata has no updated_at column and #85 removed the raw-handle test
+// escape hatch, so there is no other way to observe "no write happened" from
+// outside the package.
+//
+// This test alone does NOT discriminate pre-#105 code from the fix: a
+// counter that's simply never wired up would also read 0 here. The actual
+// regression guards -- verified to fail against pre-#105's commit.go/
+// watcher.go -- are TestTouchWithChangedMetadataWritesOnlyTheDelta (proves
+// only the genuinely-changed key is written, not the whole set) and
+// TestTouchBackfillsMetadataForProbelessFirstScan's MetadataWritten==2
+// assertion (proves a real backfill pass is counted at all). This test's
+// job is the mirror-image sanity check once those two establish the counter
+// is real: an unchanged pass through the same reconcileAllMetadata code
+// path is 0, not some nonzero leftover.
 func TestTouchWithUnchangedMetadataWritesNothing(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
