@@ -144,3 +144,20 @@ export interface StorageHealth {
   locations: StorageLocationHealth[];
   queues: StorageQueueHealth;
 }
+
+export interface AssetQueryParams {
+  limit?: number;
+  offset?: number;
+  cameraModel?: string;
+  graphStatus?: Asset["graphStatus"];
+  storageLocationId?: number;
+  lifecycleState?: Asset["lifecycleState"];
+  unlinkedOnly?: boolean;
+}
+
+export interface JobsQueryParams {
+  limit?: number;
+  offset?: number;
+  kind?: ScanJob["kind"];
+  state?: ScanJob["state"];
+}

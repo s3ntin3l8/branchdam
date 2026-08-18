@@ -7,6 +7,7 @@ const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
 const AuditQueuePage = lazy(() => import("./pages/AuditQueuePage"));
 const IngestPage = lazy(() => import("./pages/IngestPage"));
+const IngestJobsPage = lazy(() => import("./pages/IngestJobsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const StorageHealthPage = lazy(() => import("./pages/StorageHealthPage"));
 
@@ -45,6 +46,7 @@ export default function App() {
           </NavItem>
           <NavItem to="/audit">Audit Queue</NavItem>
           <NavItem to="/ingest">Ingest</NavItem>
+          <NavItem to="/jobs">Ingest Jobs</NavItem>
           <NavItem to="/storage-health">Storage Health</NavItem>
           <NavItem to="/settings">Settings</NavItem>
         </div>
@@ -60,6 +62,7 @@ export default function App() {
             <Route path="/assets/:id" element={<AssetDetailPage />} />
             <Route path="/audit" element={<AuditQueuePage />} />
             <Route path="/ingest" element={<IngestPage />} />
+            <Route path="/jobs" element={<IngestJobsPage />} />
             <Route path="/storage-health" element={<StorageHealthPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>

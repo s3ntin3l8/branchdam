@@ -28,9 +28,12 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)
 
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
+	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
+
+	huma.Get(api, "/api/v1/jobs", s.handleListJobs)
 
 	huma.Post(api, "/api/v1/edges", s.handleCreateEdge)
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
@@ -203,26 +206,108 @@ func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
 }
 
 type ListAssetsInput struct {
-	Limit  int64 `query:"limit" default:"50" minimum:"1" maximum:"500"`
-	Offset int64 `query:"offset" default:"0" minimum:"0"`
+	Limit             int64  `query:"limit" default:"50" minimum:"1" maximum:"500"`
+	Offset            int64  `query:"offset" default:"0" minimum:"0"`
+	CameraModel       string `query:"cameraModel"`
+	GraphStatus       string `query:"graphStatus"`
+	StorageLocationID int64  `query:"storageLocationId"`
+	LifecycleState    string `query:"lifecycleState"`
+	UnlinkedOnly      bool   `query:"unlinkedOnly"`
 }
 
 type ListAssetsOutput struct {
 	Body struct {
 		Assets []assetDTO `json:"assets"`
+		Total  int64      `json:"total"`
 	}
 }
 
 func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*ListAssetsOutput, error) {
-	rows, err := s.db.Reader.ListMediaNodes(ctx, sqlcgen.ListMediaNodesParams{Limit: in.Limit, Offset: in.Offset})
-	if err != nil {
-		return nil, huma.Error500InternalServerError("list assets", err)
+	var lifecycleState sql.NullString
+	if in.LifecycleState != "" {
+		lifecycleState = sql.NullString{String: in.LifecycleState, Valid: true}
 	}
+
+	var graphStatus sql.NullString
+	if in.UnlinkedOnly {
+		graphStatus = sql.NullString{String: "UNLINKED", Valid: true}
+	} else if in.GraphStatus != "" {
+		graphStatus = sql.NullString{String: in.GraphStatus, Valid: true}
+	}
+
+	var cameraModel sql.NullString
+	if in.CameraModel != "" {
+		cameraModel = sql.NullString{String: in.CameraModel, Valid: true}
+	}
+
+	var storageLocationID sql.NullInt64
+	if in.StorageLocationID > 0 {
+		storageLocationID = sql.NullInt64{Int64: in.StorageLocationID, Valid: true}
+	}
+
+	hasFilters := lifecycleState.Valid || graphStatus.Valid || cameraModel.Valid || storageLocationID.Valid
+
+	var rows []sqlcgen.MediaNode
+	var total int64
+	var err error
+
+	if !hasFilters {
+		rows, err = s.db.Reader.ListMediaNodes(ctx, sqlcgen.ListMediaNodesParams{Limit: in.Limit, Offset: in.Offset})
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list assets", err)
+		}
+		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{})
+		if err != nil {
+			total = int64(len(rows))
+		}
+	} else {
+		params := sqlcgen.ListMediaNodesFilteredParams{
+			Limit:             in.Limit,
+			Offset:            in.Offset,
+			LifecycleState:    lifecycleState,
+			CameraModel:       cameraModel,
+			GraphStatus:       graphStatus,
+			StorageLocationID: storageLocationID,
+		}
+		rows, err = s.db.Reader.ListMediaNodesFiltered(ctx, params)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list filtered assets", err)
+		}
+		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{
+			LifecycleState:    lifecycleState,
+			CameraModel:       cameraModel,
+			GraphStatus:       graphStatus,
+			StorageLocationID: storageLocationID,
+		})
+		if err != nil {
+			total = int64(len(rows))
+		}
+	}
+
 	out := &ListAssetsOutput{}
 	out.Body.Assets = make([]assetDTO, len(rows))
 	for i, r := range rows {
 		out.Body.Assets[i] = toAssetDTO(r)
 	}
+	out.Body.Total = total
+	return out, nil
+}
+
+// --- /api/v1/assets/facets ---
+
+type AssetFacetsOutput struct {
+	Body struct {
+		CameraModels []string `json:"cameraModels"`
+	}
+}
+
+func (s *Server) handleListAssetFacets(ctx context.Context, _ *struct{}) (*AssetFacetsOutput, error) {
+	models, err := s.db.Reader.ListCameraModelFacets(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list camera model facets", err)
+	}
+	out := &AssetFacetsOutput{}
+	out.Body.CameraModels = models
 	return out, nil
 }
 
@@ -761,6 +846,67 @@ func (s *Server) handleProgress(ctx context.Context, in *ProgressInput) (*Progre
 		}
 		out.Body.Jobs[i] = dto
 	}
+	return out, nil
+}
+
+// --- /api/v1/jobs ---
+
+type ListJobsInput struct {
+	Limit  int64  `query:"limit" default:"50" minimum:"1" maximum:"500"`
+	Offset int64  `query:"offset" default:"0" minimum:"0"`
+	Kind   string `query:"kind"`
+	State  string `query:"state"`
+}
+
+type ListJobsOutput struct {
+	Body struct {
+		Jobs  []scanJobDTO `json:"jobs"`
+		Total int64        `json:"total"`
+	}
+}
+
+func (s *Server) handleListJobs(ctx context.Context, in *ListJobsInput) (*ListJobsOutput, error) {
+	var kind sql.NullString
+	if in.Kind != "" {
+		kind = sql.NullString{String: in.Kind, Valid: true}
+	}
+	var state sql.NullString
+	if in.State != "" {
+		state = sql.NullString{String: in.State, Valid: true}
+	}
+
+	rows, err := s.db.Reader.ListScanJobsFiltered(ctx, sqlcgen.ListScanJobsFilteredParams{
+		Limit:  in.Limit,
+		Offset: in.Offset,
+		Kind:   kind,
+		State:  state,
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list scan jobs", err)
+	}
+
+	total, err := s.db.Reader.CountScanJobsFiltered(ctx, sqlcgen.CountScanJobsFilteredParams{
+		Kind:  kind,
+		State: state,
+	})
+	if err != nil {
+		total = int64(len(rows))
+	}
+
+	out := &ListJobsOutput{}
+	out.Body.Jobs = make([]scanJobDTO, len(rows))
+	for i, r := range rows {
+		dto := scanJobDTO{
+			ID: r.ID, Kind: r.Kind, State: r.State,
+			FilesSeen: r.FilesSeen, FilesHashed: r.FilesHashed, FilesFailed: r.FilesFailed,
+			EdgesCreated: r.EdgesCreated,
+		}
+		if r.LastError.Valid {
+			dto.LastError = r.LastError.String
+		}
+		out.Body.Jobs[i] = dto
+	}
+	out.Body.Total = total
 	return out, nil
 }
 
