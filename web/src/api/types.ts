@@ -99,6 +99,10 @@ export interface CreateEdgeInput {
   relationshipType: Edge["relationshipType"];
 }
 
+export interface InheritMetadataResponse {
+  inherited: Record<string, string>;
+}
+
 export interface ScanJob {
   id: number;
   kind: "FULL_SCAN" | "INCREMENTAL" | "WATCH";
