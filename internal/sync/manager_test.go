@@ -303,3 +303,53 @@ func TestRecoverStalePushingResetsStrandedRows(t *testing.T) {
 		t.Errorf("sync_status after recovery = %q, want PENDING_CLOUD_PUSH", row.SyncStatus)
 	}
 }
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met within", timeout)
+}
+
+func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot.jpg")) // under export path -> enqueued
+	seedNode(t, database, locID, filepath.Join(root, "other.jpg"))      // outside export path -> ignored
+
+	push := &recordingPush{}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 16, 50*time.Millisecond, push.fn, nil)
+
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+
+	// Wait until the export-path node is actually PUSHED (push is invoked
+	// before the mark-pushed transaction commits, so waiting on the DB state,
+	// not the call count, is what guarantees the batch finished).
+	waitFor(t, 5*time.Second, func() bool {
+		rows, err := database.Reader.ListRemoteSyncStateByStatus(context.Background(), sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+		return err == nil && len(rows) == 1
+	})
+	cancel()
+	<-done
+
+	// Only the export-path node was pushed.
+	rows, err := database.Reader.ListRemoteSyncStateByStatus(context.Background(), sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("pushed rows = %d, want 1 (only the export-path node)", len(rows))
+	}
+}

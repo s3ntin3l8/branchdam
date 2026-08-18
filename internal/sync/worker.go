@@ -1,0 +1,92 @@
+package sync
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+)
+
+// Worker is the periodic loop that drains remote_sync_state for one remote,
+// driving NOT_QUEUED -> PENDING_CLOUD_PUSH -> PUSHING -> PUSHED/PUSH_FAILED
+// via Manager. Each drain tick (1) enqueues live nodes under exportPath that
+// aren't yet tracked for this remote, and (2) processes one PENDING batch
+// through the injected PushFunc. The PushFunc is the actual outbound call
+// (e.g. the Immich client's TriggerScan); the worker itself stays HTTP-free.
+type Worker struct {
+	manager    *Manager
+	remote     string
+	exportPath string
+	batchSize  int
+	interval   time.Duration
+	push       PushFunc
+	log        *slog.Logger
+}
+
+func NewWorker(manager *Manager, remote, exportPath string, batchSize int, interval time.Duration, push PushFunc, log *slog.Logger) *Worker {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	if batchSize <= 0 {
+		batchSize = 16
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	return &Worker{manager: manager, remote: remote, exportPath: exportPath,
+		batchSize: batchSize, interval: interval, push: push, log: log}
+}
+
+// Run blocks until ctx is cancelled. Call in a goroutine from main.go.
+func (w *Worker) Run(ctx context.Context) {
+	if w.manager == nil || w.exportPath == "" {
+		return
+	}
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+	w.drain(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.drain(ctx)
+		}
+	}
+}
+
+func (w *Worker) drain(ctx context.Context) {
+	w.enqueueUntracked(ctx)
+	n, err := w.manager.ProcessPending(ctx, w.remote, w.batchSize, w.push)
+	if err != nil {
+		w.log.Error("sync: drain failed", "remote", w.remote, "err", err)
+		return
+	}
+	if n > 0 {
+		w.log.Info("sync: pushed batch", "remote", w.remote, "count", n)
+	}
+}
+
+// enqueueUntracked finds live nodes under exportPath with no row for this
+// remote yet and enqueues them. Once a node is PUSHED it drops out of the
+// source query, so this never re-queues an already-pushed node.
+func (w *Worker) enqueueUntracked(ctx context.Context) {
+	rows, err := w.manager.db.Reader.ListLiveNodesForSync(ctx, sqlcgen.ListLiveNodesForSyncParams{
+		Remote: w.remote, FilePath: w.exportPath, Limit: int64(w.batchSize),
+	})
+	if err != nil {
+		w.log.Warn("sync: list untracked nodes", "err", err)
+		return
+	}
+	for _, n := range rows {
+		node := Node{ID: n.ID}
+		if n.FastHash != nil {
+			node.Checksum = *n.FastHash
+		}
+		if err := w.manager.Enqueue(ctx, node, w.remote); err != nil && !errors.Is(err, ErrAlreadyPushed) {
+			w.log.Warn("sync: enqueue node", "nodeID", n.ID, "err", err)
+		}
+	}
+}
