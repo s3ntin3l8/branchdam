@@ -190,9 +190,11 @@ func run(parent context.Context, cfg config.Config, log *slog.Logger) error {
 // server shutdown, then joining the watcher supervisor, the scan tracker,
 // and the worker pool -- each bounded by shutdownCtx's remaining budget via
 // waitWithin, rather than the previously-unbounded direct calls. Every wait
-// runs regardless of whether an earlier one timed out: a later one may
-// still complete and shrink how much work is left unresolved. Sets
-// *dbUnsafeToClose (never clears it) if any wait didn't complete in time.
+// still runs even after an earlier one has already timed out -- shutdownCtx
+// is shared, so a later wait gets whatever sliver of budget is left (often
+// ~none), but skipping it outright would only ever make dbUnsafeToClose's
+// signal less accurate, never more. Sets *dbUnsafeToClose (never clears it)
+// if any wait didn't complete in time.
 //
 // Extracted from run() specifically so a test can drive it directly with a
 // short shutdownCtx budget and minimal/fake dependencies (a never-served

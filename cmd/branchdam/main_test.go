@@ -218,6 +218,32 @@ func TestWaitWithinReturnsFalseOnTimeout(t *testing.T) {
 	}
 }
 
+// TestShutdownSequenceHappyPathReportsCleanSuccess is the counterpart to
+// every other runShutdownSequence test here, which each force exactly one
+// stage to time out -- without this, a regression that left
+// dbUnsafeToClose stuck true (or shutdownErr non-nil) unconditionally would
+// slip through undetected, since nothing else asserts the clean case.
+func TestShutdownSequenceHappyPathReportsCleanSuccess(t *testing.T) {
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	pool := workers.New[string](1, 4)
+	pool.Run(poolCtx)
+	cancelPool() // no work submitted -- Drain must return almost immediately, not block on ctx.Done()
+
+	httpServer := &http.Server{} // never ListenAndServe'd -- Shutdown returns immediately
+	scanTracker := &pipeline.ScanTracker{}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var dbUnsafeToClose bool
+	err := runShutdownSequence(shutdownCtx, slog.New(slog.DiscardHandler), httpServer, nil, scanTracker, pool, &dbUnsafeToClose)
+	if err != nil {
+		t.Errorf("runShutdownSequence returned err = %v, want nil (nothing was slow or stuck)", err)
+	}
+	if dbUnsafeToClose {
+		t.Error("dbUnsafeToClose = true, want false (every wait completed well within budget)")
+	}
+}
+
 // TestShutdownSequenceTerminatesWithinBudgetDespiteSlowJob is #98's
 // acceptance criterion: a deliberately slow in-flight job (standing in for
 // a large-file full hash or a stalled network mount) must not delay
