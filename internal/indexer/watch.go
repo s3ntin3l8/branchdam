@@ -55,11 +55,29 @@ func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.L
 			if !ok {
 				return nil
 			}
-			if log != nil {
-				log.Warn("indexer: watcher error", "err", werr)
-			}
+			logWatcherError(log, werr)
 		}
 	}
+}
+
+// logWatcherError logs an error from fsnotify's own Errors channel,
+// distinguishing a genuine event-queue overflow (the kernel dropped events
+// because this process wasn't draining fsnotify's channel fast enough --
+// real, silent data loss at the OS level, distinct from any backpressure
+// policy this package's own consumer applies) from any other watcher error,
+// so an operator can tell "events were dropped" from "nothing happened."
+// A full rescan of the affected location is the existing self-healing path
+// for whatever an overflow missed -- the same fallback watcher.go's package
+// doc already relies on for un-watched directory renames.
+func logWatcherError(log *slog.Logger, werr error) {
+	if log == nil {
+		return
+	}
+	if errors.Is(werr, fsnotify.ErrEventOverflow) {
+		log.Error("indexer: watch queue overflowed, filesystem events were dropped by the kernel -- a full rescan will catch up", "err", werr)
+		return
+	}
+	log.Warn("indexer: watcher error", "err", werr)
 }
 
 func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer, log *slog.Logger, onEvent func(Record) error, onRemove func(path string) error) {

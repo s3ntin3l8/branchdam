@@ -1,12 +1,16 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -593,5 +597,119 @@ func osRemove(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove %s: %v", path, err)
+	}
+}
+
+// TestWatchWorkEnqueueNeverBlocks backs #87: a burst far larger than
+// watchQueueCapacity must not make enqueue block or park the caller's
+// goroutine -- the actual bug being fixed (every fired debounce timer held
+// its own goroutine parked on watchWork's mutex for the full duration of a
+// blocking channel send). Calling enqueue this many times directly from the
+// test's own goroutine, rather than spawning one per call, proves the
+// property without needing runtime.NumGoroutine(): if enqueue blocked even
+// once, this loop would hang and the test would time out.
+func TestWatchWorkEnqueueNeverBlocks(t *testing.T) {
+	work := newWatchWork(nil)
+	const burst = watchQueueCapacity * 5
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < burst; i++ {
+			work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/burst/%d", i)}})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue blocked under a burst far exceeding watchQueueCapacity")
+	}
+}
+
+// TestWatchWorkDropsOldestUnderPressure backs #87's chosen backpressure
+// policy: once the backlog reaches watchQueueCapacity, a further enqueue
+// evicts the OLDEST queued item (not the newest, not an unbounded grow),
+// logs the eviction visibly, and counts it in droppedCount.
+func TestWatchWorkDropsOldestUnderPressure(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	work := newWatchWork(log)
+
+	const burst = watchQueueCapacity * 3
+	for i := 0; i < burst; i++ {
+		work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/burst/%d", i)}})
+	}
+
+	work.mu.Lock()
+	backlog := len(work.items)
+	first := work.items[0].rec.Path
+	last := work.items[len(work.items)-1].rec.Path
+	work.mu.Unlock()
+
+	if backlog != watchQueueCapacity {
+		t.Errorf("backlog = %d, want exactly %d (bounded, not growing with burst size)", backlog, watchQueueCapacity)
+	}
+	wantDropped := int64(burst - watchQueueCapacity)
+	if got := work.droppedCount(); got != wantDropped {
+		t.Errorf("droppedCount() = %d, want %d", got, wantDropped)
+	}
+	// Drop-oldest, not drop-newest: the surviving backlog must be exactly
+	// the last watchQueueCapacity items enqueued, in order.
+	if wantFirst := fmt.Sprintf("/burst/%d", burst-watchQueueCapacity); first != wantFirst {
+		t.Errorf("oldest surviving item = %q, want %q", first, wantFirst)
+	}
+	if wantLast := fmt.Sprintf("/burst/%d", burst-1); last != wantLast {
+		t.Errorf("newest item = %q, want %q", last, wantLast)
+	}
+	if !strings.Contains(buf.String(), "dropping oldest") {
+		t.Errorf("log output missing a visible drop notice: %q", buf.String())
+	}
+}
+
+// TestWatchWorkDequeueDrainsThenCloses proves dequeue's contract directly:
+// every enqueued item is eventually returned (nothing lost below capacity),
+// and dequeue only reports ok=false once the queue is both closed and
+// fully drained -- never while items remain, and never blocking forever
+// after close() with nothing left.
+func TestWatchWorkDequeueDrainsThenCloses(t *testing.T) {
+	work := newWatchWork(nil)
+	for i := 0; i < 5; i++ {
+		work.enqueue(watchItem{rec: indexer.Record{Path: fmt.Sprintf("/item/%d", i)}})
+	}
+
+	var got []string
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			item, ok := work.dequeue()
+			if !ok {
+				close(done)
+				return
+			}
+			got = append(got, item.rec.Path)
+		}
+	}()
+
+	// Close after a moment, once the 5 items are likely already queued --
+	// dequeue must still drain them all before reporting closed.
+	time.Sleep(20 * time.Millisecond)
+	work.close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dequeue never reported closed after close()")
+	}
+	wg.Wait()
+
+	if len(got) != 5 {
+		t.Fatalf("drained %d items, want 5 (nothing lost below capacity)", len(got))
+	}
+	for i, path := range got {
+		if want := fmt.Sprintf("/item/%d", i); path != want {
+			t.Errorf("item %d = %q, want %q", i, path, want)
+		}
 	}
 }
