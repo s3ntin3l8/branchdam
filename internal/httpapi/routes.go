@@ -698,7 +698,7 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 	jobID, err := pipeline.RunScan(ctx, pipeline.ScanDeps{
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
 		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
-		Tracker: s.tracker,
+		Tracker: s.tracker, Shutdown: s.shutdown,
 		Nudge: func() {
 			if s.hub != nil {
 				s.hub.Broadcast()

@@ -43,22 +43,29 @@ type Deps struct {
 	// server builds, so cmd/branchdam can join scans started via
 	// POST /api/v1/scan before closing the database on shutdown.
 	Tracker *pipeline.ScanTracker
+
+	// Shutdown, if set, is passed through to every pipeline.ScanDeps this
+	// server builds -- see pipeline.ScanDeps.Shutdown's doc comment. Not the
+	// request context: a scan must survive the HTTP request that started it,
+	// same reasoning as Tracker.
+	Shutdown <-chan struct{}
 }
 
 // Server bundles the dependencies handlers need.
 type Server struct {
-	cfg     *config.Config
-	log     *slog.Logger
-	db      *db.DB
-	guard   *storage.Guard
-	prober  *probe.Prober
-	pool    *workers.Pool[string]
-	engine  *graph.Engine
-	hub     *sse.Hub
-	sseSlot *limiter
-	spa     fs.FS
-	version string
-	tracker *pipeline.ScanTracker
+	cfg      *config.Config
+	log      *slog.Logger
+	db       *db.DB
+	guard    *storage.Guard
+	prober   *probe.Prober
+	pool     *workers.Pool[string]
+	engine   *graph.Engine
+	hub      *sse.Hub
+	sseSlot  *limiter
+	spa      fs.FS
+	version  string
+	tracker  *pipeline.ScanTracker
+	shutdown <-chan struct{}
 }
 
 // New builds the HTTP server handler set.
@@ -72,18 +79,19 @@ func New(d Deps) *Server {
 		version = "dev"
 	}
 	return &Server{
-		cfg:     d.Config,
-		log:     log,
-		db:      d.DB,
-		guard:   d.Guard,
-		prober:  d.Prober,
-		pool:    d.Pool,
-		engine:  d.Engine,
-		hub:     d.Hub,
-		sseSlot: newLimiter(maxSSEClients),
-		spa:     d.SPA,
-		version: version,
-		tracker: d.Tracker,
+		cfg:      d.Config,
+		log:      log,
+		db:       d.DB,
+		guard:    d.Guard,
+		prober:   d.Prober,
+		pool:     d.Pool,
+		engine:   d.Engine,
+		hub:      d.Hub,
+		sseSlot:  newLimiter(maxSSEClients),
+		spa:      d.SPA,
+		version:  version,
+		tracker:  d.Tracker,
+		shutdown: d.Shutdown,
 	}
 }
 
