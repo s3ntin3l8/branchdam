@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -32,6 +33,9 @@ type Worker struct {
 	retryWindow time.Duration
 	push        PushFunc
 	log         *slog.Logger
+	// wg tracks the Run goroutine so Wait can join it before the database
+	// closes during shutdown.
+	wg sync.WaitGroup
 }
 
 func NewWorker(manager *Manager, remote, exportPath string, batchSize int, interval time.Duration, push PushFunc, log *slog.Logger) *Worker {
@@ -51,6 +55,8 @@ func NewWorker(manager *Manager, remote, exportPath string, batchSize int, inter
 
 // Run blocks until ctx is cancelled. Call in a goroutine from main.go.
 func (w *Worker) Run(ctx context.Context) {
+	w.wg.Add(1)
+	defer w.wg.Done()
 	if w.manager == nil || w.exportPath == "" {
 		return
 	}
@@ -66,6 +72,10 @@ func (w *Worker) Run(ctx context.Context) {
 		}
 	}
 }
+
+// Wait blocks until the Run goroutine has returned. Call during shutdown,
+// after ctx is cancelled, before the database closes.
+func (w *Worker) Wait() { w.wg.Wait() }
 
 func (w *Worker) drain(ctx context.Context) {
 	// Re-claim PUSH_FAILED rows old enough to retry, so a transient remote
