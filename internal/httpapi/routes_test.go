@@ -1859,6 +1859,100 @@ func TestSyncRetryRequeuesFailed(t *testing.T) {
 	}
 }
 
+func TestSyncRetrySkipsInFlightAndQueued(t *testing.T) {
+	// A PUSHING (in-flight) or PENDING_CLOUD_PUSH (already queued) row must
+	// never be regressed by a manual retry -- only PUSH_FAILED rows are
+	// re-claimed. The remote CHECK constraint allows only IMMICH /
+	// GOOGLE_PHOTOS, so use a separate node to hold these statuses.
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "inflight.jpg"), "uuid-sync-inflight")
+
+	now := time.Now().Unix()
+	seedSyncState(t, database, node.ID, "IMMICH", "PUSHING", "", now)
+	seedSyncState(t, database, node.ID, "GOOGLE_PHOTOS", "PENDING_CLOUD_PUSH", "", now)
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync/retry", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Requeued int64 `json:"requeued"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Requeued != 0 {
+		t.Errorf("requeued = %d, want 0 (PUSHING/PENDING rows are never re-claimed)", out.Requeued)
+	}
+
+	rows, err := database.Reader.ListRemoteSyncStateByNode(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("list sync state: %v", err)
+	}
+	byRemote := map[string]sqlcgen.RemoteSyncState{}
+	for _, r := range rows {
+		byRemote[r.Remote] = r
+	}
+	if imm, ok := byRemote["IMMICH"]; !ok || imm.SyncStatus != "PUSHING" {
+		t.Errorf("IMMICH should stay PUSHING (in flight): %+v", imm)
+	}
+	if gp, ok := byRemote["GOOGLE_PHOTOS"]; !ok || gp.SyncStatus != "PENDING_CLOUD_PUSH" {
+		t.Errorf("GOOGLE_PHOTOS should stay PENDING_CLOUD_PUSH (already queued): %+v", gp)
+	}
+}
+
+func TestSyncRetryArchived404(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "archived.jpg"), "uuid-sync-archived")
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		return q.ArchiveMediaNode(context.Background(), node.ID)
+	})
+	if err != nil {
+		t.Fatalf("archive node: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync/retry", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for ARCHIVED node", rr.Code)
+	}
+}
+
+func TestSyncRetryNoRowsRequeuesZero(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "norows.jpg"), "uuid-sync-norows")
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync/retry", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Requeued int64 `json:"requeued"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Requeued != 0 {
+		t.Errorf("requeued = %d, want 0 for a node with no remote_sync_state rows", out.Requeued)
+	}
+
+	rrGet := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync-status", nil)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("sync-status status = %d, body = %s", rrGet.Code, rrGet.Body.String())
+	}
+	var got struct {
+		Sync []syncStateDTO `json:"sync"`
+	}
+	if err := json.Unmarshal(rrGet.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Sync == nil || len(got.Sync) != 0 {
+		t.Errorf("sync array = %+v, want empty", got.Sync)
+	}
+}
+
 func TestSyncRetryRequiresAdmin(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	srv.cfg.Authz.Groups = []string{"dam-admins"}

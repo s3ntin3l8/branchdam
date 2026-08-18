@@ -611,12 +611,17 @@ func (s *Server) handleSyncRetry(ctx context.Context, in *SyncRetryInput) (*Sync
 		return nil, huma.Error404NotFound("asset not found")
 	}
 
-	rows, err := s.db.Reader.ListRemoteSyncStateByNode(ctx, in.ID)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("list sync state", err)
-	}
 	var requeued int64
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// Read + re-claim inside ONE write transaction on the writer pool's
+		// single connection. A concurrent ProcessPending that claims the same
+		// row (PUSH_FAILED -> PUSHING) cannot interleave between the read and
+		// the upsert and be regressed back to PENDING_CLOUD_PUSH (which would
+		// duplicate the push) -- the writer connection serializes the two.
+		rows, err := q.ListRemoteSyncStateByNode(ctx, in.ID)
+		if err != nil {
+			return err
+		}
 		for _, r := range rows {
 			if r.SyncStatus != "PUSH_FAILED" {
 				continue

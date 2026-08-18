@@ -60,6 +60,9 @@ export function useAssetSyncStatus(id: number | undefined) {
     queryKey: ["asset-sync-status", id],
     queryFn: () => api.getAssetSyncStatus(id as number),
     enabled: id !== undefined,
+    // Poll so the status stays fresh while the sync worker progresses
+    // (useEventStream only nudges on SSE events, not on worker drain ticks).
+    refetchInterval: 15_000,
   });
 }
 

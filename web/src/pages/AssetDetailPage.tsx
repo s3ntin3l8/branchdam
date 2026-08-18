@@ -79,7 +79,7 @@ export default function AssetDetailPage() {
                       </p>
                     )}
                   </div>
-                  {s.syncStatus === "PUSH_FAILED" && (
+                  {s.syncStatus === "PUSH_FAILED" && asset.lifecycleState !== "ARCHIVED" && (
                     <button
                       onClick={() => retrySync.mutate(asset.id)}
                       disabled={retrySync.isPending}
@@ -93,6 +93,9 @@ export default function AssetDetailPage() {
             </div>
           ) : (
             <p className="text-sm text-neutral-500">No sync state yet.</p>
+          )}
+          {retrySync.isError && (
+            <p className="mt-3 text-xs text-red-400">Failed to retry sync: {String(retrySync.error)}</p>
           )}
         </div>
       </section>
