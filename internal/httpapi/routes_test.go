@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -1241,15 +1242,20 @@ func TestStatfsWithTimeoutSucceedsOnFastPath(t *testing.T) {
 // mount must degrade the location, not block the whole /api/v1/
 // storage-health response indefinitely. Statfs itself can't be reproduced
 // hanging in a portable unit test (it would need a genuinely wedged
-// mount), so this pins the timeout mechanism directly with a timeout so
-// short (1ns) that even a fast local Statfs call cannot win the race --
-// the goroutine dispatch and syscall overhead alone exceed it -- which
-// deterministically exercises the same `case <-time.After(timeout)` branch
-// a real hang would hit.
+// mount), so this uses statfsWithTimeoutFn to substitute a stub that
+// blocks forever, forcing the timeout branch deterministically against a
+// real, non-degenerate timeout -- an earlier version of this test raced a
+// 1ns timeout against the real syscall instead, which was flaky in CI: a
+// fast enough real Statfs call occasionally won that race, so the test
+// would flip-flop between exercising the timeout branch and the success
+// branch depending on runner load, not the code under test.
 func TestStatfsWithTimeoutReturnsErrorWhenExceeded(t *testing.T) {
-	_, err := statfsWithTimeout(t.TempDir(), 1*time.Nanosecond)
+	blockForever := func(_ string, _ *unix.Statfs_t) error {
+		select {}
+	}
+	_, err := statfsWithTimeoutFn(blockForever, "/irrelevant", 20*time.Millisecond)
 	if err == nil {
-		t.Fatal("statfsWithTimeout with a near-zero timeout returned nil error, want a timeout error")
+		t.Fatal("statfsWithTimeoutFn with a permanently-blocked syscall returned nil error, want a timeout error")
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("err = %q, want it to mention a timeout", err.Error())

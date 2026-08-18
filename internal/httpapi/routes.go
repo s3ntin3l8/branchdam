@@ -1443,6 +1443,18 @@ const statfsTimeout = 2 * time.Second
 // goroutine on a rare, already-degraded mount is far better than every
 // caller of this handler hanging until the mount recovers.
 func statfsWithTimeout(path string, timeout time.Duration) (unix.Statfs_t, error) {
+	return statfsWithTimeoutFn(unix.Statfs, path, timeout)
+}
+
+// statfsWithTimeoutFn is statfsWithTimeout with the syscall itself injected,
+// so tests can force the timeout branch deterministically -- with a real
+// syscall, racing a positive timeout against how fast Statfs happens to
+// return is inherently flaky (CI's runner resolved a real local Statfs call
+// fast enough to occasionally win even a 1ns timeout, which an earlier
+// version of this test relied on). Substituting a stub that blocks forever
+// makes the timeout branch win deterministically against any real,
+// non-degenerate timeout instead.
+func statfsWithTimeoutFn(statfs func(path string, buf *unix.Statfs_t) error, path string, timeout time.Duration) (unix.Statfs_t, error) {
 	type result struct {
 		stat unix.Statfs_t
 		err  error
@@ -1450,7 +1462,7 @@ func statfsWithTimeout(path string, timeout time.Duration) (unix.Statfs_t, error
 	done := make(chan result, 1)
 	go func() {
 		var r result
-		r.err = unix.Statfs(path, &r.stat)
+		r.err = statfs(path, &r.stat)
 		done <- r
 	}()
 	select {
