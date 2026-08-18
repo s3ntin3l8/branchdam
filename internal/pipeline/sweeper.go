@@ -111,6 +111,20 @@ func (s *SweeperSupervisor) sweepLocation(ctx context.Context, loc storage.Locat
 // a shutdown mid-walk would surface as a walk error (FAILED) instead of the
 // CANCELLED state watchLocation's own convention (watcher.go) uses for a
 // clean shutdown.
+//
+// Accepted, inherited tradeoff: because the walk runs under a
+// non-cancellable context, indexer.Walk's own per-entry ctx.Done() check
+// never fires here -- a pass already in progress runs to completion rather
+// than aborting early, exactly like a FULL_SCAN via RunScan. That's a
+// rare, operator-triggered event for a FULL_SCAN; for a recurring sweep it
+// means the odds of shutdown landing mid-pass over the process's lifetime
+// are roughly walk-duration/interval rather than incidental. main.go's
+// joinCtx bounds how long shutdown waits for it (waitBounded); a timeout
+// there falls back to dbUnsafeToClose, the same safety net every other
+// slow-to-join background component already relies on. Not fixed here:
+// doing so would mean giving runScan's proven shutdown semantics a
+// per-file early-exit path, which is a change to the shared core this PR
+// deliberately leaves untouched, not a sweep-specific tweak.
 func (s *SweeperSupervisor) runOneSweep(ctx context.Context, loc storage.Location) {
 	job, err := createScanJob(ctx, s.deps, loc, "INCREMENTAL")
 	if err != nil {

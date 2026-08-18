@@ -99,8 +99,8 @@ type StorageLocation struct {
 	// Watch opts this location into a continuous fsnotify watcher at startup
 	// (kind='WATCH' scan job), off by default. Never honored for Tier 3 --
 	// the master archive is never watched regardless of this flag. Local NVMe
-	// volumes only; fsnotify does not fire reliably over SMB/NFS (that
-	// differential mtime sweep is a separate, later issue).
+	// volumes only; fsnotify does not fire reliably over SMB/NFS -- Sweep
+	// below is the polling adjunct for those mounts instead (#60).
 	Watch bool `yaml:"watch"`
 
 	// Sweep opts this location into a low-priority differential mtime sweep
@@ -114,7 +114,10 @@ type StorageLocation struct {
 	Sweep bool `yaml:"sweep"`
 
 	// SweepIntervalSecs overrides the 10-minute default between sweep
-	// passes for this location. Zero (the default) means "use the default".
+	// passes for this location. Zero (the default) means "use the default";
+	// a negative value also falls back to the default (SweeperSupervisor.Start
+	// treats interval<=0 uniformly) rather than producing a busy-looping
+	// sweep, but is not itself a meaningful config value -- avoid it.
 	SweepIntervalSecs int `yaml:"sweepIntervalSecs"`
 }
 

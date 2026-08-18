@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -235,13 +236,16 @@ func TestSweepProgressCounterNeverRegresses(t *testing.T) {
 // flush adds every one of its entries' paths to uncertain -- matching
 // drainAndCommit's own failed-batch handling -- rather than silently
 // dropping them (which would let a live file's stale last_seen_at feed the
-// MISSING sweep). Forces the failure deterministically by closing the
-// database before flushing: sql.DB.Close is idempotent, so the test's own
+// MISSING sweep), and bumps filesFailed the same way a failed Commit batch
+// does, so scan_jobs.files_failed doesn't undercount this failure class.
+// Forces the failure deterministically by closing the database before
+// flushing: sql.DB.Close is idempotent, so the test's own
 // t.Cleanup-driven Close afterward is harmless.
 func TestTouchBatcherFlushFailureMarksUncertain(t *testing.T) {
 	database := openTestDB(t)
 	uncertain := newUncertainPaths()
-	batch := newTouchBatcher(database, uncertain, nil)
+	var filesFailed atomic.Int32
+	batch := newTouchBatcher(database, uncertain, &filesFailed, nil)
 
 	ctx := context.Background()
 	batch.add(ctx, 1, "/a", 100)
@@ -252,6 +256,10 @@ func TestTouchBatcherFlushFailureMarksUncertain(t *testing.T) {
 	}
 
 	batch.flush(ctx)
+
+	if got := filesFailed.Load(); got != 2 {
+		t.Errorf("filesFailed = %d, want 2", got)
+	}
 
 	got := uncertain.list()
 	want := map[string]bool{"/a": true, "/b": true}
@@ -321,5 +329,106 @@ func TestSweepMarksDeletedFileMissing(t *testing.T) {
 	b := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "b.txt"))
 	if b.LifecycleState != "ACTIVE" {
 		t.Errorf("b.txt lifecycle_state = %q, want ACTIVE", b.LifecycleState)
+	}
+}
+
+// TestSweepMissingNodeAlwaysRehashes is the Hermes-flagged correctness
+// guard: a MISSING node whose path gets a DIFFERENT file with a
+// coincidentally matching mtime+size must never be reactivated by the
+// differential fast path on that weak signal alone. sweepUnchanged requires
+// LifecycleState=="ACTIVE"; a MISSING node always falls through to the
+// ordinary hash+Commit path, which verifies via fast_hash and -- since the
+// content genuinely differs here -- archives the stale node and inserts a
+// fresh one, rather than silently reattaching the old node's identity
+// (full_hash, phash) to unrelated content.
+func TestSweepMissingNodeAlwaysRehashes(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "a.txt")
+	const originalContent = "original-content"
+	writeFile(t, path, originalContent)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	resolvedPath := filepath.Join(resolvedRoot, "a.txt")
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 1): %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("pass 1 state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	original := mustGetLiveNode(t, database, resolvedPath)
+
+	if err := os.Remove(resolvedPath); err != nil {
+		t.Fatalf("remove a.txt: %v", err)
+	}
+	waitForNextSecond(t)
+
+	jobID2, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 2): %v", err)
+	}
+	if job := waitJobDone(t, database, jobID2); job.State != "COMPLETED" {
+		t.Fatalf("pass 2 state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	missing := mustGetLiveNode(t, database, resolvedPath)
+	if missing.LifecycleState != "MISSING" {
+		t.Fatalf("pre-conditions broken: a.txt = %q, want MISSING", missing.LifecycleState)
+	}
+
+	waitForNextSecond(t)
+
+	// A DIFFERENT file, same byte length as the original, pinned back to the
+	// missing node's stored mtime -- coincidentally matching (mtime, size)
+	// without being the same content.
+	const differentContent = "different-conten" // same length as originalContent
+	if len(differentContent) != len(originalContent) {
+		t.Fatalf("test fixture bug: content lengths differ (%d vs %d)", len(differentContent), len(originalContent))
+	}
+	if err := os.WriteFile(resolvedPath, []byte(differentContent), 0o644); err != nil {
+		t.Fatalf("write replacement a.txt: %v", err)
+	}
+	origMtime := time.Unix(missing.MtimeUnix, 0)
+	if err := os.Chtimes(resolvedPath, origMtime, origMtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	jobID3, err := RunSweep(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunSweep (pass 3): %v", err)
+	}
+	job3 := waitJobDone(t, database, jobID3)
+	if job3.State != "COMPLETED" {
+		t.Fatalf("pass 3 state = %q (last_error=%v)", job3.State, job3.LastError)
+	}
+	if job3.FilesHashed != 1 {
+		t.Errorf("pass 3 files_hashed = %d, want 1 (a MISSING node must always be re-hashed, never blindly reactivated)", job3.FilesHashed)
+	}
+
+	after := mustGetLiveNode(t, database, resolvedPath)
+	if after.ID == original.ID {
+		t.Error("a.txt: id unchanged, want a fresh node (version collision) since the reappeared content genuinely differs")
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE", after.LifecycleState)
+	}
+	if after.FastHash == nil || original.FastHash == nil || *after.FastHash == *original.FastHash {
+		t.Error("a.txt: fast_hash unchanged from the original MISSING node, want it to reflect the new content")
+	}
+
+	archived, err := database.Reader.GetMediaNodeByID(ctx, original.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID(original): %v", err)
+	}
+	if archived.LifecycleState != "ARCHIVED" {
+		t.Errorf("original node lifecycle_state = %q, want ARCHIVED (must not have been silently reactivated in place)", archived.LifecycleState)
 	}
 }

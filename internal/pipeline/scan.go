@@ -105,7 +105,7 @@ func (t *ScanTracker) Wait() { t.wg.Wait() }
 // (internal/httpapi, PR 9) are expected to respond 202 with the returned
 // job id right away -- this function never blocks on the scan itself.
 func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int64, error) {
-	return startScanAsync(ctx, deps, location, "FULL_SCAN")
+	return startScanAsync(ctx, deps, location, "FULL_SCAN", false)
 }
 
 // RunSweep is RunScan's low-priority differential counterpart (#60): a file
@@ -123,13 +123,15 @@ func RunScan(ctx context.Context, deps ScanDeps, location storage.Location) (int
 // so callers that want a single fire-and-forget sweep (tests, a future
 // manual-trigger endpoint) don't need to reach into pipeline internals.
 func RunSweep(ctx context.Context, deps ScanDeps, location storage.Location) (int64, error) {
-	return startScanAsync(ctx, deps, location, "INCREMENTAL")
+	return startScanAsync(ctx, deps, location, "INCREMENTAL", true)
 }
 
 // startScanAsync creates the scan_jobs row synchronously, then runs the
 // walk/hash/commit work in a background goroutine and returns the job id
-// immediately.
-func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Location, kind string) (int64, error) {
+// immediately. differential is passed through to runScan explicitly rather
+// than derived from kind -- an unrecognized kind string must never silently
+// fall back to FULL_SCAN semantics under a mislabeled row.
+func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Location, kind string, differential bool) (int64, error) {
 	job, err := createScanJob(ctx, deps, location, kind)
 	if err != nil {
 		return 0, err
@@ -153,7 +155,7 @@ func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Locatio
 		if deps.Tracker != nil {
 			defer deps.Tracker.done()
 		}
-		runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt, kind == "INCREMENTAL")
+		runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt, differential)
 	}()
 	return job.ID, nil
 }
@@ -245,7 +247,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// unambiguous.
 	var interrupted atomic.Bool
 	uncertain := newUncertainPaths()
-	touchBatch := newTouchBatcher(deps.DB, uncertain, log)
+	touchBatch := newTouchBatcher(deps.DB, uncertain, &filesFailed, log)
 
 	walkFn := deps.WalkFn
 	if walkFn == nil {
