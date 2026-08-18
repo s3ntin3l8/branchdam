@@ -25,9 +25,7 @@ type Drainer struct {
 	log         *slog.Logger
 	maxRetries  int
 	backoffWait time.Duration
-
-	mu      sync.Mutex
-	retries map[int64]int
+	mu          sync.Mutex
 }
 
 // NewDrainer creates an agent event queue drainer.
@@ -40,7 +38,6 @@ func NewDrainer(database *db.DB, guard *storage.Guard, log *slog.Logger) *Draine
 		guard:      guard,
 		log:        log,
 		maxRetries: DefaultMaxRetries,
-		retries:    make(map[int64]int),
 	}
 }
 
@@ -87,6 +84,10 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		return stats, nil
 	}
 
+	d.mu.Lock()
+	maxRetries := d.maxRetries
+	d.mu.Unlock()
+
 	for _, ev := range events {
 		if err := ctx.Err(); err != nil {
 			stats.Duration = time.Since(start)
@@ -101,9 +102,6 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		})
 
 		if processErr == nil {
-			d.mu.Lock()
-			delete(d.retries, ev.ID)
-			d.mu.Unlock()
 			stats.Processed++
 			continue
 		}
@@ -115,40 +113,35 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			errors.Is(processErr, ErrReadOnlyRebase) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
-		d.mu.Lock()
-		d.retries[ev.ID]++
 		attempts := int(ev.RetryCount) + 1
-		if d.retries[ev.ID] > attempts {
-			attempts = d.retries[ev.ID]
-		}
-		d.mu.Unlock()
 
-		if isFatal || attempts >= d.maxRetries {
+		if isFatal || attempts >= maxRetries {
 			d.log.Warn("agent: event failed permanently",
 				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "err", processErr)
 
 			// Mark FAILED with error_log in its own transaction so queue head unblocks.
-			_ = d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			if err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 				return q.MarkAgentEventFailed(ctx, sqlcgen.MarkAgentEventFailedParams{
 					ID:       ev.ID,
 					ErrorLog: sql.NullString{String: processErr.Error(), Valid: true},
 				})
-			})
-			d.mu.Lock()
-			delete(d.retries, ev.ID)
-			d.mu.Unlock()
+			}); err != nil {
+				d.log.Error("agent: failed to mark event FAILED in db", "eventID", ev.ID, "err", err)
+			}
 			stats.Failed++
 		} else {
 			d.log.Warn("agent: transient event error, will retry",
 				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "err", processErr)
 
 			// Persist retry count in DB so retries survive crashes and multi-instance restarts.
-			_ = d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			if err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 				return q.IncrementAgentEventRetry(ctx, sqlcgen.IncrementAgentEventRetryParams{
 					ID:       ev.ID,
 					ErrorLog: sql.NullString{String: processErr.Error(), Valid: true},
 				})
-			})
+			}); err != nil {
+				d.log.Error("agent: failed to increment event retry in db", "eventID", ev.ID, "err", err)
+			}
 		}
 	}
 
@@ -200,10 +193,12 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 			if backoff <= 0 {
 				break
 			}
+			timer := time.NewTimer(backoff)
 			select {
-			case <-time.After(backoff):
+			case <-timer.C:
 				// retry next iteration
 			case <-ctx.Done():
+				timer.Stop()
 				totalStats.Duration = time.Since(start)
 				return totalStats, ctx.Err()
 			}
