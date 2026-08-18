@@ -19,6 +19,13 @@ export function useEventStream() {
       void queryClient.invalidateQueries({ queryKey: ["progress"] });
       void queryClient.invalidateQueries({ queryKey: ["assets"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+      // The ingest jobs page (#52) and storage-health page (#51) were both
+      // added after this hook and never wired in -- they previously only
+      // updated on their own poll interval (15s / 10s respectively,
+      // hooks/queries.ts) instead of reacting to a nudge like everything
+      // else here.
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
     };
 
     source.addEventListener("progress", onProgress);
