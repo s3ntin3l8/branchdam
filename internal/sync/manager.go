@@ -188,6 +188,23 @@ func (m *Manager) RecoverStalePushing(ctx context.Context, remote string, olderT
 	return n, err
 }
 
+// RecoverFailedPushes resets PUSH_FAILED rows older than olderThan back to
+// PENDING_CLOUD_PUSH, so a transient remote failure doesn't strand a batch
+// forever -- this is the worker-level retry (bounded in frequency by
+// olderThan; the Immich client's own retry is the per-attempt backoff).
+func (m *Manager) RecoverFailedPushes(ctx context.Context, remote string, olderThan time.Duration) (int64, error) {
+	var n int64
+	err := m.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		n, err = q.ResetRemoteSyncStateFailed(ctx, sqlcgen.ResetRemoteSyncStateFailedParams{
+			Remote:        remote,
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-olderThan).Unix(), Valid: true},
+		})
+		return err
+	})
+	return n, err
+}
+
 // setBatchStatus applies one status transition to a set of node ids inside a
 // single write transaction.
 func (m *Manager) setBatchStatus(ctx context.Context, nodeIDs []int64, remote, status, remoteAssetID string, lastErr *string) error {

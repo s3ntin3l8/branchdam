@@ -188,6 +188,31 @@ func (q *Queries) MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteS
 	return err
 }
 
+const resetRemoteSyncStateFailed = `-- name: ResetRemoteSyncStateFailed :execrows
+UPDATE remote_sync_state
+SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2
+`
+
+type ResetRemoteSyncStateFailedParams struct {
+	Remote        string
+	LastAttemptAt sql.NullInt64
+}
+
+// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
+// the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
+// re-attempts them -- a transient remote failure must not strand a batch
+// forever. Scoped to a single remote. last_attempt_at is set explicitly on
+// every attempt, so this only re-claims rows that have not been retried
+// recently (bounded retry frequency, not a hot loop).
+func (q *Queries) ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, resetRemoteSyncStateFailed, arg.Remote, arg.LastAttemptAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const resetRemoteSyncStateStale = `-- name: ResetRemoteSyncStateStale :execrows
 UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()

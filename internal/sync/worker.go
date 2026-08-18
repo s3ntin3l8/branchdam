@@ -21,8 +21,11 @@ type Worker struct {
 	exportPath string
 	batchSize  int
 	interval   time.Duration
-	push       PushFunc
-	log        *slog.Logger
+	// retryWindow is how old a PUSH_FAILED row must be before the worker
+	// re-claims it (bounded retry frequency -- not a hot loop).
+	retryWindow time.Duration
+	push        PushFunc
+	log         *slog.Logger
 }
 
 func NewWorker(manager *Manager, remote, exportPath string, batchSize int, interval time.Duration, push PushFunc, log *slog.Logger) *Worker {
@@ -36,7 +39,8 @@ func NewWorker(manager *Manager, remote, exportPath string, batchSize int, inter
 		interval = 30 * time.Second
 	}
 	return &Worker{manager: manager, remote: remote, exportPath: exportPath,
-		batchSize: batchSize, interval: interval, push: push, log: log}
+		batchSize: batchSize, interval: interval, retryWindow: 5 * time.Minute,
+		push: push, log: log}
 }
 
 // Run blocks until ctx is cancelled. Call in a goroutine from main.go.
@@ -58,6 +62,13 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) drain(ctx context.Context) {
+	// Re-claim PUSH_FAILED rows old enough to retry, so a transient remote
+	// failure doesn't strand a batch forever. Then enqueue brand-new nodes.
+	if n, err := w.manager.RecoverFailedPushes(ctx, w.remote, w.retryWindow); err != nil {
+		w.log.Warn("sync: recover failed pushes", "err", err)
+	} else if n > 0 {
+		w.log.Info("sync: recovered failed pushes for retry", "remote", w.remote, "count", n)
+	}
 	w.enqueueUntracked(ctx)
 	n, err := w.manager.ProcessPending(ctx, w.remote, w.batchSize, w.push)
 	if err != nil {

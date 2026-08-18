@@ -321,12 +321,19 @@ func TestCloseDatabaseSkipsCloseWhenUnsafe(t *testing.T) {
 }
 
 func TestStartImmichWorkerDisabledWhenNotConfigured(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	database := mainTestOpenDB(t)
-	w := startImmichWorker(ctx, &config.Config{}, database, slog.New(slog.DiscardHandler))
-	if w != nil {
-		t.Fatalf("startImmichWorker with empty APIURL = %v, want nil", w)
+	for name, apiURL := range map[string]string{
+		"empty":                  "",
+		"unresolved placeholder": "${IMMICH_API_URL}", // unset env left literal by expandEnv
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			database := mainTestOpenDB(t)
+			w := startImmichWorker(ctx, &config.Config{Immich: config.Immich{APIURL: apiURL}}, database, slog.New(slog.DiscardHandler))
+			if w != nil {
+				t.Fatalf("startImmichWorker with apiUrl %q = %v, want nil", apiURL, w)
+			}
+		})
 	}
 }
 

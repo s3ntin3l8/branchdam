@@ -68,3 +68,14 @@ WHERE n.lifecycle_state != 'ARCHIVED'
   AND rs.node_id IS NULL
 ORDER BY n.id ASC
 LIMIT ?3;
+
+-- name: ResetRemoteSyncStateFailed :execrows
+-- #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
+-- the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
+-- re-attempts them -- a transient remote failure must not strand a batch
+-- forever. Scoped to a single remote. last_attempt_at is set explicitly on
+-- every attempt, so this only re-claims rows that have not been retried
+-- recently (bounded retry frequency, not a hot loop).
+UPDATE remote_sync_state
+SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2;

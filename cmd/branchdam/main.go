@@ -236,10 +236,13 @@ func closeDatabase(log *slog.Logger, database *db.DB, unsafe bool) {
 }
 
 // startImmichWorker wires the Immich sync worker and returns it, or nil when
-// Immich is not configured (apiUrl empty). Runs RecoverStalePushing at startup
-// so a crashed mid-push doesn't strand nodes in PUSHING forever.
+// Immich is not configured. Runs RecoverStalePushing at startup so a crashed
+// mid-push doesn't strand nodes in PUSHING forever.
 func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB, log *slog.Logger) *sync.Worker {
-	if cfg.Immich.APIURL == "" {
+	// Empty apiUrl is the documented off switch; an unresolved ${VAR} left as
+	// literal text by config's expandEnv (unset environment variable) is also
+	// treated as disabled rather than pointed at a bogus host.
+	if cfg.Immich.APIURL == "" || strings.Contains(cfg.Immich.APIURL, "${") {
 		return nil
 	}
 	immichClient := immich.New(immich.Config{
@@ -251,7 +254,7 @@ func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB,
 	} else if n > 0 {
 		log.Warn("sync: recovered stale PUSHING rows", "count", n)
 	}
-	exportPath := cfg.Immich.ExportPath
+	exportPath := strings.TrimRight(cfg.Immich.ExportPath, "/")
 	if exportPath == "" {
 		exportPath = "/storage/exports/immich"
 	}

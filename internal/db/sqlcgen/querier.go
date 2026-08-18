@@ -177,6 +177,11 @@ type Querier interface {
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
 	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
+	// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older
+	// than the retry window are reset to PENDING_CLOUD_PUSH so the next worker
+	// pass re-attempts them -- a transient remote failure must not strand a
+	// batch forever. Scoped to a single remote.
+	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
