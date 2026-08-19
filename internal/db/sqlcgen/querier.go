@@ -149,14 +149,14 @@ type Querier interface {
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
 	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
-	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
-	// a node (both remotes), ordered by remote for a stable DTO.
-	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
 	// order, capped at one batch. Scoped to a single remote -- a node can hold
 	// both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
 	// ProcessPending(remote) must never list (or re-flip) another remote's rows.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
+	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row
+	// for a node (both remotes), ordered by remote for a stable DTO.
+	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
@@ -218,17 +218,15 @@ type Querier interface {
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
 	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
-	// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
-	// the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
-	// re-attempts them -- a transient remote failure must not strand a batch
-	// forever. Scoped to a single remote. last_attempt_at is set explicitly on
-	// every attempt, so this only re-claims rows that have not been retried
-	// recently (bounded retry frequency, not a hot loop).
-	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
 	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
 	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
+	// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older
+	// than the retry window are reset to PENDING_CLOUD_PUSH so the next worker
+	// pass re-attempts them -- a transient remote failure must not strand a
+	// batch forever. Scoped to a single remote.
+	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
