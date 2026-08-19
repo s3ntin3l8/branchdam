@@ -454,13 +454,21 @@ func TestDrainer_PoisonPill_And_MalformedPayload(t *testing.T) {
 func TestDrainer_RefuseTier3Rebase(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	// The file-not-yet-present case is deliberately transient (retries,
+	// not an immediate fatal failure -- see ErrArchiveFileNotYetPresent's
+	// doc comment), so pin maxRetries=1 to reach a terminal FAILED state
+	// within this test's single DrainAll call.
+	drainer.SetMaxRetries(1)
 	ctx := context.Background()
 
 	nodeUUID := uuid.New().String()
 	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
 		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "master.raw"),
 	})
-	// Try rebasing into read-only Tier 3 archive
+	// Issue #167: a Tier 3 target is refused unless the file already exists
+	// there. This target is never created on disk, so it must still be
+	// refused -- see TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived
+	// for the success case.
 	tier3Path := filepath.Join(env.archive, "master.raw")
 	tier3Event := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
 		NodeUUID:       nodeUUID,
@@ -486,13 +494,17 @@ func TestDrainer_RefuseTier3Rebase(t *testing.T) {
 func TestDrainer_RefuseTier3NodeMoved(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	// See TestDrainer_RefuseTier3Rebase: file-not-yet-present is transient.
+	drainer.SetMaxRetries(1)
 	ctx := context.Background()
 
 	nodeUUID := uuid.New().String()
 	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
 		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "clip.mov"),
 	})
-	// Attempt to move node directly into Tier 3 archive
+	// Same as TestDrainer_RefuseTier3Rebase: refused because the file was
+	// never created on disk at the Tier 3 target, not because Tier 3 is
+	// categorically off-limits (issue #167).
 	tier3Path := filepath.Join(env.archive, "clip.mov")
 	moveEvent := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
 		NodeUUID:    nodeUUID,
@@ -510,6 +522,161 @@ func TestDrainer_RefuseTier3NodeMoved(t *testing.T) {
 		require.Equal(t, "FAILED", ev.Status)
 		require.True(t, ev.ErrorLog.Valid)
 		require.Contains(t, ev.ErrorLog.String, "read-only")
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived is the spec
+// §9-named scenario (issue #167, resolving the contradiction in #58): once
+// the workstation agent has already copied a node's bytes into the Tier 3
+// archive itself, a EVENT_PATH_REBASED for that node_uuid must succeed --
+// branchDAM only records the new location in the database, it never writes
+// to the archive.
+func TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "master.raw"),
+	})
+
+	// The workstation agent has already placed the bytes in the archive.
+	tier3Path := filepath.Join(env.archive, "master.raw")
+	require.NoError(t, os.WriteFile(tier3Path, []byte("archived bytes"), 0o644))
+
+	rebaseEvent := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       nodeUUID,
+		TargetFilePath: tier3Path,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed) // node create + rebase
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, rebaseEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PROCESSED", ev.Status)
+
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		require.NoError(t, err)
+		require.Equal(t, tier3Path, node.FilePath)
+		require.Equal(t, env.locID3, node.StorageLocationID)
+		require.Equal(t, "ACTIVE", node.LifecycleState)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_NodeMoved_Tier3WhenFileAlreadyArchived mirrors
+// TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived for EVENT_NODE_MOVED.
+func TestDrainer_NodeMoved_Tier3WhenFileAlreadyArchived(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "clip.mov"),
+	})
+
+	tier3Path := filepath.Join(env.archive, "clip.mov")
+	require.NoError(t, os.WriteFile(tier3Path, []byte("archived bytes"), 0o644))
+
+	moveEvent := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
+		NodeUUID:    nodeUUID,
+		NewFilePath: tier3Path,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, moveEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PROCESSED", ev.Status)
+
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		require.NoError(t, err)
+		require.Equal(t, tier3Path, node.FilePath)
+		require.Equal(t, env.locID3, node.StorageLocationID)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_NonTier3ReadOnlyStaysRefusedEvenWithFile is issue #167's
+// scoping guarantee: the file-already-present exemption applies ONLY to
+// TIER3_MASTER_ARCHIVE, never to any other read-only location, even when
+// the target file genuinely exists there. Without this test, a future
+// change accidentally widening resolveRebaseTarget's Tier-3 check (e.g.
+// dropping the loc.Tier != "TIER3_MASTER_ARCHIVE" guard, or a typo in the
+// tier string literal) would go uncaught -- every other read-only fixture
+// in this file is Tier 3, so none of them can distinguish "refused because
+// Tier 3 and file missing" from "refused because read-only, full stop".
+func TestDrainer_NonTier3ReadOnlyStaysRefusedEvenWithFile(t *testing.T) {
+	env := setupTestDB(t)
+	ctx := context.Background()
+
+	// A read-only location that is NOT Tier 3 -- the schema permits this
+	// (only Tier 3 is required to be read-only, not the reverse).
+	roDir := filepath.Join(t.TempDir(), "readonly-import")
+	require.NoError(t, os.MkdirAll(roDir, 0o755))
+	resRoDir, err := filepath.EvalSymlinks(roDir)
+	require.NoError(t, err)
+
+	var roLoc sqlcgen.StorageLocation
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		roLoc, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: 1, Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	guard := storage.NewGuard([]storage.Location{
+		{ID: env.locID1, Name: "local_staging", RootPath: env.staging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: false},
+		{ID: roLoc.ID, Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: true},
+	})
+	drainer := agent.NewDrainer(env.db, guard, nil)
+	drainer.SetMaxRetries(1) // this refusal is fatal, but pin it anyway for a deterministic single-pass assertion
+
+	// The file genuinely exists -- this must still be refused, unlike the
+	// Tier-3 case, which would allow it.
+	targetPath := filepath.Join(resRoDir, "already_here.raw")
+	require.NoError(t, os.WriteFile(targetPath, []byte("bytes"), 0o644))
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "orig.raw"),
+	})
+	rebaseEvent := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       nodeUUID,
+		TargetFilePath: targetPath,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, rebaseEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", ev.Status)
+		require.True(t, ev.ErrorLog.Valid)
+		require.Contains(t, ev.ErrorLog.String, "read-only")
+
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		require.NoError(t, err)
+		require.NotEqual(t, targetPath, node.FilePath, "the refused rebase must not have taken effect")
 		return nil
 	})
 	require.NoError(t, err)

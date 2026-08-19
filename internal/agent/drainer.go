@@ -516,12 +516,9 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 	if d.guard == nil {
 		return fmt.Errorf("agent: storage guard not configured, deferring node move for %q", p.NewFilePath)
 	}
-	loc, err := d.guard.Resolve(p.NewFilePath)
+	loc, err := resolveRebaseTarget(d.guard, p.NewFilePath)
 	if err != nil {
-		return fmt.Errorf("%w: move target %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.NewFilePath, err)
-	}
-	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
-		return fmt.Errorf("%w: move target %q resolves to read-only tier %s", ErrReadOnlyRebase, p.NewFilePath, loc.Tier)
+		return err
 	}
 	locID := loc.ID
 
@@ -584,12 +581,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	if d.guard == nil {
 		return fmt.Errorf("agent: storage guard not configured, deferring path rebase for %q", p.TargetFilePath)
 	}
-	loc, err := d.guard.Resolve(p.TargetFilePath)
+	loc, err := resolveRebaseTarget(d.guard, p.TargetFilePath)
 	if err != nil {
-		return fmt.Errorf("%w: target path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.TargetFilePath, err)
-	}
-	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
-		return fmt.Errorf("%w: %q resolves to read-only tier %s", ErrReadOnlyRebase, p.TargetFilePath, loc.Tier)
+		return err
 	}
 	locID := loc.ID
 
@@ -650,6 +644,38 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		LensModel:          sql.NullString{},
 	})
 	return insertErr
+}
+
+// resolveRebaseTarget resolves path via guard and applies the Tier-3
+// exemption decided in issue #167: a target resolving to a writable
+// location is allowed unconditionally; a target resolving to a read-only
+// tier is refused *unless* it is specifically TIER3_MASTER_ARCHIVE and the
+// file already exists there (checked via guard.Exists, a pure stat -- see
+// its doc comment for why this never performs a write against the
+// archive). This is the spec §9-required "LOCAL_STAGING -> CENTRAL_TIER3"
+// scenario: once the workstation agent has copied the bytes into the
+// archive itself, the server may record that location, but branchDAM's own
+// code still never writes, renames, or deletes a Tier-3 file. Any other
+// read-only tier has no such exemption and stays hard-refused.
+func resolveRebaseTarget(guard *storage.Guard, path string) (storage.Location, error) {
+	loc, err := guard.Resolve(path)
+	if err != nil {
+		return storage.Location{}, fmt.Errorf("%w: rebase target %q does not resolve to any known storage location: %v", ErrMalformedPayload, path, err)
+	}
+	if !loc.ReadOnly && loc.Tier != "TIER3_MASTER_ARCHIVE" {
+		return loc, nil
+	}
+	if loc.Tier != "TIER3_MASTER_ARCHIVE" {
+		return storage.Location{}, fmt.Errorf("%w: rebase target %q resolves to read-only tier %s", ErrReadOnlyRebase, path, loc.Tier)
+	}
+	exists, err := guard.Exists(path)
+	if err != nil {
+		return storage.Location{}, fmt.Errorf("%w: checking whether rebase target %q already exists: %v", ErrMalformedPayload, path, err)
+	}
+	if !exists {
+		return storage.Location{}, fmt.Errorf("%w: rebase target %q resolves to read-only tier %s and no file exists there yet -- the bytes must already be copied into the archive before the server can rebase the record", ErrArchiveFileNotYetPresent, path, loc.Tier)
+	}
+	return loc, nil
 }
 
 func isDuplicateEdgeError(err error) bool {

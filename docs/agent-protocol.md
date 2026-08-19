@@ -150,6 +150,18 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
    ```
 
 #### D. Path Rebase Endpoint (`POST /api/v1/agent/rebase`)
+
+> **Rebasing a target inside Tier 3 (`TIER3_MASTER_ARCHIVE`) succeeds if and only if the file
+> already exists there.** This is spec §9's required `LOCAL_STAGING → CENTRAL_TIER3` scenario,
+> resolved in issue #167: the workstation agent copies the bytes into the archive itself, then
+> calls this endpoint (or sends `EVENT_NODE_MOVED`/`EVENT_PATH_REBASED`) purely to update
+> `media_nodes.file_path`/`storage_location_id`. branchDAM never performs the copy and never
+> writes, renames, or deletes anything under Tier 3 -- the existence check is a stat
+> (`storage.Guard.Exists`), never a write. A Tier 3 target whose file is not yet present is
+> refused with `400 Bad Request` (HTTP) / the event marked `FAILED` (queue), so the agent must
+> finish copying before calling this. Any other read-only tier has no such exemption and is
+> always refused.
+
 - **Request (`AgentRebaseInput`):**
   ```json
   {
