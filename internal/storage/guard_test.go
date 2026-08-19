@@ -264,3 +264,62 @@ func TestLoadGuardFailsLoudlyOnListerError(t *testing.T) {
 		t.Fatal("LoadGuard with a failing lister succeeded, want an error")
 	}
 }
+
+// TestExistsOnTier3 is the primitive issue #167's Tier-3 rebase exemption is
+// built on: a pure stat, never a write, that still correctly distinguishes
+// a present file from an absent one on a read-only tier.
+func TestExistsOnTier3(t *testing.T) {
+	guard, _, tier3 := newTestGuard(t)
+
+	present := filepath.Join(tier3, "already_archived.arw")
+	if err := os.WriteFile(present, []byte("raw bytes"), 0o644); err != nil {
+		t.Fatalf("seed fixture file: %v", err)
+	}
+
+	ok, err := guard.Exists(present)
+	if err != nil {
+		t.Fatalf("Exists(present) error: %v", err)
+	}
+	if !ok {
+		t.Error("Exists(present) = false, want true")
+	}
+
+	absent := filepath.Join(tier3, "not_copied_yet.arw")
+	ok, err = guard.Exists(absent)
+	if err != nil {
+		t.Fatalf("Exists(absent) error: %v", err)
+	}
+	if ok {
+		t.Error("Exists(absent) = true, want false")
+	}
+
+	if _, statErr := os.Stat(absent); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Exists(absent) must not have created anything (stat err = %v)", statErr)
+	}
+}
+
+// TestExistsThroughSymlinkEscapeUsesRealTarget mirrors
+// TestSymlinkEscapeRefused: a symlink sitting in the writable Tier 2
+// directory whose target lives in Tier 3 must resolve to its real location
+// before the stat runs, exactly like Resolve.
+func TestExistsThroughSymlinkEscapeUsesRealTarget(t *testing.T) {
+	guard, tier2, tier3 := newTestGuard(t)
+
+	linkPath := filepath.Join(tier2, "escape-hatch")
+	if err := os.Symlink(tier3, linkPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	real := filepath.Join(tier3, "master.arw")
+	if err := os.WriteFile(real, []byte("raw bytes"), 0o644); err != nil {
+		t.Fatalf("seed fixture file: %v", err)
+	}
+
+	ok, err := guard.Exists(filepath.Join(linkPath, "master.arw"))
+	if err != nil {
+		t.Fatalf("Exists through symlink error: %v", err)
+	}
+	if !ok {
+		t.Error("Exists through symlink to a real Tier 3 file = false, want true")
+	}
+}

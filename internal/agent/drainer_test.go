@@ -460,7 +460,10 @@ func TestDrainer_RefuseTier3Rebase(t *testing.T) {
 	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
 		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "master.raw"),
 	})
-	// Try rebasing into read-only Tier 3 archive
+	// Issue #167: a Tier 3 target is refused unless the file already exists
+	// there. This target is never created on disk, so it must still be
+	// refused -- see TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived
+	// for the success case.
 	tier3Path := filepath.Join(env.archive, "master.raw")
 	tier3Event := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
 		NodeUUID:       nodeUUID,
@@ -492,7 +495,9 @@ func TestDrainer_RefuseTier3NodeMoved(t *testing.T) {
 	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
 		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "clip.mov"),
 	})
-	// Attempt to move node directly into Tier 3 archive
+	// Same as TestDrainer_RefuseTier3Rebase: refused because the file was
+	// never created on disk at the Tier 3 target, not because Tier 3 is
+	// categorically off-limits (issue #167).
 	tier3Path := filepath.Join(env.archive, "clip.mov")
 	moveEvent := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
 		NodeUUID:    nodeUUID,
@@ -510,6 +515,90 @@ func TestDrainer_RefuseTier3NodeMoved(t *testing.T) {
 		require.Equal(t, "FAILED", ev.Status)
 		require.True(t, ev.ErrorLog.Valid)
 		require.Contains(t, ev.ErrorLog.String, "read-only")
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived is the spec
+// §9-named scenario (issue #167, resolving the contradiction in #58): once
+// the workstation agent has already copied a node's bytes into the Tier 3
+// archive itself, a EVENT_PATH_REBASED for that node_uuid must succeed --
+// branchDAM only records the new location in the database, it never writes
+// to the archive.
+func TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "master.raw"),
+	})
+
+	// The workstation agent has already placed the bytes in the archive.
+	tier3Path := filepath.Join(env.archive, "master.raw")
+	require.NoError(t, os.WriteFile(tier3Path, []byte("archived bytes"), 0o644))
+
+	rebaseEvent := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       nodeUUID,
+		TargetFilePath: tier3Path,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed) // node create + rebase
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, rebaseEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PROCESSED", ev.Status)
+
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		require.NoError(t, err)
+		require.Equal(t, tier3Path, node.FilePath)
+		require.Equal(t, env.locID3, node.StorageLocationID)
+		require.Equal(t, "ACTIVE", node.LifecycleState)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_NodeMoved_Tier3WhenFileAlreadyArchived mirrors
+// TestDrainer_PathRebased_Tier3WhenFileAlreadyArchived for EVENT_NODE_MOVED.
+func TestDrainer_NodeMoved_Tier3WhenFileAlreadyArchived(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "clip.mov"),
+	})
+
+	tier3Path := filepath.Join(env.archive, "clip.mov")
+	require.NoError(t, os.WriteFile(tier3Path, []byte("archived bytes"), 0o644))
+
+	moveEvent := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
+		NodeUUID:    nodeUUID,
+		NewFilePath: tier3Path,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, moveEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PROCESSED", ev.Status)
+
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		require.NoError(t, err)
+		require.Equal(t, tier3Path, node.FilePath)
+		require.Equal(t, env.locID3, node.StorageLocationID)
 		return nil
 	})
 	require.NoError(t, err)

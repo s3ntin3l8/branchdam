@@ -1798,6 +1798,86 @@ func TestAgentRebase_Known_And_Unknown_Nodes_And_Tier3_Safety(t *testing.T) {
 	}
 }
 
+// TestAgentRebase_Spec9Scenario_LocalStagingToCentralTier3 is the spec
+// §9-named test issue #58 quoted but did not implement, resolved by issue
+// #167: "path rebasing when an offline node's location changes from
+// LOCAL_STAGING to CENTRAL_TIER3". Once the workstation agent has already
+// copied the node's bytes into the archive, POST /api/v1/agent/rebase must
+// succeed -- this call only records the new location in the database, it
+// never writes to Tier 3 itself.
+func TestAgentRebase_Spec9Scenario_LocalStagingToCentralTier3(t *testing.T) {
+	srv, database, _, staging, _, archive := serverWithGuard(t)
+	ctx := context.Background()
+
+	nodeUUID := "018f0000-0000-7000-8000-0000000000bb"
+	stagingPath := filepath.Join(staging, "master.raw")
+	var nodeID int64
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          nodeUUID,
+			StorageLocationID: 1,
+			FilePath:          stagingPath,
+			FileName:          "master.raw",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		nodeID = n.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+
+	// The workstation agent has already copied the bytes into the archive.
+	tier3Path := filepath.Join(archive, "master.raw")
+	if err := os.WriteFile(tier3Path, []byte("archived bytes"), 0o644); err != nil {
+		t.Fatalf("seed archived file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   nodeUUID,
+		"targetPath": tier3Path,
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("rebase LOCAL_STAGING -> CENTRAL_TIER3 status = %d, want 200 OK, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		ID       int64  `json:"id"`
+		NodeUUID string `json:"nodeUuid"`
+		FilePath string `json:"filePath"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.ID != nodeID || out.Status != "REBASED" || out.FilePath != tier3Path {
+		t.Errorf("rebase to Tier 3 unexpected: %+v, want ID=%d status=REBASED filePath=%q", out, nodeID, tier3Path)
+	}
+
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		if err != nil {
+			return err
+		}
+		if node.FilePath != tier3Path {
+			t.Errorf("node file_path = %q, want %q", node.FilePath, tier3Path)
+		}
+		if node.LifecycleState != "ACTIVE" {
+			t.Errorf("node lifecycle_state = %q, want ACTIVE", node.LifecycleState)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify rebased node: %v", err)
+	}
+}
+
 // seedSyncLocation creates a storage location for seeding nodes.
 func seedSyncLocation(t *testing.T, database *db.DB) int64 {
 	t.Helper()

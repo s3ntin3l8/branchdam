@@ -1420,8 +1420,25 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	if err != nil {
 		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid target path %q: %v", in.Body.TargetPath, err), err)
 	}
+	// Issue #167: a read-only target is refused unless it is specifically
+	// TIER3_MASTER_ARCHIVE and the file already exists there (spec §9's
+	// required LOCAL_STAGING -> CENTRAL_TIER3 scenario -- the workstation
+	// agent has already copied the bytes into the archive itself; this call
+	// only records that location in the database, never writes to the
+	// archive). guard.Exists is a pure stat. See
+	// internal/agent/drainer.go's resolveRebaseTarget for the identical
+	// policy on the event-driven rebase paths.
 	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
-		return nil, huma.Error400BadRequest(fmt.Sprintf("rebase to read-only tier %s refused for path %q", loc.Tier, in.Body.TargetPath), nil)
+		if loc.Tier != "TIER3_MASTER_ARCHIVE" {
+			return nil, huma.Error400BadRequest(fmt.Sprintf("rebase to read-only tier %s refused for path %q", loc.Tier, in.Body.TargetPath), nil)
+		}
+		exists, err := s.guard.Exists(in.Body.TargetPath)
+		if err != nil {
+			return nil, huma.Error400BadRequest(fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
+		}
+		if !exists {
+			return nil, huma.Error400BadRequest(fmt.Sprintf("rebase to read-only tier %s refused for path %q: no file exists there yet", loc.Tier, in.Body.TargetPath), nil)
+		}
 	}
 
 	fileName := in.Body.FileName
