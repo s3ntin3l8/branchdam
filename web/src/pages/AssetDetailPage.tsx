@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { useParams, useSearchParams } from "react-router";
-import { useAsset, useAssetLineage, useAssetSyncStatus, useRetrySync } from "../hooks/queries";
+import { useAsset, useAssetLineage, useAssetSyncStatus, usePruneCache, useRetrySync } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
+import type { Asset } from "../api/types";
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -8,6 +10,90 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
       <dt className="text-neutral-500">{label}</dt>
       <dd className="col-span-2 break-all font-mono text-neutral-200">{value ?? "—"}</dd>
     </div>
+  );
+}
+
+// AssetPruneControl is the per-asset counterpart to StorageHealthPage's
+// location-level purge control: same dry-run-then-confirm flow, narrowed
+// to this one node via nodeIds. A plan that comes back empty means the
+// asset isn't eligible (no verified Tier-3 ancestor, or not yet past its
+// location's TTL) -- reported as a message, not an error, since "not
+// eligible" is an expected outcome, not a failure.
+function AssetPruneControl({ asset }: { asset: Asset }) {
+  const [checked, setChecked] = useState<"eligible" | "ineligible" | null>(null);
+  const [purged, setPurged] = useState(false);
+  const pruneCache = usePruneCache();
+
+  const checkEligibility = () => {
+    setPurged(false);
+    pruneCache.mutate(
+      { storageLocationId: asset.storageLocationId, nodeIds: [asset.id] },
+      { onSuccess: (res) => setChecked(res.candidates.length > 0 ? "eligible" : "ineligible") },
+    );
+  };
+
+  const confirmPurge = () => {
+    pruneCache.mutate(
+      { storageLocationId: asset.storageLocationId, nodeIds: [asset.id], execute: true },
+      {
+        onSuccess: () => {
+          setChecked(null);
+          setPurged(true);
+        },
+      },
+    );
+  };
+
+  if (purged) {
+    return <span className="text-xs text-neutral-400">Cache purged.</span>;
+  }
+
+  if (checked === "ineligible") {
+    return (
+      <span className="text-xs text-neutral-500">
+        Not eligible for pruning.{" "}
+        <button type="button" onClick={() => setChecked(null)} className="underline hover:text-neutral-300">
+          Dismiss
+        </button>
+      </span>
+    );
+  }
+
+  if (checked === "eligible") {
+    return (
+      <span className="flex items-center gap-2 text-xs">
+        {pruneCache.isError && <span className="text-red-400">Purge failed: {String(pruneCache.error)}</span>}
+        <button
+          type="button"
+          onClick={confirmPurge}
+          disabled={pruneCache.isPending}
+          className="rounded bg-red-900 px-2 py-1 text-red-200 hover:bg-red-800 disabled:opacity-50"
+        >
+          {pruneCache.isPending ? "Purging…" : "Confirm Purge"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setChecked(null)}
+          className="rounded bg-neutral-800 px-2 py-1 text-neutral-300 hover:bg-neutral-700"
+        >
+          Cancel
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span>
+      {pruneCache.isError && <span className="mr-2 text-xs text-red-400">Check failed: {String(pruneCache.error)}</span>}
+      <button
+        type="button"
+        onClick={checkEligibility}
+        disabled={pruneCache.isPending}
+        className="rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+      >
+        {pruneCache.isPending ? "Checking…" : "Purge Cache"}
+      </button>
+    </span>
   );
 }
 
@@ -37,9 +123,12 @@ export default function AssetDetailPage() {
 
   return (
     <div className="space-y-6 p-6">
-      <div>
-        <h1 className="text-xl font-semibold">{asset.fileName}</h1>
-        <p className="text-sm text-neutral-500">{asset.filePath}</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold">{asset.fileName}</h1>
+          <p className="text-sm text-neutral-500">{asset.filePath}</p>
+        </div>
+        <AssetPruneControl asset={asset} />
       </div>
 
       <section>

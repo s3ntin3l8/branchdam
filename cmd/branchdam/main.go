@@ -56,6 +56,11 @@ func main() {
 		os.Exit(runHealthcheck(cfg.ListenAddr))
 	}
 
+	if err := validatePruneConfig(cfg.StorageLocations); err != nil {
+		log.Error("invalid config", "err", err)
+		os.Exit(1)
+	}
+
 	log.Info("loaded config", "version", version, "listenAddr", cfg.ListenAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -474,6 +479,22 @@ func resolveWatchedLocations(ctx context.Context, database *db.DB, cfgs []config
 		})
 	}
 	return out, nil
+}
+
+// validatePruneConfig rejects a config where cacheTtlHours is set on a
+// location that can never actually become eligible for TTL cache pruning
+// (#61): a non-prunable location (the schema's own CHECK already restricts
+// prunable to TIER1_LOCAL_SCRATCH, so this also catches every non-Tier-1
+// location). Caught at startup rather than silently ignored -- an operator
+// setting cacheTtlHours on the wrong location should see a config error,
+// not a purge that quietly never fires.
+func validatePruneConfig(cfgs []config.StorageLocation) error {
+	for _, c := range cfgs {
+		if c.CacheTTLHours > 0 && !c.Prunable {
+			return fmt.Errorf("storage location %q: cacheTtlHours is set but prunable is false", c.Name)
+		}
+	}
+	return nil
 }
 
 // sweptFromConfig returns the config locations to sweep: opt-in via config

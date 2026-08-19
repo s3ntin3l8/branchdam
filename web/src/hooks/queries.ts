@@ -170,6 +170,24 @@ export function useStorageHealth() {
   });
 }
 
+// usePruneCache backs both the Storage Health page's location-level purge
+// control and AssetDetailPage's per-asset [Purge Cache] action -- same
+// endpoint, the caller decides dry-run vs. execute and whether to narrow
+// via nodeIds. Invalidated on success rather than relying on the SSE nudge
+// alone: useEventStream doesn't invalidate "storage-health", so a caller
+// that needs the fresh count right away shouldn't wait on that 10s poll.
+export function usePruneCache() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: import("../api/types").PruneRequest) => api.pruneCache(input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["asset"] });
+    },
+  });
+}
+
 export function useJobs(params: import("../api/types").JobsQueryParams = {}) {
   return useQuery({
     queryKey: ["jobs", params],

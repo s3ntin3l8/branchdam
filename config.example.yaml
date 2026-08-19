@@ -69,6 +69,13 @@ storageLocations:
     rootPath: /storage/scratch
     tier: TIER1_LOCAL_SCRATCH
     prunable: true                # only Tier 1 may be prunable
+    # cacheTtlHours is the age (by mtime, not scan recency) past which an
+    # ACTIVE node here becomes eligible for TTL cache pruning (#61) --
+    # provided it also has a verified full_hash on a Tier-3 location.
+    # prunable alone does not imply a TTL: zero (the default) means
+    # "never eligible". Setting this on a non-prunable location is a
+    # startup config error.
+    cacheTtlHours: 720             # 30 days
     # watch: false                # off by default
     watch: true                   # example: watch continuous ingest on working tiers
 

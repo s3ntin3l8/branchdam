@@ -1,5 +1,6 @@
-import { useStorageHealth } from "../hooks/queries";
-import type { StorageLocationHealth } from "../api/types";
+import { useState } from "react";
+import { usePruneCache, useStorageHealth } from "../hooks/queries";
+import type { PruneCandidate, StorageLocationHealth } from "../api/types";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -7,6 +8,122 @@ function formatBytes(bytes: number): string {
   const sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+// PruneControl is a two-step flow: "Purge Cache" runs a dry-run plan and
+// shows the candidate count/bytes; a second, explicit click ("Confirm
+// Purge") re-posts with execute:true. Mirrors the repo's existing feedback
+// pattern (IngestPage/AuditQueuePage) -- isPending disables the button and
+// swaps its label, errors render as inline text -- no toast library exists
+// in this codebase, so this deliberately doesn't add one.
+function PruneControl({ locationId }: { locationId: number }) {
+  const [plan, setPlan] = useState<PruneCandidate[] | null>(null);
+  const [result, setResult] = useState<PruneCandidate[] | null>(null);
+  const pruneCache = usePruneCache();
+
+  const runPlan = () => {
+    setResult(null);
+    pruneCache.mutate(
+      { storageLocationId: locationId },
+      { onSuccess: (res) => setPlan(res.candidates) },
+    );
+  };
+
+  const runExecute = () => {
+    pruneCache.mutate(
+      { storageLocationId: locationId, execute: true },
+      {
+        onSuccess: (res) => {
+          setPlan(null);
+          setResult(res.candidates);
+        },
+      },
+    );
+  };
+
+  const cancel = () => setPlan(null);
+
+  if (result) {
+    const purged = result.filter((c) => c.purged).length;
+    const failed = result.length - purged;
+    return (
+      <div className="rounded bg-neutral-800/50 p-3 text-xs text-neutral-300 border border-neutral-700">
+        <p>
+          Purged {purged} file{purged === 1 ? "" : "s"}
+          {failed > 0 ? `, ${failed} failed` : ""}.
+        </p>
+        {failed > 0 && (
+          <ul className="mt-1 space-y-0.5 text-red-400">
+            {result
+              .filter((c) => !c.purged)
+              .map((c) => (
+                <li key={c.nodeId} className="font-mono break-all">
+                  {c.filePath}: {c.error}
+                </li>
+              ))}
+          </ul>
+        )}
+        <button
+          type="button"
+          onClick={() => setResult(null)}
+          className="mt-2 rounded bg-neutral-700 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-600"
+        >
+          Dismiss
+        </button>
+      </div>
+    );
+  }
+
+  if (plan) {
+    const totalBytes = plan.reduce((sum, c) => sum + c.sizeBytes, 0);
+    return (
+      <div className="rounded bg-neutral-800/50 p-3 text-xs text-neutral-300 border border-neutral-700 space-y-2">
+        <p>
+          {plan.length === 0
+            ? "No files are eligible for pruning right now."
+            : `${plan.length} file${plan.length === 1 ? "" : "s"} eligible (${formatBytes(totalBytes)}).`}
+        </p>
+        {pruneCache.isError && (
+          <p className="text-red-400">Purge failed: {String(pruneCache.error)}</p>
+        )}
+        <div className="flex gap-2">
+          {plan.length > 0 && (
+            <button
+              type="button"
+              onClick={runExecute}
+              disabled={pruneCache.isPending}
+              className="rounded bg-red-900 px-2 py-1 text-xs text-red-200 hover:bg-red-800 disabled:opacity-50"
+            >
+              {pruneCache.isPending ? "Purging…" : "Confirm Purge"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={cancel}
+            className="rounded bg-neutral-700 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-600"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {pruneCache.isError && (
+        <p className="mb-1 text-xs text-red-400">Plan failed: {String(pruneCache.error)}</p>
+      )}
+      <button
+        type="button"
+        onClick={runPlan}
+        disabled={pruneCache.isPending}
+        className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 border border-neutral-700 hover:bg-neutral-700 disabled:opacity-50"
+      >
+        {pruneCache.isPending ? "Checking…" : "Purge Cache"}
+      </button>
+    </div>
+  );
 }
 
 function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
@@ -89,6 +206,12 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
             </div>
           </div>
         </>
+      )}
+
+      {loc.prunable && (
+        <div className="pt-2 border-t border-neutral-800">
+          <PruneControl locationId={loc.id} />
+        </div>
       )}
     </div>
   );

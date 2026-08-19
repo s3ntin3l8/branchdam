@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, ScanJob, StorageHealth, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PruneRequest, PruneResponse, ScanJob, StorageHealth, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -86,4 +86,10 @@ export const api = {
   },
 
   getStorageHealth: () => request<StorageHealth>("/api/v1/storage-health"),
+
+  pruneCache: (input: PruneRequest) =>
+    request<PruneResponse>("/api/v1/prune", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
 };

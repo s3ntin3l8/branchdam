@@ -89,6 +89,17 @@ internal/db/sqlcgen/` and manually inspect every file you did not deliberately c
 drift (interface method reordering, previously-missing doc comments) is fine to keep, but revert
 any file with unexplained diffs and re-add only the query you actually meant to add/change.
 
+**sqlc's SQLite grammar doesn't support `GLOB`, and mixes up `sqlc.arg(name)` numbering when a
+plain `?N` placeholder appears earlier in the same query file (#61).** `GLOB` fails outright
+(`no viable alternative at input 'GLOB'`) -- use `length(x) = N` / other operators instead. Less
+obviously: a new query using `sqlc.arg(name)` placed in a file that *also* has an earlier query
+using bare positional params (`?1`, `?2`, ...) fails to parse with a cascade of confusing
+"extraneous input ')'" / "no viable alternative" errors that look like a syntax problem in the
+new query itself -- reproduced by bisection on a clean, working query in isolation. The fix is to
+use plain `?1`/`?2` instead of `sqlc.arg(name)` in that file (matching what most of the codebase
+already does), not to debug the SQL. Confirmed as a real generator bug for this sqlc version by
+reproducing with a trivial two-query file, not something specific to any one query's shape.
+
 ### Frontend (Vite + React + TypeScript)
 
 ```sh
@@ -198,7 +209,16 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   storage location. `Guard.CheckWrite` resolves the canonical (symlink-resolved) path against
   `storage_locations` and refuses a read-only tier with a typed `*ErrReadOnlyTier` before any
   syscall -- a `:ro` bind mount alone only surfaces `EROFS` at whatever call depth first happens
-  to touch it.
+  to touch it. `internal/prune.Execute` (#61) is `Guard.Remove`'s first and, by design, only
+  production caller -- every purge still resolves through `CheckWrite` first, so a symlink from a
+  prunable Tier-1 location into Tier 3 is refused the same way any other Guard caller is.
+- **A Tier-1 cache file is only prunable with a verified Tier-3 master.** `ListPrunableNodes`
+  (#61) requires a *live* ancestor (`lifecycle_state IN ('ACTIVE','HIDDEN')`, walked via
+  `media_edges` target→source, `REJECTED` edges excluded) on a `TIER3_MASTER_ARCHIVE` location
+  with a non-NULL 64-length `full_hash` -- a MISSING or ARCHIVED master, or one with no verified
+  hash, never authorizes a purge. TTL itself is config-only (`StorageLocation.CacheTTLHours`,
+  compared against `mtime_unix`, not `last_seen_at`) -- `prunable: true` alone never makes a node
+  eligible.
 - **Identity is read in exactly one place.** `internal/auth.BrowserChain` is the only code
   permitted to reference `X-Authentik-*`. `AgentChain` deletes those headers unconditionally
   (before even checking the API key) on the router that bypasses Authentik ForwardAuth by

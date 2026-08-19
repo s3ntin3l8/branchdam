@@ -495,6 +495,33 @@ func TestStartImmichWorkerEnabledWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestValidatePruneConfig(t *testing.T) {
+	t.Run("cacheTtlHours without prunable is rejected", func(t *testing.T) {
+		cfg := []config.StorageLocation{
+			{Name: "scratch", RootPath: "/s", Tier: "TIER1_LOCAL_SCRATCH", Prunable: false, CacheTTLHours: 24},
+		}
+		if err := validatePruneConfig(cfg); err == nil {
+			t.Fatal("validatePruneConfig = nil, want an error")
+		}
+	})
+	t.Run("cacheTtlHours with prunable is accepted", func(t *testing.T) {
+		cfg := []config.StorageLocation{
+			{Name: "scratch", RootPath: "/s", Tier: "TIER1_LOCAL_SCRATCH", Prunable: true, CacheTTLHours: 24},
+		}
+		if err := validatePruneConfig(cfg); err != nil {
+			t.Errorf("validatePruneConfig = %v, want nil", err)
+		}
+	})
+	t.Run("prunable without cacheTtlHours is accepted (never eligible, not an error)", func(t *testing.T) {
+		cfg := []config.StorageLocation{
+			{Name: "scratch", RootPath: "/s", Tier: "TIER1_LOCAL_SCRATCH", Prunable: true},
+		}
+		if err := validatePruneConfig(cfg); err != nil {
+			t.Errorf("validatePruneConfig = %v, want nil", err)
+		}
+	})
+}
+
 func TestSweptFromConfig(t *testing.T) {
 	cfg := []config.StorageLocation{
 		{Name: "nas", RootPath: "/n", Tier: "TIER2_EXPORTS", Sweep: true},

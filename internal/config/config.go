@@ -119,6 +119,17 @@ type StorageLocation struct {
 	// treats interval<=0 uniformly) rather than producing a busy-looping
 	// sweep, but is not itself a meaningful config value -- avoid it.
 	SweepIntervalSecs int `yaml:"sweepIntervalSecs"`
+
+	// CacheTTLHours is the age (by mtime_unix, not last_seen_at -- scan
+	// recency is not the same as file age) past which an ACTIVE node on
+	// this location becomes eligible for TTL cache pruning (#61), provided
+	// it also has a verified Tier-3 ancestor (see ListPrunableNodes). Zero
+	// (the default) means "never eligible" -- prunable alone does not imply
+	// a TTL. Only meaningful when Prunable is true; validated at startup
+	// (validatePruneConfig, cmd/branchdam) against Prunable and Tier both,
+	// since the DB schema itself already restricts Prunable to
+	// TIER1_LOCAL_SCRATCH.
+	CacheTTLHours int `yaml:"cacheTtlHours"`
 }
 
 func defaultConfig() Config {
