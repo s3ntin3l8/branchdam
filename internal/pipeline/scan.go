@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -160,12 +161,42 @@ func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Locatio
 	return job.ID, nil
 }
 
+// ErrScanAlreadyRunning is returned by createScanJob (and so by RunScan) when
+// a FULL_SCAN job is already RUNNING for the same storage location (#163).
+// Two concurrent POSTs to /api/v1/scan for one location otherwise each walk
+// it independently; workers.Pool.Submit dedups by file path, so the second
+// scan's submissions are silently refused for every file, leaving a
+// confusing large files_failed count with no indication why. Rejecting the
+// second scan outright is clearer and fail-safe: ReconcileOrphanedScanJobs
+// already flips any stale RUNNING row to FAILED at startup, so a crashed
+// process can never permanently strand a location behind this guard.
+var ErrScanAlreadyRunning = errors.New("a scan is already running for this storage location")
+
 // createScanJob inserts the scan_jobs row for a new pass. Shared by
 // startScanAsync (FULL_SCAN/INCREMENTAL, fire-and-forget) and
-// SweeperSupervisor.runOneSweep (INCREMENTAL, synchronous).
+// SweeperSupervisor.runOneSweep (INCREMENTAL, synchronous). The
+// already-running check is scoped to kind == "FULL_SCAN" only -- WATCH jobs
+// are already singleton-per-location via WatcherSupervisor.Start's
+// sync.Once and are long-lived by design, and INCREMENTAL sweeps are
+// already serialized per-location by SweeperSupervisor's own loop -- so
+// neither needs (or should get) this guard.
 func createScanJob(ctx context.Context, deps ScanDeps, location storage.Location, kind string) (sqlcgen.ScanJob, error) {
 	var job sqlcgen.ScanJob
 	err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if kind == "FULL_SCAN" {
+			// Checked inside the same transaction as the insert below so the
+			// check-then-create is one atomic unit -- the writer pool being
+			// single-connection makes this safe today, but the transaction
+			// is what makes it correct, not an accident of that connection
+			// count.
+			running, err := q.CountRunningFullScansForLocation(ctx, sql.NullInt64{Int64: location.ID, Valid: true})
+			if err != nil {
+				return fmt.Errorf("count running full scans: %w", err)
+			}
+			if running > 0 {
+				return ErrScanAlreadyRunning
+			}
+		}
 		j, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
 			StorageLocationID: sql.NullInt64{Int64: location.ID, Valid: true},
 			Kind:              kind,
@@ -174,6 +205,9 @@ func createScanJob(ctx context.Context, deps ScanDeps, location storage.Location
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, ErrScanAlreadyRunning) {
+			return sqlcgen.ScanJob{}, err
+		}
 		return sqlcgen.ScanJob{}, fmt.Errorf("create scan job: %w", err)
 	}
 	return job, nil

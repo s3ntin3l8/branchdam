@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -82,6 +83,64 @@ func TestRunScanEndToEnd(t *testing.T) {
 			t.Errorf("node for %s indexing_status = %q, want INDEXED_SHALLOW (FullHashPolicy=never)", name, node.IndexingStatus)
 		}
 	}
+}
+
+// TestRunScanRejectsDuplicateRunningFullScan backs #163: a second RunScan
+// call against a location that already has a RUNNING FULL_SCAN job must be
+// rejected outright, not silently create a second job that starves on
+// workers.Pool.Submit's per-path dedup.
+func TestRunScanRejectsDuplicateRunningFullScan(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	location := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	var runningJob sqlcgen.ScanJob
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		j, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: locationID, Valid: true},
+			Kind:              "FULL_SCAN",
+		})
+		runningJob = j
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed running scan job: %v", err)
+	}
+
+	if _, err := RunScan(ctx, deps, location); !errors.Is(err, ErrScanAlreadyRunning) {
+		t.Fatalf("RunScan while a FULL_SCAN is RUNNING: err = %v, want ErrScanAlreadyRunning", err)
+	}
+
+	jobs, err := database.Reader.ListScanJobsFiltered(ctx, sqlcgen.ListScanJobsFilteredParams{
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListScanJobsFiltered: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("scan_jobs row count = %d, want 1 (no second job created)", len(jobs))
+	}
+
+	// Terminalize the seeded job -- a following RunScan must now succeed.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.CompleteScanJob(ctx, runningJob.ID)
+	}); err != nil {
+		t.Fatalf("complete seeded job: %v", err)
+	}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan after prior job terminalized: %v", err)
+	}
+	waitJobDone(t, database, jobID)
 }
 
 func writeFile(t *testing.T, path, contents string) {

@@ -1135,6 +1135,9 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 			}
 		},
 	}, location)
+	if errors.Is(err, pipeline.ErrScanAlreadyRunning) {
+		return nil, huma.Error409Conflict("a scan is already running for this storage location")
+	}
 	if err != nil {
 		return nil, huma.Error500InternalServerError("start scan", err)
 	}

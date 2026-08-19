@@ -4,6 +4,16 @@ VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch())
 RETURNING id, storage_location_id, kind, state, files_seen, files_hashed,
           files_failed, edges_created, started_at, finished_at, last_error, updated_at;
 
+-- name: CountRunningFullScansForLocation :one
+-- #163: called inside the same transaction as CreateScanJob (see
+-- pipeline.RunScan) so the check-then-insert is one atomic unit, not just
+-- an accident of the writer pool being single-connection. Scoped to
+-- kind = 'FULL_SCAN' only -- WATCH jobs are already singleton-per-location
+-- via WatcherSupervisor.Start's sync.Once and are long-lived by design, so
+-- they must not block a FULL_SCAN (or vice versa).
+SELECT COUNT(*) FROM scan_jobs
+WHERE storage_location_id = ?1 AND kind = 'FULL_SCAN' AND state = 'RUNNING';
+
 -- name: UpdateScanJobProgress :exec
 UPDATE scan_jobs
 SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, edges_created = ?5, updated_at = unixepoch()

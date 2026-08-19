@@ -28,6 +28,13 @@ type Querier interface {
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
+	// #163: called inside the same transaction as CreateScanJob (see
+	// pipeline.RunScan) so the check-then-insert is one atomic unit, not just
+	// an accident of the writer pool being single-connection. Scoped to
+	// kind = 'FULL_SCAN' only -- WATCH jobs are already singleton-per-location
+	// via WatcherSupervisor.Start's sync.Once and are long-lived by design, so
+	// they must not block a FULL_SCAN (or vice versa).
+	CountRunningFullScansForLocation(ctx context.Context, storageLocationID sql.NullInt64) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
 	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
