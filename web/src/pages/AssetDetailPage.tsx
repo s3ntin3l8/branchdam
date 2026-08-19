@@ -1,8 +1,68 @@
 import { useState } from "react";
 import { useParams, useSearchParams } from "react-router";
-import { useAsset, useAssetLineage, useAssetSyncStatus, usePruneCache, useRetrySync, useStorageLocations } from "../hooks/queries";
+import {
+  useAsset,
+  useAssetLineage,
+  useAssetSyncStatus,
+  useInheritMetadata,
+  usePruneCache,
+  useRetrySync,
+  useStorageLocations,
+} from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
 import type { Asset } from "../api/types";
+
+// identityTags are the two tags Plan (internal/metadata) always emits
+// regardless of whether there was anything to inherit -- excluded from the
+// "N tag(s) inherited" count so re-running against an already-fully-tagged
+// child (or one with no eligible parent field at all) doesn't read as
+// having inherited something.
+const identityTags = new Set(["XMP-dc:Identifier", "XMP-xmpMM:DerivedFrom"]);
+
+// AssetInheritMetadataControl backs POST /api/v1/assets/{id}/inherit-metadata
+// (#54) -- the client for this endpoint (api.inheritMetadata) has existed
+// since #156 but had no caller anywhere in the SPA until now (#186).
+// Attempt-then-report, same shape as AssetPruneControl below: the endpoint's
+// eligibility rules (a resolved Tier-1/2 ancestry parent that isn't
+// ARCHIVED/MISSING, a writable location, exiftool available) are involved
+// enough that re-deriving them client-side to gate the button would drift
+// from the server's actual logic -- the 409/422/503 response body's message
+// is surfaced as-is instead.
+function AssetInheritMetadataControl({ asset }: { asset: Asset }) {
+  const inheritMetadata = useInheritMetadata();
+  const [inheritedCount, setInheritedCount] = useState<number | null>(null);
+
+  const handleClick = () => {
+    setInheritedCount(null);
+    inheritMetadata.mutate(asset.id, {
+      onSuccess: (data) => {
+        const count = Object.keys(data.inherited).filter((tag) => !identityTags.has(tag)).length;
+        setInheritedCount(count);
+      },
+    });
+  };
+
+  return (
+    <span className="flex items-center gap-2 text-xs">
+      {inheritMetadata.isError && (
+        <span className="text-red-400">Inherit failed: {String(inheritMetadata.error)}</span>
+      )}
+      {inheritedCount !== null && !inheritMetadata.isError && (
+        <span className="text-neutral-400">
+          {inheritedCount > 0 ? `Inherited ${inheritedCount} tag${inheritedCount === 1 ? "" : "s"}.` : "Nothing new to inherit."}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={inheritMetadata.isPending}
+        className="rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+      >
+        {inheritMetadata.isPending ? "Inheriting…" : "Inherit Metadata"}
+      </button>
+    </span>
+  );
+}
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -165,7 +225,10 @@ export default function AssetDetailPage() {
       </div>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium text-neutral-400">Metadata</h2>
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-medium text-neutral-400">Metadata</h2>
+          {asset.lifecycleState !== "ARCHIVED" && <AssetInheritMetadataControl asset={asset} />}
+        </div>
         <dl className="rounded border border-neutral-800 p-3">
           <Field label="Node UUID" value={asset.nodeUuid} />
           <Field label="Size" value={`${asset.sizeBytes} bytes`} />
