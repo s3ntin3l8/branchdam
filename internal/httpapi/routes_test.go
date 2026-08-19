@@ -756,6 +756,26 @@ func TestOpenAPIEndpointExposure(t *testing.T) {
 			}
 		}
 	})
+
+	// #164: openAPIMiddleware's admin check has its own !ok/group-check
+	// logic, separate from RequireAdmin's -- a request with zero identity
+	// headers at all must not slip past it via the empty-allowedGroups
+	// permits-all path, the same gap this issue closes for mutating routes.
+	t.Run("no identity headers denied even with empty allowedGroups", func(t *testing.T) {
+		srv, _ := fullTestServer(t)
+		srv.cfg.HTTP.ExposeOpenAPI = true
+
+		paths := []string{"/openapi.json", "/docs"}
+		for _, p := range paths {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("GET %s with no identity headers, empty allowedGroups: status = %d, want %d", p, rr.Code, http.StatusForbidden)
+			}
+		}
+	})
 }
 
 func TestHandleListPathRewrites(t *testing.T) {
