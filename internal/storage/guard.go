@@ -228,12 +228,22 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 // already at this Tier 3 path" (safe to record in the database) from "they
 // are not" (nothing else will ever place them there, since Tier 3 is
 // read-only) without ever attempting a write against the archive itself.
+//
+// Deliberately os.Stat, not os.Lstat: canonicalize only resolves symlinks
+// up to the deepest EXISTING ancestor, so for a DANGLING symlink at the
+// leaf position (the link itself exists on disk, its target does not),
+// EvalSymlinks fails to resolve the target and canonicalize rejoins the
+// leaf name literally -- canon ends up pointing at the symlink itself, not
+// through it. Lstat would then report the dangling link as "existing" even
+// though zero real bytes are present at the target, defeating the entire
+// point of this check. Stat follows the symlink and correctly reports
+// absent when the target doesn't resolve.
 func (g *Guard) Exists(path string) (bool, error) {
 	canon, err := canonicalize(path)
 	if err != nil {
 		return false, fmt.Errorf("storage: resolve %q: %w", path, err)
 	}
-	if _, err := os.Lstat(canon); err != nil {
+	if _, err := os.Stat(canon); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}

@@ -454,6 +454,11 @@ func TestDrainer_PoisonPill_And_MalformedPayload(t *testing.T) {
 func TestDrainer_RefuseTier3Rebase(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	// The file-not-yet-present case is deliberately transient (retries,
+	// not an immediate fatal failure -- see ErrArchiveFileNotYetPresent's
+	// doc comment), so pin maxRetries=1 to reach a terminal FAILED state
+	// within this test's single DrainAll call.
+	drainer.SetMaxRetries(1)
 	ctx := context.Background()
 
 	nodeUUID := uuid.New().String()
@@ -489,6 +494,8 @@ func TestDrainer_RefuseTier3Rebase(t *testing.T) {
 func TestDrainer_RefuseTier3NodeMoved(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	// See TestDrainer_RefuseTier3Rebase: file-not-yet-present is transient.
+	drainer.SetMaxRetries(1)
 	ctx := context.Background()
 
 	nodeUUID := uuid.New().String()
@@ -599,6 +606,77 @@ func TestDrainer_NodeMoved_Tier3WhenFileAlreadyArchived(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tier3Path, node.FilePath)
 		require.Equal(t, env.locID3, node.StorageLocationID)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_NonTier3ReadOnlyStaysRefusedEvenWithFile is issue #167's
+// scoping guarantee: the file-already-present exemption applies ONLY to
+// TIER3_MASTER_ARCHIVE, never to any other read-only location, even when
+// the target file genuinely exists there. Without this test, a future
+// change accidentally widening resolveRebaseTarget's Tier-3 check (e.g.
+// dropping the loc.Tier != "TIER3_MASTER_ARCHIVE" guard, or a typo in the
+// tier string literal) would go uncaught -- every other read-only fixture
+// in this file is Tier 3, so none of them can distinguish "refused because
+// Tier 3 and file missing" from "refused because read-only, full stop".
+func TestDrainer_NonTier3ReadOnlyStaysRefusedEvenWithFile(t *testing.T) {
+	env := setupTestDB(t)
+	ctx := context.Background()
+
+	// A read-only location that is NOT Tier 3 -- the schema permits this
+	// (only Tier 3 is required to be read-only, not the reverse).
+	roDir := filepath.Join(t.TempDir(), "readonly-import")
+	require.NoError(t, os.MkdirAll(roDir, 0o755))
+	resRoDir, err := filepath.EvalSymlinks(roDir)
+	require.NoError(t, err)
+
+	var roLoc sqlcgen.StorageLocation
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		roLoc, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: 1, Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	guard := storage.NewGuard([]storage.Location{
+		{ID: env.locID1, Name: "local_staging", RootPath: env.staging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: false},
+		{ID: roLoc.ID, Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: true},
+	})
+	drainer := agent.NewDrainer(env.db, guard, nil)
+	drainer.SetMaxRetries(1) // this refusal is fatal, but pin it anyway for a deterministic single-pass assertion
+
+	// The file genuinely exists -- this must still be refused, unlike the
+	// Tier-3 case, which would allow it.
+	targetPath := filepath.Join(resRoDir, "already_here.raw")
+	require.NoError(t, os.WriteFile(targetPath, []byte("bytes"), 0o644))
+
+	nodeUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "orig.raw"),
+	})
+	rebaseEvent := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       nodeUUID,
+		TargetFilePath: targetPath,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, rebaseEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", ev.Status)
+		require.True(t, ev.ErrorLog.Valid)
+		require.Contains(t, ev.ErrorLog.String, "read-only")
+
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		require.NoError(t, err)
+		require.NotEqual(t, targetPath, node.FilePath, "the refused rebase must not have taken effect")
 		return nil
 	})
 	require.NoError(t, err)

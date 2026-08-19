@@ -34,6 +34,17 @@ var (
 	// ErrWouldCreateCycle is fatal, not transient: the graph does not
 	// un-cycle itself by retrying the same edge.
 	ErrWouldCreateCycle = errors.New("agent: edge would create a cycle")
+
+	// ErrArchiveFileNotYetPresent is deliberately transient, unlike
+	// ErrReadOnlyRebase: unlike a genuinely-read-only, non-Tier-3 tier
+	// (which never becomes writable by retrying), a Tier-3 target missing
+	// its file today may well have it by the next drain pass -- the
+	// workstation agent is still mid-copy. Left out of ProcessPending's
+	// isFatal set on purpose, so it goes through the normal retry/backoff
+	// path (maxRetries) instead of failing permanently on the first
+	// attempt; only marked FAILED once retries are exhausted with the
+	// bytes still absent. Flagged by an independent review pass on #178.
+	ErrArchiveFileNotYetPresent = errors.New("agent: rebase target resolves to Tier 3 but the file does not exist there yet")
 )
 
 // NodeCreatedPayload represents the payload for EVENT_NODE_CREATED.

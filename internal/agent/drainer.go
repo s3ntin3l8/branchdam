@@ -673,7 +673,7 @@ func resolveRebaseTarget(guard *storage.Guard, path string) (storage.Location, e
 		return storage.Location{}, fmt.Errorf("%w: checking whether rebase target %q already exists: %v", ErrMalformedPayload, path, err)
 	}
 	if !exists {
-		return storage.Location{}, fmt.Errorf("%w: rebase target %q resolves to read-only tier %s and no file exists there yet -- the bytes must already be copied into the archive before the server can rebase the record", ErrReadOnlyRebase, path, loc.Tier)
+		return storage.Location{}, fmt.Errorf("%w: rebase target %q resolves to read-only tier %s and no file exists there yet -- the bytes must already be copied into the archive before the server can rebase the record", ErrArchiveFileNotYetPresent, path, loc.Tier)
 	}
 	return loc, nil
 }

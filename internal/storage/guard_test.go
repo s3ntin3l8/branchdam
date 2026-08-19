@@ -323,3 +323,29 @@ func TestExistsThroughSymlinkEscapeUsesRealTarget(t *testing.T) {
 		t.Error("Exists through symlink to a real Tier 3 file = false, want true")
 	}
 }
+
+// TestExistsDanglingLeafSymlinkReportsAbsent is the case os.Lstat would get
+// wrong: a symlink AT THE LEAF whose target does not exist. canonicalize
+// can't resolve through a dangling link (EvalSymlinks fails on the
+// nonexistent target), so it rejoins the leaf name literally -- canon ends
+// up naming the symlink itself, not its target. Exists must still report
+// false here: an os.Lstat-based check would see the link itself "exists" on
+// disk and wrongly report true even though zero real bytes are present,
+// which for the Tier-3-rebase exemption (issue #167) would let a rebase
+// succeed against a target that was never actually archived.
+func TestExistsDanglingLeafSymlinkReportsAbsent(t *testing.T) {
+	guard, _, tier3 := newTestGuard(t)
+
+	danglingLink := filepath.Join(tier3, "broken.arw")
+	if err := os.Symlink(filepath.Join(tier3, "never_written.raw"), danglingLink); err != nil {
+		t.Fatalf("create dangling symlink: %v", err)
+	}
+
+	ok, err := guard.Exists(danglingLink)
+	if err != nil {
+		t.Fatalf("Exists(dangling symlink) error: %v", err)
+	}
+	if ok {
+		t.Error("Exists(dangling symlink) = true, want false -- the symlink itself exists but its target does not")
+	}
+}

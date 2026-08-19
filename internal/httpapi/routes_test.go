@@ -2229,3 +2229,114 @@ func TestAgentRebase_RefusesArchivedNode(t *testing.T) {
 		t.Fatalf("verify archived node untouched: %v", err)
 	}
 }
+
+// TestAgentRebase_NonTier3ReadOnlyRefusedEvenWithFile is handleAgentRebase's
+// half of the same scoping guarantee covered on the drainer side by
+// TestDrainer_NonTier3ReadOnlyStaysRefusedEvenWithFile (issue #167): the
+// file-already-present exemption applies only to TIER3_MASTER_ARCHIVE, not
+// to read-only locations in general, even when the target file genuinely
+// exists.
+func TestAgentRebase_NonTier3ReadOnlyRefusedEvenWithFile(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	roDir := filepath.Join(root, "readonly-import")
+	for _, d := range []string{staging, roDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	resStaging, _ := filepath.EvalSymlinks(staging)
+	resRoDir, _ := filepath.EvalSymlinks(roDir)
+
+	dbPath := filepath.Join(root, "routes.db")
+	database, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	ctx := context.Background()
+	var stagingLoc, roLoc sqlcgen.StorageLocation
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		stagingLoc, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "staging", RootPath: resStaging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		roLoc, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: 1, Prunable: 0,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("upsert locations: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{
+		{ID: stagingLoc.ID, Name: "staging", RootPath: resStaging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: false},
+		{ID: roLoc.ID, Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: true},
+	})
+	srv := New(Deps{
+		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		DB:      database,
+		Guard:   guard,
+		Prober:  probe.New(),
+		Engine:  graph.NewEngine(database, nil),
+		Hub:     sse.New(),
+		Version: "test",
+	})
+
+	nodeUUID := "018f0000-0000-7000-8000-0000000000cc"
+	originalPath := filepath.Join(resStaging, "orig.raw")
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          nodeUUID,
+			StorageLocationID: stagingLoc.ID,
+			FilePath:          originalPath,
+			FileName:          "orig.raw",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+
+	// The file genuinely exists at the read-only target -- must still be
+	// refused, unlike the Tier-3 case.
+	targetPath := filepath.Join(resRoDir, "already_here.raw")
+	if err := os.WriteFile(targetPath, []byte("bytes"), 0o644); err != nil {
+		t.Fatalf("seed existing file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   nodeUUID,
+		"targetPath": targetPath,
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("rebase to non-Tier3 read-only location with existing file status = %d, want 400 Bad Request, body = %s", rr.Code, rr.Body.String())
+	}
+
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		if err != nil {
+			return err
+		}
+		if node.FilePath != originalPath {
+			t.Errorf("node file_path = %q, want unchanged %q -- refused rebase must not take effect", node.FilePath, originalPath)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify node untouched: %v", err)
+	}
+}
