@@ -39,17 +39,12 @@ type Worker struct {
 	// wg tracks the run goroutine started by Start so Wait can join it before
 	// the database closes during shutdown.
 	wg sync.WaitGroup
-	// triggeredThisRun tracks whether push has already fired during the
-	// current contiguous run of non-empty drain ticks (#183). The underlying
-	// operation (e.g. Immich's TriggerScan) isn't scoped to one batch's
-	// nodes -- it makes the remote (re-)discover everything already on the
-	// shared mount -- so re-invoking it on every tick of a long backfill is
-	// one full remote operation per batchSize nodes for no added benefit.
-	// Reset to false whenever a tick finds nothing to push, so a later burst
-	// of newly-arrived files still gets its own fresh trigger. Only read/
-	// written from the single run() goroutine, so it needs no lock.
-	triggeredThisRun bool
 }
+
+// enqueueDiscoveryMultiplier makes enqueueUntracked's per-tick discovery
+// limit a multiple of batchSize rather than equal to it (#183) -- see
+// enqueueUntracked's doc comment for why.
+const enqueueDiscoveryMultiplier = 10
 
 func NewWorker(manager *Manager, remote, exportPath string, batchSize int, interval time.Duration, push PushFunc, log *slog.Logger) *Worker {
 	if log == nil {
@@ -107,49 +102,79 @@ func (w *Worker) Wait() { w.wg.Wait() }
 
 func (w *Worker) drain(ctx context.Context) {
 	// Re-claim PUSH_FAILED rows old enough to retry, so a transient remote
-	// failure doesn't strand a batch forever. Then enqueue brand-new nodes.
+	// failure doesn't strand a batch forever. Then enqueue brand-new nodes --
+	// exactly once, before the loop below, which is what makes that loop's
+	// coalescing safe (see its comment).
 	if n, err := w.manager.RecoverFailedPushes(ctx, w.remote, w.retryWindow, w.maxRetries); err != nil {
 		w.log.Warn("sync: recover failed pushes", "err", err)
 	} else if n > 0 {
 		w.log.Info("sync: recovered failed pushes for retry", "remote", w.remote, "count", n)
 	}
 	w.enqueueUntracked(ctx)
-	n, err := w.manager.ProcessPending(ctx, w.remote, w.batchSize, w.coalescedPush)
-	if err != nil {
-		w.log.Error("sync: drain failed", "remote", w.remote, "err", err)
-		return
+
+	// Drain every row PENDING as of the enqueueUntracked call above through
+	// at most one real push call, claiming in batchSize-sized sub-batches so
+	// no single write transaction grows unbounded (#183). This differs from
+	// the cross-tick coalescing it replaced: enqueueUntracked runs exactly
+	// once per drain() call, before this loop starts, so every row the loop
+	// claims was already on disk before the one real push call fires. A
+	// node whose file lands after this tick's enqueueUntracked snapshot
+	// isn't enqueued yet -- it can't be swept into this tick's push
+	// coverage by the noop sub-batches below -- so it simply waits for its
+	// own tick's enqueueUntracked call and gets its own real push there.
+	//
+	// This assumes push is a whole-mount-rescan operation (e.g. Immich's
+	// TriggerScan) that doesn't need to know which specific nodes prompted
+	// it -- true for every remote wired today. A future per-node PushFunc
+	// must not reuse this loop as-is: nodes claimed by the noop sub-batches
+	// are marked PUSHED without ever reaching push.
+	triggered := false
+	total := 0
+	for {
+		pushFn := w.push
+		if triggered {
+			pushFn = noopPush
+		}
+		n, err := w.manager.ProcessPending(ctx, w.remote, w.batchSize, pushFn)
+		if err != nil {
+			w.log.Error("sync: drain failed", "remote", w.remote, "err", err)
+			return
+		}
+		if n == 0 {
+			break
+		}
+		triggered = true
+		total += n
+		if n < w.batchSize {
+			break // a partial batch means nothing more is claimable right now
+		}
 	}
-	if n == 0 {
-		// The backlog is drained for now -- the next non-empty tick starts a
-		// fresh run and gets its own trigger.
-		w.triggeredThisRun = false
-		return
+	if total > 0 {
+		w.log.Info("sync: pushed batch", "remote", w.remote, "count", total)
 	}
-	w.log.Info("sync: pushed batch", "remote", w.remote, "count", n)
 }
 
-// coalescedPush wraps the injected PushFunc so at most one real trigger
-// fires per contiguous run of non-empty drain ticks (#183) -- see
-// triggeredThisRun's doc comment for why. A failed push does not set
-// triggeredThisRun, so the very next tick retries the real call rather than
-// silently treating the failure as "already handled this run".
-func (w *Worker) coalescedPush(ctx context.Context, nodes []Node) error {
-	if w.triggeredThisRun {
-		return nil
-	}
-	if err := w.push(ctx, nodes); err != nil {
-		return err
-	}
-	w.triggeredThisRun = true
-	return nil
-}
+// noopPush lets drain's internal loop mark further sub-batches PUSHED
+// without a redundant real trigger call, once the tick's one real push has
+// already fired -- see drain's doc comment for the safety argument.
+func noopPush(context.Context, []Node) error { return nil }
 
 // enqueueUntracked finds live nodes under exportPath with no row for this
 // remote yet and enqueues them. Once a node is PUSHED it drops out of the
 // source query, so this never re-queues an already-pushed node.
+//
+// The discovery limit is a multiple of batchSize, not equal to it (#183): a
+// large backlog (e.g. a fresh export mount with 100k files) needs to be
+// enqueued in as few ticks as possible for drain's internal loop above to
+// actually coalesce it into one real push per tick, rather than spending one
+// tick -- and one real trigger -- per batchSize newly-discovered nodes as
+// before. Enqueue runs its own read+upsert write transaction per node (see
+// its doc comment), so the multiplier is kept modest rather than unbounded,
+// to bound how long one tick holds the single writer connection against
+// other write paths (scans, edge confirms).
 func (w *Worker) enqueueUntracked(ctx context.Context) {
 	rows, err := w.manager.db.Reader.ListLiveNodesForSync(ctx, sqlcgen.ListLiveNodesForSyncParams{
-		Remote: w.remote, FilePath: w.exportPath, Limit: int64(w.batchSize),
+		Remote: w.remote, FilePath: w.exportPath, Limit: int64(w.batchSize * enqueueDiscoveryMultiplier),
 	})
 	if err != nil {
 		w.log.Warn("sync: list untracked nodes", "err", err)

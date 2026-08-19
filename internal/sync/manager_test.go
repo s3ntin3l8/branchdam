@@ -466,11 +466,12 @@ func TestWorkerStopsOnCancel(t *testing.T) {
 	}
 }
 
-// TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks covers #183: a
-// backlog spanning several batches must trigger the injected push exactly
-// once, not once per batch/tick -- but a new arrival after the backlog
-// drains must get its own fresh trigger.
-func TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks(t *testing.T) {
+// TestWorkerDrainCoalescesPushWithinOneTick covers #183: a backlog spanning
+// several batchSize-sized claims must still trigger the injected push exactly
+// once *within a single drain tick* (enqueueUntracked's discovery limit is a
+// multiple of batchSize precisely so a backlog like this fits in one tick's
+// enqueue snapshot -- see enqueueUntracked's doc comment).
+func TestWorkerDrainCoalescesPushWithinOneTick(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)
 	ctx := context.Background()
@@ -478,8 +479,10 @@ func TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks(t *testing.T) {
 	root := t.TempDir()
 	exportPath := filepath.Join(root, "immich")
 	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
-	// 5 nodes, batchSize 2 -> 3 drain ticks needed to exhaust the backlog
-	// (enqueueUntracked and ProcessPending are both capped at batchSize).
+	// 5 nodes, batchSize 2 -> ProcessPending needs 3 claim/mark sub-batches to
+	// exhaust what one enqueueUntracked call discovers (limit = 2*10 = 20, so
+	// all 5 are enqueued together), but drain's internal loop must still only
+	// invoke the real push once.
 	for i := 0; i < 5; i++ {
 		seedNode(t, database, locID, filepath.Join(exportPath, fmt.Sprintf("shot-%d.jpg", i)))
 	}
@@ -487,12 +490,10 @@ func TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks(t *testing.T) {
 	push := &recordingPush{}
 	w := NewWorker(mgr, RemoteImmich, exportPath, 2, time.Hour, push.fn, nil)
 
-	w.drain(ctx) // enqueues+pushes 2 -> triggers (first tick of the run)
-	w.drain(ctx) // enqueues+pushes 2 more -> must NOT trigger again
-	w.drain(ctx) // enqueues+pushes the last 1 -> must NOT trigger again
+	w.drain(ctx)
 
 	if push.calls != 1 {
-		t.Errorf("push calls across 3 non-empty ticks = %d, want 1 (coalesced into one trigger)", push.calls)
+		t.Errorf("push calls for one tick's 3 internal sub-batches = %d, want 1 (coalesced into one trigger)", push.calls)
 	}
 	rows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
 	if err != nil {
@@ -501,23 +502,57 @@ func TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks(t *testing.T) {
 	if len(rows) != 5 {
 		t.Errorf("pushed rows = %d, want 5 (every node still marked PUSHED despite the coalesced trigger)", len(rows))
 	}
+}
 
-	w.drain(ctx) // backlog is empty -> resets the run
+// TestWorkerDrainNeverCoalescesAcrossTicks is the regression test for the bug
+// a review caught in an earlier version of #183's fix: coalescing scoped to a
+// "contiguous run of non-empty ticks" (spanning multiple drain() calls) could
+// mark a node PUSHED via a later tick's no-op sub-batch even though that
+// node's file only appeared on disk *after* the run's one real push already
+// fired -- silently telling nobody at the remote about it. Two back-to-back
+// non-empty ticks (no empty tick between them) must each still get their own
+// real push call.
+func TestWorkerDrainNeverCoalescesAcrossTicks(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
 
-	// A new node arrives after the backlog drained: it must get its own
-	// fresh trigger, not be silently coalesced into the finished run.
-	seedNode(t, database, locID, filepath.Join(exportPath, "shot-later.jpg"))
-	w.drain(ctx)
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot-1.jpg"))
+
+	push := &recordingPush{}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 16, time.Hour, push.fn, nil)
+
+	w.drain(ctx) // tick 1: pushes shot-1 -> real trigger
+	if push.calls != 1 {
+		t.Fatalf("push calls after tick 1 = %d, want 1", push.calls)
+	}
+
+	// A second file lands before the next tick runs -- e.g. arriving on the
+	// export mount between two 10s-interval ticks in production. The old
+	// cross-run coalescing would have swallowed this into tick 1's trigger
+	// via a no-op; it must instead get pushed for real.
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot-2.jpg"))
+	w.drain(ctx) // tick 2: must push shot-2 for real, not silently mark it PUSHED
 	if push.calls != 2 {
-		t.Errorf("push calls after a post-drain arrival = %d, want 2 (a new run gets a fresh trigger)", push.calls)
+		t.Errorf("push calls after tick 2's new arrival = %d, want 2 (each tick's own backlog gets its own real trigger)", push.calls)
+	}
+
+	rows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("pushed rows = %d, want 2", len(rows))
 	}
 }
 
-// TestWorkerCoalescingRetriesAfterAFailedTrigger proves a failed push does
-// not get treated as "already handled this run" -- the very next tick must
-// retry the real call, not silently coalesce into a run that never actually
-// triggered anything.
-func TestWorkerCoalescingRetriesAfterAFailedTrigger(t *testing.T) {
+// TestWorkerDrainRetriesAfterAFailedTrigger proves a failed push halts that
+// tick's internal loop rather than masking the failure behind a later no-op
+// sub-batch, and that the very next tick retries the real call.
+func TestWorkerDrainRetriesAfterAFailedTrigger(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)
 	ctx := context.Background()
