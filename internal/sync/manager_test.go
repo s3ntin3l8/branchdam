@@ -466,6 +466,101 @@ func TestWorkerStopsOnCancel(t *testing.T) {
 	}
 }
 
+// TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks covers #183: a
+// backlog spanning several batches must trigger the injected push exactly
+// once, not once per batch/tick -- but a new arrival after the backlog
+// drains must get its own fresh trigger.
+func TestWorkerCoalescesPushAcrossContiguousNonEmptyTicks(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	// 5 nodes, batchSize 2 -> 3 drain ticks needed to exhaust the backlog
+	// (enqueueUntracked and ProcessPending are both capped at batchSize).
+	for i := 0; i < 5; i++ {
+		seedNode(t, database, locID, filepath.Join(exportPath, fmt.Sprintf("shot-%d.jpg", i)))
+	}
+
+	push := &recordingPush{}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 2, time.Hour, push.fn, nil)
+
+	w.drain(ctx) // enqueues+pushes 2 -> triggers (first tick of the run)
+	w.drain(ctx) // enqueues+pushes 2 more -> must NOT trigger again
+	w.drain(ctx) // enqueues+pushes the last 1 -> must NOT trigger again
+
+	if push.calls != 1 {
+		t.Errorf("push calls across 3 non-empty ticks = %d, want 1 (coalesced into one trigger)", push.calls)
+	}
+	rows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Errorf("pushed rows = %d, want 5 (every node still marked PUSHED despite the coalesced trigger)", len(rows))
+	}
+
+	w.drain(ctx) // backlog is empty -> resets the run
+
+	// A new node arrives after the backlog drained: it must get its own
+	// fresh trigger, not be silently coalesced into the finished run.
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot-later.jpg"))
+	w.drain(ctx)
+	if push.calls != 2 {
+		t.Errorf("push calls after a post-drain arrival = %d, want 2 (a new run gets a fresh trigger)", push.calls)
+	}
+}
+
+// TestWorkerCoalescingRetriesAfterAFailedTrigger proves a failed push does
+// not get treated as "already handled this run" -- the very next tick must
+// retry the real call, not silently coalesce into a run that never actually
+// triggered anything.
+func TestWorkerCoalescingRetriesAfterAFailedTrigger(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	seedNode(t, database, locID, filepath.Join(exportPath, "shot.jpg"))
+
+	failing := &recordingPush{err: errors.New("transient 5xx")}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 16, time.Hour, failing.fn, nil)
+	w.retryWindow = 0
+
+	w.drain(ctx) // enqueues + attempts to push -> fails, PUSH_FAILED
+	if failing.calls != 1 {
+		t.Fatalf("push calls after first (failing) drain = %d, want 1", failing.calls)
+	}
+
+	// Backdate last_attempt_at, same as TestWorkerRetriesFailedPushes: without
+	// it, unixepoch()'s 1s granularity can make last_attempt_at < now false
+	// within the same wall-clock second, independent of anything this test
+	// is actually about.
+	node, err := database.Reader.GetLiveNodeByPath(ctx, filepath.Join(exportPath, "shot.jpg"))
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSH_FAILED",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{String: "transient 5xx", Valid: true},
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-1 * time.Hour).Unix(), Valid: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	w.drain(ctx) // retries the same node -> must call push again, not skip it
+	if failing.calls != 2 {
+		t.Errorf("push calls after a retried drain = %d, want 2 (a failed trigger must not be coalesced away)", failing.calls)
+	}
+}
+
 func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)

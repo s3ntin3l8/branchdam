@@ -39,6 +39,16 @@ type Worker struct {
 	// wg tracks the run goroutine started by Start so Wait can join it before
 	// the database closes during shutdown.
 	wg sync.WaitGroup
+	// triggeredThisRun tracks whether push has already fired during the
+	// current contiguous run of non-empty drain ticks (#183). The underlying
+	// operation (e.g. Immich's TriggerScan) isn't scoped to one batch's
+	// nodes -- it makes the remote (re-)discover everything already on the
+	// shared mount -- so re-invoking it on every tick of a long backfill is
+	// one full remote operation per batchSize nodes for no added benefit.
+	// Reset to false whenever a tick finds nothing to push, so a later burst
+	// of newly-arrived files still gets its own fresh trigger. Only read/
+	// written from the single run() goroutine, so it needs no lock.
+	triggeredThisRun bool
 }
 
 func NewWorker(manager *Manager, remote, exportPath string, batchSize int, interval time.Duration, push PushFunc, log *slog.Logger) *Worker {
@@ -104,14 +114,34 @@ func (w *Worker) drain(ctx context.Context) {
 		w.log.Info("sync: recovered failed pushes for retry", "remote", w.remote, "count", n)
 	}
 	w.enqueueUntracked(ctx)
-	n, err := w.manager.ProcessPending(ctx, w.remote, w.batchSize, w.push)
+	n, err := w.manager.ProcessPending(ctx, w.remote, w.batchSize, w.coalescedPush)
 	if err != nil {
 		w.log.Error("sync: drain failed", "remote", w.remote, "err", err)
 		return
 	}
-	if n > 0 {
-		w.log.Info("sync: pushed batch", "remote", w.remote, "count", n)
+	if n == 0 {
+		// The backlog is drained for now -- the next non-empty tick starts a
+		// fresh run and gets its own trigger.
+		w.triggeredThisRun = false
+		return
 	}
+	w.log.Info("sync: pushed batch", "remote", w.remote, "count", n)
+}
+
+// coalescedPush wraps the injected PushFunc so at most one real trigger
+// fires per contiguous run of non-empty drain ticks (#183) -- see
+// triggeredThisRun's doc comment for why. A failed push does not set
+// triggeredThisRun, so the very next tick retries the real call rather than
+// silently treating the failure as "already handled this run".
+func (w *Worker) coalescedPush(ctx context.Context, nodes []Node) error {
+	if w.triggeredThisRun {
+		return nil
+	}
+	if err := w.push(ctx, nodes); err != nil {
+		return err
+	}
+	w.triggeredThisRun = true
+	return nil
 }
 
 // enqueueUntracked finds live nodes under exportPath with no row for this
