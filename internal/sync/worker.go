@@ -41,6 +41,15 @@ type Worker struct {
 	wg sync.WaitGroup
 }
 
+// maxSubBatchesPerTick bounds how many batchSize-sized sub-batches drain's
+// internal loop will claim and mark-status in one tick (#183), regardless of
+// where the PENDING_CLOUD_PUSH rows came from (new discovery or a mass
+// PUSH_FAILED recovery) -- see drain's doc comment for why this matters.
+// Reuses enqueueDiscoveryMultiplier's value so "how much backlog one tick
+// will fully absorb" stays one coherent number (batchSize *
+// enqueueDiscoveryMultiplier nodes) rather than two independently-tuned caps.
+const maxSubBatchesPerTick = enqueueDiscoveryMultiplier
+
 // enqueueDiscoveryMultiplier makes enqueueUntracked's per-tick discovery
 // limit a multiple of batchSize rather than equal to it (#183) -- see
 // enqueueUntracked's doc comment for why.
@@ -128,9 +137,21 @@ func (w *Worker) drain(ctx context.Context) {
 	// it -- true for every remote wired today. A future per-node PushFunc
 	// must not reuse this loop as-is: nodes claimed by the noop sub-batches
 	// are marked PUSHED without ever reaching push.
+	//
+	// The loop is capped at maxSubBatchesPerTick iterations. Without a cap,
+	// a large RecoverFailedPushes recovery (ResetRemoteSyncStateFailed has
+	// no row limit -- an extended Immich outage can leave thousands of rows
+	// PUSH_FAILED with similar last_attempt_at timestamps, all reset to
+	// PENDING_CLOUD_PUSH by one tick's call above) would make this loop
+	// claim and mark-status thousands of sub-batches back to back, holding
+	// the single writer connection against scans and edge confirms for the
+	// whole tick. Whatever the cap doesn't finish this tick stays
+	// PENDING_CLOUD_PUSH and is drained -- with its own fresh real push --
+	// by a later tick; nothing is lost or coalesced away by leaving it.
 	triggered := false
 	total := 0
-	for {
+	cappedWithMoreLeft := false
+	for i := 0; i < maxSubBatchesPerTick; i++ {
 		pushFn := w.push
 		if triggered {
 			pushFn = noopPush
@@ -148,9 +169,14 @@ func (w *Worker) drain(ctx context.Context) {
 		if n < w.batchSize {
 			break // a partial batch means nothing more is claimable right now
 		}
+		cappedWithMoreLeft = i == maxSubBatchesPerTick-1
 	}
 	if total > 0 {
 		w.log.Info("sync: pushed batch", "remote", w.remote, "count", total)
+	}
+	if cappedWithMoreLeft {
+		w.log.Info("sync: drain tick hit its per-tick claim cap; remaining backlog continues next tick",
+			"remote", w.remote, "capNodes", w.batchSize*maxSubBatchesPerTick)
 	}
 }
 

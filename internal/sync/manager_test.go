@@ -596,6 +596,130 @@ func TestWorkerDrainRetriesAfterAFailedTrigger(t *testing.T) {
 	}
 }
 
+// TestWorkerDrainStopsInternalLoopOnFailureWithoutMaskingRemainingRows is the
+// multi-sub-batch companion to TestWorkerDrainRetriesAfterAFailedTrigger:
+// that test's failing batch is also the only batch, so it can't actually
+// exercise "a failure halts the loop before any later no-op sub-batch runs".
+// This one seeds enough nodes to need multiple sub-batches and proves the
+// ones never claimed stay PENDING_CLOUD_PUSH -- not incorrectly marked
+// PUSHED by a no-op sub-batch that runs anyway after the failure.
+func TestWorkerDrainStopsInternalLoopOnFailureWithoutMaskingRemainingRows(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	for i := 0; i < 5; i++ {
+		seedNode(t, database, locID, filepath.Join(exportPath, fmt.Sprintf("shot-%d.jpg", i)))
+	}
+
+	failing := &recordingPush{err: errors.New("transient 5xx")}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 2, time.Hour, failing.fn, nil)
+
+	w.drain(ctx)
+	if failing.calls != 1 {
+		t.Errorf("push calls = %d, want 1 (the loop halts on the first sub-batch's failure)", failing.calls)
+	}
+
+	failedRows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSH_FAILED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus(PUSH_FAILED): %v", err)
+	}
+	if len(failedRows) != 2 {
+		t.Errorf("PUSH_FAILED rows = %d, want 2 (only the sub-batch that was actually claimed and pushed)", len(failedRows))
+	}
+
+	pendingRows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PENDING_CLOUD_PUSH", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus(PENDING_CLOUD_PUSH): %v", err)
+	}
+	if len(pendingRows) != 3 {
+		t.Errorf("PENDING_CLOUD_PUSH rows = %d, want 3 (never-claimed rows must stay pending, not be swept in as PUSHED)", len(pendingRows))
+	}
+}
+
+// TestWorkerDrainCapsSubBatchesPerTickLeavingOverflowForNextTick covers the
+// gap a review found in the first version of this per-tick loop: with no
+// cap, a mass PUSH_FAILED -> PENDING_CLOUD_PUSH recovery (which
+// ResetRemoteSyncStateFailed can produce in one shot, since it has no row
+// limit -- e.g. after an extended Immich outage) would make drain's loop
+// claim and mark-status every one of those rows in a single tick, holding
+// the single writer connection for the whole batch. maxSubBatchesPerTick
+// bounds that; whatever doesn't fit this tick must still get pushed for
+// real on a later tick, not silently dropped or marked PUSHED without
+// coverage.
+func TestWorkerDrainCapsSubBatchesPerTickLeavingOverflowForNextTick(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	exportPath := filepath.Join(root, "immich")
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	// batchSize 2, maxSubBatchesPerTick 10 -> cap of 20 nodes per tick.
+	// Seed 25 nodes directly as PENDING_CLOUD_PUSH (standing in for a mass
+	// recovery event rather than routing through Enqueue/enqueueUntracked,
+	// which is itself bounded by the discovery limit and so could never
+	// produce more than the cap in one call).
+	const seeded = 25
+	nodeIDs := make([]int64, seeded)
+	for i := 0; i < seeded; i++ {
+		node := seedNode(t, database, locID, filepath.Join(exportPath, fmt.Sprintf("shot-%d.jpg", i)))
+		nodeIDs[i] = node.ID
+	}
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, id := range nodeIDs {
+			if _, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+				NodeID: id, Remote: RemoteImmich, SyncStatus: "PENDING_CLOUD_PUSH",
+				RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+				LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed pending rows: %v", err)
+	}
+
+	push := &recordingPush{}
+	w := NewWorker(mgr, RemoteImmich, exportPath, 2, time.Hour, push.fn, nil)
+
+	w.drain(ctx)
+	if push.calls != 1 {
+		t.Errorf("push calls for the capped tick = %d, want 1 (still coalesced up to the cap)", push.calls)
+	}
+	pushedRows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus(PUSHED): %v", err)
+	}
+	if len(pushedRows) != 20 {
+		t.Errorf("PUSHED rows after one capped tick = %d, want 20 (the per-tick cap, not all 25)", len(pushedRows))
+	}
+	pendingRows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PENDING_CLOUD_PUSH", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus(PENDING_CLOUD_PUSH): %v", err)
+	}
+	if len(pendingRows) != seeded-20 {
+		t.Errorf("PENDING_CLOUD_PUSH rows left for next tick = %d, want %d", len(pendingRows), seeded-20)
+	}
+
+	w.drain(ctx) // the overflow tick: must push the remainder for real, not silently mark it PUSHED
+	if push.calls != 2 {
+		t.Errorf("push calls after the overflow tick = %d, want 2 (leftover rows get their own real trigger)", push.calls)
+	}
+	pushedRows, err = database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PUSHED", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRemoteSyncStateByStatus(PUSHED) after overflow tick: %v", err)
+	}
+	if len(pushedRows) != seeded {
+		t.Errorf("PUSHED rows after the overflow tick = %d, want %d", len(pushedRows), seeded)
+	}
+}
+
 func TestWorkerEnqueuesAndPushesUntrackedNodes(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)
