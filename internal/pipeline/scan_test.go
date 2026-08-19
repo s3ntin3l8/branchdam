@@ -1572,11 +1572,22 @@ func TestSidecarEdgeRetriedAfterLateMediaCommit(t *testing.T) {
 		}
 
 		deadline := time.Now().Add(5 * time.Second)
+		visible := false
 		for time.Now().Before(deadline) {
 			if _, err := database.Reader.GetLiveNodeByPath(ctx, damJSONPath); err == nil {
+				visible = true
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
+		}
+		if !visible {
+			// Fail loudly rather than falling through to emit the media
+			// record anyway: silently proceeding here would let both
+			// records land in the same drainAndCommit batch, same-batch
+			// resolution would succeed independent of the #169 retry fix,
+			// and the test would pass without ever forcing the two-batch
+			// split it exists to force.
+			return fmt.Errorf("sidecar node never became visible in the DB; the two-batch split was not forced")
 		}
 
 		mediaInfo, err := os.Stat(mediaPath)
@@ -1626,5 +1637,123 @@ func TestSidecarEdgeRetriedAfterLateMediaCommit(t *testing.T) {
 	// can't distinguish "live sidecar" from "sidecar swept to MISSING").
 	if _, err := database.Reader.GetLiveNodeByPath(ctx, damJSONPath); err != nil {
 		t.Errorf("GetLiveNodeByPath sidecar: %v (sidecar should still be ACTIVE, not swept to MISSING)", err)
+	}
+}
+
+// TestSidecarPartialResolutionRetriedWithoutDoubleCounting backs #169's
+// design choice to retry every sidecar path unconditionally, not just the
+// ones whose first attempt resolved zero edges (see the comment at the
+// runScan retry block in scan.go): a sidecar can reference more than one
+// media node, and only some of those references may still be unresolved
+// when its own batch runs. This drives a sidecar with two references
+// through three forced batches -- media A, then the sidecar (which can
+// resolve only the media-A reference), then media B, later -- and asserts
+// exactly 2 edges land with no double count of the one that already
+// resolved in-batch (ResolveAndCommit's MediaEdgeExists-gated created++ is
+// what's supposed to prevent that).
+func TestSidecarPartialResolutionRetriedWithoutDoubleCounting(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("eval symlinks root: %v", err)
+	}
+
+	mediaDir := filepath.Join(resolvedRoot, "01_media")
+	projDir := filepath.Join(resolvedRoot, "projects")
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		t.Fatalf("mkdir media: %v", err)
+	}
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+
+	mediaAPath := filepath.Join(mediaDir, "A001_C001.mov")
+	mediaBPath := filepath.Join(mediaDir, "A001_C002.mov")
+	damJSONPath := filepath.Join(projDir, "project.dam.json")
+	writeFile(t, mediaAPath, "raw video payload A")
+	writeFile(t, mediaBPath, "raw video payload B")
+	writeFile(t, damJSONPath, `{"version":"1.0","project_name":"Test","media_references":[{"raw_path":"../01_media/A001_C001.mov","role":"media"},{"raw_path":"../01_media/A001_C002.mov","role":"media"}]}`)
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.Engine = graph.NewEngine(database, nil, graph.NewProjectSidecarResolver(nil))
+
+	waitVisible := func(path string) error {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := database.Reader.GetLiveNodeByPath(ctx, path); err == nil {
+				return nil
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return fmt.Errorf("%s never became visible in the DB", path)
+	}
+	emit := func(onFile func(indexer.Record) error, path string) error {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		return onFile(indexer.Record{Path: path, Size: info.Size(), ModTime: info.ModTime()})
+	}
+
+	deps.WalkFn = func(ctx context.Context, root string, onFile func(indexer.Record) error) error {
+		// Batch 1: media A alone.
+		if err := emit(onFile, mediaAPath); err != nil {
+			return err
+		}
+		if err := waitVisible(mediaAPath); err != nil {
+			return err
+		}
+
+		// Batch 2: the sidecar. Its first-pass resolution can find media A
+		// (already committed) but not media B (not committed yet) --
+		// resolving exactly one of its two references.
+		if err := emit(onFile, damJSONPath); err != nil {
+			return err
+		}
+		if err := waitVisible(damJSONPath); err != nil {
+			return err
+		}
+
+		// Batch 3: media B, later. Only the end-of-scan retry can resolve
+		// the sidecar's second reference against it.
+		return emit(onFile, mediaBPath)
+	}
+
+	location := storage.Location{
+		ID: locationID, Name: "test-sidecar-partial-race", RootPath: resolvedRoot,
+		Tier: "PROJECTS", ReadOnly: false,
+	}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+
+	job := waitJobDone(t, database, jobID)
+	if job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q, want COMPLETED (last_error=%v)", job.State, job.LastError)
+	}
+	if job.EdgesCreated != 2 {
+		t.Fatalf("job.EdgesCreated = %d, want 2 (one resolved in-batch against media A, one only via the #169 retry against media B -- no double count of the first)", job.EdgesCreated)
+	}
+
+	sidecarNode, err := database.Reader.GetLiveNodeByPath(ctx, damJSONPath)
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath sidecar: %v", err)
+	}
+	parents, err := database.Reader.ListEdgesByTarget(ctx, sidecarNode.ID)
+	if err != nil {
+		t.Fatalf("ListEdgesByTarget: %v", err)
+	}
+	if len(parents) != 2 {
+		t.Fatalf("parents = %+v, want exactly 2 PROJECT_SIDECAR edges (one per media reference)", parents)
+	}
+	for _, edge := range parents {
+		if edge.RelationshipType != "PROJECT_SIDECAR" || edge.Confidence != 1.00 {
+			t.Errorf("unexpected edge properties: %+v", edge)
+		}
 	}
 }

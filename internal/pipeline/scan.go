@@ -440,16 +440,16 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// doesn't distinguish "resolved nothing" from "resolved some" -- only
 	// unconditional retry covers that partial case too.
 	if deps.Engine != nil && len(sidecarPaths) > 0 {
-		var retried int
+		var retryCreated int
 		for _, p := range sidecarPaths {
-			retried += resolveNodeEdges(ctx, deps, p, log)
+			retryCreated += resolveNodeEdges(ctx, deps, p, log)
 		}
-		if retried > 0 {
+		if retryCreated > 0 {
 			// CompleteScanJob below only ever writes state/finished_at -- it
 			// never touches edges_created -- so without this extra write the
 			// retry's edges would never reach scan_jobs at all, even though
 			// they're already committed to media_edges.
-			total.EdgesCreated += retried
+			total.EdgesCreated += retryCreated
 			if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 				return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
 					ID:           jobID,
