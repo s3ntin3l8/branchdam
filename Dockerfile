@@ -16,7 +16,7 @@ RUN npm run build
 # branchDAM only ever runs ffprobe, never ffmpeg/ffplay). Multi-arch: the
 # manifest list covers both linux/amd64 and linux/arm64, matching
 # docker-publish.yml's build matrix.
-FROM mwader/static-ffmpeg@sha256:a8090df5f5608daef387e1b2e93b98aaacb4d92153ad904e7d715c725724fca4 AS ffprobe
+FROM mwader/static-ffmpeg@sha256:78ebc8cc0368a109db21961a14a4e890a7b1ccafb373a1b3109f0be7fcec8171 AS ffprobe
 
 # --- Stage 3: build the Go binary (with embedded dist) ---
 # golang:1.26-bookworm, NOT -alpine: CGO_ENABLED=1 (mattn/go-sqlite3, see
