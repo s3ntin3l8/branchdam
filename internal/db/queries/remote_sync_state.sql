@@ -97,6 +97,17 @@ UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
 WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2 AND retry_count < ?3;
 
+-- name: CountRemoteSyncStateExhausted :one
+-- Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
+-- for this remote have a retry_count at or past the bound, so
+-- ResetRemoteSyncStateFailed will never re-claim them again on its own.
+-- Backs Worker.drain's periodic "permanently abandoned" warning -- distinct
+-- from ResetRemoteSyncStateFailed's `retry_count < ?3` claim filter (this is
+-- its complement, `>=`), so a misconfigured remote's silent backlog is
+-- visible in logs instead of only discoverable via a direct SQLite query.
+SELECT count(*) FROM remote_sync_state
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND retry_count >= ?2;
+
 -- name: ListRemoteSyncStateByNode :many
 -- Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
 -- a node (both remotes), ordered by remote for a stable DTO.

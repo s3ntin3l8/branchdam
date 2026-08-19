@@ -119,6 +119,16 @@ func (w *Worker) drain(ctx context.Context) {
 	} else if n > 0 {
 		w.log.Info("sync: recovered failed pushes for retry", "remote", w.remote, "count", n)
 	}
+	// Every tick, not just the one that first crosses the bound: a row stuck
+	// PUSH_FAILED at maxRetries produces zero output from RecoverFailedPushes
+	// above forever after (it drops out of that query's claim set), so this is
+	// the only recurring signal an operator gets that a node's sync has
+	// permanently stopped short of querying SQLite directly (#182).
+	if n, err := w.manager.CountExhaustedPushes(ctx, w.remote, w.maxRetries); err != nil {
+		w.log.Warn("sync: count exhausted pushes", "remote", w.remote, "err", err)
+	} else if n > 0 {
+		w.log.Warn("sync: rows permanently abandoned at retry bound", "remote", w.remote, "count", n, "maxRetries", w.maxRetries)
+	}
 	w.enqueueUntracked(ctx)
 
 	// Drain every row PENDING as of the enqueueUntracked call above through

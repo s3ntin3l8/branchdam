@@ -116,6 +116,8 @@ export interface SyncState {
   remoteAssetId?: string;
   lastError?: string;
   lastAttemptAt?: number;
+  retryCount: number;
+  exhausted: boolean;
 }
 
 export interface AssetSyncStatus {

@@ -28,6 +28,14 @@ type Querier interface {
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
+	// Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
+	// for this remote have a retry_count at or past the bound, so
+	// ResetRemoteSyncStateFailed will never re-claim them again on its own.
+	// Backs Worker.drain's periodic "permanently abandoned" warning -- distinct
+	// from ResetRemoteSyncStateFailed's `retry_count < ?3` claim filter (this is
+	// its complement, `>=`), so a misconfigured remote's silent backlog is
+	// visible in logs instead of only discoverable via a direct SQLite query.
+	CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error)
 	// #163: called inside the same transaction as CreateScanJob (see
 	// pipeline.RunScan) so the check-then-insert is one atomic unit, not just
 	// an accident of the writer pool being single-connection. Scoped to

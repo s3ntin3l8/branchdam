@@ -232,6 +232,20 @@ func (m *Manager) RecoverFailedPushes(ctx context.Context, remote string, olderT
 	return n, err
 }
 
+// CountExhaustedPushes returns how many PUSH_FAILED rows for remote have a
+// retry_count at or past maxRetries -- rows RecoverFailedPushes will never
+// automatically re-claim again (#182). maxRetries <= 0 falls back to
+// DefaultMaxSyncRetries, matching RecoverFailedPushes' own fallback so the
+// two stay measured against the same bound.
+func (m *Manager) CountExhaustedPushes(ctx context.Context, remote string, maxRetries int) (int64, error) {
+	if maxRetries <= 0 {
+		maxRetries = DefaultMaxSyncRetries
+	}
+	return m.db.Reader.CountRemoteSyncStateExhausted(ctx, sqlcgen.CountRemoteSyncStateExhaustedParams{
+		Remote: remote, RetryCount: int64(maxRetries),
+	})
+}
+
 // setBatchStatus applies one status transition to a set of node ids inside a
 // single write transaction.
 func (m *Manager) setBatchStatus(ctx context.Context, nodeIDs []int64, remote, status, remoteAssetID string, lastErr *string) error {

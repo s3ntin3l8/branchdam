@@ -24,6 +24,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
+	"github.com/s3ntin3l8/branchdam/internal/sync"
 )
 
 func (s *Server) registerRoutes(api huma.API) {
@@ -549,6 +550,21 @@ type syncStateDTO struct {
 	RemoteAssetID *string `json:"remoteAssetId,omitempty"`
 	LastError     *string `json:"lastError,omitempty"`
 	LastAttemptAt *int64  `json:"lastAttemptAt,omitempty"`
+	RetryCount    int64   `json:"retryCount"`
+	// Exhausted is true once a PUSH_FAILED row's retry_count has reached
+	// sync.DefaultMaxSyncRetries -- ResetRemoteSyncStateFailed's automatic
+	// worker recovery (#182) will no longer re-claim it, so the row is
+	// permanently abandoned short of an explicit operator retry via
+	// POST /api/v1/assets/{id}/sync/retry.
+	//
+	// This is always measured against the package default, not a given
+	// Worker's effective w.maxRetries -- SetMaxRetries has no production
+	// caller today (no config wires a non-default bound to any Worker), so
+	// the two can't currently diverge. If that ever changes, this flag needs
+	// the effective per-remote bound plumbed in instead of assuming the
+	// default; RetryCount is exposed raw precisely so a caller can already
+	// compare it against any bound without waiting on that.
+	Exhausted bool `json:"exhausted"`
 }
 
 type AssetSyncStatusInput struct {
@@ -583,7 +599,7 @@ func (s *Server) handleAssetSyncStatus(ctx context.Context, in *AssetSyncStatusI
 	out := &AssetSyncStatusOutput{}
 	out.Body.Sync = make([]syncStateDTO, len(rows))
 	for i, r := range rows {
-		dto := syncStateDTO{Remote: r.Remote, SyncStatus: r.SyncStatus}
+		dto := syncStateDTO{Remote: r.Remote, SyncStatus: r.SyncStatus, RetryCount: r.RetryCount}
 		if r.RemoteAssetID.Valid {
 			dto.RemoteAssetID = &r.RemoteAssetID.String
 		}
@@ -593,6 +609,7 @@ func (s *Server) handleAssetSyncStatus(ctx context.Context, in *AssetSyncStatusI
 		if r.LastAttemptAt.Valid {
 			dto.LastAttemptAt = &r.LastAttemptAt.Int64
 		}
+		dto.Exhausted = r.SyncStatus == "PUSH_FAILED" && r.RetryCount >= sync.DefaultMaxSyncRetries
 		out.Body.Sync[i] = dto
 	}
 	return out, nil
