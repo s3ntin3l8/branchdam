@@ -12,9 +12,11 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
-// autoAcceptThresholdForTier returns the confidence threshold for auto-accepting
+// AutoAcceptThresholdForTier returns the confidence threshold for auto-accepting
 // a candidate edge based on its tier: >=0.85 for Tier 3, >=0.90 for Tier 1 and 2.
-func autoAcceptThresholdForTier(tier int) float64 {
+// Exported so internal/agent can derive an agent-attached edge's review_state the
+// same way every other resolver does, rather than accepting one from the payload.
+func AutoAcceptThresholdForTier(tier int) float64 {
 	if tier == 3 {
 		return 0.85
 	}
@@ -22,7 +24,10 @@ func autoAcceptThresholdForTier(tier int) float64 {
 }
 
 const (
-	needsReviewFloor = 0.50
+	// NeedsReviewFloor is the confidence below which a candidate edge is
+	// discarded outright rather than queued for review. Exported for the
+	// same reason as AutoAcceptThresholdForTier.
+	NeedsReviewFloor = 0.50
 )
 
 // Engine runs every registered Resolver against a child node, merges their
@@ -84,7 +89,7 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 	var created int
 	err := e.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		for _, c := range merged {
-			if c.Confidence < needsReviewFloor {
+			if c.Confidence < NeedsReviewFloor {
 				continue
 			}
 
@@ -123,7 +128,7 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 			}
 
 			reviewState := "NEEDS_REVIEW"
-			if c.Confidence >= autoAcceptThresholdForTier(c.Tier) {
+			if c.Confidence >= AutoAcceptThresholdForTier(c.Tier) {
 				reviewState = "AUTO_ACCEPTED"
 			}
 

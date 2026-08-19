@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -223,6 +224,92 @@ func TestDrainer_EdgeAttached(t *testing.T) {
 		require.Len(t, edges, 1)
 		require.Equal(t, "DERIVED_FROM", edges[0].RelationshipType)
 		require.Equal(t, 0.95, edges[0].Confidence)
+		require.Equal(t, "AUTO_ACCEPTED", edges[0].ReviewState)
+
+		tgt, err := q.GetMediaNodeByUUID(ctx, tgtUUID)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, "LINKED", tgt.GraphStatus)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_EdgeAttached_ConfidenceGatesReviewState(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	makeNodes := func() (string, string) {
+		src, tgt := uuid.New().String(), uuid.New().String()
+		enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+			NodeUUID: src, FilePath: filepath.Join(env.staging, src+".raw"),
+		})
+		enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+			NodeUUID: tgt, FilePath: filepath.Join(env.staging, tgt+".jpg"),
+		})
+		return src, tgt
+	}
+
+	// Tier 2 at 0.80: below the 0.90 Tier 1/2 auto-accept threshold -> NEEDS_REVIEW, not AUTO_ACCEPTED.
+	srcA, tgtA := makeNodes()
+	enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: srcA, TargetNodeUUID: tgtA, RelationshipType: "DERIVED_FROM",
+		Confidence: 0.80, Tier: 2,
+	})
+
+	// Same tier at 0.95 -> AUTO_ACCEPTED.
+	srcB, tgtB := makeNodes()
+	enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: srcB, TargetNodeUUID: tgtB, RelationshipType: "DERIVED_FROM",
+		Confidence: 0.95, Tier: 2,
+	})
+
+	// Omitted confidence -> FAILED, not a free 1.0 auto-accept.
+	srcC, tgtC := makeNodes()
+	noConfEvent := enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: srcC, TargetNodeUUID: tgtC, RelationshipType: "DERIVED_FROM",
+	})
+
+	// Agent asserting a human review decision -> FAILED, naming the field.
+	srcD, tgtD := makeNodes()
+	humanStateEvent := enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: srcD, TargetNodeUUID: tgtD, RelationshipType: "DERIVED_FROM",
+		Confidence: 0.95, Tier: 1, ReviewState: "CONFIRMED",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 10, stats.Processed) // 8 node creates + 2 successful edges
+	require.Equal(t, 2, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		srcNodeA, err := q.GetMediaNodeByUUID(ctx, srcA)
+		require.NoError(t, err)
+		edgesA, err := q.ListEdgesBySource(ctx, srcNodeA.ID)
+		require.NoError(t, err)
+		require.Len(t, edgesA, 1)
+		require.Equal(t, "NEEDS_REVIEW", edgesA[0].ReviewState)
+
+		srcNodeB, err := q.GetMediaNodeByUUID(ctx, srcB)
+		require.NoError(t, err)
+		edgesB, err := q.ListEdgesBySource(ctx, srcNodeB.ID)
+		require.NoError(t, err)
+		require.Len(t, edgesB, 1)
+		require.Equal(t, "AUTO_ACCEPTED", edgesB[0].ReviewState)
+
+		evC, err := q.GetAgentEventByUUID(ctx, noConfEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", evC.Status)
+		require.True(t, evC.ErrorLog.Valid)
+		require.Contains(t, evC.ErrorLog.String, "confidence")
+
+		evD, err := q.GetAgentEventByUUID(ctx, humanStateEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", evD.Status)
+		require.True(t, evD.ErrorLog.Valid)
+		require.Contains(t, evD.ErrorLog.String, "reviewState")
 		return nil
 	})
 	require.NoError(t, err)
@@ -437,11 +524,16 @@ func TestDrainer_EdgeAttached_SelfLoopFails(t *testing.T) {
 	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
 		NodeUUID: nodeUUID, FilePath: filepath.Join(env.staging, "self.raw"),
 	})
-	// Attach self-loop edge (source == target)
+	// Attach self-loop edge (source == target). WouldCreateCycle catches
+	// this before CreateMediaEdge is ever called -- a node is trivially its
+	// own descendant in the recursive CTE's anchor row -- so this exercises
+	// the cycle guard, not the schema's separate source<>target CHECK.
 	selfLoopEvent := enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
 		SourceNodeUUID:   nodeUUID,
 		TargetNodeUUID:   nodeUUID,
 		RelationshipType: "DERIVED_FROM",
+		Confidence:       0.95,
+		Tier:             1,
 	})
 
 	stats, err := drainer.DrainAll(ctx)
@@ -454,7 +546,7 @@ func TestDrainer_EdgeAttached_SelfLoopFails(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "FAILED", ev.Status)
 		require.True(t, ev.ErrorLog.Valid)
-		require.Contains(t, ev.ErrorLog.String, "CHECK constraint failed")
+		require.Contains(t, ev.ErrorLog.String, "cycle")
 		return nil
 	})
 	require.NoError(t, err)
@@ -545,4 +637,169 @@ func TestDrainer_Backoff(t *testing.T) {
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.GreaterOrEqual(t, duration, 50*time.Millisecond)
+}
+
+func TestDrainer_RefuseArchivedNodeRebase(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	// Create a node, then archive it directly (as the pipeline's
+	// version-collision path would on a real re-scan) without a
+	// superseding successor -- ArchiveMediaNode alone is enough to
+	// reproduce an ARCHIVED node with a stale node_uuid an agent might
+	// still be holding.
+	archivedUUID := uuid.New().String()
+	var archivedID int64
+	err := env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          archivedUUID,
+			StorageLocationID: env.locID1,
+			FilePath:          filepath.Join(env.staging, "old_version.mov"),
+			FileName:          "old_version.mov",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		if err != nil {
+			return err
+		}
+		archivedID = n.ID
+		return q.ArchiveMediaNode(ctx, n.ID)
+	})
+	require.NoError(t, err)
+
+	moveEvent := enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
+		NodeUUID:    archivedUUID,
+		NewFilePath: filepath.Join(env.exports, "resurrected_via_move.mov"),
+	})
+	rebaseEvent := enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       archivedUUID,
+		TargetFilePath: filepath.Join(env.exports, "resurrected_via_rebase.mov"),
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Processed)
+	require.Equal(t, 2, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, evUUID := range []string{moveEvent.EventUuid, rebaseEvent.EventUuid} {
+			ev, err := q.GetAgentEventByUUID(ctx, evUUID)
+			require.NoError(t, err)
+			require.Equal(t, "FAILED", ev.Status)
+			require.True(t, ev.ErrorLog.Valid)
+			require.Contains(t, ev.ErrorLog.String, "archived")
+		}
+
+		// The row itself must be untouched: still ARCHIVED, still at its
+		// original path -- not resurrected to ACTIVE at either target.
+		node, err := q.GetMediaNodeByUUID(ctx, archivedUUID)
+		require.NoError(t, err)
+		require.Equal(t, archivedID, node.ID)
+		require.Equal(t, "ARCHIVED", node.LifecycleState)
+		require.Equal(t, filepath.Join(env.staging, "old_version.mov"), node.FilePath)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_EdgeAttached_MultiHopCycleRefused(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	a, b, c, d := uuid.New().String(), uuid.New().String(), uuid.New().String(), uuid.New().String()
+	for _, u := range []string{a, b, c, d} {
+		enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+			NodeUUID: u, FilePath: filepath.Join(env.staging, u+".raw"),
+		})
+	}
+	// A -> B -> C, both legitimate.
+	enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: a, TargetNodeUUID: b, RelationshipType: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+	})
+	enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: b, TargetNodeUUID: c, RelationshipType: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+	})
+	// C -> A would close the cycle A->B->C->A -- must be refused.
+	cycleEvent := enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: c, TargetNodeUUID: a, RelationshipType: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+	})
+	// Positive control in the same fixture: A -> D is unrelated to the
+	// cycle and must still succeed. Without this, a fully-inverted
+	// parent/child mapping in the cycle check would also make this test
+	// pass (every edge refused), masking the bug.
+	enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID: a, TargetNodeUUID: d, RelationshipType: "DERIVED_FROM", Confidence: 0.95, Tier: 1,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 7, stats.Processed) // 4 node creates + A->B, B->C, A->D
+	require.Equal(t, 1, stats.Failed)    // C->A
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		ev, err := q.GetAgentEventByUUID(ctx, cycleEvent.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "FAILED", ev.Status)
+		require.True(t, ev.ErrorLog.Valid)
+		require.Contains(t, ev.ErrorLog.String, "cycle")
+
+		nodeC, err := q.GetMediaNodeByUUID(ctx, c)
+		require.NoError(t, err)
+		edgesFromC, err := q.ListEdgesBySource(ctx, nodeC.ID)
+		require.NoError(t, err)
+		require.Empty(t, edgesFromC, "the refused C->A edge must not have been created")
+
+		nodeA, err := q.GetMediaNodeByUUID(ctx, a)
+		require.NoError(t, err)
+		edgesFromA, err := q.ListEdgesBySource(ctx, nodeA.ID)
+		require.NoError(t, err)
+		require.Len(t, edgesFromA, 2, "A->B and A->D (the positive control) must both have succeeded")
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_UnresolvableStorageLocationRefused(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	outsidePath := filepath.Join(t.TempDir(), "not_under_any_root.mov")
+
+	// No payload storageLocationId at all.
+	noIDUUID := uuid.New().String()
+	noIDEvent := enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: noIDUUID, FilePath: outsidePath,
+	})
+
+	// A payload storageLocationId pointing at a real (Tier 3, read-only)
+	// location must NOT let the node in via that ID -- Resolve(FilePath) is
+	// the only source of truth, and Resolve fails for an out-of-root path
+	// regardless of what storageLocationId claims.
+	withIDUUID := uuid.New().String()
+	withIDEvent := enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: withIDUUID, FilePath: outsidePath, StorageLocationID: env.locID3,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Processed)
+	require.Equal(t, 2, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, evUUID := range []string{noIDEvent.EventUuid, withIDEvent.EventUuid} {
+			ev, err := q.GetAgentEventByUUID(ctx, evUUID)
+			require.NoError(t, err)
+			require.Equal(t, "FAILED", ev.Status)
+		}
+		for _, nodeUUID := range []string{noIDUUID, withIDUUID} {
+			_, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+			require.ErrorIs(t, err, sql.ErrNoRows, "neither node should have been created, and certainly not at location id 1")
+		}
+		return nil
+	})
+	require.NoError(t, err)
 }
