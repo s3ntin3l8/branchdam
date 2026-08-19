@@ -85,4 +85,36 @@ describe("AssetDetailPage purge control", () => {
     await userEvent.click(screen.getByRole("button", { name: /purge cache/i }));
     await waitFor(() => expect(screen.getByText(/not eligible for pruning/i)).toBeInTheDocument());
   });
+
+  // Execute re-verifies eligibility right before deleting (TOCTOU fix), so
+  // a 200 response can still report purged=false for this asset's own
+  // candidate -- e.g. the Tier-3 master went MISSING between the dry-run
+  // and this click. The UI must key its message off that per-candidate
+  // outcome, not off the request having merely succeeded.
+  it("shows a failure message when the confirmed purge reports purged=false", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.pruneCache).mockResolvedValueOnce({
+      executed: false,
+      candidates: [{ nodeId: 42, filePath: asset.filePath, sizeBytes: asset.sizeBytes, purged: false }],
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: /purge cache/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /confirm purge/i })).toBeInTheDocument());
+
+    vi.mocked(api.pruneCache).mockResolvedValueOnce({
+      executed: true,
+      candidates: [{
+        nodeId: 42, filePath: asset.filePath, sizeBytes: asset.sizeBytes, purged: false,
+        error: "node is no longer eligible for pruning: verified Tier-3 ancestor lost since Plan",
+      }],
+    });
+    await userEvent.click(screen.getByRole("button", { name: /confirm purge/i }));
+
+    await waitFor(() => expect(screen.getByText(/purge failed/i)).toBeInTheDocument());
+    expect(screen.queryByText("Cache purged.")).not.toBeInTheDocument();
+  });
 });

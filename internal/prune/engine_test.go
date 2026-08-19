@@ -299,6 +299,12 @@ func TestPlanExcludesChainThroughArchivedIntermediate(t *testing.T) {
 // Guard.CheckWrite before any syscall, proving Execute genuinely routes
 // through Guard rather than calling os.Remove directly. The point is
 // proving the *executor*, not re-proving Guard (already proven).
+//
+// The candidate node is seeded with a real verified Tier-3 ancestor so
+// Execute's own re-eligibility check (which now runs before Guard.Remove)
+// doesn't short-circuit with ErrNoLongerEligible before ever reaching the
+// symlink -- this test is specifically about the Guard call, not the
+// eligibility re-check (that's TestExecuteAbortsWhenNoLongerEligible).
 func TestExecuteSymlinkEscapeRefused(t *testing.T) {
 	database := openTestDB(t)
 	tier1Root := t.TempDir()
@@ -323,8 +329,12 @@ func TestExecuteSymlinkEscapeRefused(t *testing.T) {
 		{ID: tier3ID, Name: "t3", RootPath: tier3Root, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
 	})
 
-	candidate := Candidate{NodeID: 1, FilePath: linkPath, FileName: "escape-hatch.jpg", StorageLocationID: tier1ID}
-	results := Execute(context.Background(), database, guard, []Candidate{candidate})
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("escape")})
+	candidateNode := seedNode(t, database, nodeSpec{locationID: tier1ID, path: linkPath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, candidateNode.ID, "AUTO_ACCEPTED")
+
+	candidate := Candidate{NodeID: candidateNode.ID, FilePath: linkPath, FileName: "escape-hatch.jpg", StorageLocationID: tier1ID}
+	results := Execute(context.Background(), database, guard, []Candidate{candidate}, cutoffUnix)
 
 	if len(results) != 1 {
 		t.Fatalf("results = %+v, want exactly 1", results)
@@ -341,6 +351,49 @@ func TestExecuteSymlinkEscapeRefused(t *testing.T) {
 	}
 }
 
+// TestExecuteAbortsWhenNoLongerEligible proves the TOCTOU fix: a candidate
+// whose verified Tier-3 ancestor is gone by the time Execute runs (e.g. the
+// master went MISSING between the dry-run and the confirm click) is
+// refused with ErrNoLongerEligible, and its file is never touched --
+// exactly the scenario the verified-hash gate exists to prevent.
+func TestExecuteAbortsWhenNoLongerEligible(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "proxy.jpg")
+	if err := os.WriteFile(filePath, []byte("proxy content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
+
+	// A candidate with NO verified ancestor at all -- as if Plan's own
+	// snapshot became stale (master went MISSING, full_hash cleared, etc.)
+	// by the time Execute runs.
+	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+
+	results := Execute(context.Background(), database, guard, []Candidate{
+		{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID},
+	}, cutoffUnix)
+
+	if len(results) != 1 || results[0].Purged {
+		t.Fatalf("results = %+v, want a single refused (not purged) result", results)
+	}
+	if !errors.Is(results[0].Err, ErrNoLongerEligible) {
+		t.Errorf("err = %v, want ErrNoLongerEligible", results[0].Err)
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		t.Errorf("file gone after a refused purge (stat err = %v), want it to survive", err)
+	}
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Errorf("lifecycle_state = %q, want ACTIVE (unchanged)", after.LifecycleState)
+	}
+}
+
 // TestExecutePurgesFileAndMarksMissing proves the happy path: the file is
 // deleted from disk, the node lands in MISSING (never deleted -- rows are
 // never deleted, matching this repo's invariant), and superseded_by chains
@@ -354,15 +407,18 @@ func TestExecutePurgesFileAndMarksMissing(t *testing.T) {
 	}
 
 	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
 	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
 
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("purge")})
 	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
 
 	beforeCount := countMediaNodes(t, database)
 
 	results := Execute(context.Background(), database, guard, []Candidate{
 		{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID},
-	})
+	}, cutoffUnix)
 
 	if len(results) != 1 || !results[0].Purged || results[0].Err != nil {
 		t.Fatalf("results = %+v, want a single successful purge", results)

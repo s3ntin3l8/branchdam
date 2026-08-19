@@ -21,11 +21,16 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 // eligible" is an expected outcome, not a failure.
 function AssetPruneControl({ asset }: { asset: Asset }) {
   const [checked, setChecked] = useState<"eligible" | "ineligible" | null>(null);
-  const [purged, setPurged] = useState(false);
+  // null = not attempted; otherwise the actual outcome for THIS asset's
+  // candidate, not just "the request succeeded" -- Execute re-verifies
+  // eligibility right before deleting, so a 200 response can still report
+  // purged=false (e.g. the Tier-3 master went MISSING between the dry-run
+  // and this click), which must not be shown as "Cache purged."
+  const [purgeResult, setPurgeResult] = useState<{ purged: boolean; error?: string } | null>(null);
   const pruneCache = usePruneCache();
 
   const checkEligibility = () => {
-    setPurged(false);
+    setPurgeResult(null);
     pruneCache.mutate(
       { storageLocationId: asset.storageLocationId, nodeIds: [asset.id] },
       { onSuccess: (res) => setChecked(res.candidates.length > 0 ? "eligible" : "ineligible") },
@@ -36,16 +41,26 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
     pruneCache.mutate(
       { storageLocationId: asset.storageLocationId, nodeIds: [asset.id], execute: true },
       {
-        onSuccess: () => {
+        onSuccess: (res) => {
           setChecked(null);
-          setPurged(true);
+          const outcome = res.candidates.find((c) => c.nodeId === asset.id);
+          setPurgeResult(outcome ? { purged: outcome.purged, error: outcome.error } : { purged: false });
         },
       },
     );
   };
 
-  if (purged) {
-    return <span className="text-xs text-neutral-400">Cache purged.</span>;
+  if (purgeResult) {
+    return purgeResult.purged ? (
+      <span className="text-xs text-neutral-400">Cache purged.</span>
+    ) : (
+      <span className="text-xs text-red-400">
+        Purge failed{purgeResult.error ? `: ${purgeResult.error}` : ""}.{" "}
+        <button type="button" onClick={() => setPurgeResult(null)} className="underline hover:text-red-300">
+          Dismiss
+        </button>
+      </span>
+    );
   }
 
   if (checked === "ineligible") {

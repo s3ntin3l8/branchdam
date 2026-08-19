@@ -1796,7 +1796,7 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 	if s.guard == nil {
 		return nil, huma.Error500InternalServerError("purge requested but no storage guard is configured", nil)
 	}
-	results := prune.Execute(ctx, s.db, s.guard, candidates)
+	results := prune.Execute(ctx, s.db, s.guard, candidates, cutoffUnix)
 	out.Body.Executed = true
 	for _, r := range results {
 		dto := pruneCandidateDTO{NodeID: r.NodeID, FilePath: r.FilePath, SizeBytes: r.SizeBytes, Purged: r.Purged}
