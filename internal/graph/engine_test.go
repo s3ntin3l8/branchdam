@@ -1198,3 +1198,129 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 		t.Errorf("nil CapturedAt returned %d candidates, want 0", len(noTimeCandidates))
 	}
 }
+
+// TestHeuristicSpatialTemporalResolverSameFormatBurstProducesNoEdges backs
+// #162: a continuous-drive burst of same-format frames (all raw, here) must
+// produce zero candidates -- with no raw->export role asymmetry, there is
+// no principled way to pick a direction, so the resolver must decline
+// rather than link them arbitrarily.
+func TestHeuristicSpatialTemporalResolverSameFormatBurstProducesNoEdges(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	t0 := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	phash := int64(0x0000000000000000)
+
+	var last sqlcgen.MediaNode
+	for i := 0; i < 6; i++ {
+		capturedAt := t0.Add(time.Duration(i) * 200 * time.Millisecond)
+		last = seedNode(t, database, locationID, nodeFixture{
+			Path: fmt.Sprintf("/burst_%d.arw", i), FileName: fmt.Sprintf("burst_%d.arw", i), FileExt: "arw",
+			CameraSerial: "SERIAL_BURST", LensModel: "FE 85mm F1.4 GM", CapturedAt: &capturedAt, PHash: &phash,
+		})
+	}
+
+	engine := NewEngine(database, nil, HeuristicSpatialTemporalResolver{})
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(last))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("got %d edges among 6 same-format (.arw) burst siblings, want 0: %+v", len(edges), edges)
+	}
+}
+
+// TestHeuristicSpatialTemporalResolverPicksSingleBestRawMatch backs #162: a
+// mixed-format burst (several raw candidates in-window for one export
+// child) must not still produce a small cross-linked mesh -- the resolver
+// picks exactly one match, the lowest Hamming distance.
+func TestHeuristicSpatialTemporalResolverPicksSingleBestRawMatch(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	t0 := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1 * time.Second)
+	phashChild := int64(0x0000000000000000)
+	phashClosest := int64(0x0000000000000003)  // Hamming distance 2
+	phashMiddle := int64(0x000000000000000F)   // Hamming distance 4
+	phashFarthest := int64(0x00000000000000FF) // Hamming distance 8
+
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_middle.arw", FileName: "parent_middle.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_MULTI", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phashMiddle,
+	})
+	parentClosest := seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_closest.arw", FileName: "parent_closest.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_MULTI", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phashClosest,
+	})
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_farthest.arw", FileName: "parent_farthest.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_MULTI", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phashFarthest,
+	})
+
+	child := seedNode(t, database, locationID, nodeFixture{
+		Path: "/child.jpg", FileName: "child.jpg", FileExt: "jpg",
+		CameraSerial: "SERIAL_MULTI", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t1, PHash: &phashChild,
+	})
+
+	engine := NewEngine(database, nil, HeuristicSpatialTemporalResolver{})
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(child))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges among 3 in-window raw candidates, want 1 (single best match): %+v", len(edges), edges)
+	}
+	if edges[0].SourceNodeID != parentClosest.ID {
+		t.Errorf("SourceNodeID = %d, want %d (lowest Hamming distance)", edges[0].SourceNodeID, parentClosest.ID)
+	}
+}
+
+// TestHeuristicSpatialTemporalResolverFullTieBreaksOnLowestParentID backs
+// #162: two RAW parents that tie on confidence, Hamming distance, AND time
+// delta -- a real scenario for burst siblings sharing lens/pHash/timestamp,
+// not a hypothetical -- must resolve to a stable winner rather than falling
+// back to whatever order the underlying SQL scan happens to return rows in
+// (ListTier3Candidates has no ORDER BY). Run with -count=1 so this can't
+// pass by coincidentally matching a cached, order-dependent result.
+func TestHeuristicSpatialTemporalResolverFullTieBreaksOnLowestParentID(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	t0 := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1 * time.Second)
+	phash := int64(0x0000000000000000)
+
+	parentA := seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_a.arw", FileName: "parent_a.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_TIE", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phash,
+	})
+	parentB := seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_b.arw", FileName: "parent_b.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_TIE", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phash,
+	})
+	child := seedNode(t, database, locationID, nodeFixture{
+		Path: "/child.jpg", FileName: "child.jpg", FileExt: "jpg",
+		CameraSerial: "SERIAL_TIE", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t1, PHash: &phash,
+	})
+
+	wantWinner := parentA.ID
+	if parentB.ID < wantWinner {
+		wantWinner = parentB.ID
+	}
+
+	engine := NewEngine(database, nil, HeuristicSpatialTemporalResolver{})
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(child))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges among 2 fully-tied raw candidates, want 1: %+v", len(edges), edges)
+	}
+	if edges[0].SourceNodeID != wantWinner {
+		t.Errorf("SourceNodeID = %d, want %d (lowest parent node ID, the final tie-break)", edges[0].SourceNodeID, wantWinner)
+	}
+}
