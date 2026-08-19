@@ -666,6 +666,95 @@ func TestInheritMetadataPrefersValidParentOverHigherConfidenceTier3(t *testing.T
 	}
 }
 
+// TestLoadTagSetReadsNodeMetadataRows covers finding F's "loadTagSet remains
+// untested" gap for its primary path: every tag loadTagSet reads out of
+// node_metadata (not just the captured_at_unix fallback below), including
+// the GPS float-parse branches, and that a non-exiftool-sourced row for the
+// same key is ignored rather than silently overriding the exiftool value.
+func TestLoadTagSetReadsNodeMetadataRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loadtagset-metadata.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loadtagset-metadata", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "eeeeeeeeeeeeeeee"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-loadtagset-metadata", StorageLocationID: loc.ID, FilePath: "/metadata/shot.jpg",
+			FileName: "shot.jpg", FileExt: "jpg", SizeBytes: 1, MtimeUnix: time.Now().Unix(), FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			CameraModel: sql.NullString{String: "ILCE-7M4", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		for _, kv := range []struct{ source, key, value string }{
+			{"exiftool", "EXIF:Make", "SONY"},
+			{"exiftool", "EXIF:LensModel", "FE 24-70mm F2.8 GM"},
+			{"exiftool", "EXIF:SerialNumber", "1234567"},
+			{"exiftool", "EXIF:DateTimeOriginal", "2024:01:01 12:34:56"},
+			{"exiftool", "EXIF:OffsetTimeOriginal", "+02:00"},
+			{"exiftool", "Composite:GPSLatitude", "48.858222"},
+			{"exiftool", "Composite:GPSLongitude", "2.2945"},
+			// A non-exiftool row for a key exiftool also supplies must be
+			// ignored, not override the exiftool value.
+			{"internal", "EXIF:Make", "WRONG-SOURCE"},
+		} {
+			if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+				NodeID: node.ID, Source: kv.source, Key: kv.key, Value: kv.value,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ts, err := loadTagSet(context.Background(), database.Reader, node)
+	if err != nil {
+		t.Fatalf("loadTagSet: %v", err)
+	}
+	if ts.Make != "SONY" {
+		t.Errorf("Make = %q, want SONY (the exiftool-sourced row, not the heuristic one)", ts.Make)
+	}
+	if ts.LensModel != "FE 24-70mm F2.8 GM" {
+		t.Errorf("LensModel = %q, want FE 24-70mm F2.8 GM", ts.LensModel)
+	}
+	if ts.SerialNumber != "1234567" {
+		t.Errorf("SerialNumber = %q, want 1234567", ts.SerialNumber)
+	}
+	if ts.DateTimeOriginal != "2024:01:01 12:34:56" {
+		t.Errorf("DateTimeOriginal = %q, want 2024:01:01 12:34:56 (node_metadata value, not the captured_at_unix fallback)", ts.DateTimeOriginal)
+	}
+	if ts.OffsetTimeOriginal != "+02:00" {
+		t.Errorf("OffsetTimeOriginal = %q, want +02:00", ts.OffsetTimeOriginal)
+	}
+	if ts.GPSLatitude == nil || *ts.GPSLatitude != 48.858222 {
+		t.Errorf("GPSLatitude = %v, want 48.858222", ts.GPSLatitude)
+	}
+	if ts.GPSLongitude == nil || *ts.GPSLongitude != 2.2945 {
+		t.Errorf("GPSLongitude = %v, want 2.2945", ts.GPSLongitude)
+	}
+	if ts.Model != "ILCE-7M4" {
+		t.Errorf("Model = %q, want ILCE-7M4 (from the promoted camera_model column, not node_metadata)", ts.Model)
+	}
+	if ts.Identifier != node.NodeUuid {
+		t.Errorf("Identifier = %q, want %q (always the node's own uuid)", ts.Identifier, node.NodeUuid)
+	}
+}
+
 // TestLoadTagSetCapturedAtUnixFallbackEmitsExplicitUTCOffset covers finding
 // G directly against loadTagSet: a node with no node_metadata rows for
 // EXIF:DateTimeOriginal (a catalog indexed before #54 allowlisted the tag)
