@@ -694,16 +694,21 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 	}
 	winning := pickWinningParent(parents)
 	if winning == nil {
+		if hasResolvedButIneligibleParent(parents) {
+			return nil, huma.Error409Conflict("cannot inherit from a Tier-3-resolved or non-ancestry (duplicate/sidecar) parent edge")
+		}
 		return nil, huma.Error409Conflict("asset has no resolved parent edge to inherit from")
-	}
-	// Never inherit identity metadata from a Tier-3 (heuristic) match.
-	if winning.Tier == 3 {
-		return nil, huma.Error409Conflict("cannot inherit from a Tier-3-resolved parent edge (heuristic matches are not identity)")
 	}
 
 	parent, err := s.db.Reader.GetMediaNodeByID(ctx, winning.SourceNodeID)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("get parent asset", err)
+	}
+	// A parent that has since been archived or gone missing is not a usable
+	// identity source, even though the edge pointing at it may still be
+	// AUTO_ACCEPTED/CONFIRMED -- archiving never touches media_edges.
+	if parent.LifecycleState == "ARCHIVED" || parent.LifecycleState == "MISSING" {
+		return nil, huma.Error409Conflict("parent asset is " + parent.LifecycleState + ", not a usable identity source")
 	}
 
 	parentTags, err := loadTagSet(ctx, s.db.Reader, parent)
@@ -810,11 +815,28 @@ func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.
 	})
 }
 
-// pickWinningParent returns the highest-confidence parent edge that is
-// AUTO_ACCEPTED or CONFIRMED, or nil when the node has none. A NEEDS_REVIEW
-// (unconfirmed) or REJECTED edge is never a valid identity source: stamping an
-// unconfirmed parent's metadata into the child's file would cement a
-// possibly-wrong lineage with no recovery path. Equal-confidence ties break by
+// validParentRelationships is the closed set of relationship types that
+// represent identity ancestry -- the only kinds of edge inherit-metadata may
+// treat as "this child's parent". DUPLICATE_OF is a content match, not
+// ancestry: stamping a duplicate's node_uuid into XMP-xmpMM:DerivedFrom would
+// fabricate a false lineage. PROJECT_SIDECAR's "parent" is the project file
+// itself (the resolver makes the project file the edge's source), not a
+// media ancestor whose EXIF is meaningful to inherit.
+var validParentRelationships = map[string]bool{
+	"DERIVED_FROM": true,
+	"FINAL_EXPORT": true,
+	"PROXY_OF":     true,
+}
+
+// pickWinningParent returns the highest-confidence Tier-1/2 parent edge that
+// is AUTO_ACCEPTED or CONFIRMED and represents identity ancestry (see
+// validParentRelationships), or nil when the node has none. A NEEDS_REVIEW
+// (unconfirmed) or REJECTED edge is never a valid identity source: stamping
+// an unconfirmed parent's metadata into the child's file would cement a
+// possibly-wrong lineage with no recovery path. Tier-3 (heuristic) matches
+// are excluded from selection entirely, not merely rejected after one is
+// picked -- a Tier-3 edge existing alongside a valid Tier-1/2 parent must
+// never prevent inheriting from the valid one. Equal-confidence ties break by
 // lowest edge id (ListEdgesByTarget has no ORDER BY), keeping the result
 // deterministic.
 func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
@@ -824,6 +846,9 @@ func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 		if e.ReviewState != "AUTO_ACCEPTED" && e.ReviewState != "CONFIRMED" {
 			continue
 		}
+		if e.Tier == 3 || !validParentRelationships[e.RelationshipType] {
+			continue
+		}
 		// Highest confidence wins; on a tie, the lowest edge id (deterministic,
 		// since ListEdgesByTarget has no ORDER BY).
 		if best == nil || e.Confidence > best.Confidence || (e.Confidence == best.Confidence && e.ID < best.ID) {
@@ -831,6 +856,21 @@ func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 		}
 	}
 	return best
+}
+
+// hasResolvedButIneligibleParent reports whether edges contains an
+// AUTO_ACCEPTED/CONFIRMED edge that pickWinningParent nonetheless excluded
+// (Tier-3, or not an identity-ancestry relationship type). Used only to give
+// the caller a more specific refusal message than "no resolved parent edge
+// at all" when that's not actually true.
+func hasResolvedButIneligibleParent(edges []sqlcgen.MediaEdge) bool {
+	for i := range edges {
+		e := &edges[i]
+		if e.ReviewState == "AUTO_ACCEPTED" || e.ReviewState == "CONFIRMED" {
+			return true
+		}
+	}
+	return false
 }
 
 // loadTagSet assembles a node's inheritable tag values from its promoted

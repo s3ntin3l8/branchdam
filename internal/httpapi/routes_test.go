@@ -203,11 +203,26 @@ func TestInheritMetadataConflicts(t *testing.T) {
 		}
 	})
 
-	t.Run("tier-3 parent edge 409s", func(t *testing.T) {
+	t.Run("tier-3-only parent edge 409s", func(t *testing.T) {
 		srv, database, _, child := inheritTestServer(t, t.TempDir())
-		// A second parent edge resolved at tier 3 with higher confidence than
-		// the seeded 0.9/2 edge becomes the winning parent -- and must be refused.
-		locID := child.StorageLocationID
+		// Reject the seeded valid Tier-2 edge first, so the only remaining
+		// resolved edge is the Tier-3 one seeded below -- pickWinningParent
+		// must never fall back to a heuristic match just because nothing
+		// better is left.
+		var locID int64
+		_ = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			rows, err := q.ListEdgesByTarget(context.Background(), child.ID)
+			if err != nil {
+				return err
+			}
+			for _, e := range rows {
+				if _, err := q.RejectMediaEdge(context.Background(), sqlcgen.RejectMediaEdgeParams{ID: e.ID, ReviewedBy: sql.NullString{}}); err != nil {
+					return err
+				}
+			}
+			locID = child.StorageLocationID
+			return nil
+		})
 		t3Parent := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "t3-parent.jpg"), "uuid-t3-parent")
 		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
@@ -222,7 +237,69 @@ func TestInheritMetadataConflicts(t *testing.T) {
 
 		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 		if rr.Code != http.StatusConflict {
-			t.Errorf("status = %d, want 409", rr.Code)
+			t.Errorf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("DUPLICATE_OF-only parent edge 409s", func(t *testing.T) {
+		srv, database, _, child := inheritTestServer(t, t.TempDir())
+		// Reject the seeded valid Tier-2 edge, add a DUPLICATE_OF edge as the
+		// only remaining resolved candidate -- a duplicate is not ancestry and
+		// must never be treated as an identity source.
+		var locID int64
+		_ = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			rows, err := q.ListEdgesByTarget(context.Background(), child.ID)
+			if err != nil {
+				return err
+			}
+			for _, e := range rows {
+				if _, err := q.RejectMediaEdge(context.Background(), sqlcgen.RejectMediaEdgeParams{ID: e.ID, ReviewedBy: sql.NullString{}}); err != nil {
+					return err
+				}
+			}
+			locID = child.StorageLocationID
+			return nil
+		})
+		dup := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "dup.jpg"), "uuid-dup")
+		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+				SourceNodeID: dup.ID, TargetNodeID: child.ID, RelationshipType: "DUPLICATE_OF",
+				Confidence: 1.0, Tier: 1, Resolver: "manual", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("seed duplicate-of edge: %v", err)
+		}
+
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("ARCHIVED parent 409s", func(t *testing.T) {
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.ArchiveMediaNode(context.Background(), parent.ID)
+		}); err != nil {
+			t.Fatalf("archive parent: %v", err)
+		}
+
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("MISSING parent 409s", func(t *testing.T) {
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.MarkNodeMissing(context.Background(), parent.ID)
+		}); err != nil {
+			t.Fatalf("mark parent missing: %v", err)
+		}
+
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
 		}
 	})
 	t.Run("needs-review parent edge 409s", func(t *testing.T) {
@@ -467,6 +544,119 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 	}
 	if after.IndexingStatus != "INDEXED_SHALLOW" {
 		t.Errorf("child indexing_status = %q, want INDEXED_SHALLOW (downgraded from INDEXED_FULL, whose full_hash is now stale)", after.IndexingStatus)
+	}
+}
+
+// TestInheritMetadataPrefersValidParentOverHigherConfidenceTier3 covers
+// finding B end to end: a Tier-3 (heuristic) edge with higher confidence
+// than a valid Tier-1/2 ancestry edge must not shadow it -- the request
+// should succeed using the valid parent, not 409 because Tier-3 "won".
+func TestInheritMetadataPrefersValidParentOverHigherConfidenceTier3(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	validParentPath := filepath.Join(resolved, "valid-parent.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, validParentPath, map[string]string{"EXIF:Make": "SONY"})
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil)
+
+	path := filepath.Join(t.TempDir(), "inherit-tier3-shadow.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var validParent, child sqlcgen.MediaNode
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "inherit-tier3-shadow", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		validHash, validSize, validMtime := fastHashOf(t, validParentPath)
+		validParent, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-valid-parent", StorageLocationID: locID, FilePath: validParentPath, FileName: "valid-parent.jpg",
+			FileExt: "jpg", SizeBytes: validSize, MtimeUnix: validMtime, FastHash: &validHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.InsertNodeMetadata(context.Background(), sqlcgen.InsertNodeMetadataParams{
+			NodeID: validParent.ID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+		}); err != nil {
+			return err
+		}
+
+		// A Tier-3 competitor at a much higher confidence than the valid
+		// parent below -- it must never be selected regardless.
+		t3Parent, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-t3-competitor", StorageLocationID: locID, FilePath: filepath.Join(resolved, "t3.jpg"),
+			FileName: "t3.jpg", FileExt: "jpg", SizeBytes: 1, MtimeUnix: time.Now().Unix(),
+			FastHash: &[]string{"cccccccccccccccc"}[0], IndexingStatus: "INDEXED_SHALLOW",
+			GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		childHash, childSize, _ := fastHashOf(t, childPath)
+		child, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-tier3-shadow-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSize, MtimeUnix: time.Now().Unix(), FastHash: &childHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		if _, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: t3Parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.99, Tier: 3, Resolver: "heuristic", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+		}); err != nil {
+			return err
+		}
+		_, err = q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: validParent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.70, Tier: 2, Resolver: "test", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-tier3-shadow", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		DB:     database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the valid Tier-2 parent must win despite the higher-confidence Tier-3 edge), body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Inherited map[string]string `json:"inherited"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if body.Inherited["XMP-xmpMM:DerivedFrom"] != "uuid-valid-parent" {
+		t.Errorf("inherited XMP-xmpMM:DerivedFrom = %q, want uuid-valid-parent (not the Tier-3 competitor)", body.Inherited["XMP-xmpMM:DerivedFrom"])
+	}
+	if body.Inherited["EXIF:Make"] != "SONY" {
+		t.Errorf("inherited EXIF:Make = %q, want SONY", body.Inherited["EXIF:Make"])
 	}
 }
 
@@ -2394,11 +2584,11 @@ func TestSyncRetryRequiresAdmin(t *testing.T) {
 
 func TestPickWinningParentTieBreaksByID(t *testing.T) {
 	edges := []sqlcgen.MediaEdge{
-		{ID: 5, Confidence: 0.9, ReviewState: "AUTO_ACCEPTED"},
-		{ID: 3, Confidence: 0.9, ReviewState: "CONFIRMED"},
-		{ID: 7, Confidence: 0.9, ReviewState: "REJECTED"},
-		{ID: 9, Confidence: 0.9, ReviewState: "NEEDS_REVIEW"},
-		{ID: 2, Confidence: 0.99, ReviewState: "REJECTED"},
+		{ID: 5, Confidence: 0.9, ReviewState: "AUTO_ACCEPTED", RelationshipType: "DERIVED_FROM"},
+		{ID: 3, Confidence: 0.9, ReviewState: "CONFIRMED", RelationshipType: "DERIVED_FROM"},
+		{ID: 7, Confidence: 0.9, ReviewState: "REJECTED", RelationshipType: "DERIVED_FROM"},
+		{ID: 9, Confidence: 0.9, ReviewState: "NEEDS_REVIEW", RelationshipType: "DERIVED_FROM"},
+		{ID: 2, Confidence: 0.99, ReviewState: "REJECTED", RelationshipType: "DERIVED_FROM"},
 	}
 
 	got := pickWinningParent(edges)
@@ -2412,7 +2602,7 @@ func TestPickWinningParentTieBreaksByID(t *testing.T) {
 		t.Errorf("winning review state = %q, want CONFIRMED", got.ReviewState)
 	}
 
-	edges = append(edges, sqlcgen.MediaEdge{ID: 1, Confidence: 0.95, ReviewState: "AUTO_ACCEPTED"})
+	edges = append(edges, sqlcgen.MediaEdge{ID: 1, Confidence: 0.95, ReviewState: "AUTO_ACCEPTED", RelationshipType: "DERIVED_FROM"})
 	got = pickWinningParent(edges)
 	if got == nil {
 		t.Fatal("pickWinningParent = nil, want the higher-confidence edge")
@@ -2420,6 +2610,66 @@ func TestPickWinningParentTieBreaksByID(t *testing.T) {
 	if got.ID != 1 {
 		t.Errorf("winning edge id = %d, want 1 (higher confidence beats the tie-break)", got.ID)
 	}
+}
+
+// TestPickWinningParentExcludesIneligibleCandidates covers findings B: a
+// Tier-3 (heuristic) edge and a DUPLICATE_OF/PROJECT_SIDECAR edge are never
+// eligible identity sources, regardless of confidence -- and a lower-
+// confidence valid Tier-1/2 ancestry edge must win over them, not be
+// shadowed by them.
+func TestPickWinningParentExcludesIneligibleCandidates(t *testing.T) {
+	t.Run("tier-3 alone is not eligible", func(t *testing.T) {
+		edges := []sqlcgen.MediaEdge{
+			{ID: 1, Confidence: 0.99, ReviewState: "AUTO_ACCEPTED", RelationshipType: "DERIVED_FROM", Tier: 3},
+		}
+		if got := pickWinningParent(edges); got != nil {
+			t.Errorf("pickWinningParent = %+v, want nil (Tier-3 is never an identity source)", got)
+		}
+		if !hasResolvedButIneligibleParent(edges) {
+			t.Error("hasResolvedButIneligibleParent = false, want true")
+		}
+	})
+
+	t.Run("DUPLICATE_OF alone is not eligible", func(t *testing.T) {
+		edges := []sqlcgen.MediaEdge{
+			{ID: 1, Confidence: 1.0, ReviewState: "CONFIRMED", RelationshipType: "DUPLICATE_OF", Tier: 1},
+		}
+		if got := pickWinningParent(edges); got != nil {
+			t.Errorf("pickWinningParent = %+v, want nil (a duplicate is not ancestry)", got)
+		}
+		if !hasResolvedButIneligibleParent(edges) {
+			t.Error("hasResolvedButIneligibleParent = false, want true")
+		}
+	})
+
+	t.Run("PROJECT_SIDECAR alone is not eligible", func(t *testing.T) {
+		edges := []sqlcgen.MediaEdge{
+			{ID: 1, Confidence: 1.0, ReviewState: "AUTO_ACCEPTED", RelationshipType: "PROJECT_SIDECAR", Tier: 1},
+		}
+		if got := pickWinningParent(edges); got != nil {
+			t.Errorf("pickWinningParent = %+v, want nil", got)
+		}
+	})
+
+	t.Run("a lower-confidence valid parent wins over a higher-confidence Tier-3 edge", func(t *testing.T) {
+		edges := []sqlcgen.MediaEdge{
+			{ID: 1, Confidence: 0.99, ReviewState: "AUTO_ACCEPTED", RelationshipType: "DERIVED_FROM", Tier: 3},
+			{ID: 2, Confidence: 0.70, ReviewState: "AUTO_ACCEPTED", RelationshipType: "DERIVED_FROM", Tier: 2},
+		}
+		got := pickWinningParent(edges)
+		if got == nil {
+			t.Fatal("pickWinningParent = nil, want edge 2 (the Tier-3 edge must not shadow the valid one)")
+		}
+		if got.ID != 2 {
+			t.Errorf("winning edge id = %d, want 2", got.ID)
+		}
+	})
+
+	t.Run("no edges at all is distinct from a resolved-but-ineligible edge", func(t *testing.T) {
+		if hasResolvedButIneligibleParent(nil) {
+			t.Error("hasResolvedButIneligibleParent(nil) = true, want false")
+		}
+	})
 }
 
 func TestAgentRebase_RefusesArchivedNode(t *testing.T) {
