@@ -556,6 +556,14 @@ type syncStateDTO struct {
 	// worker recovery (#182) will no longer re-claim it, so the row is
 	// permanently abandoned short of an explicit operator retry via
 	// POST /api/v1/assets/{id}/sync/retry.
+	//
+	// This is always measured against the package default, not a given
+	// Worker's effective w.maxRetries -- SetMaxRetries has no production
+	// caller today (no config wires a non-default bound to any Worker), so
+	// the two can't currently diverge. If that ever changes, this flag needs
+	// the effective per-remote bound plumbed in instead of assuming the
+	// default; RetryCount is exposed raw precisely so a caller can already
+	// compare it against any bound without waiting on that.
 	Exhausted bool `json:"exhausted"`
 }
 
