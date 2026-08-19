@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import AssetDetailPage from "./AssetDetailPage";
 import { api } from "../api/client";
-import type { Asset } from "../api/types";
+import type { Asset, StorageLocation } from "../api/types";
 
 vi.mock("../api/client", () => ({
   api: {
@@ -14,6 +14,7 @@ vi.mock("../api/client", () => ({
     getAssetSyncStatus: vi.fn().mockResolvedValue({ sync: [] }),
     retrySync: vi.fn(),
     pruneCache: vi.fn(),
+    listStorageLocations: vi.fn(),
   },
 }));
 
@@ -28,6 +29,15 @@ const asset: Asset = {
   graphStatus: "UNLINKED",
   lifecycleState: "ACTIVE",
   storageLocationId: 7,
+};
+
+const prunableLocation: StorageLocation = {
+  id: 7,
+  name: "scratch",
+  rootPath: "/mnt/scratch",
+  tier: "TIER1_LOCAL_SCRATCH",
+  readOnly: false,
+  prunable: true,
 };
 
 function renderWithClient() {
@@ -49,6 +59,7 @@ describe("AssetDetailPage purge control", () => {
   it("checks eligibility then executes on confirm", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
     vi.mocked(api.pruneCache).mockResolvedValueOnce({
       executed: false,
       candidates: [{ nodeId: 42, filePath: asset.filePath, sizeBytes: asset.sizeBytes, purged: false }],
@@ -57,7 +68,8 @@ describe("AssetDetailPage purge control", () => {
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: /purge cache/i }));
+    const purgeButton = await screen.findByRole("button", { name: /purge cache/i });
+    await userEvent.click(purgeButton);
     await waitFor(() =>
       expect(api.pruneCache).toHaveBeenCalledWith({ storageLocationId: 7, nodeIds: [42] }),
     );
@@ -77,12 +89,14 @@ describe("AssetDetailPage purge control", () => {
   it("reports ineligible when the plan returns no candidates", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
     vi.mocked(api.pruneCache).mockResolvedValueOnce({ executed: false, candidates: [] });
 
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: /purge cache/i }));
+    const purgeButton = await screen.findByRole("button", { name: /purge cache/i });
+    await userEvent.click(purgeButton);
     await waitFor(() => expect(screen.getByText(/not eligible for pruning/i)).toBeInTheDocument());
   });
 
@@ -94,6 +108,7 @@ describe("AssetDetailPage purge control", () => {
   it("shows a failure message when the confirmed purge reports purged=false", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
     vi.mocked(api.pruneCache).mockResolvedValueOnce({
       executed: false,
       candidates: [{ nodeId: 42, filePath: asset.filePath, sizeBytes: asset.sizeBytes, purged: false }],
@@ -102,7 +117,8 @@ describe("AssetDetailPage purge control", () => {
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: /purge cache/i }));
+    const purgeButton = await screen.findByRole("button", { name: /purge cache/i });
+    await userEvent.click(purgeButton);
     await waitFor(() => expect(screen.getByRole("button", { name: /confirm purge/i })).toBeInTheDocument());
 
     vi.mocked(api.pruneCache).mockResolvedValueOnce({

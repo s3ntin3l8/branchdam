@@ -151,3 +151,10 @@ mapping those two columns to `bool` when `internal/graph` (PR 7) starts consumin
   `MISSING`, never deleted, matching the "rows are never deleted" invariant.
 - Added `POST /api/v1/prune` — admin-gated automatically (`auth.RequireAdmin` gates by HTTP
   method, not per-route), dry-run by default (`execute` must be set explicitly to purge).
+- **Follow-up (late Hermes finding on #177):** `Execute` re-verifies eligibility inside the
+  delete's own transaction (`ErrNoLongerEligible` if the DB-side Tier-3 ancestor lost its verified
+  hash since `Plan`), but that alone doesn't cover a stale `mtime_unix` — the DB row is only as
+  fresh as the last scan/sweep. `Execute` now also `os.Lstat`s the file immediately before
+  `guard.Remove` and aborts with `ErrFileChangedSincePlan` on an `(mtime, size)` mismatch against
+  what `Plan` recorded; a file already gone on its own is treated as success (nothing left to
+  remove, node still lands `MISSING`). See `CLAUDE.md`'s Key invariants for the full rationale.

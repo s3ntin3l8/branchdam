@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -48,6 +49,19 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	if err := os.WriteFile(filePath, []byte("proxy content"), 0o644); err != nil {
 		t.Fatalf("write proxy file: %v", err)
 	}
+	// Backdated well past any cacheTTLHours cutoff, then read back via
+	// Lstat (not just reused verbatim) so the DB record matches exactly
+	// what Execute's own file-freshness re-check will observe -- avoids
+	// any filesystem mtime-precision mismatch between what Chtimes was
+	// asked to set and what actually landed on disk.
+	oldTime := time.Unix(pruneOldMtime, 0)
+	if err := os.Chtimes(filePath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes proxy file: %v", err)
+	}
+	fileInfo, err := os.Lstat(filePath)
+	if err != nil {
+		t.Fatalf("lstat proxy file: %v", err)
+	}
 
 	var tier1ID, tier3ID int64
 	var candidate sqlcgen.MediaNode
@@ -81,7 +95,7 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 		candidate, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
 			NodeUuid: "uuid-proxy", StorageLocationID: tier1ID,
 			FilePath: filePath, FileName: "proxy.jpg", FileExt: "jpg",
-			SizeBytes: 100, MtimeUnix: pruneOldMtime,
+			SizeBytes: fileInfo.Size(), MtimeUnix: fileInfo.ModTime().Unix(),
 			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
 		})
 		if err != nil {

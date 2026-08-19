@@ -219,6 +219,19 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   hash, never authorizes a purge. TTL itself is config-only (`StorageLocation.CacheTTLHours`,
   compared against `mtime_unix`, not `last_seen_at`) -- `prunable: true` alone never makes a node
   eligible.
+- **`prune.Execute` re-verifies both the DB and the disk immediately before deleting, not just
+  at `Plan` time.** Two independent TOCTOU windows exist between a dry-run `Plan` and a later
+  `Execute`: (1) DB-side -- the Tier-3 ancestor's verified-hash status can change (master goes
+  MISSING, hash invalidated) between the two calls, closed by re-running `Plan` itself inside the
+  same transaction as the delete, aborting with `ErrNoLongerEligible` if the candidate no longer
+  appears; (2) filesystem-side -- `media_nodes.mtime_unix` is only as fresh as the last scan/sweep
+  that touched the node, so the row can look eligible while the real file was modified or
+  regenerated moments earlier with no scan yet observing it. This is closed by an `os.Lstat`
+  (deliberately not `os.Stat` -- same symlink-defeat direction as `Guard.CheckWrite`'s own
+  canonicalize step) taken immediately before `guard.Remove`: an `(mtime, size)` mismatch against
+  what `Plan` recorded aborts with `ErrFileChangedSincePlan` and leaves the file untouched; a file
+  already gone on its own (`fs.ErrNotExist`) is not an error -- the node still lands in `MISSING`,
+  since there is nothing left for `Guard` to remove either way.
 - **Identity is read in exactly one place.** `internal/auth.BrowserChain` is the only code
   permitted to reference `X-Authentik-*`. `AgentChain` deletes those headers unconditionally
   (before even checking the API key) on the router that bypasses Authentik ForwardAuth by
