@@ -666,6 +666,267 @@ func TestInheritMetadataPrefersValidParentOverHigherConfidenceTier3(t *testing.T
 	}
 }
 
+// TestLoadTagSetReadsNodeMetadataRows covers finding F's "loadTagSet remains
+// untested" gap for its primary path: every tag loadTagSet reads out of
+// node_metadata (not just the captured_at_unix fallback below), including
+// the GPS float-parse branches, and that a non-exiftool-sourced row for the
+// same key is ignored rather than silently overriding the exiftool value.
+func TestLoadTagSetReadsNodeMetadataRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loadtagset-metadata.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loadtagset-metadata", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "eeeeeeeeeeeeeeee"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-loadtagset-metadata", StorageLocationID: loc.ID, FilePath: "/metadata/shot.jpg",
+			FileName: "shot.jpg", FileExt: "jpg", SizeBytes: 1, MtimeUnix: time.Now().Unix(), FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			CameraModel: sql.NullString{String: "ILCE-7M4", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		for _, kv := range []struct{ source, key, value string }{
+			{"exiftool", "EXIF:Make", "SONY"},
+			{"exiftool", "EXIF:LensModel", "FE 24-70mm F2.8 GM"},
+			{"exiftool", "EXIF:SerialNumber", "1234567"},
+			{"exiftool", "EXIF:DateTimeOriginal", "2024:01:01 12:34:56"},
+			{"exiftool", "EXIF:OffsetTimeOriginal", "+02:00"},
+			{"exiftool", "Composite:GPSLatitude", "48.858222"},
+			{"exiftool", "Composite:GPSLongitude", "2.2945"},
+			// A non-exiftool row for a key exiftool also supplies must be
+			// ignored, not override the exiftool value.
+			{"internal", "EXIF:Make", "WRONG-SOURCE"},
+		} {
+			if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+				NodeID: node.ID, Source: kv.source, Key: kv.key, Value: kv.value,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ts, err := loadTagSet(context.Background(), database.Reader, node)
+	if err != nil {
+		t.Fatalf("loadTagSet: %v", err)
+	}
+	if ts.Make != "SONY" {
+		t.Errorf("Make = %q, want SONY (the exiftool-sourced row, not the heuristic one)", ts.Make)
+	}
+	if ts.LensModel != "FE 24-70mm F2.8 GM" {
+		t.Errorf("LensModel = %q, want FE 24-70mm F2.8 GM", ts.LensModel)
+	}
+	if ts.SerialNumber != "1234567" {
+		t.Errorf("SerialNumber = %q, want 1234567", ts.SerialNumber)
+	}
+	if ts.DateTimeOriginal != "2024:01:01 12:34:56" {
+		t.Errorf("DateTimeOriginal = %q, want 2024:01:01 12:34:56 (node_metadata value, not the captured_at_unix fallback)", ts.DateTimeOriginal)
+	}
+	if ts.OffsetTimeOriginal != "+02:00" {
+		t.Errorf("OffsetTimeOriginal = %q, want +02:00", ts.OffsetTimeOriginal)
+	}
+	if ts.GPSLatitude == nil || *ts.GPSLatitude != 48.858222 {
+		t.Errorf("GPSLatitude = %v, want 48.858222", ts.GPSLatitude)
+	}
+	if ts.GPSLongitude == nil || *ts.GPSLongitude != 2.2945 {
+		t.Errorf("GPSLongitude = %v, want 2.2945", ts.GPSLongitude)
+	}
+	if ts.Model != "ILCE-7M4" {
+		t.Errorf("Model = %q, want ILCE-7M4 (from the promoted camera_model column, not node_metadata)", ts.Model)
+	}
+	if ts.Identifier != node.NodeUuid {
+		t.Errorf("Identifier = %q, want %q (always the node's own uuid)", ts.Identifier, node.NodeUuid)
+	}
+}
+
+// TestLoadTagSetCapturedAtUnixFallbackEmitsExplicitUTCOffset covers finding
+// G directly against loadTagSet: a node with no node_metadata rows for
+// EXIF:DateTimeOriginal (a catalog indexed before #54 allowlisted the tag)
+// must fall back to the promoted captured_at_unix column, and that fallback
+// must pair the UTC-formatted wall clock with an explicit +00:00 offset --
+// not a bare, offset-less string that exiftool would misread as local time.
+func TestLoadTagSetCapturedAtUnixFallbackEmitsExplicitUTCOffset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loadtagset-fallback.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	// The instant this stands in for is 2024-01-01 12:34:56 +02:00 -- i.e.
+	// 2024-01-01 10:34:56 UTC. captured_at_unix only ever stores the
+	// absolute instant (see probe.capturedAt), never the original offset.
+	captured := time.Date(2024, 1, 1, 10, 34, 56, 0, time.UTC).Unix()
+
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loadtagset-fallback", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "dddddddddddddddd"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-loadtagset-fallback", StorageLocationID: loc.ID, FilePath: "/fallback/shot.jpg",
+			FileName: "shot.jpg", FileExt: "jpg", SizeBytes: 1, MtimeUnix: time.Now().Unix(), FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			CapturedAtUnix: sql.NullInt64{Int64: captured, Valid: true},
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Deliberately no node_metadata rows for this node -- exercises the
+	// captured_at_unix fallback path, not the node_metadata lookup above it.
+
+	ts, err := loadTagSet(context.Background(), database.Reader, node)
+	if err != nil {
+		t.Fatalf("loadTagSet: %v", err)
+	}
+	if ts.DateTimeOriginal != "2024:01:01 10:34:56" {
+		t.Errorf("DateTimeOriginal = %q, want 2024:01:01 10:34:56 (captured_at_unix formatted as UTC wall clock)", ts.DateTimeOriginal)
+	}
+	if ts.OffsetTimeOriginal != "+00:00" {
+		t.Errorf("OffsetTimeOriginal = %q, want +00:00 -- without an explicit offset, exiftool reads the bare wall clock as local time, silently shifting the instant when this value gets written into a child's file (finding G)", ts.OffsetTimeOriginal)
+	}
+}
+
+// TestInheritMetadataWritesConsistentUTCTimestampFromCapturedAtUnixFallback
+// is finding G's end-to-end regression test: a parent indexed before #54
+// (captured_at_unix set, no node_metadata EXIF:DateTimeOriginal row) must
+// still cause the child's file to receive a self-consistent
+// DateTimeOriginal+OffsetTimeOriginal pair naming the exact same instant --
+// not a wall-clock value silently shifted by the original capture's offset.
+func TestInheritMetadataWritesConsistentUTCTimestampFromCapturedAtUnixFallback(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parentPath := filepath.Join(resolved, "parent.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, parentPath, nil) // untagged: DateTimeOriginal comes from captured_at_unix, not the file
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil)
+
+	captured := time.Date(2024, 1, 1, 10, 34, 56, 0, time.UTC).Unix()
+
+	path := filepath.Join(t.TempDir(), "inherit-utc-fallback.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var parent, child sqlcgen.MediaNode
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "inherit-utc-fallback", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		parentHash, parentSize, parentMtime := fastHashOf(t, parentPath)
+		parent, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-utc-fallback-parent", StorageLocationID: locID, FilePath: parentPath, FileName: "parent.jpg",
+			FileExt: "jpg", SizeBytes: parentSize, MtimeUnix: parentMtime, FastHash: &parentHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			CapturedAtUnix: sql.NullInt64{Int64: captured, Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		// No node_metadata row for EXIF:DateTimeOriginal -- pre-#54 catalog.
+
+		childHash, childSize, _ := fastHashOf(t, childPath)
+		child, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-utc-fallback-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSize, MtimeUnix: time.Now().Unix(), FastHash: &childHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 1.0, Tier: 1, Resolver: "test", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-utc-fallback", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		DB:     database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Inherited map[string]string `json:"inherited"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if body.Inherited["EXIF:DateTimeOriginal"] != "2024:01:01 10:34:56" {
+		t.Errorf("inherited EXIF:DateTimeOriginal = %q, want 2024:01:01 10:34:56", body.Inherited["EXIF:DateTimeOriginal"])
+	}
+	if body.Inherited["EXIF:OffsetTimeOriginal"] != "+00:00" {
+		t.Errorf("inherited EXIF:OffsetTimeOriginal = %q, want +00:00", body.Inherited["EXIF:OffsetTimeOriginal"])
+	}
+
+	// Read back what actually landed in the file, not just the response
+	// body -- this is what proves the tags reached WriteTags and were
+	// accepted by exiftool as a valid, self-consistent pair.
+	out, err := exec.Command(exiftoolPath, "-j", "-EXIF:DateTimeOriginal", "-EXIF:OffsetTimeOriginal", childPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read back child tags: %v\n%s", err, out)
+	}
+	var reread []struct {
+		DateTimeOriginal   string `json:"DateTimeOriginal"`
+		OffsetTimeOriginal string `json:"OffsetTimeOriginal"`
+	}
+	if err := json.Unmarshal(out, &reread); err != nil || len(reread) != 1 {
+		t.Fatalf("unmarshal exiftool -j output: %v\n%s", err, out)
+	}
+	if reread[0].DateTimeOriginal != "2024:01:01 10:34:56" {
+		t.Errorf("child file's DateTimeOriginal = %q, want 2024:01:01 10:34:56", reread[0].DateTimeOriginal)
+	}
+	if reread[0].OffsetTimeOriginal != "+00:00" {
+		t.Errorf("child file's OffsetTimeOriginal = %q, want +00:00 (a bare wall clock with no offset would be misread as local time by any later reader, silently shifting the instant)", reread[0].OffsetTimeOriginal)
+	}
+}
+
 func TestMeReflectsBrowserPrincipal(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)

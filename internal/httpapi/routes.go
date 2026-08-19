@@ -918,14 +918,20 @@ func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode)
 			}
 		}
 	}
-	// Fall back to the promoted captured_at_unix column for the raw
-	// DateTimeOriginal when it isn't in node_metadata (a catalog indexed
-	// before EXIF:DateTimeOriginal was allowlisted in #54). This preserves
-	// the "never overwrite a child's own capture time" rule for pre-PR rows:
-	// the offset is lost (captured_at is UTC), but the child's actual time is
-	// kept rather than silently replaced by the parent's.
+	// Fall back to the promoted captured_at_unix column when node_metadata
+	// has no EXIF:DateTimeOriginal row -- a pre-#54 catalog, or any
+	// agent-ingested node (internal/agent never writes node_metadata at
+	// all). captured_at_unix is an absolute instant (see
+	// internal/probe/probe.go's capturedAt), so it's paired with an
+	// explicit +00:00 offset rather than a bare wall clock, which exiftool
+	// would misread as local time -- on the PARENT side that wrong value is
+	// exactly what Plan below writes into the child's file. The overwrite
+	// is unconditional (not gated on ts.OffsetTimeOriginal already being
+	// set) deliberately: DateTimeOriginal here is always the UTC rendering,
+	// so pairing it with any other offset would misname the instant.
 	if ts.DateTimeOriginal == "" && node.CapturedAtUnix.Valid {
 		ts.DateTimeOriginal = time.Unix(node.CapturedAtUnix.Int64, 0).UTC().Format("2006:01:02 15:04:05")
+		ts.OffsetTimeOriginal = "+00:00"
 	}
 	return ts, nil
 }
