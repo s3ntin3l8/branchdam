@@ -96,3 +96,16 @@ SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_a
 FROM remote_sync_state
 WHERE node_id = ?1
 ORDER BY remote ASC;
+
+-- name: ManualRetryRemoteSyncState :exec
+-- Backs POST /api/v1/assets/{id}/sync/retry (handleSyncRetry, #156): an
+-- explicit operator "try again" action on a PUSH_FAILED row, bypassing
+-- ResetRemoteSyncStateFailed's retry_count bound by design (see that
+-- query's comment). retry_count resets to 0 here -- the same rule
+-- MarkRemoteSyncStatePushed applies on a real success -- so the operator's
+-- action restores a full automatic-retry budget, not just one attempt
+-- before immediately re-hitting the bound on the very next failure (#182).
+UPDATE remote_sync_state
+SET sync_status = 'PENDING_CLOUD_PUSH', last_error = NULL, retry_count = 0,
+    last_attempt_at = unixepoch(), updated_at = unixepoch()
+WHERE node_id = ?1 AND remote = ?2;

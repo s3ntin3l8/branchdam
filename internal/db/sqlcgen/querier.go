@@ -190,6 +190,14 @@ type Querier interface {
 	// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
+	// Backs POST /api/v1/assets/{id}/sync/retry (handleSyncRetry, #156): an
+	// explicit operator "try again" action on a PUSH_FAILED row, bypassing
+	// ResetRemoteSyncStateFailed's retry_count bound by design (see that
+	// query's comment). retry_count resets to 0 here -- the same rule
+	// MarkRemoteSyncStatePushed applies on a real success -- so the operator's
+	// action restores a full automatic-retry budget, not just one attempt
+	// before immediately re-hitting the bound on the very next failure (#182).
+	ManualRetryRemoteSyncState(ctx context.Context, arg ManualRetryRemoteSyncStateParams) error
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
 	MarkNodeMissing(ctx context.Context, id int64) error
