@@ -448,7 +448,10 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			// CompleteScanJob below only ever writes state/finished_at -- it
 			// never touches edges_created -- so without this extra write the
 			// retry's edges would never reach scan_jobs at all, even though
-			// they're already committed to media_edges.
+			// they're already committed to media_edges. This write and
+			// CompleteScanJob's are sequenced, not concurrent: this whole
+			// block runs to completion before the sweep/prune/terminalize
+			// sequence below even starts.
 			total.EdgesCreated += retryCreated
 			if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
 				return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
