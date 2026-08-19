@@ -141,6 +141,10 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 			case statErr != nil:
 				return statErr
 			case info.ModTime().Unix() != c.MtimeUnix || info.Size() != c.SizeBytes:
+				// Second-granularity, matching mtime_unix's own column type: a
+				// same-size rewrite landing within the same Unix second as the
+				// original would not be caught here. Inherent to the schema,
+				// not a gap introduced by this check.
 				return ErrFileChangedSincePlan
 			default:
 				if err := guard.Remove(c.FilePath); err != nil {
