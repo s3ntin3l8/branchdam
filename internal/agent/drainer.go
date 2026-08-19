@@ -122,6 +122,14 @@ func (d *Drainer) Start(ctx context.Context, interval time.Duration) {
 func (d *Drainer) Wait() { d.wg.Wait() }
 
 func (d *Drainer) run(ctx context.Context, interval time.Duration) {
+	// An immediate pass before the ticker's first tick, so an event
+	// enqueued right before/during startup isn't left PENDING for up to a
+	// full interval before it's first considered. Suggested by Hermes on
+	// #189.
+	if _, err := d.DrainAll(ctx); err != nil && ctx.Err() == nil {
+		d.log.Warn("agent: drain pass failed", "err", err)
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -207,11 +215,15 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			// connection (docs/schema.md fix #7), so it cannot run nested
 			// inside the InTx above. Mirrors
 			// pipeline.resolveEdgesForBatch's same after-commit call.
-			// Failure here is logged, not fatal to the event: the event
-			// itself (a node create/rebase) already succeeded, and a
-			// UNLINKED node left unresolved self-heals on this drainer's
-			// next pass over it via a future edge-attach event, exactly
-			// like an unresolved scanned node would on the next scan.
+			// Failure here is logged, not fatal to the event: the create/
+			// rebase itself already succeeded and committed. Unlike a
+			// scanned node (which gets a fresh ResolveAndCommit attempt on
+			// every subsequent scan pass that touches it), there is
+			// currently no retry path for this one-shot call -- a failure
+			// here leaves the node UNLINKED with nothing to re-trigger
+			// resolution. Flagged by Hermes on #189; still a strict
+			// improvement over never resolving at all, which is the
+			// pre-#166 behavior this replaces.
 			if resolveNodeID != 0 && d.engine != nil {
 				node, err := d.db.Reader.GetMediaNodeByID(ctx, resolveNodeID)
 				if err != nil {
