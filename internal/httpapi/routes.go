@@ -629,10 +629,13 @@ func (s *Server) handleSyncRetry(ctx context.Context, in *SyncRetryInput) (*Sync
 			if r.SyncStatus != "PUSH_FAILED" {
 				continue
 			}
-			if _, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
-				NodeID: r.NodeID, Remote: r.Remote, SyncStatus: "PENDING_CLOUD_PUSH",
-				RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
-				LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			// ManualRetryRemoteSyncState, not UpsertRemoteSyncState: this also
+			// resets retry_count to 0, so the operator's explicit retry restores
+			// a full automatic-retry budget rather than buying exactly one more
+			// attempt before immediately re-hitting ResetRemoteSyncStateFailed's
+			// bound on the very next failure (#182).
+			if err := q.ManualRetryRemoteSyncState(ctx, sqlcgen.ManualRetryRemoteSyncStateParams{
+				NodeID: r.NodeID, Remote: r.Remote,
 			}); err != nil {
 				return err
 			}

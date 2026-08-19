@@ -83,6 +83,7 @@ type RemoteSyncState struct {
 	LastAttemptAt sql.NullInt64
 	CreatedAt     int64
 	UpdatedAt     int64
+	RetryCount    int64
 }
 
 type ScanJob struct {

@@ -25,6 +25,15 @@ const (
 	RemoteGooglePhotos = "GOOGLE_PHOTOS"
 )
 
+// DefaultMaxSyncRetries bounds RecoverFailedPushes' automatic re-claim of a
+// PUSH_FAILED row (#182): past this many consecutive failures a
+// misconfigured remote (an empty Immich libraryId, a dead API key) stops
+// being retried every retryWindow forever and is left PUSH_FAILED
+// permanently, matching internal/agent.DefaultMaxRetries' precedent. A human
+// can still force a re-attempt via POST /api/v1/assets/{id}/sync/retry,
+// which is an explicit operator action, not this automatic loop.
+const DefaultMaxSyncRetries = 3
+
 // ErrAlreadyPushed is returned by Enqueue when (node_id, remote) is already
 // PUSHED or PUSHING -- the idempotent replay short-circuit. A caller that
 // does not treat this as an error should skip it via errors.Is.
@@ -190,15 +199,22 @@ func (m *Manager) RecoverStalePushing(ctx context.Context, remote string, olderT
 
 // RecoverFailedPushes resets PUSH_FAILED rows older than olderThan back to
 // PENDING_CLOUD_PUSH, so a transient remote failure doesn't strand a batch
-// forever -- this is the worker-level retry (bounded in frequency by
-// olderThan; the Immich client's own retry is the per-attempt backoff).
-func (m *Manager) RecoverFailedPushes(ctx context.Context, remote string, olderThan time.Duration) (int64, error) {
+// forever -- this is the worker-level retry, bounded in frequency by
+// olderThan (the Immich client's own retry is the per-attempt backoff) and
+// in count by maxRetries: a row whose retry_count has already reached
+// maxRetries is left PUSH_FAILED rather than re-claimed again (#182).
+// maxRetries <= 0 falls back to DefaultMaxSyncRetries.
+func (m *Manager) RecoverFailedPushes(ctx context.Context, remote string, olderThan time.Duration, maxRetries int) (int64, error) {
+	if maxRetries <= 0 {
+		maxRetries = DefaultMaxSyncRetries
+	}
 	var n int64
 	err := m.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		n, err = q.ResetRemoteSyncStateFailed(ctx, sqlcgen.ResetRemoteSyncStateFailedParams{
 			Remote:        remote,
 			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-olderThan).Unix(), Valid: true},
+			RetryCount:    int64(maxRetries),
 		})
 		return err
 	})

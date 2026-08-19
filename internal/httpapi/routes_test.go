@@ -2478,6 +2478,53 @@ func TestSyncRetryRequeuesFailed(t *testing.T) {
 	}
 }
 
+// TestSyncRetryResetsRetryCount covers the gap an independent review of #200
+// found: a manual retry must restore a full automatic-retry budget, not just
+// buy one more attempt before immediately re-hitting
+// ResetRemoteSyncStateFailed's bound on the very next failure.
+func TestSyncRetryResetsRetryCount(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "retry-count.jpg"), "uuid-sync-retry-count")
+
+	now := time.Now().Unix()
+	seedSyncState(t, database, node.ID, "IMMICH", "PUSH_FAILED", "boom", now)
+	// Drive retry_count above 0 via the real failure transition, mirroring
+	// internal/sync's own tests -- not a direct column poke.
+	for i := 0; i < 3; i++ {
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.MarkRemoteSyncStateFailed(context.Background(), sqlcgen.MarkRemoteSyncStateFailedParams{
+				NodeID: node.ID, Remote: "IMMICH", LastError: sql.NullString{String: "boom", Valid: true},
+			})
+		}); err != nil {
+			t.Fatalf("mark failed (%d): %v", i, err)
+		}
+	}
+	before, err := database.Reader.GetRemoteSyncState(context.Background(), sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: "IMMICH"})
+	if err != nil {
+		t.Fatalf("get before retry: %v", err)
+	}
+	if before.RetryCount != 3 {
+		t.Fatalf("test setup: retry_count = %d, want 3", before.RetryCount)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync/retry", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	after, err := database.Reader.GetRemoteSyncState(context.Background(), sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: "IMMICH"})
+	if err != nil {
+		t.Fatalf("get after retry: %v", err)
+	}
+	if after.RetryCount != 0 {
+		t.Errorf("retry_count after manual retry = %d, want 0 (operator's fix must restore a full retry budget)", after.RetryCount)
+	}
+	if after.SyncStatus != "PENDING_CLOUD_PUSH" {
+		t.Errorf("sync_status after manual retry = %q, want PENDING_CLOUD_PUSH", after.SyncStatus)
+	}
+}
+
 func TestSyncRetrySkipsInFlightAndQueued(t *testing.T) {
 	// A PUSHING (in-flight) or PENDING_CLOUD_PUSH (already queued) row must
 	// never be regressed by a manual retry -- only PUSH_FAILED rows are

@@ -31,8 +31,11 @@ type Worker struct {
 	// retryWindow is how old a PUSH_FAILED row must be before the worker
 	// re-claims it (bounded retry frequency -- not a hot loop).
 	retryWindow time.Duration
-	push        PushFunc
-	log         *slog.Logger
+	// maxRetries bounds how many times RecoverFailedPushes will re-claim the
+	// same row before leaving it PUSH_FAILED permanently (#182).
+	maxRetries int
+	push       PushFunc
+	log        *slog.Logger
 	// wg tracks the run goroutine started by Start so Wait can join it before
 	// the database closes during shutdown.
 	wg sync.WaitGroup
@@ -50,7 +53,16 @@ func NewWorker(manager *Manager, remote, exportPath string, batchSize int, inter
 	}
 	return &Worker{manager: manager, remote: remote, exportPath: exportPath,
 		batchSize: batchSize, interval: interval, retryWindow: 5 * time.Minute,
-		push: push, log: log}
+		maxRetries: DefaultMaxSyncRetries, push: push, log: log}
+}
+
+// SetMaxRetries overrides the default automatic-retry ceiling (#182),
+// mirroring internal/agent.Drainer.SetMaxRetries.
+func (w *Worker) SetMaxRetries(n int) {
+	if n <= 0 {
+		return
+	}
+	w.maxRetries = n
 }
 
 // Start launches the drain loop in a goroutine that Wait joins. Safe to call
@@ -86,7 +98,7 @@ func (w *Worker) Wait() { w.wg.Wait() }
 func (w *Worker) drain(ctx context.Context) {
 	// Re-claim PUSH_FAILED rows old enough to retry, so a transient remote
 	// failure doesn't strand a batch forever. Then enqueue brand-new nodes.
-	if n, err := w.manager.RecoverFailedPushes(ctx, w.remote, w.retryWindow); err != nil {
+	if n, err := w.manager.RecoverFailedPushes(ctx, w.remote, w.retryWindow, w.maxRetries); err != nil {
 		w.log.Warn("sync: recover failed pushes", "err", err)
 	} else if n > 0 {
 		w.log.Info("sync: recovered failed pushes for retry", "remote", w.remote, "count", n)

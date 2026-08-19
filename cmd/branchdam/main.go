@@ -315,6 +315,15 @@ func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB,
 	if cfg.Immich.APIURL == "" || strings.Contains(cfg.Immich.APIURL, "${") {
 		return nil
 	}
+	// An empty libraryId would call POST /api/libraries//scan, which 404s
+	// forever -- every push failing, retried until the retry_count bound
+	// kicks in, then permanently stuck PUSH_FAILED with no way to recover
+	// short of a config fix and a restart (#182). Refuse to start rather
+	// than run a worker that can never succeed.
+	if cfg.Immich.LibraryID == "" || strings.Contains(cfg.Immich.LibraryID, "${") {
+		log.Warn("sync: immich.libraryId is empty or unresolved, not starting the sync worker", "libraryID", cfg.Immich.LibraryID)
+		return nil
+	}
 	immichClient := immich.New(immich.Config{
 		APIURL: cfg.Immich.APIURL, APIKey: cfg.Immich.APIKey, LibraryID: cfg.Immich.LibraryID,
 	})

@@ -1,7 +1,7 @@
 -- name: GetRemoteSyncState :one
 -- The idempotency look-before-write read for Enqueue: does (node_id, remote)
 -- already exist, and in what state?
-SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE node_id = ?1 AND remote = ?2;
 
@@ -19,14 +19,14 @@ ON CONFLICT (node_id, remote) DO UPDATE SET
     last_error      = excluded.last_error,
     last_attempt_at = excluded.last_attempt_at,
     updated_at      = unixepoch()
-RETURNING node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at;
+RETURNING node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count;
 
 -- name: ListRemoteSyncStateByStatus :many
 -- The sync worker's claim query: oldest-attempt-first so a backlog drains in
 -- order, capped at one batch. Scoped to a single remote -- a node can hold
 -- both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
 -- ProcessPending(remote) must never list (or re-flip) another remote's rows.
-SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE remote = ?1 AND sync_status = ?2
 ORDER BY last_attempt_at ASC, node_id ASC
@@ -34,16 +34,19 @@ LIMIT ?3;
 
 -- name: MarkRemoteSyncStatePushed :exec
 -- Terminal success: records the remote asset id (empty for a scan-trigger
--- push) and clears any prior error. updated_at set explicitly -- no trigger.
+-- push) and clears any prior error. retry_count resets to 0 -- it tracks
+-- consecutive failures since the last success, not a lifetime total.
+-- updated_at set explicitly -- no trigger.
 UPDATE remote_sync_state
 SET sync_status = 'PUSHED', remote_asset_id = ?3, last_error = NULL,
-    last_attempt_at = unixepoch(), updated_at = unixepoch()
+    retry_count = 0, last_attempt_at = unixepoch(), updated_at = unixepoch()
 WHERE node_id = ?1 AND remote = ?2;
 
 -- name: MarkRemoteSyncStateFailed :exec
--- Terminal failure: records the error and the attempt time.
+-- Terminal failure: records the error, the attempt time, and increments
+-- retry_count -- what ResetRemoteSyncStateFailed's bound is measured against.
 UPDATE remote_sync_state
-SET sync_status = 'PUSH_FAILED', last_error = ?3,
+SET sync_status = 'PUSH_FAILED', last_error = ?3, retry_count = retry_count + 1,
     last_attempt_at = unixepoch(), updated_at = unixepoch()
 WHERE node_id = ?1 AND remote = ?2;
 
@@ -70,20 +73,39 @@ ORDER BY n.id ASC
 LIMIT ?3;
 
 -- name: ResetRemoteSyncStateFailed :execrows
--- #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
--- the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
--- re-attempts them -- a transient remote failure must not strand a batch
--- forever. Scoped to a single remote. last_attempt_at is set explicitly on
--- every attempt, so this only re-claims rows that have not been retried
--- recently (bounded retry frequency, not a hot loop).
+-- #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
+-- than the retry window AND whose retry_count hasn't yet reached the bound
+-- are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --
+-- a transient remote failure must not strand a batch forever. Once
+-- retry_count reaches the bound, a row is left PUSH_FAILED permanently: a
+-- misconfigured remote (e.g. an empty libraryId, see #182) must not retry
+-- every 5 minutes forever. A human can still force a re-attempt via
+-- POST /api/v1/assets/{id}/sync/retry (handleSyncRetry), which bypasses this
+-- bound by design -- an explicit operator action, not an automatic loop.
+-- Scoped to a single remote. last_attempt_at is set explicitly on every
+-- attempt, so this only re-claims rows that have not been retried recently
+-- (bounded retry frequency, not a hot loop).
 UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
-WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2;
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2 AND retry_count < ?3;
 
 -- name: ListRemoteSyncStateByNode :many
 -- Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
 -- a node (both remotes), ordered by remote for a stable DTO.
-SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE node_id = ?1
 ORDER BY remote ASC;
+
+-- name: ManualRetryRemoteSyncState :exec
+-- Backs POST /api/v1/assets/{id}/sync/retry (handleSyncRetry, #156): an
+-- explicit operator "try again" action on a PUSH_FAILED row, bypassing
+-- ResetRemoteSyncStateFailed's retry_count bound by design (see that
+-- query's comment). retry_count resets to 0 here -- the same rule
+-- MarkRemoteSyncStatePushed applies on a real success -- so the operator's
+-- action restores a full automatic-retry budget, not just one attempt
+-- before immediately re-hitting the bound on the very next failure (#182).
+UPDATE remote_sync_state
+SET sync_status = 'PENDING_CLOUD_PUSH', last_error = NULL, retry_count = 0,
+    last_attempt_at = unixepoch(), updated_at = unixepoch()
+WHERE node_id = ?1 AND remote = ?2;

@@ -304,6 +304,119 @@ func TestRecoverStalePushingResetsStrandedRows(t *testing.T) {
 	}
 }
 
+func TestRecoverFailedPushesRespectsRetryBound(t *testing.T) {
+	for name, tc := range map[string]struct {
+		failures  int
+		wantRecov int64
+		wantFinal string
+	}{
+		"below the bound is re-claimed":  {failures: DefaultMaxSyncRetries - 1, wantRecov: 1, wantFinal: "PENDING_CLOUD_PUSH"},
+		"at the bound stays PUSH_FAILED": {failures: DefaultMaxSyncRetries, wantRecov: 0, wantFinal: "PUSH_FAILED"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			database := openTestDB(t)
+			mgr := NewManager(database, nil)
+			ctx := context.Background()
+			locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+			node := seedNode(t, database, locID, "/exports/immich/shot.jpg")
+
+			if err := mgr.Enqueue(ctx, Node{ID: node.ID, Checksum: "aaaaaaaaaaaaaaaa"}, RemoteImmich); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			// Drive retry_count up via the real transition MarkRemoteSyncStateFailed
+			// performs on every failure, not a direct column poke.
+			for i := 0; i < tc.failures; i++ {
+				if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+					return q.MarkRemoteSyncStateFailed(ctx, sqlcgen.MarkRemoteSyncStateFailedParams{
+						NodeID: node.ID, Remote: RemoteImmich, LastError: sql.NullString{String: "boom", Valid: true},
+					})
+				}); err != nil {
+					t.Fatalf("mark failed (%d): %v", i, err)
+				}
+			}
+			// Backdate so the age window alone is never what gates the outcome here.
+			if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+				_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+					NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSH_FAILED",
+					RemoteAssetID: sql.NullString{}, LastError: sql.NullString{String: "boom", Valid: true},
+					LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-1 * time.Hour).Unix(), Valid: true},
+				})
+				return err
+			}); err != nil {
+				t.Fatalf("backdate: %v", err)
+			}
+
+			n, err := mgr.RecoverFailedPushes(ctx, RemoteImmich, 0, DefaultMaxSyncRetries)
+			if err != nil {
+				t.Fatalf("RecoverFailedPushes: %v", err)
+			}
+			if n != tc.wantRecov {
+				t.Errorf("recovered = %d, want %d", n, tc.wantRecov)
+			}
+			row, _ := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+			if row.SyncStatus != tc.wantFinal {
+				t.Errorf("sync_status = %q, want %q", row.SyncStatus, tc.wantFinal)
+			}
+		})
+	}
+}
+
+func TestMarkRemoteSyncStatePushedResetsRetryCount(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	node := seedNode(t, database, locID, "/exports/immich/shot.jpg")
+
+	if err := mgr.Enqueue(ctx, Node{ID: node.ID, Checksum: "aaaaaaaaaaaaaaaa"}, RemoteImmich); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	// Fail it up to (but not past) the bound, then succeed.
+	for i := 0; i < DefaultMaxSyncRetries-1; i++ {
+		if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.MarkRemoteSyncStateFailed(ctx, sqlcgen.MarkRemoteSyncStateFailedParams{
+				NodeID: node.ID, Remote: RemoteImmich, LastError: sql.NullString{String: "boom", Valid: true},
+			})
+		}); err != nil {
+			t.Fatalf("mark failed (%d): %v", i, err)
+		}
+	}
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.MarkRemoteSyncStatePushed(ctx, sqlcgen.MarkRemoteSyncStatePushedParams{NodeID: node.ID, Remote: RemoteImmich})
+	}); err != nil {
+		t.Fatalf("mark pushed: %v", err)
+	}
+
+	// A later failure must start counting from zero again, not resume where
+	// the pre-success streak left off -- otherwise a node that succeeds once
+	// every few attempts would eventually get stuck at the bound anyway.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.MarkRemoteSyncStateFailed(ctx, sqlcgen.MarkRemoteSyncStateFailedParams{
+			NodeID: node.ID, Remote: RemoteImmich, LastError: sql.NullString{String: "boom again", Valid: true},
+		})
+	}); err != nil {
+		t.Fatalf("mark failed after success: %v", err)
+	}
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSH_FAILED",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{String: "boom again", Valid: true},
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-1 * time.Hour).Unix(), Valid: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	n, err := mgr.RecoverFailedPushes(ctx, RemoteImmich, 0, DefaultMaxSyncRetries)
+	if err != nil {
+		t.Fatalf("RecoverFailedPushes: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("recovered = %d, want 1 (retry_count reset to 0 by the intervening success)", n)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

@@ -190,13 +190,24 @@ type Querier interface {
 	// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
+	// Backs POST /api/v1/assets/{id}/sync/retry (handleSyncRetry, #156): an
+	// explicit operator "try again" action on a PUSH_FAILED row, bypassing
+	// ResetRemoteSyncStateFailed's retry_count bound by design (see that
+	// query's comment). retry_count resets to 0 here -- the same rule
+	// MarkRemoteSyncStatePushed applies on a real success -- so the operator's
+	// action restores a full automatic-retry budget, not just one attempt
+	// before immediately re-hitting the bound on the very next failure (#182).
+	ManualRetryRemoteSyncState(ctx context.Context, arg ManualRetryRemoteSyncStateParams) error
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
 	MarkNodeMissing(ctx context.Context, id int64) error
-	// Terminal failure: records the error and the attempt time.
+	// Terminal failure: records the error, the attempt time, and increments
+	// retry_count -- what ResetRemoteSyncStateFailed's bound is measured against.
 	MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error
 	// Terminal success: records the remote asset id (empty for a scan-trigger
-	// push) and clears any prior error. updated_at set explicitly -- no trigger.
+	// push) and clears any prior error. retry_count resets to 0 -- it tracks
+	// consecutive failures since the last success, not a lifetime total.
+	// updated_at set explicitly -- no trigger.
 	MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteSyncStatePushedParams) error
 	// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
 	// scanned storage location whose last_seen_at predates the scan's start is
@@ -259,10 +270,18 @@ type Querier interface {
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
 	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
-	// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older
-	// than the retry window are reset to PENDING_CLOUD_PUSH so the next worker
-	// pass re-attempts them -- a transient remote failure must not strand a
-	// batch forever. Scoped to a single remote.
+	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
+	// than the retry window AND whose retry_count hasn't yet reached the bound
+	// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --
+	// a transient remote failure must not strand a batch forever. Once
+	// retry_count reaches the bound, a row is left PUSH_FAILED permanently: a
+	// misconfigured remote (e.g. an empty libraryId, see #182) must not retry
+	// every 5 minutes forever. A human can still force a re-attempt via
+	// POST /api/v1/assets/{id}/sync/retry (handleSyncRetry), which bypasses this
+	// bound by design -- an explicit operator action, not an automatic loop.
+	// Scoped to a single remote. last_attempt_at is set explicitly on every
+	// attempt, so this only re-claims rows that have not been retried recently
+	// (bounded retry frequency, not a hot loop).
 	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
