@@ -426,7 +426,13 @@ func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Loc
 		hashed.Add(int32(stats.Inserted + stats.Touched + stats.VersionCollisions + stats.Moved))
 	}
 	if w.deps.Engine != nil {
-		edgesCreated.Add(int32(resolveEdgesForBatch(ctx, w.deps, []Result{*result}, w.log)))
+		// The second return (sidecar paths worth an end-of-scan retry, #169)
+		// is scan-only -- runScan's post-walk retry pass is what actually
+		// consumes it. A watch event resolves one file against whatever is
+		// already committed at the moment it arrives; there is no later
+		// "batch" here to retry against, so it's intentionally discarded.
+		created, _ := resolveEdgesForBatch(ctx, w.deps, []Result{*result}, w.log)
+		edgesCreated.Add(int32(created))
 	}
 	return true
 }
