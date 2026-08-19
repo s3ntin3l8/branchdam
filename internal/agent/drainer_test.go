@@ -16,6 +16,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -32,11 +33,20 @@ type testEnv struct {
 
 func setupTestDB(t *testing.T) *testEnv {
 	t.Helper()
-	database, err := db.Open(context.Background(), ":memory:")
+	root := t.TempDir()
+	// A real temp-file DB, not ":memory:": a bare ":memory:" DSN gives every
+	// SQLite connection its own isolated, empty database (no cache=shared),
+	// so db.DB's reader pool -- a separate *sql.DB from the writer, up to
+	// readerConns connections -- would never see anything the writer
+	// commits. graph.Engine.ResolveAndCommit reads exclusively through the
+	// reader pool (internal/graph/lookup.go), so any test exercising it
+	// (WithEngine) needs a DB the reader pool can actually see. Matches
+	// internal/httpapi's test harness (fullTestServer), which already uses
+	// a temp file for the same reason.
+	database, err := db.Open(context.Background(), filepath.Join(root, "agent_test.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = database.Close() })
 
-	root := t.TempDir()
 	staging := filepath.Join(root, "staging")
 	exports := filepath.Join(root, "exports")
 	archive := filepath.Join(root, "archive")
@@ -970,3 +980,135 @@ func TestDrainer_UnresolvableStorageLocationRefused(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// TestDrainer_WithEngineResolvesAgentCreatedNode is issue #166's third
+// acceptance criterion: an agent-created node must not sit graph_status
+// UNLINKED forever. FilenameStemResolver (a real, already-shipped Tier-2
+// resolver) is enough to prove the hook actually runs: two nodes sharing a
+// filename stem produce a NEEDS_REVIEW candidate at base confidence 0.60,
+// below the 0.90 auto-accept threshold, so the resulting graph_status is
+// deterministic without needing to control capture time/camera/directory
+// boosts.
+func TestDrainer_WithEngineResolvesAgentCreatedNode(t *testing.T) {
+	env := setupTestDB(t)
+	engine := graph.NewEngine(env.db, nil, graph.FilenameStemResolver{})
+	drainer := agent.NewDrainer(env.db, env.guard, nil, agent.WithEngine(engine))
+	ctx := context.Background()
+
+	parentUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: parentUUID, FilePath: filepath.Join(env.staging, "IMG_0001.raw"),
+		FilenameStem: strPtr("IMG_0001"),
+	})
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+
+	childUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: childUUID, FilePath: filepath.Join(env.exports, "IMG_0001.jpg"),
+		FilenameStem: strPtr("IMG_0001"),
+	})
+	stats, err = drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		child, err := q.GetMediaNodeByUUID(ctx, childUUID)
+		require.NoError(t, err)
+		require.Equal(t, "NEEDS_REVIEW", child.GraphStatus, "the FilenameStemResolver candidate must have been resolved and committed, not left UNLINKED")
+
+		parent, err := q.GetMediaNodeByUUID(ctx, parentUUID)
+		require.NoError(t, err)
+		edges, err := q.ListEdgesBySource(ctx, parent.ID)
+		require.NoError(t, err)
+		require.Len(t, edges, 1)
+		require.Equal(t, "filename_stem", edges[0].Resolver)
+		require.Equal(t, child.ID, edges[0].TargetNodeID)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_WithoutEngineLeavesNodeUnlinked is the regression check for
+// the above: a Drainer built without WithEngine (every pre-existing
+// NewDrainer call site, including every other test in this file) must
+// behave exactly as before -- no resolution attempted, node stays UNLINKED.
+func TestDrainer_WithoutEngineLeavesNodeUnlinked(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	uuidA := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuidA, FilePath: filepath.Join(env.staging, "IMG_0002.raw"),
+		FilenameStem: strPtr("IMG_0002"),
+	})
+	uuidB := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuidB, FilePath: filepath.Join(env.exports, "IMG_0002.jpg"),
+		FilenameStem: strPtr("IMG_0002"),
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.GetMediaNodeByUUID(ctx, uuidB)
+		require.NoError(t, err)
+		require.Equal(t, "UNLINKED", node.GraphStatus)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDrainer_StartWaitProcessesInBackground is issue #166's first two
+// acceptance criteria together: Start runs a background loop that picks up
+// a newly enqueued event without an explicit DrainAll/ProcessPending call,
+// and nudges after doing so; Wait joins cleanly once ctx is cancelled.
+func TestDrainer_StartWaitProcessesInBackground(t *testing.T) {
+	env := setupTestDB(t)
+	nudged := make(chan struct{}, 1)
+	drainer := agent.NewDrainer(env.db, env.guard, nil, agent.WithNudge(func() {
+		select {
+		case nudged <- struct{}{}:
+		default:
+		}
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ev := enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid.New().String(), FilePath: filepath.Join(env.staging, "background.raw"),
+	})
+
+	drainer.Start(ctx, 10*time.Millisecond)
+
+	select {
+	case <-nudged:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the background drain loop to process the event and nudge")
+	}
+
+	cancel()
+	waited := make(chan struct{})
+	go func() {
+		drainer.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Wait() did not return after ctx was cancelled")
+	}
+
+	err := env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		got, err := q.GetAgentEventByUUID(context.Background(), ev.EventUuid)
+		require.NoError(t, err)
+		require.Equal(t, "PROCESSED", got.Status)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func strPtr(s string) *string { return &s }
