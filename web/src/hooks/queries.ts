@@ -76,6 +76,20 @@ export function useRetrySync() {
   });
 }
 
+export function useInheritMetadata() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.inheritMetadata(id),
+    onSuccess: (_data, id) => {
+      // The endpoint rewrites the file in place and refreshes size/hash/
+      // indexing_status on the node (see internal/httpapi's
+      // refreshNodeAfterInPlaceWrite) -- re-fetch the asset so the Metadata
+      // panel reflects the new file state, not the pre-write one.
+      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+    },
+  });
+}
+
 export function useUnlinkedCount() {
   return useQuery({
     queryKey: ["unlinked-count"],

@@ -15,6 +15,7 @@ vi.mock("../api/client", () => ({
     retrySync: vi.fn(),
     pruneCache: vi.fn(),
     listStorageLocations: vi.fn(),
+    inheritMetadata: vi.fn(),
   },
 }));
 
@@ -132,5 +133,77 @@ describe("AssetDetailPage purge control", () => {
 
     await waitFor(() => expect(screen.getByText(/purge failed/i)).toBeInTheDocument());
     expect(screen.queryByText("Cache purged.")).not.toBeInTheDocument();
+  });
+});
+
+describe("AssetDetailPage inherit-metadata control", () => {
+  it("reports how many tags were inherited, excluding the always-emitted identity tags", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
+      inherited: {
+        "EXIF:Make": "SONY",
+        "EXIF:LensModel": "FE 24-70mm F2.8 GM",
+        "XMP-dc:Identifier": "uuid-child",
+        "XMP-xmpMM:DerivedFrom": "uuid-parent",
+      },
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    const button = await screen.findByRole("button", { name: /inherit metadata/i });
+    await userEvent.click(button);
+
+    await waitFor(() => expect(api.inheritMetadata).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(screen.getByText("Inherited 2 tags.")).toBeInTheDocument());
+  });
+
+  it("reports nothing new when only identity tags come back", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
+      inherited: { "XMP-dc:Identifier": "uuid-child" },
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+    await waitFor(() => expect(screen.getByText("Nothing new to inherit.")).toBeInTheDocument());
+  });
+
+  // The server's 409/422/503 responses carry the actual reason (no resolved
+  // parent, read-only location, exiftool unavailable, ...) -- surfaced
+  // as-is rather than re-derived client-side, since the eligibility rules
+  // are the server's, not the SPA's, to own.
+  it("surfaces the server's error message on failure", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.inheritMetadata).mockRejectedValueOnce(
+      new Error("asset has no resolved parent edge to inherit from"),
+    );
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/asset has no resolved parent edge to inherit from/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("hides the control for an ARCHIVED asset", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue({ ...asset, lifecycleState: "ARCHIVED" });
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: /inherit metadata/i })).not.toBeInTheDocument();
   });
 });
