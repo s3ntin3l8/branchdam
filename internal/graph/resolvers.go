@@ -140,11 +140,31 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 	return candidates, nil
 }
 
-// HeuristicSpatialTemporalResolver matches candidate parents sharing camera
+// HeuristicSpatialTemporalResolver matches a candidate parent sharing camera
 // serial number within a ±2s capture timestamp window (Tier 3, confidence band
 // 0.70–0.89). Score starts at 0.70 (serial + time match), +0.10 for lens model
 // match, +0.09 for pHash Hamming distance <= 10. Hamming distance > 10 emits no
 // candidate. A node with NULL phash on either side caps confidence below 0.80 (0.79).
+//
+// #162: the underlying signals (serial + ±2s window + Hamming <= 10) can't
+// distinguish direction on their own -- a continuous-drive burst produces
+// near-identical images and near-identical pHashes, so every pair in the
+// window would otherwise score identically regardless of which frame is
+// "the parent." Ordering by captured_at_unix doesn't resolve this either:
+// that column is truncated to whole seconds (internal/pipeline/commit.go),
+// so a RAW+export pair from the same shutter release -- this resolver's
+// actual target case -- shares one timestamp, same as same-second burst
+// frames. Instead, a candidate is only emitted when the parent is a
+// camera-native raw format and the child is an export format (rawExts/
+// exportExts, the same maps inferRelationship already uses for
+// FINAL_EXPORT): direction becomes a function of file role, not resolution
+// order, and a same-format burst (all raw, or all export) now produces
+// zero edges. Because a fast burst's ±2s window can still contain several
+// raw candidates for one export child (or vice versa isn't possible: an
+// export is never a parent under this rule), only the single best-scoring
+// match is returned -- highest confidence, tie-broken by lowest Hamming
+// distance then smallest time delta -- so a mixed-format burst can't still
+// produce a small cross-linked mesh.
 type HeuristicSpatialTemporalResolver struct{}
 
 func (HeuristicSpatialTemporalResolver) Name() string { return "heuristic_spatial_temporal" }
@@ -160,9 +180,14 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 		return nil, err
 	}
 
-	var candidates []Candidate
+	var best *Candidate
+	bestHamming := math.MaxInt
+	bestDeltaSec := math.MaxFloat64
 	for _, parent := range parents {
 		if parent.ID == child.ID || parent.CapturedAt == nil {
+			continue
+		}
+		if !rawExts[strings.ToLower(parent.FileExt)] || !exportExts[strings.ToLower(child.FileExt)] {
 			continue
 		}
 
@@ -178,12 +203,14 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 			evidence["lens_model"] = child.LensModel
 		}
 
+		hamming := math.MaxInt
 		if child.PHash != nil && parent.PHash != nil {
 			dist := hashing.HammingDistance(*child.PHash, *parent.PHash)
 			evidence["hamming_distance"] = dist
 			if dist > 10 {
 				continue
 			}
+			hamming = dist
 			confidence += 0.09
 		} else {
 			evidence["phash_missing"] = true
@@ -197,7 +224,7 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 			confidence = 0.89
 		}
 
-		candidates = append(candidates, Candidate{
+		candidate := Candidate{
 			ParentID:   parent.ID,
 			ChildID:    child.ID,
 			Rel:        inferRelationship(child.FileName, child.FileExt, parent.FileExt),
@@ -205,9 +232,22 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 			Tier:       3,
 			Resolver:   "heuristic_spatial_temporal",
 			Evidence:   evidence,
-		})
+		}
+
+		betterThanBest := best == nil ||
+			confidence > best.Confidence ||
+			(confidence == best.Confidence && hamming < bestHamming) ||
+			(confidence == best.Confidence && hamming == bestHamming && deltaSec < bestDeltaSec)
+		if betterThanBest {
+			best = &candidate
+			bestHamming = hamming
+			bestDeltaSec = deltaSec
+		}
 	}
-	return candidates, nil
+	if best == nil {
+		return nil, nil
+	}
+	return []Candidate{*best}, nil
 }
 
 func sameCaptureDay(a, b *time.Time) bool {
