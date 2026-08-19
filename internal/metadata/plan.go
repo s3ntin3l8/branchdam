@@ -33,7 +33,7 @@ type TagSet struct {
 //
 // Returns the tag->value map ready for exiftool's -TAG=value syntax. Returns
 // an empty map when there is nothing to write.
-func Plan(parent, child TagSet) (map[string]string, error) {
+func Plan(parent, child TagSet) map[string]string {
 	tags := map[string]string{}
 
 	inherit := func(tag, parentVal, childVal string) {
@@ -57,13 +57,18 @@ func Plan(parent, child TagSet) (map[string]string, error) {
 	inherit("EXIF:LensModel", parent.LensModel, child.LensModel)
 	inherit("EXIF:SerialNumber", parent.SerialNumber, child.SerialNumber)
 
-	if parent.GPSLatitude != nil && child.GPSLatitude == nil {
+	// GPSLatitude and GPSLongitude are a coupled pair too, the same way
+	// DateTimeOriginal+OffsetTimeOriginal are above: a single coordinate is
+	// not a position. Only inherit when the parent has BOTH and the child
+	// has NEITHER -- inheriting just one (e.g. because the child already
+	// carries a longitude of its own) would pair a fresh latitude with the
+	// child's unrelated longitude and fabricate a location neither asset was
+	// actually at.
+	if parent.GPSLatitude != nil && parent.GPSLongitude != nil && child.GPSLatitude == nil && child.GPSLongitude == nil {
 		// Composite:GPS* is signed decimal degrees; writing it (not the raw
 		// EXIF:GPS* magnitude) is what makes exiftool emit the correct
 		// GPSLatitudeRef/GPSLongitudeRef hemisphere and preserve the sign.
 		tags["Composite:GPSLatitude"] = formatFloat(*parent.GPSLatitude)
-	}
-	if parent.GPSLongitude != nil && child.GPSLongitude == nil {
 		tags["Composite:GPSLongitude"] = formatFloat(*parent.GPSLongitude)
 	}
 
@@ -74,7 +79,7 @@ func Plan(parent, child TagSet) (map[string]string, error) {
 		tags["XMP-xmpMM:DerivedFrom"] = child.DerivedFrom
 	}
 
-	return tags, nil
+	return tags
 }
 
 func formatFloat(f float64) string {

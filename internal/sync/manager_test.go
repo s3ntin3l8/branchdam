@@ -417,6 +417,62 @@ func TestMarkRemoteSyncStatePushedResetsRetryCount(t *testing.T) {
 	}
 }
 
+// TestMarkRemoteSyncStatePushedKeepsExistingRemoteAssetIDOnEmptyOverwrite
+// covers finding H: MarkRemoteSyncStatePushed must COALESCE remote_asset_id
+// (matching UpsertRemoteSyncState's pattern), not bare-overwrite it. Unreachable
+// via Manager's public API today -- every current PushFunc is Immich's
+// whole-library TriggerScan, which never populates a remote_asset_id, so
+// Manager.ProcessPending always calls this with an empty string -- but the
+// query itself must still be correct for a future per-node remote, which
+// this test exercises directly against the generated query rather than
+// through Manager.
+func TestMarkRemoteSyncStatePushedKeepsExistingRemoteAssetIDOnEmptyOverwrite(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	node := seedNode(t, database, locID, "/exports/immich/shot.jpg")
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID: node.ID, Remote: RemoteImmich, SyncStatus: "PUSHING",
+			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
+			LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed PUSHING: %v", err)
+	}
+
+	// First push records a real remote asset id.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.MarkRemoteSyncStatePushed(ctx, sqlcgen.MarkRemoteSyncStatePushedParams{
+			NodeID: node.ID, Remote: RemoteImmich,
+			RemoteAssetID: sql.NullString{String: "immich-asset-123", Valid: true},
+		})
+	}); err != nil {
+		t.Fatalf("mark pushed with id: %v", err)
+	}
+
+	// A later re-push (e.g. a re-sync) that doesn't have a fresh id in hand
+	// must not NULL out the one already recorded.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.MarkRemoteSyncStatePushed(ctx, sqlcgen.MarkRemoteSyncStatePushedParams{
+			NodeID: node.ID, Remote: RemoteImmich,
+			RemoteAssetID: sql.NullString{}, // empty -- matches every current PushFunc
+		})
+	}); err != nil {
+		t.Fatalf("mark pushed without id: %v", err)
+	}
+
+	row, err := database.Reader.GetRemoteSyncState(ctx, sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !row.RemoteAssetID.Valid || row.RemoteAssetID.String != "immich-asset-123" {
+		t.Errorf("remote_asset_id = %+v, want immich-asset-123 (an empty overwrite must not NULL a previously recorded id)", row.RemoteAssetID)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

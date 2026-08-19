@@ -2691,6 +2691,22 @@ func TestAssetSyncStatus(t *testing.T) {
 			t.Errorf("status = %d, want 404", rr.Code)
 		}
 	})
+
+	// Finding K: handleSyncRetry and handleInheritMetadata both 404 an
+	// ARCHIVED node; handleAssetSyncStatus previously didn't, despite the
+	// three handlers sitting adjacent.
+	t.Run("ARCHIVED asset 404s", func(t *testing.T) {
+		archived := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "archived-status.jpg"), "uuid-sync-status-archived")
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.ArchiveMediaNode(context.Background(), archived.ID)
+		}); err != nil {
+			t.Fatalf("archive node: %v", err)
+		}
+		rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+fmt.Sprint(archived.ID)+"/sync-status", nil)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404 for ARCHIVED node", rr.Code)
+		}
+	})
 }
 
 func TestSyncRetryRequeuesFailed(t *testing.T) {
@@ -2780,6 +2796,39 @@ func TestSyncRetryResetsRetryCount(t *testing.T) {
 	}
 	if after.RetryCount != 0 {
 		t.Errorf("retry_count after manual retry = %d, want 0 (operator's fix must restore a full retry budget)", after.RetryCount)
+	}
+	if after.SyncStatus != "PENDING_CLOUD_PUSH" {
+		t.Errorf("sync_status after manual retry = %q, want PENDING_CLOUD_PUSH", after.SyncStatus)
+	}
+}
+
+// TestSyncRetryLeavesLastAttemptAtUntouched covers finding K: a manual retry
+// must not bump last_attempt_at, or ListRemoteSyncStateByStatus's
+// oldest-attempt-first claim ordering sends the row an operator just
+// explicitly asked to retry to the BACK of the queue -- behind every row the
+// automatic ResetRemoteSyncStateFailed recovery already reset (which leaves
+// last_attempt_at alone). This is the property that makes the two retry
+// paths for the same transition agree.
+func TestSyncRetryLeavesLastAttemptAtUntouched(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedSyncLocation(t, database)
+	node := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "retry-attempt-at.jpg"), "uuid-sync-retry-attempt-at")
+
+	oldAttempt := time.Now().Add(-1 * time.Hour).Unix()
+	seedSyncState(t, database, node.ID, "IMMICH", "PUSH_FAILED", "boom", oldAttempt)
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/sync/retry", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	after, err := database.Reader.GetRemoteSyncState(context.Background(), sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: "IMMICH"})
+	if err != nil {
+		t.Fatalf("get after retry: %v", err)
+	}
+	if !after.LastAttemptAt.Valid || after.LastAttemptAt.Int64 != oldAttempt {
+		t.Errorf("last_attempt_at after manual retry = %+v, want unchanged at %d -- a manual retry must claim promptly, not sort behind rows the automatic recovery already reset",
+			after.LastAttemptAt, oldAttempt)
 	}
 	if after.SyncStatus != "PENDING_CLOUD_PUSH" {
 		t.Errorf("sync_status after manual retry = %q, want PENDING_CLOUD_PUSH", after.SyncStatus)
