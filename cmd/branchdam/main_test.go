@@ -484,6 +484,24 @@ func TestStartImmichWorkerDisabledWhenNotConfigured(t *testing.T) {
 	}
 }
 
+func TestStartImmichWorkerDisabledWhenLibraryIDMissing(t *testing.T) {
+	for name, libraryID := range map[string]string{
+		"empty":                  "",
+		"unresolved placeholder": "${IMMICH_LIBRARY_ID}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			database := mainTestOpenDB(t)
+			cfg := &config.Config{Immich: config.Immich{APIURL: "http://immich:2283", APIKey: "k", LibraryID: libraryID, ExportPath: "/e"}}
+			w := startImmichWorker(ctx, cfg, database, slog.New(slog.DiscardHandler))
+			if w != nil {
+				t.Fatalf("startImmichWorker with libraryId %q = %v, want nil (an empty libraryId would 404 every push forever, see #182)", libraryID, w)
+			}
+		})
+	}
+}
+
 func TestStartImmichWorkerEnabledWhenConfigured(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

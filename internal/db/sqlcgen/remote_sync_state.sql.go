@@ -11,7 +11,7 @@ import (
 )
 
 const getRemoteSyncState = `-- name: GetRemoteSyncState :one
-SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE node_id = ?1 AND remote = ?2
 `
@@ -35,6 +35,7 @@ func (q *Queries) GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncState
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryCount,
 	)
 	return i, err
 }
@@ -100,7 +101,7 @@ func (q *Queries) ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesFor
 }
 
 const listRemoteSyncStateByNode = `-- name: ListRemoteSyncStateByNode :many
-SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE node_id = ?1
 ORDER BY remote ASC
@@ -126,6 +127,7 @@ func (q *Queries) ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) (
 			&i.LastAttemptAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RetryCount,
 		); err != nil {
 			return nil, err
 		}
@@ -141,7 +143,7 @@ func (q *Queries) ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) (
 }
 
 const listRemoteSyncStateByStatus = `-- name: ListRemoteSyncStateByStatus :many
-SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE remote = ?1 AND sync_status = ?2
 ORDER BY last_attempt_at ASC, node_id ASC
@@ -176,6 +178,7 @@ func (q *Queries) ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemot
 			&i.LastAttemptAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RetryCount,
 		); err != nil {
 			return nil, err
 		}
@@ -192,7 +195,7 @@ func (q *Queries) ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemot
 
 const markRemoteSyncStateFailed = `-- name: MarkRemoteSyncStateFailed :exec
 UPDATE remote_sync_state
-SET sync_status = 'PUSH_FAILED', last_error = ?3,
+SET sync_status = 'PUSH_FAILED', last_error = ?3, retry_count = retry_count + 1,
     last_attempt_at = unixepoch(), updated_at = unixepoch()
 WHERE node_id = ?1 AND remote = ?2
 `
@@ -203,7 +206,8 @@ type MarkRemoteSyncStateFailedParams struct {
 	LastError sql.NullString
 }
 
-// Terminal failure: records the error and the attempt time.
+// Terminal failure: records the error, the attempt time, and increments
+// retry_count -- what ResetRemoteSyncStateFailed's bound is measured against.
 func (q *Queries) MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error {
 	_, err := q.db.ExecContext(ctx, markRemoteSyncStateFailed, arg.NodeID, arg.Remote, arg.LastError)
 	return err
@@ -212,7 +216,7 @@ func (q *Queries) MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteS
 const markRemoteSyncStatePushed = `-- name: MarkRemoteSyncStatePushed :exec
 UPDATE remote_sync_state
 SET sync_status = 'PUSHED', remote_asset_id = ?3, last_error = NULL,
-    last_attempt_at = unixepoch(), updated_at = unixepoch()
+    retry_count = 0, last_attempt_at = unixepoch(), updated_at = unixepoch()
 WHERE node_id = ?1 AND remote = ?2
 `
 
@@ -223,7 +227,9 @@ type MarkRemoteSyncStatePushedParams struct {
 }
 
 // Terminal success: records the remote asset id (empty for a scan-trigger
-// push) and clears any prior error. updated_at set explicitly -- no trigger.
+// push) and clears any prior error. retry_count resets to 0 -- it tracks
+// consecutive failures since the last success, not a lifetime total.
+// updated_at set explicitly -- no trigger.
 func (q *Queries) MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteSyncStatePushedParams) error {
 	_, err := q.db.ExecContext(ctx, markRemoteSyncStatePushed, arg.NodeID, arg.Remote, arg.RemoteAssetID)
 	return err
@@ -232,22 +238,29 @@ func (q *Queries) MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteS
 const resetRemoteSyncStateFailed = `-- name: ResetRemoteSyncStateFailed :execrows
 UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', updated_at = unixepoch()
-WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND last_attempt_at < ?2 AND retry_count < ?3
 `
 
 type ResetRemoteSyncStateFailedParams struct {
 	Remote        string
 	LastAttemptAt sql.NullInt64
+	RetryCount    int64
 }
 
-// #55: worker-level retry. PUSH_FAILED rows whose last attempt is older than
-// the retry window are reset to PENDING_CLOUD_PUSH so the next worker pass
-// re-attempts them -- a transient remote failure must not strand a batch
-// forever. Scoped to a single remote. last_attempt_at is set explicitly on
-// every attempt, so this only re-claims rows that have not been retried
-// recently (bounded retry frequency, not a hot loop).
+// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
+// than the retry window AND whose retry_count hasn't yet reached the bound
+// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --
+// a transient remote failure must not strand a batch forever. Once
+// retry_count reaches the bound, a row is left PUSH_FAILED permanently: a
+// misconfigured remote (e.g. an empty libraryId, see #182) must not retry
+// every 5 minutes forever. A human can still force a re-attempt via
+// POST /api/v1/assets/{id}/sync/retry (handleSyncRetry), which bypasses this
+// bound by design -- an explicit operator action, not an automatic loop.
+// Scoped to a single remote. last_attempt_at is set explicitly on every
+// attempt, so this only re-claims rows that have not been retried recently
+// (bounded retry frequency, not a hot loop).
 func (q *Queries) ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, resetRemoteSyncStateFailed, arg.Remote, arg.LastAttemptAt)
+	result, err := q.db.ExecContext(ctx, resetRemoteSyncStateFailed, arg.Remote, arg.LastAttemptAt, arg.RetryCount)
 	if err != nil {
 		return 0, err
 	}
@@ -285,7 +298,7 @@ ON CONFLICT (node_id, remote) DO UPDATE SET
     last_error      = excluded.last_error,
     last_attempt_at = excluded.last_attempt_at,
     updated_at      = unixepoch()
-RETURNING node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at
+RETURNING node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 `
 
 type UpsertRemoteSyncStateParams struct {
@@ -321,6 +334,7 @@ func (q *Queries) UpsertRemoteSyncState(ctx context.Context, arg UpsertRemoteSyn
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryCount,
 	)
 	return i, err
 }

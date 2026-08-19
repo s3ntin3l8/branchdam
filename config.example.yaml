@@ -34,12 +34,14 @@ authz:
     - branchdam-admins
 
 immich:
-  # External-library scan trigger (phase 7 #55). Leave apiUrl empty to disable
-  # the sync worker. exportPath is where Immich's external library mount
-  # indexes -- the worker enqueues live nodes under it.
+  # External-library scan trigger (phase 7 #55). Leave apiUrl or libraryId
+  # empty (or unresolved, as here) to disable the sync worker -- an empty
+  # libraryId would otherwise 404 every push forever (#182). exportPath is
+  # where Immich's external library mount indexes -- the worker enqueues
+  # live nodes under it.
   apiUrl: ${IMMICH_API_URL}
   apiKey: ${IMMICH_API_KEY}
-  libraryId: <library-uuid>
+  libraryId: ${IMMICH_LIBRARY_ID}
   exportPath: /storage/exports/immich
 
 
