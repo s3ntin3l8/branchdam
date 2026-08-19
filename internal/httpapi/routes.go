@@ -562,11 +562,19 @@ type AssetSyncStatusOutput struct {
 }
 
 func (s *Server) handleAssetSyncStatus(ctx context.Context, in *AssetSyncStatusInput) (*AssetSyncStatusOutput, error) {
-	if _, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, huma.Error404NotFound("asset not found")
-		}
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
 		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+	// Matches handleSyncRetry and handleInheritMetadata, both of which 404 an
+	// ARCHIVED node -- these three handlers sit adjacent and previously
+	// disagreed on this for no reason; an ARCHIVED node's sync history isn't
+	// meaningful to surface as if it were live.
+	if node.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
 	}
 	rows, err := s.db.Reader.ListRemoteSyncStateByNode(ctx, in.ID)
 	if err != nil {
@@ -724,10 +732,7 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 	}
 	childTags.DerivedFrom = parent.NodeUuid // XMP-xmpMM:DerivedFrom = parent node_uuid
 
-	tags, err := metadata.Plan(parentTags, childTags)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("plan metadata inheritance", err)
-	}
+	tags := metadata.Plan(parentTags, childTags)
 	// Plan always emits the two identity tags (XMP-dc:Identifier /
 	// XMP-xmpMM:DerivedFrom), so this write is idempotent in value: repeating
 	// it leaves the file's inheritable metadata unchanged and re-asserts the
@@ -762,8 +767,13 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 	// stale values instead of seeing the child's own tags (#157).
 	// Bounded with its own inheritWriteTimeout: a hung exiftool re-read on a
 	// stalled mount must not hang the request after the write already
-	// succeeded.
-	bctx, bcancel := context.WithTimeout(ctx, inheritWriteTimeout)
+	// succeeded. Derived from context.WithoutCancel(ctx), not ctx directly:
+	// the write itself already committed by this point, so a client
+	// disconnecting now must not cancel a backfill that exists specifically
+	// to keep the DB in sync with a change that already happened -- the
+	// disconnect is exactly the case most likely to leave node_metadata
+	// stale, which is the failure this backfill exists to avoid.
+	bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), inheritWriteTimeout)
 	defer bcancel()
 	if exif, err := s.prober.Exif(bctx, child.FilePath); err != nil {
 		s.log.Warn("inherit-metadata: re-read child for backfill failed", "nodeID", child.ID, "err", err)

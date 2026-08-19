@@ -197,6 +197,16 @@ type Querier interface {
 	// MarkRemoteSyncStatePushed applies on a real success -- so the operator's
 	// action restores a full automatic-retry budget, not just one attempt
 	// before immediately re-hitting the bound on the very next failure (#182).
+	//
+	// last_attempt_at is deliberately left untouched, matching
+	// ResetRemoteSyncStateFailed (the automatic recovery path for the same
+	// PUSH_FAILED -> PENDING_CLOUD_PUSH transition), not UpsertRemoteSyncState.
+	// ListRemoteSyncStateByStatus claims oldest-last_attempt_at-first, so
+	// bumping it here would send a row an operator just explicitly asked to
+	// retry to the BACK of the claim queue -- behind every row the automatic
+	// recovery already reset. Leaving it alone keeps the row's original
+	// position, so it claims promptly instead of behind a potentially large
+	// backlog.
 	ManualRetryRemoteSyncState(ctx context.Context, arg ManualRetryRemoteSyncStateParams) error
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
@@ -208,6 +218,14 @@ type Querier interface {
 	// push) and clears any prior error. retry_count resets to 0 -- it tracks
 	// consecutive failures since the last success, not a lifetime total.
 	// updated_at set explicitly -- no trigger.
+	//
+	// remote_asset_id uses COALESCE(excluded, existing), matching
+	// UpsertRemoteSyncState's pattern, not a bare overwrite: today's only
+	// PushFunc (Immich's whole-library TriggerScan) never populates it, so ?3 is
+	// always empty and this is currently unreachable in practice. It's still
+	// fixed for symmetry -- a bare overwrite would silently NULL a previously
+	// recorded id on any future call site that (unlike today's) sometimes pushes
+	// without a fresh remote_asset_id in hand.
 	MarkRemoteSyncStatePushed(ctx context.Context, arg MarkRemoteSyncStatePushedParams) error
 	// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
 	// scanned storage location whose last_seen_at predates the scan's start is

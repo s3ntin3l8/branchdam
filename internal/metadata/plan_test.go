@@ -21,10 +21,7 @@ func TestPlan(t *testing.T) {
 	childNoParent := TagSet{Identifier: "uuid-child"}
 
 	t.Run("full inheritance into an empty child", func(t *testing.T) {
-		got, err := Plan(parent, childWithParent)
-		if err != nil {
-			t.Fatalf("Plan: %v", err)
-		}
+		got := Plan(parent, childWithParent)
 		want := map[string]string{
 			"EXIF:DateTimeOriginal":   "2023:05:01 12:34:56",
 			"EXIF:OffsetTimeOriginal": "+02:00",
@@ -44,10 +41,7 @@ func TestPlan(t *testing.T) {
 
 	t.Run("partial parent inherits only what it has", func(t *testing.T) {
 		partial := TagSet{Make: "SONY", Model: "ILCE-7M4", Identifier: "uuid-parent", DerivedFrom: "gp"}
-		got, err := Plan(partial, childWithParent)
-		if err != nil {
-			t.Fatalf("Plan: %v", err)
-		}
+		got := Plan(partial, childWithParent)
 		if _, ok := got["EXIF:Make"]; !ok {
 			t.Errorf("expected EXIF:Make to be inherited, got %v", got)
 		}
@@ -66,10 +60,7 @@ func TestPlan(t *testing.T) {
 			Make: "Canon", Model: "EOS R5", LensModel: "RF 50mm", SerialNumber: "998877",
 			Identifier: "uuid-child", DerivedFrom: "uuid-parent",
 		}
-		got, err := Plan(parent, child)
-		if err != nil {
-			t.Fatalf("Plan: %v", err)
-		}
+		got := Plan(parent, child)
 		for _, tag := range []string{"EXIF:DateTimeOriginal", "EXIF:OffsetTimeOriginal", "Composite:GPSLatitude", "Composite:GPSLongitude", "EXIF:Make", "EXIF:Model", "EXIF:LensModel", "EXIF:SerialNumber"} {
 			if _, ok := got[tag]; ok {
 				t.Errorf("tag %q should NOT be overwritten, got %v", tag, got)
@@ -89,10 +80,7 @@ func TestPlan(t *testing.T) {
 			DateTimeOriginal: "2019:01:01 00:00:00", // own time, no offset
 			Identifier:       "uuid-child", DerivedFrom: "uuid-parent",
 		}
-		got, err := Plan(parent, child)
-		if err != nil {
-			t.Fatalf("Plan: %v", err)
-		}
+		got := Plan(parent, child)
 		if _, ok := got["EXIF:DateTimeOriginal"]; ok {
 			t.Errorf("child's own DateTimeOriginal must not be overwritten, got %v", got)
 		}
@@ -101,22 +89,41 @@ func TestPlan(t *testing.T) {
 		}
 	})
 
+	// GPSLatitude/GPSLongitude are a coupled pair, the same way
+	// DateTimeOriginal/OffsetTimeOriginal are: a lone coordinate is not a
+	// position, so Plan must never emit one without the other.
+	t.Run("a lone parent coordinate is not inherited", func(t *testing.T) {
+		latOnly := TagSet{GPSLatitude: fptr(48.858222), Identifier: "uuid-parent", DerivedFrom: "gp"}
+		got := Plan(latOnly, childWithParent)
+		if _, ok := got["Composite:GPSLatitude"]; ok {
+			t.Errorf("a parent with only latitude must not inherit it alone, got %v", got)
+		}
+		if _, ok := got["Composite:GPSLongitude"]; ok {
+			t.Errorf("did not expect a longitude tag at all, got %v", got)
+		}
+	})
+
+	t.Run("child with only one coordinate of its own still blocks inheritance", func(t *testing.T) {
+		child := TagSet{GPSLatitude: fptr(40.0), Identifier: "uuid-child", DerivedFrom: "uuid-parent"}
+		got := Plan(parent, child)
+		if _, ok := got["Composite:GPSLatitude"]; ok {
+			t.Errorf("child already has a latitude, must not be overwritten, got %v", got)
+		}
+		if _, ok := got["Composite:GPSLongitude"]; ok {
+			t.Errorf("pairing the parent's longitude with the child's own latitude would fabricate a location, got %v", got)
+		}
+	})
+
 	t.Run("missing parent writes only injected tags", func(t *testing.T) {
 		noParent := TagSet{Identifier: "uuid-parent", DerivedFrom: ""}
-		got, err := Plan(noParent, childNoParent)
-		if err != nil {
-			t.Fatalf("Plan: %v", err)
-		}
+		got := Plan(noParent, childNoParent)
 		if len(got) != 1 || got["XMP-dc:Identifier"] != "uuid-child" {
 			t.Errorf("Plan = %v, want only XMP-dc:Identifier", got)
 		}
 	})
 
 	t.Run("both empty yields empty map", func(t *testing.T) {
-		got, err := Plan(TagSet{}, TagSet{})
-		if err != nil {
-			t.Fatalf("Plan: %v", err)
-		}
+		got := Plan(TagSet{}, TagSet{})
 		if len(got) != 0 {
 			t.Errorf("Plan = %v, want empty", got)
 		}

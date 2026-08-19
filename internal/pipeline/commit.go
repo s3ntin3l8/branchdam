@@ -462,6 +462,22 @@ func ffprobeMetadata(r Result) map[string]string {
 // next scan. The caller owns bounding ctx (the httpapi handler wraps the
 // exiftool re-read in inheritWriteTimeout): this function does no deadline
 // of its own, matching probe.Exif's contract.
+//
+// Deliberately does NOT touch media_nodes' promoted columns (captured_at_unix,
+// camera_model, camera_serial, lens_model) -- only insertNewNode and
+// commitVersionCollision's successor insert ever set those. Even
+// TouchMediaNode (same content, seen again) never refreshes them for an
+// existing node, so leaving them alone here matches that same repo-wide
+// "promoted at insert, not on update" pattern rather than making this one
+// caller special. The practical effect: after an inherit-metadata call, a
+// child's node_metadata can carry an inherited EXIF:DateTimeOriginal while
+// captured_at_unix stays NULL, so HeuristicSpatialTemporalResolver (which
+// queries captured_at_unix via ix_media_nodes_camera_time) won't see it.
+// loadTagSet is unaffected (it prefers node_metadata), so this is a
+// divergence between the two metadata stores, not a live bug in the
+// inheritance endpoint itself. Whether ANY update-existing-node path should
+// re-promote these columns is a broader question than this function answers
+// alone -- tracked separately as #204, not fixed here.
 func PersistExifMetadata(ctx context.Context, database *db.DB, nodeID int64, exif *probe.ExifResult, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)

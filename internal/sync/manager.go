@@ -51,10 +51,12 @@ type Node struct {
 // target_service). This repo keys idempotency on the (node_id, remote)
 // primary key instead -- node_id is structurally tied to content identity (a
 // content change is a version collision that mints a NEW node_id), so the PK
-// is a faithful, simpler stand-in and NO schema column is needed. The key is
-// still computed and asserted in Enqueue so a replay of the same logical push
-// is provably a no-op at the state-machine level, not just the SQL level.
-// This is stated explicitly so it isn't mistaken for an oversight.
+// is a faithful, simpler stand-in and NO schema column is needed. pushKey is
+// still computed in Enqueue and included in its debug log, purely as a
+// documented cross-check for that reasoning -- it is NOT compared or
+// asserted against anything at runtime; the (node_id, remote) PK is what
+// actually enforces idempotency. This is stated explicitly so the absence of
+// a real assertion isn't mistaken for an oversight.
 func pushKey(nodeChecksum, remote string) string {
 	sum := sha256.Sum256([]byte(nodeChecksum + "|" + remote))
 	return hex.EncodeToString(sum[:])
@@ -120,8 +122,17 @@ func (m *Manager) Enqueue(ctx context.Context, node Node, remote string) error {
 
 // ProcessPending claims up to batchSize PENDING_CLOUD_PUSH rows for remote,
 // marks them PUSHING, invokes push once for the whole batch, and marks every
-// node PUSHED (or PUSH_FAILED on error). Returns how many nodes were
-// attempted.
+// node PUSHED (or PUSH_FAILED on error) -- on failure the WHOLE batch is
+// marked PUSH_FAILED, not just whichever node push actually failed on.
+// Returns how many nodes were attempted.
+//
+// The all-or-nothing failure marking is correct for today's only PushFunc
+// (Immich's whole-library TriggerScan, wired via Worker -- see its drain doc
+// comment): a single call either covers every claimed node or none of them,
+// so there is no per-node result to attribute a failure to. A future
+// genuinely-per-node PushFunc would need ProcessPending itself reworked to
+// track per-node outcomes; reusing this batch-wide marking as-is would
+// re-mark already-succeeded nodes PUSH_FAILED alongside a real failure.
 //
 // The claim is atomic with the selection: both happen inside ONE write
 // transaction on the writer pool's single connection, so a concurrent second
