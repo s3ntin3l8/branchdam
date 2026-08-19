@@ -11,6 +11,8 @@ vi.mock("../api/client", () => ({
   api: {
     getAsset: vi.fn(),
     getAssetLineage: vi.fn(),
+    getAssetSyncStatus: vi.fn().mockResolvedValue({ sync: [] }),
+    retrySync: vi.fn(),
     pruneCache: vi.fn(),
   },
 }));
