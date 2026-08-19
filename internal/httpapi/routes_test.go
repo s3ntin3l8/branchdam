@@ -27,6 +27,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
+	"github.com/s3ntin3l8/branchdam/internal/sync"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
@@ -2682,6 +2683,65 @@ func TestAssetSyncStatus(t *testing.T) {
 		}
 		if gp.LastError != nil {
 			t.Errorf("GOOGLE_PHOTOS lastError = %v, want nil", gp.LastError)
+		}
+	})
+
+	t.Run("surfaces retryCount and exhausted once a row hits the retry bound", func(t *testing.T) {
+		below := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "below-bound.jpg"), "uuid-sync-status-below")
+		atBound := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "at-bound.jpg"), "uuid-sync-status-at-bound")
+		seedSyncState(t, database, below.ID, "IMMICH", "PUSH_FAILED", "boom", now)
+		seedSyncState(t, database, atBound.ID, "IMMICH", "PUSH_FAILED", "boom", now)
+
+		markFailed := func(t *testing.T, nodeID int64, times int) {
+			t.Helper()
+			for i := 0; i < times; i++ {
+				if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+					return q.MarkRemoteSyncStateFailed(context.Background(), sqlcgen.MarkRemoteSyncStateFailedParams{
+						NodeID: nodeID, Remote: "IMMICH", LastError: sql.NullString{String: "boom", Valid: true},
+					})
+				}); err != nil {
+					t.Fatalf("mark failed (%d): %v", i, err)
+				}
+			}
+		}
+		markFailed(t, below.ID, sync.DefaultMaxSyncRetries-1)
+		markFailed(t, atBound.ID, sync.DefaultMaxSyncRetries)
+
+		get := func(t *testing.T, nodeID int64) syncStateDTO {
+			t.Helper()
+			rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/"+fmt.Sprint(nodeID)+"/sync-status", nil)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+			}
+			var got struct {
+				Sync []syncStateDTO `json:"sync"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			for _, r := range got.Sync {
+				if r.Remote == "IMMICH" {
+					return r
+				}
+			}
+			t.Fatalf("missing IMMICH row: %+v", got.Sync)
+			return syncStateDTO{}
+		}
+
+		belowDTO := get(t, below.ID)
+		if belowDTO.RetryCount != int64(sync.DefaultMaxSyncRetries-1) {
+			t.Errorf("below-bound retryCount = %d, want %d", belowDTO.RetryCount, sync.DefaultMaxSyncRetries-1)
+		}
+		if belowDTO.Exhausted {
+			t.Errorf("below-bound exhausted = true, want false")
+		}
+
+		atBoundDTO := get(t, atBound.ID)
+		if atBoundDTO.RetryCount != int64(sync.DefaultMaxSyncRetries) {
+			t.Errorf("at-bound retryCount = %d, want %d", atBoundDTO.RetryCount, sync.DefaultMaxSyncRetries)
+		}
+		if !atBoundDTO.Exhausted {
+			t.Errorf("at-bound exhausted = false, want true")
 		}
 	})
 

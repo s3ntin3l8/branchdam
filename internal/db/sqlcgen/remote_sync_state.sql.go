@@ -10,6 +10,30 @@ import (
 	"database/sql"
 )
 
+const countRemoteSyncStateExhausted = `-- name: CountRemoteSyncStateExhausted :one
+SELECT count(*) FROM remote_sync_state
+WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND retry_count >= ?2
+`
+
+type CountRemoteSyncStateExhaustedParams struct {
+	Remote     string
+	RetryCount int64
+}
+
+// Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
+// for this remote have a retry_count at or past the bound, so
+// ResetRemoteSyncStateFailed will never re-claim them again on its own.
+// Backs Worker.drain's periodic "permanently abandoned" warning -- distinct
+// from ResetRemoteSyncStateFailed's `retry_count < ?3` claim filter (this is
+// its complement, `>=`), so a misconfigured remote's silent backlog is
+// visible in logs instead of only discoverable via a direct SQLite query.
+func (q *Queries) CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRemoteSyncStateExhausted, arg.Remote, arg.RetryCount)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getRemoteSyncState = `-- name: GetRemoteSyncState :one
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state

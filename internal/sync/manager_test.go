@@ -361,6 +361,54 @@ func TestRecoverFailedPushesRespectsRetryBound(t *testing.T) {
 	}
 }
 
+func TestCountExhaustedPushes(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	ctx := context.Background()
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	below := seedNode(t, database, locID, "/exports/immich/below.jpg")
+	atBound := seedNode(t, database, locID, "/exports/immich/at-bound.jpg")
+
+	for _, tc := range []struct {
+		node     sqlcgen.MediaNode
+		failures int
+	}{
+		{below, DefaultMaxSyncRetries - 1},
+		{atBound, DefaultMaxSyncRetries},
+	} {
+		if err := mgr.Enqueue(ctx, Node{ID: tc.node.ID, Checksum: "aaaaaaaaaaaaaaaa"}, RemoteImmich); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		for i := 0; i < tc.failures; i++ {
+			if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+				return q.MarkRemoteSyncStateFailed(ctx, sqlcgen.MarkRemoteSyncStateFailedParams{
+					NodeID: tc.node.ID, Remote: RemoteImmich, LastError: sql.NullString{String: "boom", Valid: true},
+				})
+			}); err != nil {
+				t.Fatalf("mark failed (%d): %v", i, err)
+			}
+		}
+	}
+
+	n, err := mgr.CountExhaustedPushes(ctx, RemoteImmich, DefaultMaxSyncRetries)
+	if err != nil {
+		t.Fatalf("CountExhaustedPushes: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("exhausted count = %d, want 1 (only the at-bound row)", n)
+	}
+
+	// maxRetries <= 0 falls back to DefaultMaxSyncRetries, matching
+	// RecoverFailedPushes' own fallback.
+	n, err = mgr.CountExhaustedPushes(ctx, RemoteImmich, 0)
+	if err != nil {
+		t.Fatalf("CountExhaustedPushes with fallback: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("exhausted count with fallback = %d, want 1", n)
+	}
+}
+
 func TestMarkRemoteSyncStatePushedResetsRetryCount(t *testing.T) {
 	database := openTestDB(t)
 	mgr := NewManager(database, nil)
