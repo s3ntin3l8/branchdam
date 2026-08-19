@@ -659,12 +659,13 @@ func TestWorkerDrainCapsSubBatchesPerTickLeavingOverflowForNextTick(t *testing.T
 	exportPath := filepath.Join(root, "immich")
 	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
 
-	// batchSize 2, maxSubBatchesPerTick 10 -> cap of 20 nodes per tick.
-	// Seed 25 nodes directly as PENDING_CLOUD_PUSH (standing in for a mass
-	// recovery event rather than routing through Enqueue/enqueueUntracked,
-	// which is itself bounded by the discovery limit and so could never
-	// produce more than the cap in one call).
-	const seeded = 25
+	// Seed more than one tick's cap of PENDING_CLOUD_PUSH rows directly
+	// (standing in for a mass recovery event rather than routing through
+	// Enqueue/enqueueUntracked, which is itself bounded by the discovery
+	// limit and so could never produce more than the cap in one call).
+	const batchSize = 2
+	const capPerTick = batchSize * maxSubBatchesPerTick
+	const seeded = capPerTick + 5
 	nodeIDs := make([]int64, seeded)
 	for i := 0; i < seeded; i++ {
 		node := seedNode(t, database, locID, filepath.Join(exportPath, fmt.Sprintf("shot-%d.jpg", i)))
@@ -686,7 +687,7 @@ func TestWorkerDrainCapsSubBatchesPerTickLeavingOverflowForNextTick(t *testing.T
 	}
 
 	push := &recordingPush{}
-	w := NewWorker(mgr, RemoteImmich, exportPath, 2, time.Hour, push.fn, nil)
+	w := NewWorker(mgr, RemoteImmich, exportPath, batchSize, time.Hour, push.fn, nil)
 
 	w.drain(ctx)
 	if push.calls != 1 {
@@ -696,15 +697,15 @@ func TestWorkerDrainCapsSubBatchesPerTickLeavingOverflowForNextTick(t *testing.T
 	if err != nil {
 		t.Fatalf("ListRemoteSyncStateByStatus(PUSHED): %v", err)
 	}
-	if len(pushedRows) != 20 {
-		t.Errorf("PUSHED rows after one capped tick = %d, want 20 (the per-tick cap, not all 25)", len(pushedRows))
+	if len(pushedRows) != capPerTick {
+		t.Errorf("PUSHED rows after one capped tick = %d, want %d (the per-tick cap, not all %d)", len(pushedRows), capPerTick, seeded)
 	}
 	pendingRows, err := database.Reader.ListRemoteSyncStateByStatus(ctx, sqlcgen.ListRemoteSyncStateByStatusParams{Remote: RemoteImmich, SyncStatus: "PENDING_CLOUD_PUSH", Limit: 100})
 	if err != nil {
 		t.Fatalf("ListRemoteSyncStateByStatus(PENDING_CLOUD_PUSH): %v", err)
 	}
-	if len(pendingRows) != seeded-20 {
-		t.Errorf("PENDING_CLOUD_PUSH rows left for next tick = %d, want %d", len(pendingRows), seeded-20)
+	if len(pendingRows) != seeded-capPerTick {
+		t.Errorf("PENDING_CLOUD_PUSH rows left for next tick = %d, want %d", len(pendingRows), seeded-capPerTick)
 	}
 
 	w.drain(ctx) // the overflow tick: must push the remainder for real, not silently mark it PUSHED
