@@ -323,6 +323,14 @@ func TestExecuteSymlinkEscapeRefused(t *testing.T) {
 	if err := os.Symlink(tier3File, linkPath); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
+	// Execute's file-freshness re-check compares against the symlink's OWN
+	// Lstat (never followed), so the candidate must carry that, not the
+	// target's -- otherwise the freshness check itself would refuse before
+	// ever reaching Guard, defeating this test's actual point.
+	linkInfo, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("lstat symlink: %v", err)
+	}
 
 	guard := storage.NewGuard([]storage.Location{
 		{ID: tier1ID, Name: "t1", RootPath: tier1Root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false},
@@ -333,7 +341,10 @@ func TestExecuteSymlinkEscapeRefused(t *testing.T) {
 	candidateNode := seedNode(t, database, nodeSpec{locationID: tier1ID, path: linkPath, mtimeUnix: oldMtime})
 	seedEdge(t, database, master.ID, candidateNode.ID, "AUTO_ACCEPTED")
 
-	candidate := Candidate{NodeID: candidateNode.ID, FilePath: linkPath, FileName: "escape-hatch.jpg", StorageLocationID: tier1ID}
+	candidate := Candidate{
+		NodeID: candidateNode.ID, FilePath: linkPath, FileName: "escape-hatch.jpg", StorageLocationID: tier1ID,
+		MtimeUnix: linkInfo.ModTime().Unix(), SizeBytes: linkInfo.Size(),
+	}
 	results := Execute(context.Background(), database, guard, []Candidate{candidate}, cutoffUnix)
 
 	if len(results) != 1 {
@@ -405,6 +416,10 @@ func TestExecutePurgesFileAndMarksMissing(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("cache content"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+	fileInfo, err := os.Lstat(filePath)
+	if err != nil {
+		t.Fatalf("lstat file: %v", err)
+	}
 
 	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
 	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
@@ -416,8 +431,16 @@ func TestExecutePurgesFileAndMarksMissing(t *testing.T) {
 
 	beforeCount := countMediaNodes(t, database)
 
+	// Execute's file-freshness re-check compares the candidate's
+	// MtimeUnix/SizeBytes against a fresh Lstat, so a candidate built by
+	// hand (rather than returned from Plan) must carry the file's real
+	// values, not the DB row's -- see TestExecuteRefusesWhenFileChangedSincePlan
+	// for what happens when they deliberately don't match.
 	results := Execute(context.Background(), database, guard, []Candidate{
-		{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID},
+		{
+			NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID,
+			MtimeUnix: fileInfo.ModTime().Unix(), SizeBytes: fileInfo.Size(),
+		},
 	}, cutoffUnix)
 
 	if len(results) != 1 || !results[0].Purged || results[0].Err != nil {
@@ -438,6 +461,111 @@ func TestExecutePurgesFileAndMarksMissing(t *testing.T) {
 	afterCount := countMediaNodes(t, database)
 	if afterCount != beforeCount {
 		t.Errorf("media_nodes row count changed from %d to %d, want unchanged (rows are never deleted)", beforeCount, afterCount)
+	}
+}
+
+// TestExecuteRefusesWhenFileChangedSincePlan proves the file-freshness
+// re-check: a candidate whose on-disk (mtime, size) no longer matches what
+// Plan recorded -- e.g. the cache file was regenerated with fresh content
+// moments before Execute runs, and no scan has observed that yet -- is
+// refused with ErrFileChangedSincePlan and never deleted. media_nodes.mtime_unix
+// is only as fresh as the last scan/sweep, so the DB-side eligibility
+// re-check alone (TestExecuteAbortsWhenNoLongerEligible) can't catch this;
+// only a fresh Lstat immediately before Guard.Remove can.
+func TestExecuteRefusesWhenFileChangedSincePlan(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache.jpg")
+	if err := os.WriteFile(filePath, []byte("stale content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
+
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("stale")})
+	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
+
+	// The file on disk is regenerated with different content -- a longer
+	// byte length is enough to guarantee a size mismatch regardless of
+	// filesystem mtime granularity.
+	if err := os.WriteFile(filePath, []byte("regenerated content, much longer now"), 0o644); err != nil {
+		t.Fatalf("rewrite file: %v", err)
+	}
+
+	// The candidate carries the STALE (pre-regeneration) mtime/size, as if
+	// it came from a Plan call whose snapshot predates the regeneration --
+	// exactly the race window Execute's freshness check exists to close.
+	results := Execute(context.Background(), database, guard, []Candidate{
+		{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID, MtimeUnix: oldMtime, SizeBytes: 13},
+	}, cutoffUnix)
+
+	if len(results) != 1 || results[0].Purged {
+		t.Fatalf("results = %+v, want a single refused (not purged) result", results)
+	}
+	if !errors.Is(results[0].Err, ErrFileChangedSincePlan) {
+		t.Errorf("err = %v, want ErrFileChangedSincePlan", results[0].Err)
+	}
+
+	got, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(got) != "regenerated content, much longer now" {
+		t.Errorf("file content = %q, want the regenerated content to survive untouched", got)
+	}
+
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Errorf("lifecycle_state = %q, want ACTIVE (unchanged -- a refused purge must not mark the node MISSING)", after.LifecycleState)
+	}
+}
+
+// TestExecuteMarksMissingWhenFileAlreadyGone proves the other side of the
+// freshness check: a candidate whose file vanished on its own (not via
+// Guard.Remove -- e.g. deleted out-of-band) is not treated as an error.
+// Nothing is left for Guard to remove, but the node's record is stale
+// either way, so it still lands in MISSING -- self-healing, matching how
+// the ordinary MISSING sweep treats a vanished file elsewhere in this
+// codebase.
+func TestExecuteMarksMissingWhenFileAlreadyGone(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache.jpg")
+	if err := os.WriteFile(filePath, []byte("cache content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
+
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("gone")})
+	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
+
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+
+	results := Execute(context.Background(), database, guard, []Candidate{
+		{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID, MtimeUnix: oldMtime, SizeBytes: 13},
+	}, cutoffUnix)
+
+	if len(results) != 1 || !results[0].Purged || results[0].Err != nil {
+		t.Fatalf("results = %+v, want a single successful purge (already-gone is not an error)", results)
+	}
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if after.LifecycleState != "MISSING" {
+		t.Errorf("lifecycle_state = %q, want MISSING", after.LifecycleState)
 	}
 }
 

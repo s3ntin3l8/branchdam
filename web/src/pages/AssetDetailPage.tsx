@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, useSearchParams } from "react-router";
-import { useAsset, useAssetLineage, useAssetSyncStatus, usePruneCache, useRetrySync } from "../hooks/queries";
+import { useAsset, useAssetLineage, useAssetSyncStatus, usePruneCache, useRetrySync, useStorageLocations } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
 import type { Asset } from "../api/types";
 
@@ -19,7 +19,17 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 // asset isn't eligible (no verified Tier-3 ancestor, or not yet past its
 // location's TTL) -- reported as a message, not an error, since "not
 // eligible" is an expected outcome, not a failure.
+//
+// Renders nothing at all for an asset on a non-prunable location (the
+// common case: any Tier-2/3 asset), mirroring StorageHealthPage's own
+// loc.prunable gate rather than showing a button that always resolves to
+// "Not eligible" -- the Asset DTO carries no tier/prunable field of its
+// own, so this cross-references the already-fetched storage-locations
+// list instead of adding one.
 function AssetPruneControl({ asset }: { asset: Asset }) {
+  const { data: locationsData } = useStorageLocations();
+  const location = locationsData?.locations.find((l) => l.id === asset.storageLocationId);
+
   const [checked, setChecked] = useState<"eligible" | "ineligible" | null>(null);
   // null = not attempted; otherwise the actual outcome for THIS asset's
   // candidate, not just "the request succeeded" -- Execute re-verifies
@@ -28,6 +38,14 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
   // and this click), which must not be shown as "Cache purged."
   const [purgeResult, setPurgeResult] = useState<{ purged: boolean; error?: string } | null>(null);
   const pruneCache = usePruneCache();
+
+  // Storage locations are always fetched at app startup elsewhere, so this
+  // is normally already cached; while genuinely unresolved (location ===
+  // undefined, not yet loaded) the control stays hidden rather than
+  // flashing a button that would immediately turn out to be ineligible.
+  if (!location?.prunable) {
+    return null;
+  }
 
   const checkEligibility = () => {
     setPurgeResult(null);
