@@ -781,6 +781,9 @@ const inheritWriteTimeout = 30 * time.Second
 // runs commitVersionCollision (see internal/pipeline/commit.go), archiving
 // this node and inserting a successor under a new node_uuid.
 func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.MediaNode) error {
+	rctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
+	defer cancel()
+
 	f, err := s.guard.OpenRead(node.FilePath)
 	if err != nil {
 		return fmt.Errorf("open for re-hash: %w", err)
@@ -797,8 +800,8 @@ func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.
 		return fmt.Errorf("re-hash: %w", err)
 	}
 
-	return s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.RefreshMediaNodeAfterInPlaceWrite(ctx, sqlcgen.RefreshMediaNodeAfterInPlaceWriteParams{
+	return s.db.InTx(rctx, func(q *sqlcgen.Queries) error {
+		return q.RefreshMediaNodeAfterInPlaceWrite(rctx, sqlcgen.RefreshMediaNodeAfterInPlaceWriteParams{
 			ID:        node.ID,
 			SizeBytes: stat.Size(),
 			MtimeUnix: stat.ModTime().Unix(),

@@ -384,10 +384,16 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 			}
 		}
 
+		// Seeded as INDEXED_FULL with a full_hash, as if an earlier scan had
+		// escalated this node (a prior fast_hash collision, say) -- the write
+		// is about to change the file's bytes, so this stale full_hash must
+		// not survive the refresh (see the RefreshMediaNodeAfterInPlaceWrite
+		// query comment).
+		staleFullHash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		child, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
 			NodeUuid: "uuid-refresh-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
 			FileExt: "jpg", SizeBytes: childSizeBefore, MtimeUnix: time.Now().Unix(), FastHash: &childHashBefore,
-			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			FullHash: &staleFullHash, IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
 		})
 		if err != nil {
 			return err
@@ -455,6 +461,12 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 	}
 	if after.MtimeUnix != wantMtime {
 		t.Errorf("child mtime_unix = %d, want %d", after.MtimeUnix, wantMtime)
+	}
+	if after.FullHash != nil {
+		t.Errorf("child full_hash = %q, want nil (stale full_hash from before the write must not survive it)", *after.FullHash)
+	}
+	if after.IndexingStatus != "INDEXED_SHALLOW" {
+		t.Errorf("child indexing_status = %q, want INDEXED_SHALLOW (downgraded from INDEXED_FULL, whose full_hash is now stale)", after.IndexingStatus)
 	}
 }
 
