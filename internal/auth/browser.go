@@ -26,11 +26,17 @@ const (
 // these headers on the router that bypasses ForwardAuth.
 func BrowserChain(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.Header.Get(authentikUsernameHeader)
 		principal := Principal{
 			Kind:   KindUser,
-			Name:   r.Header.Get(authentikUsernameHeader),
+			Name:   name,
 			Email:  r.Header.Get(authentikEmailHeader),
 			Groups: splitGroups(r.Header.Get(authentikGroupsHeader)),
+			// #164: a request with none of the expected Authentik headers
+			// (misconfigured ForwardAuth, or a direct hit on this port) must
+			// not read as "authenticated with an empty username" on a write
+			// route -- see RequireAdmin.
+			Authenticated: name != "",
 		}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), principal)))
 	})

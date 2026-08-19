@@ -163,6 +163,16 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Log
 				_, _ = w.Write([]byte(`{"$schema":"https://huma.rocks/schema/error.json","title":"Forbidden","status":403,"detail":"authentication required"}` + "\n"))
 				return
 			}
+			// #164: same reasoning as auth.RequireAdmin -- a browser
+			// principal with no identity headers at all must not pass this
+			// stricter (GET-included) admin check as if it were a real
+			// logged-in user.
+			if p.Kind != auth.KindMachine && !p.Authenticated {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"$schema":"https://huma.rocks/schema/error.json","title":"Forbidden","status":403,"detail":"authentication required"}` + "\n"))
+				return
+			}
 			if p.Kind != auth.KindMachine && len(allowedGroups) > 0 {
 				isAdmin := false
 				for _, g := range p.Groups {
