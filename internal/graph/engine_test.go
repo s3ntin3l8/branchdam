@@ -1277,3 +1277,50 @@ func TestHeuristicSpatialTemporalResolverPicksSingleBestRawMatch(t *testing.T) {
 		t.Errorf("SourceNodeID = %d, want %d (lowest Hamming distance)", edges[0].SourceNodeID, parentClosest.ID)
 	}
 }
+
+// TestHeuristicSpatialTemporalResolverFullTieBreaksOnLowestParentID backs
+// #162: two RAW parents that tie on confidence, Hamming distance, AND time
+// delta -- a real scenario for burst siblings sharing lens/pHash/timestamp,
+// not a hypothetical -- must resolve to a stable winner rather than falling
+// back to whatever order the underlying SQL scan happens to return rows in
+// (ListTier3Candidates has no ORDER BY). Run with -count=1 so this can't
+// pass by coincidentally matching a cached, order-dependent result.
+func TestHeuristicSpatialTemporalResolverFullTieBreaksOnLowestParentID(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	t0 := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1 * time.Second)
+	phash := int64(0x0000000000000000)
+
+	parentA := seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_a.arw", FileName: "parent_a.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_TIE", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phash,
+	})
+	parentB := seedNode(t, database, locationID, nodeFixture{
+		Path: "/parent_b.arw", FileName: "parent_b.arw", FileExt: "arw",
+		CameraSerial: "SERIAL_TIE", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t0, PHash: &phash,
+	})
+	child := seedNode(t, database, locationID, nodeFixture{
+		Path: "/child.jpg", FileName: "child.jpg", FileExt: "jpg",
+		CameraSerial: "SERIAL_TIE", LensModel: "FE 85mm F1.4 GM", CapturedAt: &t1, PHash: &phash,
+	})
+
+	wantWinner := parentA.ID
+	if parentB.ID < wantWinner {
+		wantWinner = parentB.ID
+	}
+
+	engine := NewEngine(database, nil, HeuristicSpatialTemporalResolver{})
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(child))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges among 2 fully-tied raw candidates, want 1: %+v", len(edges), edges)
+	}
+	if edges[0].SourceNodeID != wantWinner {
+		t.Errorf("SourceNodeID = %d, want %d (lowest parent node ID, the final tie-break)", edges[0].SourceNodeID, wantWinner)
+	}
+}

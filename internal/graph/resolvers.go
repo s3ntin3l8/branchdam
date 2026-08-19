@@ -163,8 +163,19 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 // raw candidates for one export child (or vice versa isn't possible: an
 // export is never a parent under this rule), only the single best-scoring
 // match is returned -- highest confidence, tie-broken by lowest Hamming
-// distance then smallest time delta -- so a mixed-format burst can't still
-// produce a small cross-linked mesh.
+// distance, then smallest time delta, then lowest parent node ID -- so a
+// mixed-format burst can't still produce a small cross-linked mesh. The
+// final ID tie-break matters in practice, not just in theory: a burst's raw
+// siblings can share identical lens, identical (bit-for-bit, after DCT
+// quantization) pHash, and -- per the captured_at_unix truncation above --
+// identical time delta too, so confidence/Hamming/deltaSec alone are not
+// always a total order. Without a final deterministic key, that case would
+// fall back to whatever order lookup.BySpatialTemporal's underlying SQL
+// happens to return rows in (ListTier3Candidates has no ORDER BY) --
+// reintroducing this issue's own "which frame wins is an accident of
+// resolution/scan order" problem one layer down, in the tie-break instead
+// of in Resolve's caller. Lowest parent ID is an arbitrary but explicit and
+// stable choice, not a claim that an older node ID is a more likely parent.
 type HeuristicSpatialTemporalResolver struct{}
 
 func (HeuristicSpatialTemporalResolver) Name() string { return "heuristic_spatial_temporal" }
@@ -237,7 +248,8 @@ func (HeuristicSpatialTemporalResolver) Resolve(ctx context.Context, child Node,
 		betterThanBest := best == nil ||
 			confidence > best.Confidence ||
 			(confidence == best.Confidence && hamming < bestHamming) ||
-			(confidence == best.Confidence && hamming == bestHamming && deltaSec < bestDeltaSec)
+			(confidence == best.Confidence && hamming == bestHamming && deltaSec < bestDeltaSec) ||
+			(confidence == best.Confidence && hamming == bestHamming && deltaSec == bestDeltaSec && parent.ID < best.ParentID)
 		if betterThanBest {
 			best = &candidate
 			bestHamming = hamming
