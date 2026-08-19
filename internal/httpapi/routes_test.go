@@ -210,7 +210,7 @@ func TestInheritMetadataConflicts(t *testing.T) {
 		// must never fall back to a heuristic match just because nothing
 		// better is left.
 		var locID int64
-		_ = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			rows, err := q.ListEdgesByTarget(context.Background(), child.ID)
 			if err != nil {
 				return err
@@ -222,7 +222,9 @@ func TestInheritMetadataConflicts(t *testing.T) {
 			}
 			locID = child.StorageLocationID
 			return nil
-		})
+		}); err != nil {
+			t.Fatalf("reject seeded edge: %v", err)
+		}
 		t3Parent := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "t3-parent.jpg"), "uuid-t3-parent")
 		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
@@ -246,7 +248,7 @@ func TestInheritMetadataConflicts(t *testing.T) {
 		// only remaining resolved candidate -- a duplicate is not ancestry and
 		// must never be treated as an identity source.
 		var locID int64
-		_ = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			rows, err := q.ListEdgesByTarget(context.Background(), child.ID)
 			if err != nil {
 				return err
@@ -258,7 +260,9 @@ func TestInheritMetadataConflicts(t *testing.T) {
 			}
 			locID = child.StorageLocationID
 			return nil
-		})
+		}); err != nil {
+			t.Fatalf("reject seeded edge: %v", err)
+		}
 		dup := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "dup.jpg"), "uuid-dup")
 		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
@@ -308,7 +312,7 @@ func TestInheritMetadataConflicts(t *testing.T) {
 		// from a second parent -- an unconfirmed lineage must never be used as
 		// an identity source.
 		var locID int64
-		_ = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			rows, err := q.ListEdgesByTarget(context.Background(), child.ID)
 			if err != nil {
 				return err
@@ -320,7 +324,9 @@ func TestInheritMetadataConflicts(t *testing.T) {
 			}
 			locID = child.StorageLocationID
 			return nil
-		})
+		}); err != nil {
+			t.Fatalf("reject seeded edge: %v", err)
+		}
 		nrParent := seedInheritNode(t, database, locID, filepath.Join(t.TempDir(), "nr-parent.jpg"), "uuid-nr-parent")
 		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 			_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{

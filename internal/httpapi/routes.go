@@ -858,11 +858,15 @@ func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
 	return best
 }
 
-// hasResolvedButIneligibleParent reports whether edges contains an
-// AUTO_ACCEPTED/CONFIRMED edge that pickWinningParent nonetheless excluded
-// (Tier-3, or not an identity-ancestry relationship type). Used only to give
-// the caller a more specific refusal message than "no resolved parent edge
-// at all" when that's not actually true.
+// hasResolvedButIneligibleParent reports whether edges contains any
+// AUTO_ACCEPTED/CONFIRMED edge at all. Only meaningful as a follow-up check
+// after pickWinningParent(edges) has already returned nil: at that point any
+// resolved edge found here must be one pickWinningParent excluded (Tier-3, or
+// not an identity-ancestry relationship type) -- since if it were eligible,
+// pickWinningParent would have picked it. Used only to give the caller a more
+// specific refusal message than "no resolved parent edge at all" when that's
+// not actually true. Calling this without first confirming pickWinningParent
+// returned nil would not carry that meaning.
 func hasResolvedButIneligibleParent(edges []sqlcgen.MediaEdge) bool {
 	for i := range edges {
 		e := &edges[i]
@@ -942,6 +946,11 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		return nil, huma.Error422UnprocessableEntity("self-loop edge is forbidden")
 	}
 
+	// The full schema-legal set (media_edges.relationship_type's CHECK
+	// constraint) -- a superset of validParentRelationships below, which
+	// narrows to the subset inherit-metadata may treat as identity ancestry.
+	// Keep the two in sync with the schema if it ever gains a relationship
+	// type.
 	validRels := map[string]bool{
 		"DERIVED_FROM":    true,
 		"FINAL_EXPORT":    true,
