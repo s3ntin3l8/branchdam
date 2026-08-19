@@ -232,6 +232,32 @@ WHERE id = ?1;
 -- location (docs/schema.md fix #8's full_hash policy).
 UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1;
 
+-- name: RefreshMediaNodeAfterInPlaceWrite :exec
+-- The metadata-inheritance endpoint (#54) is the first server-initiated
+-- filesystem write: it rewrites a child's file in place via exiftool, which
+-- changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
+-- next scan's commitOne sees a changed fast_hash at the same path and treats
+-- it as a version collision -- archiving the node and minting a new
+-- node_uuid, which strands every media_edges row (including a human
+-- CONFIRMED/REJECTED review decision) on the archived row. Called once,
+-- immediately after the write succeeds, so the DB and the file agree before
+-- any scan observes the change.
+--
+-- full_hash is always cleared and INDEXED_FULL is downgraded to
+-- INDEXED_SHALLOW: the write changed the file's bytes, so any previously
+-- computed BLAKE3 full_hash no longer matches it. Once fast_hash agrees
+-- again this row takes commitOne's Touched branch on the next scan, which
+-- never recomputes full_hash on its own (needsFullHash escalates based on
+-- current tier/collision state, not on the node's prior indexing_status) --
+-- so a stale full_hash would otherwise persist forever, masquerading as a
+-- verified integrity fingerprint it no longer is (docs/schema.md fix #8).
+UPDATE media_nodes
+SET size_bytes = ?2, mtime_unix = ?3, fast_hash = ?4,
+    full_hash = NULL,
+    indexing_status = CASE WHEN indexing_status = 'INDEXED_FULL' THEN 'INDEXED_SHALLOW' ELSE indexing_status END,
+    last_seen_at = unixepoch(), updated_at = unixepoch()
+WHERE id = ?1;
+
 -- name: MarkNodeMissing :exec
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
 

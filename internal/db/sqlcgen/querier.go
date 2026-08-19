@@ -230,6 +230,16 @@ type Querier interface {
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
 	RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error
+	// The metadata-inheritance endpoint (#54) is the first server-initiated
+	// filesystem write: it rewrites a child's file in place via exiftool, which
+	// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
+	// next scan's commitOne sees a changed fast_hash at the same path and treats
+	// it as a version collision -- archiving the node and minting a new
+	// node_uuid, which strands every media_edges row (including a human
+	// CONFIRMED/REJECTED review decision) on the archived row. Called once,
+	// immediately after the write succeeds, so the DB and the file agree before
+	// any scan observes the change.
+	RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error
 	// Every row still 'RUNNING' at process startup, before this process has
 	// created any scan_jobs row of its own, was left behind by a previous
 	// process that never reached a terminal state -- SIGKILL, OOM-kill,

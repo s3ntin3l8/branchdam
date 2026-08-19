@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -259,6 +261,213 @@ func TestInheritMetadataConflicts(t *testing.T) {
 			t.Errorf("status = %d, want 409", rr.Code)
 		}
 	})
+}
+
+// requireExiftoolAndFFmpeg skips the test when either external binary is
+// absent, per internal/probe's convention: this package must still build and
+// its non-exiftool tests must still pass without them.
+func requireExiftoolAndFFmpeg(t *testing.T) (exiftoolPath string) {
+	t.Helper()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed, skipping")
+	}
+	_ = ffmpegPath
+	exiftoolPath, err = exec.LookPath("exiftool")
+	if err != nil {
+		t.Skip("exiftool not installed, skipping")
+	}
+	return exiftoolPath
+}
+
+// makeTaggedFixtureJPEG generates a tiny real JPEG via ffmpeg and, if tags is
+// non-empty, stamps it with exiftool -- mirroring internal/probe's
+// makeFixtureJPEG, kept local to this package rather than shared so the two
+// packages' test fixtures can drift independently.
+func makeTaggedFixtureJPEG(t *testing.T, exiftoolPath, path string, tags map[string]string) {
+	t.Helper()
+	ffmpeg := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", path)
+	if out, err := ffmpeg.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture jpeg: %v\n%s", err, out)
+	}
+	if len(tags) == 0 {
+		return
+	}
+	args := []string{"-overwrite_original"}
+	for k, v := range tags {
+		args = append(args, "-"+k+"="+v)
+	}
+	args = append(args, path)
+	if out, err := exec.Command(exiftoolPath, args...).CombinedOutput(); err != nil {
+		t.Fatalf("tag fixture jpeg: %v\n%s", err, out)
+	}
+}
+
+// fastHashOf re-hashes a file exactly as internal/pipeline's scan path would,
+// so the test can assert the DB's fast_hash actually agrees with the file on
+// disk -- the property finding A's fix establishes.
+func fastHashOf(t *testing.T, path string) (hash string, size, mtimeUnix int64) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open for hash: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	hash, err = hashing.FastHash(f, stat.Size())
+	if err != nil {
+		t.Fatalf("FastHash: %v", err)
+	}
+	return hash, stat.Size(), stat.ModTime().Unix()
+}
+
+// TestInheritMetadataRefreshesNodeStateAfterWrite is the happy-path test:
+// exiftool actually rewrites the child's file, and the endpoint must update
+// media_nodes.size_bytes/mtime_unix/fast_hash to match the rewritten file --
+// otherwise the next scan would see a changed fast_hash at an unchanged path
+// and treat it as a version collision (finding A).
+func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parentPath := filepath.Join(resolved, "parent.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, parentPath, map[string]string{
+		"EXIF:Make": "SONY", "EXIF:LensModel": "FE 24-70mm F2.8 GM", "EXIF:SerialNumber": "1234567",
+	})
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil) // untagged: room to inherit into
+
+	childHashBefore, childSizeBefore, _ := fastHashOf(t, childPath)
+
+	path := filepath.Join(t.TempDir(), "inherit-refresh.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var parent, child sqlcgen.MediaNode
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "inherit-refresh", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		parentHash, parentSize, parentMtime := fastHashOf(t, parentPath)
+		parent, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-refresh-parent", StorageLocationID: locID, FilePath: parentPath, FileName: "parent.jpg",
+			FileExt: "jpg", SizeBytes: parentSize, MtimeUnix: parentMtime, FastHash: &parentHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			CameraModel: sql.NullString{String: "ILCE-7M4", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		for _, kv := range []struct{ k, v string }{
+			{"EXIF:Make", "SONY"}, {"EXIF:LensModel", "FE 24-70mm F2.8 GM"}, {"EXIF:SerialNumber", "1234567"},
+		} {
+			if err := q.InsertNodeMetadata(context.Background(), sqlcgen.InsertNodeMetadataParams{
+				NodeID: parent.ID, Source: "exiftool", Key: kv.k, Value: kv.v,
+			}); err != nil {
+				return err
+			}
+		}
+
+		// Seeded as INDEXED_FULL with a full_hash, as if an earlier scan had
+		// escalated this node (a prior fast_hash collision, say) -- the write
+		// is about to change the file's bytes, so this stale full_hash must
+		// not survive the refresh (see the RefreshMediaNodeAfterInPlaceWrite
+		// query comment).
+		staleFullHash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		child, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-refresh-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSizeBefore, MtimeUnix: time.Now().Unix(), FastHash: &childHashBefore,
+			FullHash: &staleFullHash, IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 1.0, Tier: 1, Resolver: "test", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-refresh", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		DB:     database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Inherited map[string]string `json:"inherited"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if body.Inherited["EXIF:Make"] != "SONY" {
+		t.Errorf("inherited EXIF:Make = %q, want SONY", body.Inherited["EXIF:Make"])
+	}
+	if body.Inherited["XMP-xmpMM:DerivedFrom"] != "uuid-refresh-parent" {
+		t.Errorf("inherited XMP-xmpMM:DerivedFrom = %q, want uuid-refresh-parent", body.Inherited["XMP-xmpMM:DerivedFrom"])
+	}
+
+	wantHash, wantSize, wantMtime := fastHashOf(t, childPath)
+	if wantHash == childHashBefore {
+		t.Fatalf("test setup: exiftool write did not change the file's bytes, fast_hash comparison is meaningless")
+	}
+
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("get child after inherit: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Errorf("child lifecycle_state = %q, want ACTIVE (must not be a fresh row -- same node)", after.LifecycleState)
+	}
+	if after.ID != child.ID || after.NodeUuid != child.NodeUuid {
+		t.Errorf("child id/uuid changed (id %d->%d, uuid %s->%s) -- inherit-metadata must update the existing row, not fabricate a successor",
+			child.ID, after.ID, child.NodeUuid, after.NodeUuid)
+	}
+	if after.FastHash == nil || *after.FastHash != wantHash {
+		got := "nil"
+		if after.FastHash != nil {
+			got = *after.FastHash
+		}
+		t.Errorf("child fast_hash = %s, want %s (DB must agree with the rewritten file)", got, wantHash)
+	}
+	if after.SizeBytes != wantSize {
+		t.Errorf("child size_bytes = %d, want %d", after.SizeBytes, wantSize)
+	}
+	if after.MtimeUnix != wantMtime {
+		t.Errorf("child mtime_unix = %d, want %d", after.MtimeUnix, wantMtime)
+	}
+	if after.FullHash != nil {
+		t.Errorf("child full_hash = %q, want nil (stale full_hash from before the write must not survive it)", *after.FullHash)
+	}
+	if after.IndexingStatus != "INDEXED_SHALLOW" {
+		t.Errorf("child indexing_status = %q, want INDEXED_SHALLOW (downgraded from INDEXED_FULL, whose full_hash is now stale)", after.IndexingStatus)
+	}
 }
 
 func TestMeReflectsBrowserPrincipal(t *testing.T) {

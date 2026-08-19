@@ -734,6 +734,18 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error500InternalServerError("write metadata", err)
 	}
 
+	// The write just changed size_bytes/mtime_unix/fast_hash on disk. Unlike
+	// the node_metadata backfill below, this update is NOT best-effort: if it
+	// doesn't happen, the next scan's commitOne sees a changed fast_hash at
+	// this path and treats it as a version collision -- archiving this node
+	// and inserting a successor under a new node_uuid, which strands every
+	// media_edges row (including a human CONFIRMED/REJECTED review decision)
+	// on the now-archived row. A failure here is therefore a hard error, not
+	// a warning, even though the file write itself already succeeded.
+	if err := s.refreshNodeAfterInPlaceWrite(ctx, child); err != nil {
+		return nil, huma.Error500InternalServerError("refresh node after metadata write", err)
+	}
+
 	// The file on disk now carries the inherited tags; backfill the child's
 	// node_metadata so the DB reflects it. Best-effort -- the write already
 	// succeeded, so a re-read/backfill failure is surfaced as a warning, not
@@ -760,6 +772,43 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 // scan path's per-file probe deadline -- a hung exiftool on a stalled network
 // mount must not hang the HTTP request indefinitely.
 const inheritWriteTimeout = 30 * time.Second
+
+// refreshNodeAfterInPlaceWrite re-reads the file's size and re-hashes it
+// (the same fast_hash a scan would compute -- xxHash64 over the same sample
+// regions) after an in-place exiftool write, and persists all three onto the
+// node's row. This is what keeps the DB and the file in agreement: without
+// it, the next scan observes a changed fast_hash at an unchanged path and
+// runs commitVersionCollision (see internal/pipeline/commit.go), archiving
+// this node and inserting a successor under a new node_uuid.
+func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.MediaNode) error {
+	rctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
+	defer cancel()
+
+	f, err := s.guard.OpenRead(node.FilePath)
+	if err != nil {
+		return fmt.Errorf("open for re-hash: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat for re-hash: %w", err)
+	}
+
+	fastHash, err := hashing.FastHash(f, stat.Size())
+	if err != nil {
+		return fmt.Errorf("re-hash: %w", err)
+	}
+
+	return s.db.InTx(rctx, func(q *sqlcgen.Queries) error {
+		return q.RefreshMediaNodeAfterInPlaceWrite(rctx, sqlcgen.RefreshMediaNodeAfterInPlaceWriteParams{
+			ID:        node.ID,
+			SizeBytes: stat.Size(),
+			MtimeUnix: stat.ModTime().Unix(),
+			FastHash:  &fastHash,
+		})
+	})
+}
 
 // pickWinningParent returns the highest-confidence parent edge that is
 // AUTO_ACCEPTED or CONFIRMED, or nil when the node has none. A NEEDS_REVIEW
