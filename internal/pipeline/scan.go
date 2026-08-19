@@ -20,6 +20,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/indexer"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/projectfile"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
@@ -402,7 +403,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		close(results)
 	}()
 
-	total := drainAndCommit(ctx, deps, location.ID, jobID, results, &filesSeen, &filesFailed, uncertain, log)
+	total, sidecarPaths := drainAndCommit(ctx, deps, location.ID, jobID, results, &filesSeen, &filesFailed, uncertain, log)
 	<-walkDone
 
 	finalErr := walkErr
@@ -420,6 +421,50 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			log.Error("pipeline: fail scan job", "jobID", jobID, "err", err)
 		}
 		return
+	}
+
+	// #169: retry every project-sidecar node once more now that every batch
+	// in the whole scan has committed. A sidecar processed in an earlier
+	// batch than the media node(s) it references can't resolve that
+	// reference within its own batch -- the target genuinely isn't in the
+	// DB yet -- and resolveEdgesForBatch's per-batch attempt silently drops
+	// that candidate rather than retrying it (see resolvers.go's
+	// ProjectSidecarResolver.resolveReference). ResolveAndCommit is
+	// idempotent (an already-created edge upserts as "existed", not
+	// duplicated), so retrying is always safe; cost is bounded by how many
+	// sidecar files this scan actually saw, not by the scan's total size.
+	// Every sidecar path is retried unconditionally, not just the ones whose
+	// first attempt created zero edges: a sidecar with multiple references
+	// (e.g. an .edl listing several clips) could have resolved some and
+	// missed only a later one, and resolveEdgesForBatch's return value
+	// doesn't distinguish "resolved nothing" from "resolved some" -- only
+	// unconditional retry covers that partial case too.
+	if deps.Engine != nil && len(sidecarPaths) > 0 {
+		var retried int
+		for _, p := range sidecarPaths {
+			retried += resolveNodeEdges(ctx, deps, p, log)
+		}
+		if retried > 0 {
+			// CompleteScanJob below only ever writes state/finished_at -- it
+			// never touches edges_created -- so without this extra write the
+			// retry's edges would never reach scan_jobs at all, even though
+			// they're already committed to media_edges.
+			total.EdgesCreated += retried
+			if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+				return q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
+					ID:           jobID,
+					FilesSeen:    int64(filesSeen.Load()),
+					FilesHashed:  int64(total.Inserted + total.Touched + total.VersionCollisions + total.Moved),
+					FilesFailed:  int64(filesFailed.Load()),
+					EdgesCreated: int64(total.EdgesCreated),
+				})
+			}); err != nil {
+				log.Error("pipeline: update scan job progress after sidecar retry", "jobID", jobID, "err", err)
+			}
+			if deps.Nudge != nil {
+				deps.Nudge()
+			}
+		}
 	}
 
 	// The sweep runs on every successful walk, excluding this pass's
@@ -552,8 +597,9 @@ func isClosed(ch <-chan struct{}) bool {
 // committed batches even while the walk itself keeps advancing, and the old
 // "empty buf means nothing to do" early return left files_seen -- already
 // incrementing in memory -- unreported for that entire stretch.
-func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64, results <-chan Result, filesSeen, filesFailed *atomic.Int32, uncertain *uncertainPaths, log *slog.Logger) Stats {
+func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64, results <-chan Result, filesSeen, filesFailed *atomic.Int32, uncertain *uncertainPaths, log *slog.Logger) (Stats, []string) {
 	var total Stats
+	var sidecarPaths []string
 	buf := make([]Result, 0, batchSize)
 	var lastReportedSeen int32 = -1 // forces the very first flush to always report
 
@@ -577,7 +623,9 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 					uncertain.add(r.Path)
 				}
 			} else if deps.Engine != nil {
-				total.EdgesCreated += resolveEdgesForBatch(ctx, deps, buf, log)
+				created, sp := resolveEdgesForBatch(ctx, deps, buf, log)
+				total.EdgesCreated += created
+				sidecarPaths = append(sidecarPaths, sp...)
 			}
 			buf = buf[:0]
 		}
@@ -614,7 +662,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 		case r, ok := <-results:
 			if !ok {
 				flush()
-				return total
+				return total, sidecarPaths
 			}
 			buf = append(buf, r)
 			if len(buf) >= batchSize {
@@ -635,22 +683,43 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 // else in the scan flow would otherwise ever call graph.Engine. One extra
 // read per node (re-fetching the live row by path) keeps this decoupled
 // from Commit's internals rather than threading node IDs back out of it.
-func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log *slog.Logger) int {
-	var created int
+//
+// Also returns every project-sidecar path seen in buf (#169): a sidecar
+// committed in an earlier batch than the media node(s) it references can't
+// resolve that reference yet -- ProjectSidecarResolver.resolveReference's
+// DB lookup genuinely finds nothing because the target hasn't been
+// committed -- and that failure is silent by design (see resolvers.go), not
+// retried within this batch. runScan retries every returned sidecar path
+// once more after the whole scan's batches have all landed, which is what
+// actually closes the race; resolveEdgesForBatch itself only collects the
+// candidates for that retry.
+func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log *slog.Logger) (created int, sidecarPaths []string) {
 	for _, r := range buf {
-		node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, r.Path)
-		if err != nil {
-			log.Warn("pipeline: resolve edges: re-fetch node", "path", r.Path, "err", err)
-			continue
+		if _, ok := projectfile.GetParser(r.Path); ok {
+			sidecarPaths = append(sidecarPaths, r.Path)
 		}
-		_, n, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node))
-		if err != nil {
-			log.Warn("pipeline: resolve edges", "path", r.Path, "err", err)
-			continue
-		}
-		created += n
+		created += resolveNodeEdges(ctx, deps, r.Path, log)
 	}
-	return created
+	return created, sidecarPaths
+}
+
+// resolveNodeEdges re-fetches the live node at path and runs edge
+// resolution for it once, returning how many of the resulting edges were
+// newly created. Shared by resolveEdgesForBatch (the ordinary per-batch
+// path) and runScan's end-of-scan sidecar retry (#169) so both go through
+// the identical re-fetch-then-resolve sequence.
+func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog.Logger) int {
+	node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, path)
+	if err != nil {
+		log.Warn("pipeline: resolve edges: re-fetch node", "path", path, "err", err)
+		return 0
+	}
+	_, n, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node))
+	if err != nil {
+		log.Warn("pipeline: resolve edges", "path", path, "err", err)
+		return 0
+	}
+	return n
 }
 
 func toGraphNode(n sqlcgen.MediaNode) graph.Node {
