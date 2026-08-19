@@ -983,6 +983,39 @@ func (q *Queries) UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNo
 	return err
 }
 
+const refreshMediaNodeAfterInPlaceWrite = `-- name: RefreshMediaNodeAfterInPlaceWrite :exec
+UPDATE media_nodes
+SET size_bytes = ?2, mtime_unix = ?3, fast_hash = ?4,
+    last_seen_at = unixepoch(), updated_at = unixepoch()
+WHERE id = ?1
+`
+
+type RefreshMediaNodeAfterInPlaceWriteParams struct {
+	ID        int64
+	SizeBytes int64
+	MtimeUnix int64
+	FastHash  *string
+}
+
+// The metadata-inheritance endpoint (#54) is the first server-initiated
+// filesystem write: it rewrites a child's file in place via exiftool, which
+// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
+// next scan's commitOne sees a changed fast_hash at the same path and treats
+// it as a version collision -- archiving the node and minting a new
+// node_uuid, which strands every media_edges row (including a human
+// CONFIRMED/REJECTED review decision) on the archived row. Called once,
+// immediately after the write succeeds, so the DB and the file agree before
+// any scan observes the change.
+func (q *Queries) RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error {
+	_, err := q.db.ExecContext(ctx, refreshMediaNodeAfterInPlaceWrite,
+		arg.ID,
+		arg.SizeBytes,
+		arg.MtimeUnix,
+		arg.FastHash,
+	)
+	return err
+}
+
 const updateMediaNodeGraphStatus = `-- name: UpdateMediaNodeGraphStatus :exec
 ;
 
