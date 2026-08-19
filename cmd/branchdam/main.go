@@ -72,13 +72,23 @@ func main() {
 		log.Error("open database", "err", err)
 		os.Exit(1)
 	}
-	// dbUnsafeToClose is set below if a shutdown wait times out -- a
+	// dbUnsafeToClose is set by run() if a shutdown wait times out -- a
 	// background goroutine may still hold the writer connection, and
 	// closing out from under it is worse than leaving it for process exit
 	// to reclaim (SQLite's WAL recovery is designed for exactly that;
 	// sql.DB.Close() racing an in-flight write is not).
+	//
+	// Deliberately not a defer: run() already joins every background
+	// goroutine before it returns, so by the time we get here it's safe --
+	// and necessary -- to close explicitly on both the success and the
+	// error path, rather than skip it via os.Exit(1) below (a deferred
+	// closeDatabase would never run once os.Exit is called). This doesn't
+	// change behavior for the os.Exit(1) calls further up in the setup
+	// sequence above (config/DB-open/guard/etc. failures) -- those already
+	// ran before run() existed and always skipped a deferred closeDatabase
+	// too, for the same reason; they're unrelated to this fix and still
+	// rely on process exit for cleanup, same as before.
 	var dbUnsafeToClose bool
-	defer func() { closeDatabase(log, database, dbUnsafeToClose) }()
 
 	if _, err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
 		log.Error("reconcile orphaned scan jobs", "err", err)
@@ -192,12 +202,39 @@ func main() {
 		WriteTimeout:      time.Duration(cfg.HTTP.WriteTimeoutSecs) * time.Second,
 	}
 
+	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichWorker, drainer, pool, &dbUnsafeToClose)
+	closeDatabase(log, database, dbUnsafeToClose)
+	if runErr != nil {
+		log.Error("run", "err", runErr)
+		os.Exit(1)
+	}
+}
+
+// run starts httpServer, blocks until ctx is cancelled (SIGTERM/SIGINT, or a
+// serve-time error below calling stop()), then runs the bounded shutdown
+// sequence: httpServer.Shutdown followed by joining every background
+// goroutine that might still hold the writer DB connection. It returns a
+// non-nil error when ListenAndServe fails for a reason other than a normal
+// Shutdown-triggered close (e.g. the configured listenAddr is already in
+// use) -- previously such a failure logged an error and fell through this
+// exact same shutdown path with a nil result, so the process exited 0 even
+// though it never successfully started serving (#123).
+func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpServer *http.Server,
+	supervisor *pipeline.WatcherSupervisor, sweeper *pipeline.SweeperSupervisor, scanTracker *pipeline.ScanTracker,
+	immichWorker *sync.Worker, drainer *agent.Drainer, pool *workers.Pool[string], dbUnsafeToClose *bool,
+) error {
+	// Buffered so the goroutine never blocks sending its result, whether or
+	// not run() is still around to receive it by the time it does.
+	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr)
+		log.Info("listening", "addr", httpServer.Addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("http server", "err", err)
+			serveErr <- err
 			stop()
+			return
 		}
+		serveErr <- nil
 	}()
 
 	<-ctx.Done()
@@ -206,13 +243,12 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		// Deliberately NOT os.Exit(1) here: a scan or watcher goroutine
+		// Deliberately NOT returning here: a scan or watcher goroutine
 		// started before shutdown began may still be running and holding
 		// the writer connection (pipeline.ScanTracker / WatcherSupervisor),
-		// and os.Exit skips every deferred function including the
-		// closeDatabase call above -- exiting here would tear the process
-		// down mid-write exactly like an unclean crash, the thing this
-		// whole sequence exists to avoid. httpServer.Shutdown has two
+		// and returning early would skip joining them below -- tearing the
+		// process down mid-write exactly like an unclean crash, the thing
+		// this whole sequence exists to avoid. httpServer.Shutdown has two
 		// distinct failure modes, not one: an early listener-Close error
 		// (returned while shutdownCtx still has most of its budget left),
 		// or -- the realistic case -- shutdownCtx's own deadline firing,
@@ -236,7 +272,7 @@ func main() {
 		// consumer goroutine, which holds the writer DB and calls Commit
 		// directly (never Pool.Submit), so it must finish before db.Close.
 		if !waitBounded(joinCtx, log, "supervisor.Wait()", supervisor.Wait) {
-			dbUnsafeToClose = true
+			*dbUnsafeToClose = true
 		}
 	}
 	if sweeper != nil {
@@ -244,32 +280,46 @@ func main() {
 		// joins each location's in-flight pass (runOneSweep), which holds
 		// the writer DB, so it must finish before db.Close.
 		if !waitBounded(joinCtx, log, "sweeper.Wait()", sweeper.Wait) {
-			dbUnsafeToClose = true
+			*dbUnsafeToClose = true
 		}
 	}
 	// scanTracker.Wait() joins every in-flight RunScan goroutine (started
 	// via POST /api/v1/scan) before the database closes.
 	if !waitBounded(joinCtx, log, "scanTracker.Wait()", scanTracker.Wait) {
-		dbUnsafeToClose = true
+		*dbUnsafeToClose = true
 	}
 	if immichWorker != nil {
 		// The Immich worker is ctx-bound (Run returns on ctx.Done); Wait joins
 		// it before the database closes, matching the supervisor/scan paths.
 		if !waitBounded(joinCtx, log, "syncWorker.Wait()", immichWorker.Wait) {
-			dbUnsafeToClose = true
+			*dbUnsafeToClose = true
 		}
 	}
 	// drainer.Start's loop already stopped scheduling new passes on
 	// ctx.Done; Wait() joins its current pass (each event its own
 	// transaction against the writer DB) before the database closes.
 	if !waitBounded(joinCtx, log, "drainer.Wait()", drainer.Wait) {
-		dbUnsafeToClose = true
+		*dbUnsafeToClose = true
 	}
 	// Drain waits for worker goroutines to finish their current job before the database closes.
 	if !waitBounded(joinCtx, log, "pool.Drain()", pool.Drain) {
-		dbUnsafeToClose = true
+		*dbUnsafeToClose = true
 	}
 	log.Info("server stopped")
+
+	// By this point httpServer.Shutdown has returned, which per net/http's
+	// own contract means ListenAndServe has already (or is about to have)
+	// returned too -- so serveErr is either already populated or about to
+	// be, well within this bound. A genuine serve-time error (e.g. a bind
+	// failure) takes priority over a nil/clean result: it's the reason ctx
+	// was cancelled in the first place, and the caller needs to know
+	// startup never actually succeeded.
+	select {
+	case err := <-serveErr:
+		return err
+	case <-time.After(100 * time.Millisecond):
+		return nil
+	}
 }
 
 // waitBounded blocks on waitFunc until it returns or ctx is done, whichever
