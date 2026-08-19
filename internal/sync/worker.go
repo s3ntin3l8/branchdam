@@ -172,10 +172,17 @@ func (w *Worker) drain(ctx context.Context) {
 		cappedWithMoreLeft = i == maxSubBatchesPerTick-1
 	}
 	if total > 0 {
-		w.log.Info("sync: pushed batch", "remote", w.remote, "count", total)
+		// "count" is how many rows this tick marked PUSHED, not how many
+		// individually reached the real push call -- only the first
+		// sub-batch did (see the coalescing comment above).
+		w.log.Info("sync: marked batch pushed", "remote", w.remote, "count", total)
 	}
 	if cappedWithMoreLeft {
-		w.log.Info("sync: drain tick hit its per-tick claim cap; remaining backlog continues next tick",
+		// The last allowed iteration claimed a full batch, so more rows may
+		// still be PENDING -- not a guarantee (the backlog could have been
+		// exactly the cap size), but worth a log line either way so an
+		// operator watching a large recovery isn't surprised it spans ticks.
+		w.log.Info("sync: drain tick hit its per-tick claim cap, backlog may continue next tick",
 			"remote", w.remote, "capNodes", w.batchSize*maxSubBatchesPerTick)
 	}
 }
