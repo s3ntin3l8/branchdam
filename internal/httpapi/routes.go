@@ -1721,6 +1721,15 @@ type PruneOutput struct {
 // (Tier-1-only, schema-enforced) location into Tier 3 is refused before
 // any syscall, the same defense storage.TestSymlinkEscapeRefused proves
 // for every other Guard caller.
+//
+// A non-prunable location returns zero candidates (200), not a 422 --
+// deliberately the same "never eligible" response shape as a prunable
+// location with no cacheTtlHours configured, both below. This is what lets
+// AssetDetailPage's per-asset [Purge Cache] control (which has no way to
+// know a given asset's location tier/prunable flag up front, unlike
+// StorageHealthPage's per-location control, which gates on loc.prunable
+// before ever calling this endpoint) report "not eligible" uniformly
+// instead of surfacing a location-tier implementation detail as an error.
 func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput, error) {
 	loc, err := s.db.Reader.GetStorageLocationByID(ctx, in.Body.StorageLocationID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1729,8 +1738,10 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 	if err != nil {
 		return nil, huma.Error500InternalServerError("get storage location", err)
 	}
+	out := &PruneOutput{}
+	out.Body.Candidates = []pruneCandidateDTO{}
 	if loc.Prunable == 0 {
-		return nil, huma.Error422UnprocessableEntity("storage location is not prunable")
+		return out, nil
 	}
 
 	// cacheTtlHours is config-only (#61's design: no new migration), so the
@@ -1747,8 +1758,6 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 			}
 		}
 	}
-	out := &PruneOutput{}
-	out.Body.Candidates = []pruneCandidateDTO{}
 	if ttlHours <= 0 {
 		// prunable=true with no configured TTL means "never eligible" --
 		// not a config error, just nothing to plan.

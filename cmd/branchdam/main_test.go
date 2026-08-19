@@ -520,6 +520,14 @@ func TestValidatePruneConfig(t *testing.T) {
 			t.Errorf("validatePruneConfig = %v, want nil", err)
 		}
 	})
+	t.Run("negative cacheTtlHours is rejected even when prunable", func(t *testing.T) {
+		cfg := []config.StorageLocation{
+			{Name: "scratch", RootPath: "/s", Tier: "TIER1_LOCAL_SCRATCH", Prunable: true, CacheTTLHours: -1},
+		}
+		if err := validatePruneConfig(cfg); err == nil {
+			t.Fatal("validatePruneConfig = nil, want an error (negative cacheTtlHours would otherwise silently no-op forever)")
+		}
+	})
 }
 
 func TestSweptFromConfig(t *testing.T) {

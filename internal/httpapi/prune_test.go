@@ -198,6 +198,13 @@ func TestHandlePruneExecutePurges(t *testing.T) {
 	}
 }
 
+// TestHandlePruneNotPrunableLocation asserts a non-prunable location
+// returns 200 with zero candidates, not a 422 -- deliberately the same
+// shape as "prunable but no TTL configured" (TestHandlePruneNoTTLConfiguredNeverEligible).
+// This is what lets AssetDetailPage's per-asset [Purge Cache] control,
+// which has no way to know an asset's location tier up front, report
+// "not eligible" uniformly instead of surfacing a raw error for the
+// common case of clicking it on a Tier-2/3 asset.
 func TestHandlePruneNotPrunableLocation(t *testing.T) {
 	srv, _, _, _ := pruneTestServer(t, 1)
 	// tier3 (index 1 in seeding order) is not prunable -- resolve its id via
@@ -226,8 +233,17 @@ func TestHandlePruneNotPrunableLocation(t *testing.T) {
 	rrPrune := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/prune", map[string]any{
 		"storageLocationId": tier3ID,
 	})
-	if rrPrune.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, body = %s, want 422", rrPrune.Code, rrPrune.Body.String())
+	if rrPrune.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rrPrune.Code, rrPrune.Body.String())
+	}
+	var out struct {
+		Candidates []any `json:"candidates"`
+	}
+	if err := json.Unmarshal(rrPrune.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Candidates) != 0 {
+		t.Errorf("candidates = %+v, want none (location is not prunable)", out.Candidates)
 	}
 }
 
