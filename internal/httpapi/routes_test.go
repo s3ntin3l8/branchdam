@@ -677,6 +677,7 @@ func TestMutatingRoutesAuthorization(t *testing.T) {
 		"/api/v1/scan",
 		"/api/v1/edges/1/confirm",
 		"/api/v1/edges/1/reject",
+		"/api/v1/prune",
 	}
 
 	for _, path := range mutatingPaths {

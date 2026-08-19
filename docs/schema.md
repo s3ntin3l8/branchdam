@@ -103,6 +103,15 @@ See `WouldCreateCycle` in [`internal/db/queries/media_edges.sql`](../internal/db
 for the working pattern. `sqlc.arg(...)` is also strictly nicer than positional `?N` — it
 generates a named Go struct field (`ParentNodeID`) instead of `Column1`.
 
+**Caveat found in #61:** that preference has a real limit. `sqlc.arg(name)` fails to parse
+(cascading "extraneous input" / "no viable alternative" errors that look like they're pointing at
+the *new* query) when the same `.sql` file already has an earlier query using plain positional
+`?N` placeholders — reproduced by bisection with a trivial two-query file, so it's a real sqlc
+v1.31.1 bug against this schema, not a one-off. `internal/db/queries/media_nodes.sql` in
+particular has both styles already (`ListTier3Candidates` etc. use `?N`), so any new query added
+there should use plain `?N` too, not `sqlc.arg`. `GLOB` is also unsupported outright ("no viable
+alternative at input 'GLOB'") — use `length(x)`/other operators.
+
 Partial indexes (`WHERE lifecycle_state <> 'ARCHIVED'`) and `CREATE VIEW` both parsed without
 issue. sqlc's `emit_interface: true` generates a `Querier` interface so `internal/pipeline` and
 `internal/graph` can take a fake for testing rather than a real `*sql.DB`.
@@ -124,3 +133,21 @@ mapping those two columns to `bool` when `internal/graph` (PR 7) starts consumin
 - `remote_sync_state` is no longer DDL-only. Phase 7 landed its first write path (#53): the query surface + `internal/sync` push state machine — idempotent on the `(node_id, remote)` PK, per-remote-scoped, with an atomic claim.
 - Plus the `ListLiveNodesForSync` enqueue source (#55) and the `ListRemoteSyncStateByNode` sync-status read (#156).
 - No schema migration was needed — the table already existed in `00001_init.sql`.
+
+### Issue #61 (TTL Cache Pruning Engine)
+- No migration — eligibility is expressible against the existing schema (`full_hash`'s length
+  `CHECK`, `lifecycle_state`, `storage_locations.tier`/`prunable`). TTL itself is config-only
+  (`StorageLocation.CacheTTLHours`), not a column — `prunable` alone was already plumbed
+  end-to-end (config → DB → both storage DTOs → `StorageHealthPage.tsx`) but had no TTL semantics
+  before this issue gave it one.
+- Added `ListPrunableNodes` in `internal/db/queries/media_nodes.sql`: a Tier-1 `ACTIVE` node past
+  its TTL (`mtime_unix`, not `last_seen_at`) is eligible only if a *live*
+  (`lifecycle_state IN ('ACTIVE','HIDDEN')`) ancestor — walked via `media_edges` target→source,
+  `REJECTED` edges excluded — on a `TIER3_MASTER_ARCHIVE` location has a non-NULL, 64-length
+  `full_hash`. Uses plain `?1`/`?2` positional params, not `sqlc.arg`, and `length(full_hash) = 64`
+  instead of a `GLOB` hex check — see the sqlc risk caveat above for why.
+- Added `internal/prune` (`Plan`/`Execute`): `Execute` is `storage.Guard.Remove`'s first real
+  production caller, gated by `Guard.CheckWrite` before every deletion. Purged nodes are marked
+  `MISSING`, never deleted, matching the "rows are never deleted" invariant.
+- Added `POST /api/v1/prune` — admin-gated automatically (`auth.RequireAdmin` gates by HTTP
+  method, not per-route), dry-run by default (`execute` must be set explicitly to purge).

@@ -22,6 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/metadata"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/prune"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -32,6 +33,7 @@ func (s *Server) registerRoutes(api huma.API) {
 
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
 	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)
+	huma.Post(api, "/api/v1/prune", s.handlePrune)
 
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
@@ -1694,5 +1696,137 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 		}
 	}
 
+	return out, nil
+}
+
+// --- /api/v1/prune ---
+
+type pruneCandidateDTO struct {
+	NodeID    int64  `json:"nodeId"`
+	FilePath  string `json:"filePath"`
+	SizeBytes int64  `json:"sizeBytes"`
+	Purged    bool   `json:"purged"`
+	Error     string `json:"error,omitempty"`
+}
+
+type PruneInput struct {
+	Body struct {
+		StorageLocationID int64 `json:"storageLocationId"`
+		// NodeIDs, if non-empty, narrows the plan to exactly these nodes --
+		// backs the per-asset [Purge Cache] action. Empty means "every
+		// eligible node on the location".
+		NodeIDs []int64 `json:"nodeIds,omitempty"`
+		// Execute defaults to false (the JSON zero value) deliberately --
+		// an empty request body must plan, never purge. A real purge
+		// requires the caller to set this explicitly.
+		Execute bool `json:"execute,omitempty"`
+	}
+}
+
+type PruneOutput struct {
+	Body struct {
+		Executed   bool                `json:"executed"`
+		Candidates []pruneCandidateDTO `json:"candidates"`
+	}
+}
+
+// handlePrune plans -- and, if Execute is set, runs -- a TTL cache purge
+// for one storage location (#61). Dry-run (Execute=false, the default)
+// only ever reads: it resolves the location's configured cacheTtlHours,
+// asks internal/prune.Plan for every eligible node, and returns the
+// candidate list with purged=false and no error. Execute=true additionally
+// runs internal/prune.Execute, which is the second (and last) real
+// production caller of storage.Guard.Remove -- every deletion still
+// resolves through Guard.CheckWrite first, so a symlink from this
+// (Tier-1-only, schema-enforced) location into Tier 3 is refused before
+// any syscall, the same defense storage.TestSymlinkEscapeRefused proves
+// for every other Guard caller.
+//
+// A non-prunable location returns zero candidates (200), not a 422 --
+// deliberately the same "never eligible" response shape as a prunable
+// location with no cacheTtlHours configured, both below. This is what lets
+// AssetDetailPage's per-asset [Purge Cache] control (which has no way to
+// know a given asset's location tier/prunable flag up front, unlike
+// StorageHealthPage's per-location control, which gates on loc.prunable
+// before ever calling this endpoint) report "not eligible" uniformly
+// instead of surfacing a location-tier implementation detail as an error.
+func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput, error) {
+	loc, err := s.db.Reader.GetStorageLocationByID(ctx, in.Body.StorageLocationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("storage location not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get storage location", err)
+	}
+	out := &PruneOutput{}
+	out.Body.Candidates = []pruneCandidateDTO{}
+	if loc.Prunable == 0 {
+		return out, nil
+	}
+
+	// cacheTtlHours is config-only (#61's design: no new migration), so the
+	// DB row alone can't answer "what's this location's TTL" -- match it
+	// against the live config by root_path, the same join key
+	// GetStorageLocationByPath already uses as the source of truth for a
+	// location's identity.
+	ttlHours := 0
+	if s.cfg != nil {
+		for _, c := range s.cfg.StorageLocations {
+			if c.RootPath == loc.RootPath {
+				ttlHours = c.CacheTTLHours
+				break
+			}
+		}
+	}
+	if ttlHours <= 0 {
+		// prunable=true with no configured TTL means "never eligible" --
+		// not a config error, just nothing to plan.
+		return out, nil
+	}
+	cutoffUnix := time.Now().Add(-time.Duration(ttlHours) * time.Hour).Unix()
+
+	candidates, err := prune.Plan(ctx, s.db.Reader, loc.ID, cutoffUnix)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("plan prune", err)
+	}
+
+	if len(in.Body.NodeIDs) > 0 {
+		want := make(map[int64]bool, len(in.Body.NodeIDs))
+		for _, id := range in.Body.NodeIDs {
+			want[id] = true
+		}
+		filtered := candidates[:0]
+		for _, c := range candidates {
+			if want[c.NodeID] {
+				filtered = append(filtered, c)
+			}
+		}
+		candidates = filtered
+	}
+
+	if !in.Body.Execute {
+		for _, c := range candidates {
+			out.Body.Candidates = append(out.Body.Candidates, pruneCandidateDTO{
+				NodeID: c.NodeID, FilePath: c.FilePath, SizeBytes: c.SizeBytes,
+			})
+		}
+		return out, nil
+	}
+
+	if s.guard == nil {
+		return nil, huma.Error500InternalServerError("purge requested but no storage guard is configured", nil)
+	}
+	results := prune.Execute(ctx, s.db, s.guard, candidates, cutoffUnix)
+	out.Body.Executed = true
+	for _, r := range results {
+		dto := pruneCandidateDTO{NodeID: r.NodeID, FilePath: r.FilePath, SizeBytes: r.SizeBytes, Purged: r.Purged}
+		if r.Err != nil {
+			dto.Error = r.Err.Error()
+		}
+		out.Body.Candidates = append(out.Body.Candidates, dto)
+	}
+	if s.hub != nil {
+		s.hub.Broadcast()
+	}
 	return out, nil
 }

@@ -1072,3 +1072,111 @@ func (q *Queries) RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathBy
 	)
 	return err
 }
+
+const listPrunableNodes = `-- name: ListPrunableNodes :many
+WITH RECURSIVE lineage(root, id) AS (
+    SELECT n.id AS root, n.id AS id
+    FROM media_nodes n
+    WHERE n.storage_location_id = ?1
+      AND n.lifecycle_state = 'ACTIVE'
+      AND n.mtime_unix < ?2
+    UNION
+    SELECT l.root AS root, e.source_node_id AS id
+    FROM media_edges e
+    JOIN lineage l ON e.target_node_id = l.id
+    JOIN media_nodes a ON a.id = e.source_node_id
+    WHERE e.review_state <> 'REJECTED'
+      AND a.lifecycle_state <> 'ARCHIVED'
+)
+SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
+       n.mtime_unix, n.storage_location_id
+FROM media_nodes n
+WHERE n.storage_location_id = ?1
+  AND n.lifecycle_state = 'ACTIVE'
+  AND n.mtime_unix < ?2
+  AND EXISTS (
+    SELECT 1
+    FROM lineage l
+    JOIN media_nodes m ON m.id = l.id
+    JOIN storage_locations s ON s.id = m.storage_location_id
+    WHERE l.root = n.id
+      AND l.id <> n.id
+      AND s.tier = 'TIER3_MASTER_ARCHIVE'
+      AND m.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+      AND m.full_hash IS NOT NULL
+      AND length(m.full_hash) = 64
+  )
+ORDER BY n.id
+`
+
+type ListPrunableNodesParams struct {
+	StorageLocationID int64
+	MtimeUnix         int64
+}
+
+type ListPrunableNodesRow struct {
+	ID                int64
+	NodeUuid          string
+	FilePath          string
+	FileName          string
+	SizeBytes         int64
+	MtimeUnix         int64
+	StorageLocationID int64
+}
+
+// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
+// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
+// TIER3_MASTER_ARCHIVE location has a verified (non-NULL, 64-hex) full_hash.
+// "live" matches v_media_edges_resolved's own parent_alive definition --
+// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
+// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
+// Ancestor, not "same full_hash": walks media_edges target->source
+// (REJECTED edges excluded), mirroring ListAncestors' direction convention.
+// Tier-1-only and prunable-only are already schema-enforced
+// (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
+// not re-checked here; the caller only invokes this against a location it
+// already knows is prunable.
+//
+// Every column in each anchor SELECT is explicitly named/aliased -- sqlc's
+// SQLite parser fails with `*ast.ResTarget has nil name` otherwise (see
+// docs/schema.md's sqlc risk note). "64-hex" is enforced here as
+// length(full_hash) = 64 only, matching the schema's own CHECK exactly
+// (docs/schema.md) -- sqlc's SQLite grammar does not support GLOB
+// ("no viable alternative at input 'GLOB'"), and full_hash is only ever
+// written by internal/hashing.FullHash, which always emits lowercase hex.
+// Plain positional params (?1/?2), not sqlc.arg: this file already has
+// earlier queries (e.g. ListTier3Candidates) using bare ?N placeholders,
+// and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder
+// in the same file when a bare ?N appears anywhere earlier in it --
+// reproduced by bisection, a real generator bug for this sqlc version, not
+// something wrong with sqlc.arg's own syntax elsewhere in the codebase.
+func (q *Queries) ListPrunableNodes(ctx context.Context, arg ListPrunableNodesParams) ([]ListPrunableNodesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPrunableNodes, arg.StorageLocationID, arg.MtimeUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPrunableNodesRow{}
+	for rows.Next() {
+		var i ListPrunableNodesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.FilePath,
+			&i.FileName,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.StorageLocationID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

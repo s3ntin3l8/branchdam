@@ -168,6 +168,27 @@ export interface StorageHealth {
   queues: StorageQueueHealth;
 }
 
+export interface PruneRequest {
+  storageLocationId: number;
+  nodeIds?: number[];
+  // Defaults to false (dry-run) when omitted -- an empty request must
+  // plan, never purge.
+  execute?: boolean;
+}
+
+export interface PruneCandidate {
+  nodeId: number;
+  filePath: string;
+  sizeBytes: number;
+  purged: boolean;
+  error?: string;
+}
+
+export interface PruneResponse {
+  executed: boolean;
+  candidates: PruneCandidate[];
+}
+
 export interface AssetQueryParams {
   limit?: number;
   offset?: number;
