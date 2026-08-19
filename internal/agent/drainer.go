@@ -18,6 +18,13 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
+// DefaultDrainInterval is how often Start polls event_queue for newly
+// PENDING rows between passes, when the caller doesn't override it. DrainAll
+// itself drains the queue to empty and returns; nothing keeps polling once
+// it does, until the next tick -- an idle tick costs one indexed COUNT
+// query (CountPendingAgentEvents), so a short default is cheap.
+const DefaultDrainInterval = 2 * time.Second
+
 // Drainer processes PENDING rows in event_queue oldest-first and applies
 // the corresponding state changes to media_nodes and media_edges.
 type Drainer struct {
@@ -27,18 +34,113 @@ type Drainer struct {
 	maxRetries  int
 	backoffWait time.Duration
 	mu          sync.Mutex
+
+	// nudge, if set, is called once after a drain pass (ProcessPending)
+	// commits at least one event, mirroring pipeline.ScanDeps.Nudge --
+	// without it a connected SPA never learns an agent event changed
+	// anything. engine, if set, resolves lineage edges for every node an
+	// agent event freshly inserts (EVENT_NODE_CREATED, and
+	// EVENT_PATH_REBASED's unknown-node-uuid branch), the same join point
+	// pipeline.resolveEdgesForBatch is for scanned nodes -- without it an
+	// agent-created node sits graph_status='UNLINKED' forever. Both nil by
+	// default (existing NewDrainer call sites, mostly tests, are
+	// unaffected); set via WithNudge/WithEngine.
+	nudge  func()
+	engine *graph.Engine
+
+	wg        sync.WaitGroup
+	startOnce sync.Once
 }
 
-// NewDrainer creates an agent event queue drainer.
-func NewDrainer(database *db.DB, guard *storage.Guard, log *slog.Logger) *Drainer {
+// DrainerOption configures optional Drainer behavior not every caller
+// needs -- see NewDrainer.
+type DrainerOption func(*Drainer)
+
+// WithNudge sets the callback ProcessPending calls after a pass commits at
+// least one event. Typically hub.Broadcast (internal/sse).
+func WithNudge(nudge func()) DrainerOption {
+	return func(d *Drainer) { d.nudge = nudge }
+}
+
+// WithEngine sets the graph.Engine used to resolve lineage edges for nodes
+// an agent event freshly inserts.
+func WithEngine(engine *graph.Engine) DrainerOption {
+	return func(d *Drainer) { d.engine = engine }
+}
+
+// NewDrainer creates an agent event queue drainer. guard and log may be
+// nil (log defaults to discarding); opts are typically WithNudge and/or
+// WithEngine in production, omitted in tests that only need
+// ProcessPending/DrainAll's own return value.
+func NewDrainer(database *db.DB, guard *storage.Guard, log *slog.Logger, opts ...DrainerOption) *Drainer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Drainer{
+	d := &Drainer{
 		db:         database,
 		guard:      guard,
 		log:        log,
 		maxRetries: DefaultMaxRetries,
+	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
+}
+
+// Start begins the background drain loop and returns immediately: a
+// ticker fires DrainAll every interval (DefaultDrainInterval if <= 0) until
+// ctx is cancelled. A second call is a no-op and logs a warning, mirroring
+// pipeline.WatcherSupervisor.Start/SweeperSupervisor.Start. Unlike a sweep
+// pass, a drain pass needs no context.WithoutCancel escape hatch to shut
+// down cleanly: DrainAll processes one event per transaction and checks
+// ctx.Err() between each, so cancellation lands it between events rather
+// than aborting one mid-write.
+func (d *Drainer) Start(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = DefaultDrainInterval
+	}
+	started := false
+	d.startOnce.Do(func() {
+		started = true
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.run(ctx, interval)
+		}()
+	})
+	if !started {
+		d.log.Warn("agent: Drainer.Start called after the first start; ignoring")
+	}
+}
+
+// Wait blocks until the background drain loop started by Start has
+// returned -- called during shutdown, after ctx is cancelled, before
+// pool.Drain and db.Close (see main.go), mirroring
+// WatcherSupervisor.Wait/SweeperSupervisor.Wait. A no-op if Start was never
+// called.
+func (d *Drainer) Wait() { d.wg.Wait() }
+
+func (d *Drainer) run(ctx context.Context, interval time.Duration) {
+	// An immediate pass before the ticker's first tick, so an event
+	// enqueued right before/during startup isn't left PENDING for up to a
+	// full interval before it's first considered. Suggested by Hermes on
+	// #189.
+	if _, err := d.DrainAll(ctx); err != nil && ctx.Err() == nil {
+		d.log.Warn("agent: drain pass failed", "err", err)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := d.DrainAll(ctx); err != nil && ctx.Err() == nil {
+				d.log.Warn("agent: drain pass failed", "err", err)
+			}
+		}
 	}
 }
 
@@ -95,15 +197,41 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			return stats, err
 		}
 
+		var resolveNodeID int64
 		processErr := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-			if err := d.applyEvent(ctx, q, ev); err != nil {
+			id, err := d.applyEvent(ctx, q, ev)
+			if err != nil {
 				return err
 			}
+			resolveNodeID = id
 			return q.MarkAgentEventProcessed(ctx, ev.ID)
 		})
 
 		if processErr == nil {
 			stats.Processed++
+			// Resolution runs in its own transaction, after the event's
+			// commits -- graph.Engine.ResolveAndCommit opens its own
+			// db.InTx internally and this repo's writer pool is a single
+			// connection (docs/schema.md fix #7), so it cannot run nested
+			// inside the InTx above. Mirrors
+			// pipeline.resolveEdgesForBatch's same after-commit call.
+			// Failure here is logged, not fatal to the event: the create/
+			// rebase itself already succeeded and committed. Unlike a
+			// scanned node (which gets a fresh ResolveAndCommit attempt on
+			// every subsequent scan pass that touches it), there is
+			// currently no retry path for this one-shot call -- a failure
+			// here leaves the node UNLINKED with nothing to re-trigger
+			// resolution. Flagged by Hermes on #189; still a strict
+			// improvement over never resolving at all, which is the
+			// pre-#166 behavior this replaces.
+			if resolveNodeID != 0 && d.engine != nil {
+				node, err := d.db.Reader.GetMediaNodeByID(ctx, resolveNodeID)
+				if err != nil {
+					d.log.Warn("agent: re-fetch agent-created node for resolution", "nodeID", resolveNodeID, "err", err)
+				} else if _, _, err := d.engine.ResolveAndCommit(ctx, graph.ToNode(node)); err != nil {
+					d.log.Warn("agent: resolve edges for agent-created node", "nodeID", resolveNodeID, "err", err)
+				}
+			}
 			continue
 		}
 
@@ -150,6 +278,16 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 				d.log.Error("agent: failed to increment event retry in db", "eventID", ev.ID, "err", err)
 			}
 		}
+	}
+
+	// Nudge once per batch, not per event -- sse.Hub.Broadcast is already a
+	// coalescing signal (internal/sse's own doc comment), so per-event
+	// calls would be harmless but wasteful. Only fires when the batch
+	// actually changed visible state (Processed > 0): a FAILED event
+	// changes nothing in media_nodes/media_edges, so nudging on
+	// failures-only would trigger a client refetch for no reason.
+	if d.nudge != nil && stats.Processed > 0 {
+		d.nudge()
 	}
 
 	stats.Duration = time.Since(start)
@@ -216,40 +354,45 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 	return totalStats, nil
 }
 
-func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
+// applyEvent applies ev and returns the ID of a media_nodes row it freshly
+// inserted, if any -- 0 if the event didn't insert one (an idempotent
+// no-op, an edge/move/delete, or a rebase of an already-known node). The
+// caller (ProcessPending) uses that ID to resolve lineage edges through
+// graph.Engine after this transaction commits.
+func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) (int64, error) {
 	switch ev.EventType {
 	case EventNodeCreated:
 		return d.applyNodeCreated(ctx, q, ev)
 	case EventEdgeAttached:
-		return d.applyEdgeAttached(ctx, q, ev)
+		return 0, d.applyEdgeAttached(ctx, q, ev)
 	case EventNodeMoved:
-		return d.applyNodeMoved(ctx, q, ev)
+		return 0, d.applyNodeMoved(ctx, q, ev)
 	case EventNodeDeleted:
-		return d.applyNodeDeleted(ctx, q, ev)
+		return 0, d.applyNodeDeleted(ctx, q, ev)
 	case EventPathRebased:
 		return d.applyPathRebased(ctx, q, ev)
 	default:
-		return fmt.Errorf("%w: %s", ErrUnknownEventType, ev.EventType)
+		return 0, fmt.Errorf("%w: %s", ErrUnknownEventType, ev.EventType)
 	}
 }
 
-func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
+func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) (int64, error) {
 	var p NodeCreatedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
-		return fmt.Errorf("%w: unmarshal node created: %v", ErrMalformedPayload, err)
+		return 0, fmt.Errorf("%w: unmarshal node created: %v", ErrMalformedPayload, err)
 	}
 	if p.NodeUUID == "" {
-		return fmt.Errorf("%w: missing nodeUuid in node created payload", ErrInvalidNodeUUID)
+		return 0, fmt.Errorf("%w: missing nodeUuid in node created payload", ErrInvalidNodeUUID)
 	}
 	if p.FilePath == "" {
-		return fmt.Errorf("%w: missing filePath in node created payload", ErrMalformedPayload)
+		return 0, fmt.Errorf("%w: missing filePath in node created payload", ErrMalformedPayload)
 	}
 
 	// Idempotency: if node already exists with this node_uuid, it's a no-op success.
 	if _, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID); err == nil {
-		return nil
+		return 0, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("lookup node by uuid: %w", err)
+		return 0, fmt.Errorf("lookup node by uuid: %w", err)
 	}
 
 	// storage_location_id always comes from Guard.Resolve(FilePath), never
@@ -260,11 +403,11 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 	// plain (non-fatal) error: the event stays PENDING/retries rather than
 	// being marked FAILED for a problem the payload didn't cause.
 	if d.guard == nil {
-		return fmt.Errorf("agent: storage guard not configured, deferring node create for %q", p.FilePath)
+		return 0, fmt.Errorf("agent: storage guard not configured, deferring node create for %q", p.FilePath)
 	}
 	loc, err := d.guard.Resolve(p.FilePath)
 	if err != nil {
-		return fmt.Errorf("%w: file path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
+		return 0, fmt.Errorf("%w: file path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
 	}
 	locID := loc.ID
 
@@ -333,7 +476,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		mtime = time.Now().Unix()
 	}
 
-	_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+	inserted, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           p.NodeUUID,
 		StorageLocationID:  locID,
 		FilePath:           p.FilePath,
@@ -356,7 +499,10 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		CameraSerial:       nullCameraSerial,
 		LensModel:          nullLensModel,
 	})
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return inserted.ID, nil
 }
 
 func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
@@ -561,16 +707,19 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	return q.MarkNodeMissing(ctx, node.ID)
 }
 
-func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
+// applyPathRebased returns the freshly inserted node's ID when NodeUUID was
+// unknown (see applyEvent's doc comment) -- 0 when it rebased an existing
+// node instead.
+func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) (int64, error) {
 	var p PathRebasedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
-		return fmt.Errorf("%w: unmarshal path rebased: %v", ErrMalformedPayload, err)
+		return 0, fmt.Errorf("%w: unmarshal path rebased: %v", ErrMalformedPayload, err)
 	}
 	if p.NodeUUID == "" {
-		return fmt.Errorf("%w: missing nodeUuid in path rebased payload", ErrInvalidNodeUUID)
+		return 0, fmt.Errorf("%w: missing nodeUuid in path rebased payload", ErrInvalidNodeUUID)
 	}
 	if p.TargetFilePath == "" {
-		return fmt.Errorf("%w: missing targetFilePath in path rebased payload", ErrMalformedPayload)
+		return 0, fmt.Errorf("%w: missing targetFilePath in path rebased payload", ErrMalformedPayload)
 	}
 
 	// storage_location_id always comes from Guard.Resolve(TargetFilePath),
@@ -579,11 +728,11 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	// handleAgentRebase's HTTP behavior; there is no locID==0 fallback to a
 	// magic default location.
 	if d.guard == nil {
-		return fmt.Errorf("agent: storage guard not configured, deferring path rebase for %q", p.TargetFilePath)
+		return 0, fmt.Errorf("agent: storage guard not configured, deferring path rebase for %q", p.TargetFilePath)
 	}
 	loc, err := resolveRebaseTarget(d.guard, p.TargetFilePath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	locID := loc.ID
 
@@ -602,9 +751,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		// the same reason as applyNodeMoved -- RebaseNodePathByUUID would
 		// resurrect a superseded version.
 		if existing.LifecycleState == "ARCHIVED" {
-			return fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
+			return 0, fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
 		}
-		return q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
+		return 0, q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
 			NodeUuid:          p.NodeUUID,
 			FilePath:          p.TargetFilePath,
 			FileName:          fileName,
@@ -613,14 +762,14 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		})
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("lookup node for rebase: %w", err)
+		return 0, fmt.Errorf("lookup node for rebase: %w", err)
 	}
 
 	// Unknown node_uuid: agent is the source of truth for an offline staged file; create node!
 	fileExt := filepath.Ext(p.TargetFilePath)
 	indexingStatus := "INDEXED_SHALLOW"
 
-	_, insertErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+	inserted, insertErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           p.NodeUUID,
 		StorageLocationID:  locID,
 		FilePath:           p.TargetFilePath,
@@ -643,7 +792,10 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		CameraSerial:       sql.NullString{},
 		LensModel:          sql.NullString{},
 	})
-	return insertErr
+	if insertErr != nil {
+		return 0, insertErr
+	}
+	return inserted.ID, nil
 }
 
 // resolveRebaseTarget resolves path via guard and applies the Tier-3

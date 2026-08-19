@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -155,6 +156,18 @@ func main() {
 		sweeper.Start(ctx, sweptLocs)
 	}
 
+	// Drains event_queue rows POST /api/v1/agent/events persists -- issue
+	// #166: the drain logic (internal/agent, Phase 8) had zero production
+	// callers until now. Always started, unconditionally: an empty queue
+	// costs one indexed COUNT query per DefaultDrainInterval tick, the same
+	// shape as WatcherSupervisor/SweeperSupervisor above, which are the
+	// ones gated on config (there's no per-location config for the agent
+	// queue to gate on -- it's one global queue, not per-storage-location).
+	drainer := agent.NewDrainer(database, guard, log,
+		agent.WithNudge(func() { hub.Broadcast() }),
+		agent.WithEngine(engine))
+	drainer.Start(ctx, 0)
+
 	spa, err := web.Dist()
 	if err != nil {
 		log.Error("embed spa", "err", err)
@@ -240,6 +253,12 @@ func main() {
 		if !waitBounded(joinCtx, log, "syncWorker.Wait()", immichWorker.Wait) {
 			dbUnsafeToClose = true
 		}
+	}
+	// drainer.Start's loop already stopped scheduling new passes on
+	// ctx.Done; Wait() joins its current pass (each event its own
+	// transaction against the writer DB) before the database closes.
+	if !waitBounded(joinCtx, log, "drainer.Wait()", drainer.Wait) {
+		dbUnsafeToClose = true
 	}
 	// Drain waits for worker goroutines to finish their current job before the database closes.
 	if !waitBounded(joinCtx, log, "pool.Drain()", pool.Drain) {
