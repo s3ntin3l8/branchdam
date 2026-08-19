@@ -243,6 +243,56 @@ func TestPlanIncludesVerifiedNode(t *testing.T) {
 	}
 }
 
+// TestPlanExcludesChainThroughArchivedIntermediate proves a multi-hop
+// lineage chain that only connects to a verified Tier-3 master THROUGH an
+// ARCHIVED intermediate node is not eligible -- mirroring ListAncestors'
+// own exclusion of ARCHIVED nodes from the walk (media_edges.sql). An
+// ARCHIVED node is a superseded version; a chain that only reaches the
+// master through one no longer represents the file currently on disk. Two
+// subtests share one chain shape (candidate <- intermediate <- master) so
+// the exclusion isn't proven vacuously: with the intermediate ACTIVE the
+// same chain IS eligible.
+func TestPlanExcludesChainThroughArchivedIntermediate(t *testing.T) {
+	buildChain := func(t *testing.T, intermediateLifecycle string) (database *db.DB, tier1ID int64, candidate sqlcgen.MediaNode) {
+		database = openTestDB(t)
+		tier1ID = seedLocation(t, database, "t1", t.TempDir(), "TIER1_LOCAL_SCRATCH", false, true)
+		tier2ID := seedLocation(t, database, "t2", t.TempDir(), "TIER2_EXPORTS", false, false)
+		tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+
+		master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("chain")})
+		intermediate := seedNode(t, database, nodeSpec{locationID: tier2ID, path: "/exports/intermediate.jpg", mtimeUnix: oldMtime, lifecycle: intermediateLifecycle})
+		candidate = seedNode(t, database, nodeSpec{locationID: tier1ID, path: "/scratch/candidate.jpg", mtimeUnix: oldMtime})
+
+		seedEdge(t, database, master.ID, intermediate.ID, "AUTO_ACCEPTED")
+		seedEdge(t, database, intermediate.ID, candidate.ID, "AUTO_ACCEPTED")
+		return database, tier1ID, candidate
+	}
+
+	t.Run("ACTIVE intermediate: chain is eligible", func(t *testing.T) {
+		database, tier1ID, candidate := buildChain(t, "ACTIVE")
+		got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		if len(got) != 1 || got[0].NodeID != candidate.ID {
+			t.Fatalf("Plan = %+v, want exactly candidate %d eligible through an ACTIVE intermediate", got, candidate.ID)
+		}
+	})
+
+	t.Run("ARCHIVED intermediate: chain is not eligible", func(t *testing.T) {
+		database, tier1ID, candidate := buildChain(t, "ARCHIVED")
+		got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		for _, c := range got {
+			if c.NodeID == candidate.ID {
+				t.Fatalf("candidate %d wrongly eligible through an ARCHIVED intermediate: %+v", candidate.ID, got)
+			}
+		}
+	})
+}
+
 // TestExecuteSymlinkEscapeRefused transposes
 // storage.TestSymlinkEscapeRefused onto the pruning executor: a Tier-1
 // path that is actually a symlink into Tier 3 must be refused by

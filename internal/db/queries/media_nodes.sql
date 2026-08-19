@@ -283,7 +283,10 @@ WHERE node_uuid = ?1;
 -- ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 -- vanished (MISSING) or archived Tier-3 master can never authorize a purge.
 -- Ancestor, not "same full_hash": walks media_edges target->source
--- (REJECTED edges excluded), mirroring ListAncestors' direction convention.
+-- (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
+-- mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
+-- exclusion exactly -- a chain that only connects through a superseded
+-- version doesn't represent the file currently on disk.
 -- Tier-1-only and prunable-only are already schema-enforced
 -- (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
 -- not re-checked here; the caller only invokes this against a location it
@@ -312,7 +315,9 @@ WITH RECURSIVE lineage(root, id) AS (
     SELECT l.root AS root, e.source_node_id AS id
     FROM media_edges e
     JOIN lineage l ON e.target_node_id = l.id
+    JOIN media_nodes a ON a.id = e.source_node_id
     WHERE e.review_state <> 'REJECTED'
+      AND a.lifecycle_state <> 'ARCHIVED'
 )
 SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
        n.mtime_unix, n.storage_location_id
