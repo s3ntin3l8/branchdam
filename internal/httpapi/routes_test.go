@@ -62,6 +62,16 @@ func fullTestServer(t *testing.T) (*Server, *db.DB) {
 	return srv, database
 }
 
+// doJSON simulates the happy-path browser request: a real deployment always
+// sits behind Traefik's ForwardAuth, which asserts X-Authentik-Username
+// (see docs/forward-auth.md), so every request that reaches this server has
+// one. #164: since RequireAdmin now fails closed on a mutating route when
+// that header is absent (Principal.Authenticated), a doJSON call carrying
+// no headers at all would no longer represent normal browser traffic.
+// Tests that specifically exercise absent-header or non-admin behavior
+// (TestMutatingRoutesAuthorization, TestOpenAPIEndpointExposure,
+// TestSyncRetryRequiresAdmin) build their requests directly instead of
+// through doJSON, so they are unaffected by this default.
 func doJSON(t *testing.T, h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
@@ -76,6 +86,7 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body any) *httpte
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Authentik-Username", "doJSON-test-user")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
@@ -612,7 +623,15 @@ func TestScanJobOutlivesRequestContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal scan request: %v", err)
 	}
-	resp, err := http.Post(ts.URL+"/api/v1/scan", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/scan", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build scan request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// #164: a real deployment always sits behind Traefik's ForwardAuth,
+	// which asserts this header -- see doJSON's doc comment.
+	req.Header.Set("X-Authentik-Username", "http-scan-request-ctx-test-user")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /api/v1/scan: %v", err)
 	}
@@ -734,6 +753,26 @@ func TestOpenAPIEndpointExposure(t *testing.T) {
 
 			if rrAdmin.Code != http.StatusOK {
 				t.Errorf("GET %s admin when exposeOpenAPI=true: status = %d, want %d", p, rrAdmin.Code, http.StatusOK)
+			}
+		}
+	})
+
+	// #164: openAPIMiddleware's admin check has its own !ok/group-check
+	// logic, separate from RequireAdmin's -- a request with zero identity
+	// headers at all must not slip past it via the empty-allowedGroups
+	// permits-all path, the same gap this issue closes for mutating routes.
+	t.Run("no identity headers denied even with empty allowedGroups", func(t *testing.T) {
+		srv, _ := fullTestServer(t)
+		srv.cfg.HTTP.ExposeOpenAPI = true
+
+		paths := []string{"/openapi.json", "/docs"}
+		for _, p := range paths {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("GET %s with no identity headers, empty allowedGroups: status = %d, want %d", p, rr.Code, http.StatusForbidden)
 			}
 		}
 	})

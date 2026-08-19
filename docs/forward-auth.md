@@ -117,6 +117,16 @@ port; only Traefik can reach `:8080` at all, per `compose.yaml`) is the current 
 point. Revisit if branchDAM's network topology ever changes to allow other containers to reach
 it directly.
 
+A request with **no** `X-Authentik-Username` header at all -- Traefik's `authResponseHeaders`
+misconfigured to drop it, or a direct hit on the port from inside the network boundary above --
+is treated differently depending on the request. Reads (`GET`/`HEAD`/`OPTIONS`), `/healthz`, the
+SSE stream, and the SPA shell still work: `BrowserChain` always attaches a `Principal`, so those
+paths are unaffected. A write (`POST`/`PUT`/etc.) now gets `403 authentication required`
+instead of silently running as a full admin session with a blank username -- previously, an
+empty `authz.groups` (the solo-homelab default) meant *any* authenticated-looking principal,
+including one with no real identity behind it, could write. See `internal/auth.Principal`'s
+`Authenticated` field and `RequireAdmin`.
+
 ## 4. Verifying it works
 
 ```bash
@@ -133,7 +143,8 @@ curl -s -o /dev/null -w '%{http_code}\n' https://dam.example.com/api/v1/agent/he
 # → 401
 ```
 
-If `/api/v1/me` returns `"kind": "user"` with an empty `name`, confirm:
+If `/api/v1/me` returns `"kind": "user"` with an empty `name` -- or a write request that used to
+work now returns `403 authentication required` -- confirm:
 
 - `authResponseHeaders` on the `authentik` middleware actually lists the headers (Traefik
   strips anything not explicitly listed there, even from a trusted forwardAuth response).

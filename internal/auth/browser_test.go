@@ -24,13 +24,19 @@ func TestBrowserChainAttachesPrincipalFromHeaders(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	want := Principal{Kind: KindUser, Name: "alice", Email: "alice@example.com", Groups: []string{"dam-admins", "dam-users"}}
+	want := Principal{Kind: KindUser, Name: "alice", Email: "alice@example.com", Groups: []string{"dam-admins", "dam-users"}, Authenticated: true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Principal = %+v, want %+v", got, want)
 	}
 }
 
-func TestBrowserChainNoHeadersYieldsAnonymousPrincipal(t *testing.T) {
+// TestBrowserChainNoHeadersYieldsUnauthenticatedPrincipal backs #164: with
+// zero Authentik headers, BrowserChain still attaches a Principal (so
+// reads, /healthz, SSE, and the SPA shell keep working) but it must be
+// Authenticated: false -- that's what lets RequireAdmin fail closed on a
+// write route instead of treating this as a real logged-in user with no
+// matching group.
+func TestBrowserChainNoHeadersYieldsUnauthenticatedPrincipal(t *testing.T) {
 	var got Principal
 	handler := BrowserChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ = From(r.Context())
@@ -45,6 +51,9 @@ func TestBrowserChainNoHeadersYieldsAnonymousPrincipal(t *testing.T) {
 	}
 	if got.Name != "" || len(got.Groups) != 0 {
 		t.Errorf("Principal = %+v, want empty Name/Groups when no headers are set", got)
+	}
+	if got.Authenticated {
+		t.Errorf("Principal.Authenticated = true, want false when no headers are set")
 	}
 }
 
@@ -63,6 +72,9 @@ func TestBrowserChainXAPIKeyGrantsNothing(t *testing.T) {
 
 	if got.Kind != KindUser {
 		t.Errorf("Kind = %q, want %q (X-API-Key alone must not grant machine access on browser routes)", got.Kind, KindUser)
+	}
+	if got.Authenticated {
+		t.Errorf("Principal.Authenticated = true, want false (X-API-Key is not an Authentik identity header)")
 	}
 }
 

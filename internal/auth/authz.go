@@ -57,6 +57,18 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 				return
 			}
 
+			// #164: a browser principal with no X-Authentik-Username at all
+			// (misconfigured ForwardAuth, or a direct hit on this port) must
+			// not reach the group check below as if it were a real logged-in
+			// user with no matching group -- that would grant full write
+			// access whenever allowedGroups is empty (the solo-homelab
+			// default). Reads are unaffected: this check runs after the
+			// GET/HEAD/OPTIONS bypass above, not before it.
+			if !p.Authenticated {
+				writeForbidden(w, "authentication required")
+				return
+			}
+
 			// Empty allowedGroups permits all authenticated users.
 			if len(allowedGroups) == 0 {
 				next.ServeHTTP(w, r)

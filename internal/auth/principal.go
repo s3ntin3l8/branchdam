@@ -29,11 +29,22 @@ const (
 // that the request holds the shared secret. Giving it empty identity
 // fields (rather than, say, a "system" placeholder name) makes it visibly
 // distinct from a real user in any audit log or UI that renders Principal.
+//
+// Authenticated is true iff BrowserChain saw a non-empty
+// X-Authentik-Username (#164). BrowserChain always attaches a Principal --
+// even with zero Authentik headers -- so reads, /healthz, the SSE stream,
+// and the SPA shell keep working regardless; Authenticated is what lets
+// RequireAdmin distinguish "a real logged-in user with no matching admin
+// group" from "no identity headers arrived at all" on a write route, which
+// it could not do before this field existed (see authz.go's RequireAdmin).
+// Always false (and never read) for a KindMachine Principal -- AgentChain
+// gates by API key instead, not by this field.
 type Principal struct {
-	Kind   Kind
-	Name   string
-	Email  string
-	Groups []string
+	Kind          Kind
+	Name          string
+	Email         string
+	Groups        []string
+	Authenticated bool
 }
 
 type principalContextKey struct{}

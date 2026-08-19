@@ -31,9 +31,10 @@ func TestRequireAdmin(t *testing.T) {
 			name:          "non-admin user POST denied",
 			allowedGroups: []string{"admin"},
 			principal: &Principal{
-				Kind:   KindUser,
-				Name:   "alice",
-				Groups: []string{"users"},
+				Kind:          KindUser,
+				Name:          "alice",
+				Groups:        []string{"users"},
+				Authenticated: true,
 			},
 			method:     http.MethodPost,
 			wantCode:   http.StatusForbidden,
@@ -43,9 +44,10 @@ func TestRequireAdmin(t *testing.T) {
 			name:          "admin user POST allowed",
 			allowedGroups: []string{"admin"},
 			principal: &Principal{
-				Kind:   KindUser,
-				Name:   "bob",
-				Groups: []string{"users", "admin"},
+				Kind:          KindUser,
+				Name:          "bob",
+				Groups:        []string{"users", "admin"},
+				Authenticated: true,
 			},
 			method:   http.MethodPost,
 			wantCode: http.StatusOK,
@@ -54,9 +56,10 @@ func TestRequireAdmin(t *testing.T) {
 			name:          "non-admin user GET allowed",
 			allowedGroups: []string{"admin"},
 			principal: &Principal{
-				Kind:   KindUser,
-				Name:   "alice",
-				Groups: []string{"users"},
+				Kind:          KindUser,
+				Name:          "alice",
+				Groups:        []string{"users"},
+				Authenticated: true,
 			},
 			method:   http.MethodGet,
 			wantCode: http.StatusOK,
@@ -65,9 +68,10 @@ func TestRequireAdmin(t *testing.T) {
 			name:          "non-admin user HEAD allowed",
 			allowedGroups: []string{"admin"},
 			principal: &Principal{
-				Kind:   KindUser,
-				Name:   "alice",
-				Groups: []string{"users"},
+				Kind:          KindUser,
+				Name:          "alice",
+				Groups:        []string{"users"},
+				Authenticated: true,
 			},
 			method:   http.MethodHead,
 			wantCode: http.StatusOK,
@@ -76,9 +80,10 @@ func TestRequireAdmin(t *testing.T) {
 			name:          "non-admin user OPTIONS allowed",
 			allowedGroups: []string{"admin"},
 			principal: &Principal{
-				Kind:   KindUser,
-				Name:   "alice",
-				Groups: []string{"users"},
+				Kind:          KindUser,
+				Name:          "alice",
+				Groups:        []string{"users"},
+				Authenticated: true,
 			},
 			method:   http.MethodOptions,
 			wantCode: http.StatusOK,
@@ -87,9 +92,10 @@ func TestRequireAdmin(t *testing.T) {
 			name:          "empty allowedGroups permits non-admin POST",
 			allowedGroups: nil,
 			principal: &Principal{
-				Kind:   KindUser,
-				Name:   "charlie",
-				Groups: []string{"users"},
+				Kind:          KindUser,
+				Name:          "charlie",
+				Groups:        []string{"users"},
+				Authenticated: true,
 			},
 			method:   http.MethodPost,
 			wantCode: http.StatusOK,
@@ -101,6 +107,30 @@ func TestRequireAdmin(t *testing.T) {
 				Kind: KindMachine,
 			},
 			method:   http.MethodPost,
+			wantCode: http.StatusOK,
+		},
+		{
+			// #164: a Principal with no identity headers at all (Authenticated:
+			// false, as BrowserChain now produces for a request with an empty
+			// X-Authentik-Username) must not reach the group check as if it
+			// were a real logged-in user -- this is the case that used to be
+			// structurally unreachable before Authenticated existed.
+			name:          "unauthenticated browser principal POST denied even with empty allowedGroups",
+			allowedGroups: nil,
+			principal: &Principal{
+				Kind: KindUser,
+			},
+			method:     http.MethodPost,
+			wantCode:   http.StatusForbidden,
+			wantDetail: "authentication required",
+		},
+		{
+			name:          "unauthenticated browser principal GET allowed",
+			allowedGroups: []string{"admin"},
+			principal: &Principal{
+				Kind: KindUser,
+			},
+			method:   http.MethodGet,
 			wantCode: http.StatusOK,
 		},
 	}
