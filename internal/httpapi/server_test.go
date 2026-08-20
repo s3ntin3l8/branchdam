@@ -100,15 +100,18 @@ func TestRecoveryMiddleware(t *testing.T) {
 // CodeQL alerts on recoverMiddleware/logMiddleware: r.URL.Path is
 // client-controlled (a percent-encoded %0d%0a in the request line decodes
 // to a literal CR/LF by the time net/url has parsed it into r.URL.Path),
-// so a value containing CR/LF must have both stripped before it's safe to
-// hand to a plain-text log sink.
+// so a value containing CR/LF must have both replaced with a visible
+// escape before it's safe to hand to a plain-text log sink -- an actual
+// line break can never reach the sink, but (per Hermes review on #215) the
+// forged suffix stays visible as `\r`/`\n` rather than being silently
+// concatenated onto the path with no separator.
 func TestSanitizeForLog(t *testing.T) {
 	in := "/api/v1/assets\r\n2026-01-01 00:00:00 FORGED level=ERROR msg=\"fake entry\""
 	got := sanitizeForLog(in)
 	if strings.ContainsAny(got, "\r\n") {
-		t.Errorf("sanitizeForLog(%q) = %q, still contains CR/LF", in, got)
+		t.Errorf("sanitizeForLog(%q) = %q, still contains an actual CR/LF", in, got)
 	}
-	want := "/api/v1/assets2026-01-01 00:00:00 FORGED level=ERROR msg=\"fake entry\""
+	want := `/api/v1/assets\r\n2026-01-01 00:00:00 FORGED level=ERROR msg="fake entry"`
 	if got != want {
 		t.Errorf("sanitizeForLog(%q) = %q, want %q", in, got, want)
 	}

@@ -204,19 +204,22 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// sanitizeForLog strips CR/LF from a user-controlled value (here, always
-// r.URL.Path) before it's written to a log record. CodeQL's go/log-injection
-// flags both call sites below: net/http's ServeMux/Huma reject a raw CR/LF
-// in the request line itself, but nothing stops a client from percent-encoding
-// one (%0d%0a), which net/url decodes back into r.URL.Path -- so this is a
-// real client-controlled forged-log-entry vector, not just a lint nit. Strips
-// rather than rejects, matching the go/log-injection alert's own recommended
-// fix (CWE-117): a forged log line is defused by removing the line breaks
-// that would let it masquerade as a separate entry, without changing request
-// handling.
+// sanitizeForLog replaces CR/LF in a user-controlled value (here, always
+// r.URL.Path) with their visible escape sequences before it's written to a
+// log record. CodeQL's go/log-injection flags both call sites below:
+// net/http's ServeMux/Huma reject a raw CR/LF in the request line itself,
+// but nothing stops a client from percent-encoding one (%0d%0a), which
+// net/url decodes back into r.URL.Path -- so this is a real
+// client-controlled forged-log-entry vector, not just a lint nit.
+// Replacing rather than deleting keeps the line break visible (as literal
+// `\r`/`\n`) instead of silently concatenating the forged suffix onto the
+// path with no separator -- matching the go/log-injection alert's own
+// recommended fix (CWE-117): a forged log line is defused by removing the
+// ACTUAL line breaks that would let it masquerade as a separate entry,
+// without changing request handling or losing the rest of the value.
 func sanitizeForLog(s string) string {
-	s = strings.ReplaceAll(s, "\r", "")
-	return strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	return strings.ReplaceAll(s, "\n", `\n`)
 }
 
 func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
