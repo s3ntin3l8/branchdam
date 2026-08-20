@@ -204,11 +204,26 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// sanitizeForLog strips CR/LF from a user-controlled value (here, always
+// r.URL.Path) before it's written to a log record. CodeQL's go/log-injection
+// flags both call sites below: net/http's ServeMux/Huma reject a raw CR/LF
+// in the request line itself, but nothing stops a client from percent-encoding
+// one (%0d%0a), which net/url decodes back into r.URL.Path -- so this is a
+// real client-controlled forged-log-entry vector, not just a lint nit. Strips
+// rather than rejects, matching the go/log-injection alert's own recommended
+// fix (CWE-117): a forged log line is defused by removing the line breaks
+// that would let it masquerade as a separate entry, without changing request
+// handling.
+func sanitizeForLog(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	return strings.ReplaceAll(s, "\n", "")
+}
+
 func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
-				log.Error("panic in handler", "path", r.URL.Path, "err", v)
+				log.Error("panic in handler", "path", sanitizeForLog(r.URL.Path), "err", v)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 		}()
@@ -221,7 +236,7 @@ func logMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Debug("request", "method", r.Method, "path", r.URL.Path, "dur", time.Since(start))
+			log.Debug("request", "method", r.Method, "path", sanitizeForLog(r.URL.Path), "dur", time.Since(start))
 		}
 	})
 }
