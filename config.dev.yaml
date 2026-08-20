@@ -1,0 +1,73 @@
+# branchDAM configuration — local dev template.
+#
+# This is NOT copied verbatim: `make dev-config` renders it into config.yaml
+# (gitignored, never overwritten if it already exists), substituting
+# __REPO_ROOT__ with this checkout's absolute path. Every path here must end
+# up absolute -- storage.Guard's canonicalize() rejects a relative rootPath
+# outright, and a relative database.path would land the SQLite file wherever
+# the process happened to be started from instead of a stable, gitignored
+# spot inside this checkout.
+#
+# Edit the generated config.yaml for your own local tweaks, not this file --
+# this file is the template every fresh clone / worktree starts from. See
+# config.example.yaml for the full field reference and comments; only the
+# fields that differ for local dev are re-explained below.
+
+listenAddr: ":8080"
+logLevel: info
+
+database:
+  # Under data/, which .gitignore already excludes and db.Open() creates
+  # (MkdirAll) if missing -- no manual setup needed before first run.
+  path: __REPO_ROOT__/data/branchdam.db
+
+http:
+  readTimeoutSecs: 15
+  writeTimeoutSecs: 15
+  exposeOpenAPI: false
+
+workers:
+  hashWorkers: 0
+  fullHashPolicy: tier3_and_collision
+
+agent:
+  # Left unresolved on purpose: unset means agent routes fail closed with
+  # 503 rather than silently accepting an empty key. Not fatal to startup --
+  # export BRANCHDAM_AGENT_API_KEY yourself (32+ chars) if you need
+  # /api/v1/agent/* routes locally.
+  apiKey: ${BRANCHDAM_AGENT_API_KEY}
+
+authz:
+  groups:
+    - branchdam-admins
+
+immich:
+  # Empty apiUrl disables the sync worker entirely -- no Immich instance
+  # needed for local dev.
+  apiUrl: ""
+  apiKey: ""
+  libraryId: ""
+  exportPath: __REPO_ROOT__/data/storage/exports/immich
+
+# Four locations, one per tier that isn't Tier 3's read-only special case --
+# every rootPath under data/storage/, which `make dev-config` creates.
+# Deliberately no `watch`/`sweep`/`prunable` on any entry: continuous ingest
+# and cache pruning aren't needed to boot a dev server, and leaving them out
+# keeps this file in exact correspondence with dev-config's mkdir list.
+storageLocations:
+  - name: archive
+    rootPath: __REPO_ROOT__/data/storage/archive
+    tier: TIER3_MASTER_ARCHIVE
+    readOnly: true
+
+  - name: exports
+    rootPath: __REPO_ROOT__/data/storage/exports
+    tier: TIER2_EXPORTS
+
+  - name: projects
+    rootPath: __REPO_ROOT__/data/storage/projects
+    tier: PROJECTS
+
+  - name: scratch
+    rootPath: __REPO_ROOT__/data/storage/scratch
+    tier: TIER1_LOCAL_SCRATCH

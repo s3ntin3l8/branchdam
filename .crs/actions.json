@@ -1,0 +1,24 @@
+{
+  "actions": [
+    {
+      "id": "branchdam:check",
+      "title": "Pre-PR check (Go)",
+      "command": "make check"
+    },
+    {
+      "id": "branchdam:check-web",
+      "title": "Pre-PR check (Web)",
+      "command": "make check-web"
+    },
+    {
+      "id": "branchdam:test",
+      "title": "Go tests (race)",
+      "command": "make test"
+    },
+    {
+      "id": "branchdam:golangci",
+      "title": "golangci-lint",
+      "command": "make golangci-lint"
+    }
+  ]
+}

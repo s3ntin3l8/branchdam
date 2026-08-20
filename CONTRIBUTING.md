@@ -21,20 +21,23 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture and package tour.
 `go test -race` and `govulncheck`. Run the same checks manually before opening a PR:
 
 ```bash
-make lint && make test && make build
-go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+make check
 ```
 
-(The `/v2` module path and the version pin both matter -- `.golangci.yml` declares
-`version: "2"`, and a floating `@latest` install could resolve v3+ and fail against a v2
-config. CI pins the same version via `golangci/golangci-lint-action@v9`; bump both together.)
+which is exactly `make lint && make test && make build && make golangci-lint` --
+`golangci-lint` is `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run`
+(see the Makefile's `GOLANGCI_LINT_VERSION`). The `/v2` module path and the version pin both
+matter -- `.golangci.yml` declares `version: "2"`, and a floating `@latest` install could
+resolve v3+ and fail against a v2 config. CI pins the same version via
+`golangci/golangci-lint-action@v9`; bump both together.
 
 Be precise about what each of these does and doesn't cover:
 
 - `make lint` is `pre-commit run --all-files` -- it only runs the `pre-commit`-staged hooks
   (gofmt, go vet, go mod tidy, sqlc-diff), **not** `go test` or `govulncheck` (those are
-  `pre-push`-staged), and **not** `golangci-lint` (not a pre-commit hook at all, but it *is* a
-  required CI status check -- run it separately).
+  `pre-push`-staged), and **not** `golangci-lint`. `make check` covers all of these; `make lint`
+  alone does not. Note `make lint`'s pre-commit hooks (`trailing-whitespace`,
+  `end-of-file-fixer`, `mixed-line-ending`, `gofmt`) rewrite files in your working tree.
 - `sqlc-diff` is a no-op if the `sqlc` binary isn't installed on your machine. If you changed
   `internal/db/migrations/*.sql` or `internal/db/queries/*.sql`, run `sqlc generate` yourself
   and commit `internal/db/sqlcgen/` in the same PR -- CI has no codegen step, so a stale
@@ -51,8 +54,10 @@ with `*ast.ResTarget has nil name`.
 Frontend changes:
 
 ```bash
-cd web && npm run lint && npm run typecheck && npm run build
+make check-web
 ```
+
+which is `cd web && npm run lint && npm run typecheck && npm run build`.
 
 ## PR title
 

@@ -22,6 +22,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   #    query on the PR, NOT the REST comment id)
   gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
   ```
+- **Mullion dock/actions config.** `.crs/dock.json` (persistent click-to-start monitors) and
+  `.crs/actions.json` (one-shot launchers) are Mullion dashboard config, not part of the app.
+  Every `command` in both files deliberately goes through the Makefile (`make dev-api`, `make
+  check`, ...) rather than inlining a raw shell command, so the dock/launcher surface and a
+  plain terminal never drift. Hand-editing either file hits Mullion's *lenient* reader
+  (`project-config.js`'s `normalizeRawControl`/`normalizeRawAction`) -- a malformed entry, a
+  missing required field, or a typo'd key is silently dropped with only a server-side
+  `console.warn`, never surfaced in the UI. The stricter validator
+  (`dock-config.js`'s `validateDockConfig`, which rejects unknown keys) only runs on a save made
+  through the dashboard's own editor. After hand-editing, verify with `mullion project dock
+  <id> --json` / `mullion project actions <id> --json` and confirm every field you set actually
+  came back -- "the JSON parses" proves nothing here.
 
 ## Commands
 
@@ -48,6 +60,21 @@ go vet ./...
 # Run the server
 make dev
 go run ./cmd/branchdam -config config.yaml -debug
+
+# Run API + frontend together, or one at a time. `make dev` above is the
+# original, unchanged target -- it does NOT bootstrap config.yaml and still
+# fails on a fresh clone. `dev-api`/`dev-all` below do, via `dev-config`
+# (see below) -- prefer these for a first-time local setup.
+make dev-api    # Go API only, :8080
+make dev-web    # Vite dev server only, :5173, proxies /api -> :8080
+make dev-all    # both in one terminal (Ctrl-C stops both)
+
+# Pinned golangci-lint (required CI check; NOT covered by `make lint`)
+make golangci-lint
+
+# One-shot pre-PR gates
+make check       # lint + test + build + golangci-lint
+make check-web   # cd web && lint + typecheck + build
 ```
 
 > The Go binary embeds `web/dist` via `//go:embed` (`web/embed.go`). If `web/dist` doesn't
@@ -55,6 +82,14 @@ go run ./cmd/branchdam -config config.yaml -debug
 > `web-stub`, which runs `.github/ci-prebuild.sh` to create a placeholder if none exists yet --
 > the same script CI's Go-only lane uses. Run `npm run build` in `web/` first if you want the
 > real SPA embedded instead of the stub.
+
+> `config.yaml` is gitignored and not present in a fresh clone; `make dev-api`/`dev-all` depend
+> on `dev-config`, which renders `config.dev.yaml` (a committed template, absolute paths under
+> `data/`, which it also creates) into `config.yaml` the first time, and leaves an existing
+> `config.yaml` alone on every run after. `database.path` there must stay absolute --
+> `storage.Guard`'s `canonicalize` (`internal/storage/guard.go`) rejects a relative `rootPath`
+> outright, which degrades to that storage location being silently skipped rather than a fatal
+> error.
 
 Neither `exiftool` nor `ffprobe` is installed on every machine that runs these tests (notably:
 the CI Go job doesn't install them). `internal/probe`'s integration tests `t.Skip` cleanly when
