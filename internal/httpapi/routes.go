@@ -22,6 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/metadata"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/projectfile"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/sync"
@@ -705,6 +706,18 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error404NotFound("asset not found")
 	}
 
+	// #199: the child of an inherit-metadata write must be a real media file,
+	// never a project archive (.drp/.fcpxml/.edl/.dam.json/.prproj). A
+	// manual edge created before handleCreateEdge's guard shipped, or a
+	// filename-stem/XMP match that lands a project file as the child of a
+	// DERIVED_FROM/FINAL_EXPORT/PROXY_OF edge, would otherwise clear
+	// pickWinningParent and run exiftool in-place against a container file
+	// that isn't an image or video. Refuse before any exiftool subprocess
+	// spawns.
+	if _, ok := projectfile.GetParser(child.FilePath); ok {
+		return nil, huma.Error409Conflict("cannot inherit metadata into a project file")
+	}
+
 	// Refuse a write into a read-only location BEFORE spawning exiftool.
 	if s.guard != nil {
 		if err := s.guard.CheckWrite(child.FilePath); err != nil {
@@ -998,8 +1011,39 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		return nil, huma.Error422UnprocessableEntity("invalid relationship type")
 	}
 
+	// #199: a manual edge must link two media nodes -- neither endpoint may
+	// be a project file (.drp/.fcpxml/.edl/.dam.json/.prproj, whatever
+	// internal/projectfile's registry recognizes). Such a node is a container
+	// of references, not a camera-derived asset: an edge whose CHILD is a
+	// project file would pass pickWinningParent's filters (DERIVED_FROM is an
+	// identity-ancestry relationship) and make handleInheritMetadata run
+	// exiftool in-place against the project archive. ProjectSidecarResolver
+	// always makes the project file the child of a PROJECT_SIDECAR edge, never
+	// the source of one, so no legitimate manual edge has a project file at
+	// either endpoint -- refuse both.
+	target, err := s.db.Reader.GetMediaNodeByID(ctx, in.Body.TargetNodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("target asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get target asset", err)
+	}
+	if _, ok := projectfile.GetParser(target.FilePath); ok {
+		return nil, huma.Error422UnprocessableEntity("cannot create an edge targeting a project file")
+	}
+	source, err := s.db.Reader.GetMediaNodeByID(ctx, in.Body.SourceNodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("source asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get source asset", err)
+	}
+	if _, ok := projectfile.GetParser(source.FilePath); ok {
+		return nil, huma.Error422UnprocessableEntity("cannot create an edge sourced from a project file")
+	}
+
 	var createdEdge sqlcgen.MediaEdge
-	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		wouldCycle, err := q.WouldCreateCycle(ctx, sqlcgen.WouldCreateCycleParams{
 			ParentNodeID: in.Body.SourceNodeID,
 			ChildNodeID:  in.Body.TargetNodeID,
