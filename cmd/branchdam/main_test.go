@@ -666,7 +666,7 @@ func TestRunReturnsErrorOnBindFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	defer occupied.Close()
+	defer func() { _ = occupied.Close() }()
 
 	httpServer := &http.Server{Addr: occupied.Addr().String()}
 
