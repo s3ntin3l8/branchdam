@@ -6,15 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/naming"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 )
 
@@ -174,7 +173,7 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 		CameraModel:        nullString(r.CameraModel),
 		CameraSerial:       nullString(r.SerialNumber),
 		LensModel:          nullString(r.LensModel),
-		FilenameStem:       nullString(filenameStem(r.FileName)),
+		FilenameStem:       nullString(naming.Stem(r.FileName)),
 	}
 	if r.PHash != nil {
 		params.Phash = sql.NullInt64{Int64: *r.PHash, Valid: true}
@@ -198,52 +197,6 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
-}
-
-// versionSuffixRe strips the common "this is a derivative of that other
-// file" suffixes the Tier-2 filenameStem resolver (PR 7) matches on:
-// _edit, -2, _proxy, _v3, " copy", "(1)". Computed here (at insert time,
-// when file_name is already known) rather than deferred to PR 7, so
-// filename_stem never needs a backfill migration once resolvers exist.
-//
-// The "-N" branch is deliberately bounded to 1-2 digits (`-\d{1,2}`), not
-// unbounded (`-\d+`, this regex's pre-fix form). Unbounded, it also matched
-// a camera's own hyphen-numbered default filenames -- Sony's DSC-0001.JPG,
-// IMG-1234.jpg -- stripping every file in a shoot down to the same bare
-// "dsc"/"img" stem. FilenameStemResolver (internal/graph/resolvers.go)
-// treats a shared stem as a lineage signal (base confidence 0.60, +0.15
-// same day, +0.10 same camera, +0.10 same directory, clamped to 0.90 --
-// exactly the Tier-2 auto-accept threshold), so a single memory-card
-// import produced an O(n^2) fully-connected, auto-accepted DERIVED_FROM
-// mesh with no operator ever seeing it in the audit queue. 1-2 digits still
-// covers the intended case -- an OS's own "file-2.jpg", "file-12.jpg"
-// duplicate-numbering never runs past two digits -- while leaving a
-// camera's 3+ digit serial numbering (0001, 1234, ...) as part of the stem,
-// where it belongs.
-//
-// This narrows the bug's trigger window, it does not close the bug class:
-// a camera or human numbering scheme that DOES stay within 1-2 digits
-// (unpadded counters, "trip-1.jpg".."trip-45.jpg") still collapses to one
-// shared stem and can reproduce the same auto-accepted mesh. Closing that
-// residual case needs a different signal than digit-count bounding --
-// filed as a fast-follow, see the versionSuffixRe test cases for the
-// specific inputs this still doesn't cover.
-var versionSuffixRe = regexp.MustCompile(`(?i)(_edit|_proxy|_v\d+|-\d{1,2}| copy|\(\d+\))+$`)
-
-func filenameStem(fileName string) string {
-	stem := fileName
-	if i := strings.LastIndex(stem, "."); i > 0 {
-		stem = stem[:i]
-	}
-	stem = strings.ToLower(strings.TrimSpace(stem))
-	for {
-		stripped := versionSuffixRe.ReplaceAllString(stem, "")
-		if stripped == stem {
-			break
-		}
-		stem = stripped
-	}
-	return stem
 }
 
 const metadataCap = 64 // per-node metadata row cap -- overflow is logged, never fatal

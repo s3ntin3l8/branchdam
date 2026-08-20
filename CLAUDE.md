@@ -294,6 +294,24 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   returns direct parents/children only, not a bounded recursive traversal. This is a stated
   scope line for increment 1, not a hidden gap -- see `internal/httpapi/routes.go`.
 - **Auto-accept thresholds are derived per resolver tier.** Tier 1 and Tier 2 use `0.90` (preserving existing classification behavior), while Tier 3 uses `0.85` (so Tier 3's 0.70–0.89 confidence band splits into 0.85–0.89 auto-accepted and 0.70–0.84 audit queue). `needsReviewFloor = 0.50` applies across all tiers.
+- **A `filename_stem` match derived from an index suffix ("-N", "(N)") never auto-accepts on
+  its own, permanently (#132).** `internal/naming` is the single owner of the stem/suffix
+  definition (`Stem`, `Kind`) shared by `internal/pipeline` (which computes and stores
+  `media_nodes.filename_stem` at insert time, unchanged since PR #134's H3 fix) and
+  `internal/graph` (whose `FilenameStemResolver` classifies both sides of a match). An index
+  suffix asserts "I am a duplicate of some other file" -- PR #134 only bounded how far that
+  could over-collapse (`-\d{1,2}`, not unbounded `-\d+`), it didn't close the class: an
+  unpadded 1-2 digit hyphen scheme (`trip-1.jpg`..`trip-45.jpg`) or an OS `(N)` duplicate index
+  still collapses siblings to a shared stem. `FilenameStemResolver` now requires a live, bare
+  anchor node (`naming.SuffixNone`) as the parent before emitting a candidate at all, requires
+  the index-suffixed node to be the child, and caps a surviving match at `0.89` -- strictly
+  below `AutoAcceptThresholdForTier(2)` -- so it always lands in the audit queue unless a
+  non-`filename_stem` resolver corroborates the same edge (`mergeCandidates` already takes max
+  confidence per `(parent, child, rel)`; no new merge logic needed). Role suffixes (`_edit`,
+  `_proxy`, `_vN`, `` copy``) are unaffected -- collapsing those siblings to a shared stem is
+  the resolver's original intended case. Migration `00006` is a one-time data correction for
+  edges already written `AUTO_ACCEPTED` before this fix existed; `UpsertMediaEdge`'s
+  confidence-only-increases rule means a rescan alone would never have fixed them.
 
 ## CI
 

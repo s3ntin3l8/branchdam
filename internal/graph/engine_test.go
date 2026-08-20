@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/naming"
 )
 
 func openTestDB(t *testing.T) *db.DB {
@@ -71,33 +71,6 @@ type nodeFixture struct {
 	PHash              *int64
 }
 
-// fixtureFilenameStem is a deliberate duplicate of pipeline's filenameStem
-// (internal/pipeline/commit.go) -- small enough that copying it here is
-// simpler and safer than restructuring package boundaries just to share it,
-// and it keeps these fixtures behaving exactly like real ingested nodes
-// without reintroducing the import cycle seedNode's doc comment explains.
-// Must be kept in sync with commit.go's versionSuffixRe -- in particular the
-// -\d{1,2} bound (not unbounded -\d+), which is what keeps camera default
-// filenames like DSC-0001.JPG from collapsing to a shared "dsc" stem; see
-// commit.go's doc comment.
-var fixtureVersionSuffixRe = regexp.MustCompile(`(?i)(_edit|_proxy|_v\d+|-\d{1,2}| copy|\(\d+\))+$`)
-
-func fixtureFilenameStem(fileName string) string {
-	stem := fileName
-	if i := strings.LastIndex(stem, "."); i > 0 {
-		stem = stem[:i]
-	}
-	stem = strings.ToLower(strings.TrimSpace(stem))
-	for {
-		stripped := fixtureVersionSuffixRe.ReplaceAllString(stem, "")
-		if stripped == stem {
-			break
-		}
-		stem = stripped
-	}
-	return stem
-}
-
 func seedNode(t *testing.T, database *db.DB, locationID int64, f nodeFixture) sqlcgen.MediaNode {
 	t.Helper()
 	ctx := context.Background()
@@ -123,7 +96,7 @@ func seedNode(t *testing.T, database *db.DB, locationID int64, f nodeFixture) sq
 		OriginalDocumentID: nullString(f.OriginalDocumentID),
 		DocumentID:         nullString(f.DocumentID),
 		CameraModel:        nullString(f.CameraModel),
-		FilenameStem:       nullString(fixtureFilenameStem(f.FileName)),
+		FilenameStem:       nullString(naming.Stem(f.FileName)),
 		CameraSerial:       nullString(f.CameraSerial),
 		LensModel:          nullString(f.LensModel),
 	}
@@ -331,6 +304,276 @@ func TestFilenameStemDistinctCameraNumbersDoNotCollapse(t *testing.T) {
 	}
 	if len(edges) != 0 {
 		t.Fatalf("got %d edges among 20 distinct DSC-NNNN siblings, want 0 -- each keeps its own numeric suffix, not a shared stem: %+v", len(edges), edges)
+	}
+}
+
+// TestFilenameStemUnpaddedIndexBatchDoesNotCollapse backs issue #132: unlike
+// TestFilenameStemDistinctCameraNumbersDoNotCollapse's 4-digit DSC-NNNN
+// siblings (which keep distinct stems by construction), an unpadded 1-2
+// digit hyphen-numbering scheme -- an unpadded camera counter, or a human
+// numbering a batch "trip-1.jpg".."trip-45.jpg" -- DOES collapse to one
+// shared stem ("trip"). Without a "trip.jpg" anchor present, the resolver's
+// anchor rule must still emit zero candidates among the batch.
+func TestFilenameStemUnpaddedIndexBatchDoesNotCollapse(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	var last sqlcgen.MediaNode
+	for i := 1; i <= 45; i++ {
+		name := fmt.Sprintf("trip-%d.jpg", i)
+		last = seedNode(t, database, locationID, nodeFixture{
+			Path: "/2026-07-15/" + name, FileName: name, FileExt: "jpg",
+			CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+		})
+	}
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(last))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("got %d edges among 45 unpadded trip-N siblings with no trip.jpg anchor, want 0: %+v", len(edges), edges)
+	}
+}
+
+// TestFilenameStemIndexBatchWithAnchorFormsStarNotMesh: the same
+// unpadded-index batch as TestFilenameStemUnpaddedIndexBatchDoesNotCollapse,
+// but WITH a "trip.jpg" anchor present. Resolving one child against 45
+// index-suffixed siblings plus the anchor must still find exactly ONE
+// candidate parent -- the anchor itself -- not one per sibling: the
+// direction rule (an index-suffixed node is never a parent) is what keeps
+// an anchored batch a star (n-1 edges, one per child resolved) rather than
+// degenerating back into the O(n^2) mesh issue #132 exists to close.
+func TestFilenameStemIndexBatchWithAnchorFormsStarNotMesh(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	anchor := seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/trip.jpg", FileName: "trip.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+	var last sqlcgen.MediaNode
+	for i := 1; i <= 45; i++ {
+		name := fmt.Sprintf("trip-%d.jpg", i)
+		last = seedNode(t, database, locationID, nodeFixture{
+			Path: "/2026-07-15/" + name, FileName: name, FileExt: "jpg",
+			CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+		})
+	}
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(last))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges resolving one child against 45 index-suffixed siblings + 1 anchor, want 1 (a star, not a mesh): %+v", len(edges), edges)
+	}
+	if edges[0].SourceNodeID != anchor.ID {
+		t.Errorf("edge source = %d, want the anchor node %d -- only the bare anchor may be a parent", edges[0].SourceNodeID, anchor.ID)
+	}
+	if edges[0].Confidence != indexMatchConfidenceCap {
+		t.Errorf("confidence = %v, want %v (index match cap)", edges[0].Confidence, indexMatchConfidenceCap)
+	}
+}
+
+// TestFilenameStemParenIndexBatchDoesNotCollapse is
+// TestFilenameStemUnpaddedIndexBatchDoesNotCollapse's counterpart for the
+// "(N)" OS duplicate-index marker, which -- unlike "-N" -- was never
+// digit-bounded at all (issue #132's scope call: both are index markers).
+func TestFilenameStemParenIndexBatchDoesNotCollapse(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	var last sqlcgen.MediaNode
+	for i := 1; i <= 45; i++ {
+		name := fmt.Sprintf("trip (%d).jpg", i)
+		last = seedNode(t, database, locationID, nodeFixture{
+			Path: "/2026-07-15/" + name, FileName: name, FileExt: "jpg",
+			CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+		})
+	}
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(last))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("got %d edges among 45 trip (N) siblings with no trip.jpg anchor, want 0: %+v", len(edges), edges)
+	}
+}
+
+// TestFilenameStemIndexAnchorNeedsReview: with a bare "photo.jpg" anchor
+// present, a "photo-2.jpg" child DOES emit a candidate -- but capped at
+// indexMatchConfidenceCap (0.89), strictly below AUTO_ACCEPTED, even with
+// every boost. It still surfaces in the audit queue (mirrors
+// TestFilenameStemWeakMatchNeedsReview's ListAuditQueue assertion).
+func TestFilenameStemIndexAnchorNeedsReview(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/photo.jpg", FileName: "photo.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/photo-2.jpg", FileName: "photo-2.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
+	}
+	if edges[0].Confidence != indexMatchConfidenceCap {
+		t.Errorf("confidence = %v, want %v (index match cap)", edges[0].Confidence, indexMatchConfidenceCap)
+	}
+	if edges[0].ReviewState != "NEEDS_REVIEW" {
+		t.Errorf("review_state = %q, want NEEDS_REVIEW", edges[0].ReviewState)
+	}
+
+	rows, err := database.Reader.ListAuditQueue(ctx, sqlcgen.ListAuditQueueParams{Limit: 10, Offset: 0})
+	if err != nil {
+		t.Fatalf("ListAuditQueue: %v", err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.ID == edges[0].ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the index-anchored NEEDS_REVIEW edge does not appear in the audit queue")
+	}
+}
+
+// TestFilenameStemIndexSuffixNeverParent: the direction rule -- an
+// index-suffixed node is never treated as a candidate PARENT. Resolving
+// the bare "photo.jpg" (not "photo-2.jpg") against a "photo-2.jpg" sibling
+// must emit nothing.
+func TestFilenameStemIndexSuffixNeverParent(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/photo.jpg", FileName: "photo.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/photo-2.jpg", FileName: "photo-2.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("got %d edges resolving bare photo.jpg against photo-2.jpg, want 0 (index-suffixed node can't be a parent): %+v", len(edges), edges)
+	}
+}
+
+// TestFilenameStemIndexAutoAcceptsWithCorroboration proves issue #132
+// criterion 2 as worded: an index-derived filename_stem match alone never
+// auto-accepts, but with a corroborating non-filename_stem signal (here,
+// xmp_original_document_id at 0.95) for the SAME (parent, child, rel), the
+// merged edge still reaches AUTO_ACCEPTED -- mergeCandidates' max-confidence
+// merge needs no changes for this to work.
+func TestFilenameStemIndexAutoAcceptsWithCorroboration(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/photo.jpg", FileName: "photo.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+		OriginalDocumentID: "doc-1", DocumentID: "doc-1",
+	})
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/photo-2.jpg", FileName: "photo-2.jpg", FileExt: "jpg",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+		OriginalDocumentID: "doc-1",
+	})
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges, want 1 (filename_stem and xmp_original_document_id candidates merge to one edge): %+v", len(edges), edges)
+	}
+	if edges[0].Confidence != 0.95 {
+		t.Errorf("confidence = %v, want 0.95 (xmp_original_document_id wins the merge)", edges[0].Confidence)
+	}
+	if edges[0].ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("review_state = %q, want AUTO_ACCEPTED", edges[0].ReviewState)
+	}
+}
+
+// TestFilenameStemRoleSuffixStillAutoAccepts proves the index gate does not
+// leak into role-suffixed matches: role suffixes (_proxy here) are
+// unaffected by issue #132, and a fully-boosted role-suffix match still
+// reaches AUTO_ACCEPTED exactly as before.
+func TestFilenameStemRoleSuffixStillAutoAccepts(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+	seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/render.mov", FileName: "render.mov", FileExt: "mov",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+	childRow := seedNode(t, database, locationID, nodeFixture{
+		Path: "/2026-07-15/render_proxy.mov", FileName: "render_proxy.mov", FileExt: "mov",
+		CapturedAt: &capturedAt, CameraModel: "ILCE-7M4",
+	})
+
+	engine := newEngine(database)
+	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(childRow))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
+	}
+	if edges[0].Confidence != 0.90 {
+		t.Errorf("confidence = %v, want 0.90 (clamped, role suffix unaffected by the index gate)", edges[0].Confidence)
+	}
+	if edges[0].RelationshipType != "PROXY_OF" {
+		t.Errorf("relationship_type = %q, want PROXY_OF", edges[0].RelationshipType)
+	}
+	if edges[0].ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("review_state = %q, want AUTO_ACCEPTED", edges[0].ReviewState)
+	}
+}
+
+// TestIndexMatchCapBelowTier2Threshold is a one-line guard that
+// indexMatchConfidenceCap and AutoAcceptThresholdForTier(2) can never drift
+// out of the relationship FilenameStemResolver's doc comment depends on.
+func TestIndexMatchCapBelowTier2Threshold(t *testing.T) {
+	if indexMatchConfidenceCap >= AutoAcceptThresholdForTier(2) {
+		t.Errorf("indexMatchConfidenceCap (%v) must be strictly below AutoAcceptThresholdForTier(2) (%v)",
+			indexMatchConfidenceCap, AutoAcceptThresholdForTier(2))
 	}
 }
 

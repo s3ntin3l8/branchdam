@@ -11,6 +11,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/naming"
 	"github.com/s3ntin3l8/branchdam/internal/projectfile"
 )
 
@@ -80,14 +81,52 @@ func (XMPOriginalDocumentIDResolver) Resolve(ctx context.Context, child Node, lo
 	return candidates, nil
 }
 
+// indexMatchConfidenceCap bounds a filename_stem match that involves an
+// "index" suffix (naming.SuffixIndex -- "-N"/"(N)") strictly below
+// AutoAcceptThresholdForTier(2) (0.90), so such a match can never reach
+// AUTO_ACCEPTED on filename alone -- see FilenameStemResolver's doc
+// comment and issue #132. mergeCandidates (engine.go) already takes the
+// max confidence per (parent, child, rel), so a corroborating
+// non-filename_stem resolver (xmp_original_document_id at 0.95,
+// project_sidecar at 1.00, heuristic_spatial_temporal up to 0.89 against
+// its own 0.85 Tier-3 threshold) still promotes the pair to AUTO_ACCEPTED
+// -- no additional merge logic is needed for that.
+const indexMatchConfidenceCap = 0.89
+
 // FilenameStemResolver matches candidate parents sharing the child's
 // normalized filename stem (computed once at index time by
-// internal/pipeline's filenameStem, so both sides of the comparison are
-// already normalized). Base confidence 0.60, +0.15 same capture day, +0.10
-// same camera_model, +0.10 same directory, clamped to 0.90 -- the build
-// plan's table. Never reaches AUTO_ACCEPTED's 0.90 threshold on filename
-// alone; it always lands in the audit queue unless corroborated by at
-// least two of the three boosts.
+// internal/naming.Stem, so both sides of the comparison are already
+// normalized). Base confidence 0.60, +0.15 same capture day, +0.10 same
+// camera_model, +0.10 same directory, clamped to 0.90 -- the build plan's
+// table. That clamp is exactly AutoAcceptThresholdForTier(2): a stem match
+// with all three boosts DOES reach AUTO_ACCEPTED on filename alone.
+//
+// Issue #132: a shared stem can come from two very different sources --
+// naming.Analyze tells them apart. An "index" suffix ("-N", "(N)")
+// asserts "I am a duplicate of some other file," which only makes sense
+// if that other, bare file actually exists; a shared stem from stripping
+// one is therefore gated on two rules before it is even scored:
+//
+//  1. Anchor rule: the parent's own filename must classify as
+//     naming.SuffixNone -- i.e. the parent IS the bare "photo.jpg" a
+//     "photo-2.jpg" child implies. A batch of "trip-1.jpg".."trip-45.jpg"
+//     with no "trip.jpg" anchor present emits zero candidates among
+//     the batch, closing the O(n^2) auto-accepted mesh PR #134 narrowed
+//     but did not close. A SuffixRole parent ("trip_edit.jpg") is
+//     deliberately NOT an acceptable anchor for an index child either --
+//     it is not the bare file the index suffix implies exists.
+//  2. Direction rule: only the child may carry the index suffix. A
+//     derived duplicate is never treated as a parent.
+//
+// A pair that survives both rules is still capped at indexMatchConfidenceCap
+// (0.89), so it always lands in the audit queue on filename_stem alone --
+// see indexMatchConfidenceCap's doc comment for how corroboration still
+// reaches AUTO_ACCEPTED.
+//
+// A shared stem from stripping a "role" suffix (_edit, _proxy, _vN,
+// " copy") is unaffected by any of this: collapsing role-suffixed
+// siblings to a shared stem is the resolver's original intended case, not
+// something #132 changes.
 type FilenameStemResolver struct{}
 
 func (FilenameStemResolver) Name() string { return "filename_stem" }
@@ -102,9 +141,23 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 		return nil, err
 	}
 
+	childKind := naming.Kind(child.FileName)
+
 	var candidates []Candidate
 	for _, parent := range parents {
 		if parent.ID == child.ID {
+			continue
+		}
+
+		parentKind := naming.Kind(parent.FileName)
+		indexGated := childKind == naming.SuffixIndex || parentKind == naming.SuffixIndex
+		if indexGated && (childKind != naming.SuffixIndex || parentKind != naming.SuffixNone) {
+			// Either side stripped an index suffix, but the pair doesn't
+			// satisfy the anchor+direction rules above -- e.g. the parent
+			// isn't a bare anchor, or the index-suffixed node is the
+			// parent rather than the child. Emit nothing rather than a
+			// candidate that would otherwise be scored and possibly
+			// auto-accepted.
 			continue
 		}
 
@@ -125,6 +178,13 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 		}
 		if confidence > 0.90 {
 			confidence = 0.90
+		}
+		if indexGated {
+			evidence["index_suffix_gated"] = true
+			evidence["anchor_file_name"] = parent.FileName
+			if confidence > indexMatchConfidenceCap {
+				confidence = indexMatchConfidenceCap
+			}
 		}
 
 		candidates = append(candidates, Candidate{
