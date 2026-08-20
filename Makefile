@@ -21,7 +21,8 @@ dev-config: ## Render config.dev.yaml -> $(CONFIG) if missing, and create data/s
 	@if [ -f $(CONFIG) ]; then \
 		echo "$(CONFIG) already exists, leaving it alone"; \
 	else \
-		sed 's|__REPO_ROOT__|$(CURDIR)|g' config.dev.yaml > $(CONFIG); \
+		esc_root=$$(printf '%s\n' "$(CURDIR)" | sed -e 's/[&|\\]/\\&/g'); \
+		sed "s|__REPO_ROOT__|$$esc_root|g" config.dev.yaml > $(CONFIG); \
 		echo "wrote $(CONFIG) from config.dev.yaml"; \
 	fi
 	@mkdir -p data/storage/archive data/storage/exports data/storage/projects data/storage/scratch

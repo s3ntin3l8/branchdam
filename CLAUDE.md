@@ -61,8 +61,10 @@ go vet ./...
 make dev
 go run ./cmd/branchdam -config config.yaml -debug
 
-# Run API + frontend together, or one at a time; bootstraps config.yaml on
-# first run (see below) -- `make dev` above is an alias for `dev-api`
+# Run API + frontend together, or one at a time. `make dev` above is the
+# original, unchanged target -- it does NOT bootstrap config.yaml and still
+# fails on a fresh clone. `dev-api`/`dev-all` below do, via `dev-config`
+# (see below) -- prefer these for a first-time local setup.
 make dev-api    # Go API only, :8080
 make dev-web    # Vite dev server only, :5173, proxies /api -> :8080
 make dev-all    # both in one terminal (Ctrl-C stops both)
