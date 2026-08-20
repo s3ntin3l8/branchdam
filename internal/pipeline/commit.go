@@ -368,14 +368,14 @@ func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.
 	exif := exifMetadata(r)
 	ffprobe := ffprobeMetadata(r)
 	if len(exif) > 0 || len(ffprobe) > 0 {
-		// Nothing this Result derives at all -- exiftool/ffprobe absent from
-		// PATH, or a non-media file. The pre-#105 persistAllMetadata path
-		// made zero DB calls in this case (cappedSortedKeys' len(kv)==0
-		// short-circuit); reconcileAllMetadata must preserve that, not spend
-		// a ListNodeMetadata read on the writer connection for nothing to
-		// reconcile against. A node that already has metadata from an
-		// earlier pass (tools installed then later removed, or genuinely
-		// probe-less content) simply keeps its existing rows untouched.
+		// Only spend a ListNodeMetadata read on the writer connection when
+		// the probe actually derived rows to diff against. The pre-#105
+		// persistAllMetadata path made zero DB calls when neither tool
+		// produced anything (cappedSortedKeys' len(kv)==0 short-circuit);
+		// reconcileAllMetadata must preserve that. A node that derives
+		// nothing on this pass -- exiftool/ffprobe absent from PATH, or a
+		// genuinely probe-less file -- skips the read and simply keeps its
+		// existing rows untouched.
 		existing, err := q.ListNodeMetadata(ctx, node.ID)
 		if err != nil {
 			return fmt.Errorf("list node_metadata for reconcile: %w", err)
