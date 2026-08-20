@@ -74,8 +74,21 @@ func TestSuffixKind(t *testing.T) {
 		"photo-123.jpg": SuffixNone,
 
 		// mixed: both an index and a role marker stripped -- index
-		// ambiguity dominates, since that's the one the resolver gates on.
-		"photo-2_edit.jpg": SuffixIndex,
+		// ambiguity dominates, since that's the one the resolver gates on,
+		// regardless of which marker was adjacent to the stem in the
+		// original filename.
+		"photo-2_edit.jpg": SuffixIndex, // index marker adjacent to the stem
+		// The reverse order: role marker adjacent to the stem, index marker
+		// further out. Still SuffixIndex here (Analyze always tries the
+		// index alternative first each loop iteration, so ordering in the
+		// original filename doesn't change the result) -- this is the case
+		// migration 00006's doc comment documents as its one conservative
+		// miss: the migration's SQL only inspects the single character
+		// immediately after the stored stem ('_' here, not '-'/'('), so it
+		// can't see the index marker that a mixed-order filename like this
+		// one stripped further out. The Go-side Kind classification pinned
+		// here is what future resolves rely on regardless.
+		"photo_edit-2.jpg": SuffixIndex,
 	}
 	for in, want := range cases {
 		if got := Kind(in); got != want {
