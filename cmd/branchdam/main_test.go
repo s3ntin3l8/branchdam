@@ -4,15 +4,22 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
+	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
+	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
 func TestWatchedFromConfig(t *testing.T) {
@@ -643,6 +650,44 @@ func TestWarnOverlappingWatchAndSweep(t *testing.T) {
 	}
 	if strings.Contains(out, "rootPath=/w") || strings.Contains(out, "rootPath=/s") {
 		t.Errorf("log output = %q, want no warning for locations with only one of watch/sweep", out)
+	}
+}
+
+// TestRunReturnsErrorOnBindFailure backs #123: a genuine ListenAndServe
+// failure (e.g. the configured listenAddr is already in use) must surface
+// through run()'s return value instead of falling through the same
+// shutdown path a normal SIGTERM takes and returning nil -- which
+// previously made the process exit 0 even though it never started serving.
+// Occupying the address with our own listener first, rather than a fixed
+// port number, makes the bind conflict deterministic without risking a
+// collision with something else on the test machine.
+func TestRunReturnsErrorOnBindFailure(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer func() { _ = occupied.Close() }()
+
+	httpServer := &http.Server{Addr: occupied.Addr().String()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := slog.New(slog.DiscardHandler)
+	database := mainTestOpenDB(t)
+	scanTracker := &pipeline.ScanTracker{}
+	drainer := agent.NewDrainer(database, nil, log)
+	pool := workers.New[string](1, 1)
+	pool.Run(ctx)
+
+	var dbUnsafeToClose bool
+	runErr := run(ctx, cancel, log, httpServer, nil, nil, scanTracker, nil, drainer, pool, &dbUnsafeToClose)
+
+	if runErr == nil {
+		t.Fatal("run() = nil, want a non-nil error surfacing the bind failure")
+	}
+	if !errors.Is(runErr, syscall.EADDRINUSE) {
+		t.Errorf("run() err = %v, want it to wrap syscall.EADDRINUSE", runErr)
 	}
 }
 
