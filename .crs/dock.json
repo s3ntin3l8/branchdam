@@ -1,0 +1,15 @@
+{
+  "controls": [
+    {
+      "id": "dev-api",
+      "title": "API (:8080)",
+      "command": "make dev-api"
+    },
+    {
+      "id": "dev-web",
+      "title": "Web (:5173)",
+      "command": "make dev-web",
+      "worktreeRefresh": true
+    }
+  ]
+}
