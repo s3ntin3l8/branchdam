@@ -331,6 +331,16 @@ type Querier interface {
 	// location (docs/schema.md fix #8's full_hash policy).
 	UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNodeFullHashParams) error
 	UpdateMediaNodeGraphStatus(ctx context.Context, arg UpdateMediaNodeGraphStatusParams) error
+	// #197: the touched/rebased branches' backfill (reconcileAllMetadata ->
+	// reconcilePromotedColumns, internal/pipeline/commit.go) refreshes the
+	// promoted EXIF/XMP columns from a freshly-probed Result. Before #188 these
+	// columns were repopulated incidentally whenever an in-place metadata write
+	// (e.g. inherit-metadata) forced a version collision on the next scan; now
+	// that the write refreshes fast_hash instead (RefreshMediaNodeAfterInPlaceWrite),
+	// the node takes commitOne's Touched branch and would otherwise keep its
+	// insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
+	// inherit-metadata that never reaches media_nodes.derived_from_id.
+	UpdateMediaNodePromotedColumns(ctx context.Context, arg UpdateMediaNodePromotedColumnsParams) error
 	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
 	// A human decision outranks any resolver, permanently: the UPDATE branch is
 	// gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely.

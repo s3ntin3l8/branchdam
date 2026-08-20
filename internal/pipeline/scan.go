@@ -575,7 +575,8 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	log.Info("pipeline: scan finished", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"cancelled", interruptedByShutdown, "inserted", total.Inserted, "touched", total.Touched,
 		"versionCollisions", total.VersionCollisions, "moved", total.Moved, "edgesCreated", total.EdgesCreated,
-		"metadataWritten", total.MetadataWritten, "differential", differential, "sweepTouched", touchBatch.total)
+		"metadataWritten", total.MetadataWritten, "promotedColumnsRefreshed", total.PromotedColumnsRefreshed,
+		"differential", differential, "sweepTouched", touchBatch.total)
 }
 
 // isClosed reports whether ch has been closed, without blocking. A nil
@@ -615,6 +616,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 			total.VersionCollisions += stats.VersionCollisions
 			total.Moved += stats.Moved
 			total.MetadataWritten += stats.MetadataWritten
+			total.PromotedColumnsRefreshed += stats.PromotedColumnsRefreshed
 			if err != nil {
 				// The whole batch failed to land -- every path in it stays
 				// seen-but-uncertain and must be excluded from the MISSING

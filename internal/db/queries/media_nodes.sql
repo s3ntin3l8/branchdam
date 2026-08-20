@@ -258,6 +258,34 @@ SET size_bytes = ?2, mtime_unix = ?3, fast_hash = ?4,
     last_seen_at = unixepoch(), updated_at = unixepoch()
 WHERE id = ?1;
 
+-- name: UpdateMediaNodePromotedColumns :exec
+-- #197: the touched/rebased branches' backfill (reconcileAllMetadata ->
+-- reconcilePromotedColumns, internal/pipeline/commit.go) refreshes the
+-- promoted EXIF/XMP columns from a freshly-probed Result. Before #188 these
+-- columns were repopulated incidentally whenever an in-place metadata write
+-- (e.g. inherit-metadata) forced a version collision on the next scan; now
+-- that the write refreshes fast_hash instead (RefreshMediaNodeAfterInPlaceWrite),
+-- the node takes commitOne's Touched branch and would otherwise keep its
+-- insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
+-- inherit-metadata that never reaches media_nodes.derived_from_id.
+--
+-- The caller passes effective values: a column whose fresh probe value was
+-- empty or unchanged is passed through as the node's current value, so this
+-- query is only ever reached with at least one genuine change. Plain
+-- positional params (?1..?7), not sqlc.arg: this file already has earlier
+-- queries using bare ?N placeholders (ListTier3Candidates, ListPrunableNodes),
+-- and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder in
+-- the same file when a bare ?N appears anywhere earlier in it.
+UPDATE media_nodes SET
+    original_document_id = ?2,
+    document_id = ?3,
+    derived_from_id = ?4,
+    camera_model = ?5,
+    camera_serial = ?6,
+    lens_model = ?7,
+    updated_at = unixepoch()
+WHERE id = ?1;
+
 -- name: MarkNodeMissing :exec
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
 
