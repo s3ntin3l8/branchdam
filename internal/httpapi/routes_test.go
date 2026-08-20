@@ -2113,6 +2113,40 @@ func TestStatfsWithTimeoutReturnsErrorWhenExceeded(t *testing.T) {
 	}
 }
 
+// TestProbeStorageLocationHealthBoundedByTimeout backs #149: handleStorageHealth
+// probes each location's root path concurrently, so N simultaneously-hung
+// mounts add ~statfsTimeout to the total latency instead of N*statfsTimeout.
+// Each probe is the real statfsWithTimeoutFn wrapped around a stub syscall
+// that blocks forever, forcing the timeout branch deterministically (the same
+// technique TestStatfsWithTimeoutReturnsErrorWhenExceeded uses) -- with a real
+// syscall the probe would resolve instantly and the test would pass trivially
+// regardless of whether the probes run sequentially or in parallel.
+func TestProbeStorageLocationHealthBoundedByTimeout(t *testing.T) {
+	blockForever := func(_ string, _ *unix.Statfs_t) error {
+		select {}
+	}
+	const timeout = 100 * time.Millisecond
+	probe := func(path string) (unix.Statfs_t, error) {
+		return statfsWithTimeoutFn(blockForever, path, timeout)
+	}
+	locations := make([]sqlcgen.StorageLocation, 4)
+	for i := range locations {
+		locations[i] = sqlcgen.StorageLocation{RootPath: "/irrelevant"}
+	}
+	dtos := make([]storageLocationHealthDTO, len(locations))
+	start := time.Now()
+	probeStorageLocationHealth(dtos, locations, probe)
+	elapsed := time.Since(start)
+	if elapsed >= 2*timeout {
+		t.Errorf("probed %d hung locations in %v, want < 2*%v (concurrent, not sequential)", len(locations), elapsed, timeout)
+	}
+	for i := range dtos {
+		if !dtos[i].IsDegraded || dtos[i].DegradedMessage == nil || !strings.Contains(*dtos[i].DegradedMessage, "timed out") {
+			t.Errorf("dtos[%d]: IsDegraded=%v, DegradedMessage=%v, want degraded with the statfsWithTimeoutFn timeout message", i, dtos[i].IsDegraded, dtos[i].DegradedMessage)
+		}
+	}
+}
+
 func TestFilteredAssetsAndFacets(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()

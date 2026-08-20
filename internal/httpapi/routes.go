@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -24,7 +25,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
-	"github.com/s3ntin3l8/branchdam/internal/sync"
+	syncpkg "github.com/s3ntin3l8/branchdam/internal/sync"
 )
 
 func (s *Server) registerRoutes(api huma.API) {
@@ -552,7 +553,7 @@ type syncStateDTO struct {
 	LastAttemptAt *int64  `json:"lastAttemptAt,omitempty"`
 	RetryCount    int64   `json:"retryCount"`
 	// Exhausted is true once a PUSH_FAILED row's retry_count has reached
-	// sync.DefaultMaxSyncRetries -- ResetRemoteSyncStateFailed's automatic
+	// syncpkg.DefaultMaxSyncRetries -- ResetRemoteSyncStateFailed's automatic
 	// worker recovery (#182) will no longer re-claim it, so the row is
 	// permanently abandoned short of an explicit operator retry via
 	// POST /api/v1/assets/{id}/sync/retry.
@@ -609,7 +610,7 @@ func (s *Server) handleAssetSyncStatus(ctx context.Context, in *AssetSyncStatusI
 		if r.LastAttemptAt.Valid {
 			dto.LastAttemptAt = &r.LastAttemptAt.Int64
 		}
-		dto.Exhausted = r.SyncStatus == "PUSH_FAILED" && r.RetryCount >= sync.DefaultMaxSyncRetries
+		dto.Exhausted = r.SyncStatus == "PUSH_FAILED" && r.RetryCount >= syncpkg.DefaultMaxSyncRetries
 		out.Body.Sync[i] = dto
 	}
 	return out, nil
@@ -1758,9 +1759,44 @@ func statfsWithTimeoutFn(statfs func(path string, buf *unix.Statfs_t) error, pat
 	}
 }
 
+// probeStorageLocationHealth fills the statfs-derived fields of each DTO
+// concurrently, one goroutine per location, so N simultaneously-hung mounts
+// add ~statfsTimeout to the total latency instead of N*statfsTimeout -- the
+// exact worst case this endpoint is built to surface (an operator diagnosing
+// a fleet of failing mounts) is where a sequential loop would be slowest.
+// probe wraps the actual syscall (normally statfsWithTimeout, which bounds
+// each call). Each goroutine writes only its own dtos[i], so the WaitGroup is
+// the only shared state. On timeout it leaks its inner syscall goroutine
+// (unblocked when the wedged mount recovers or the process exits), the same
+// trade-off statfsWithTimeout already documents. dtos and locations must be
+// parallel slices (same length, same order).
+func probeStorageLocationHealth(dtos []storageLocationHealthDTO, locations []sqlcgen.StorageLocation, probe func(path string) (unix.Statfs_t, error)) {
+	var wg sync.WaitGroup
+	for i, loc := range locations {
+		wg.Add(1)
+		go func(i int, path string) {
+			defer wg.Done()
+			stat, err := probe(path)
+			dto := &dtos[i]
+			if err != nil {
+				dto.IsDegraded = true
+				msg := err.Error()
+				dto.DegradedMessage = &msg
+				return
+			}
+			bsize := uint64(stat.Bsize)
+			dto.TotalBytes = stat.Blocks * bsize
+			dto.FreeBytes = stat.Bavail * bsize
+			if stat.Blocks >= stat.Bfree {
+				dto.UsedBytes = (stat.Blocks - stat.Bfree) * bsize
+			}
+		}(i, loc.RootPath)
+	}
+	wg.Wait()
+}
+
 func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storageHealthOutput, error) {
 	out := &storageHealthOutput{}
-	out.Body.Locations = []storageLocationHealthDTO{}
 
 	var locations []sqlcgen.StorageLocation
 	var counts []sqlcgen.ListNodeCountsByLocationRow
@@ -1788,8 +1824,9 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 		countMap[c.StorageLocationID] = c.NodeCount
 	}
 
-	for _, loc := range locations {
-		dto := storageLocationHealthDTO{
+	dtos := make([]storageLocationHealthDTO, len(locations))
+	for i, loc := range locations {
+		dtos[i] = storageLocationHealthDTO{
 			ID:        loc.ID,
 			Name:      loc.Name,
 			RootPath:  loc.RootPath,
@@ -1799,22 +1836,14 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 			IsActive:  loc.IsActive == 1,
 			NodeCount: countMap[loc.ID],
 		}
-
-		stat, err := statfsWithTimeout(loc.RootPath, statfsTimeout)
-		if err != nil {
-			dto.IsDegraded = true
-			msg := err.Error()
-			dto.DegradedMessage = &msg
-		} else {
-			bsize := uint64(stat.Bsize)
-			dto.TotalBytes = stat.Blocks * bsize
-			dto.FreeBytes = stat.Bavail * bsize
-			if stat.Blocks >= stat.Bfree {
-				dto.UsedBytes = (stat.Blocks - stat.Bfree) * bsize
-			}
-		}
-		out.Body.Locations = append(out.Body.Locations, dto)
 	}
+	// Probe every location's root path concurrently (see
+	// probeStorageLocationHealth) so a fleet of hung mounts adds ~statfsTimeout
+	// to the total latency, not len(locations)*statfsTimeout.
+	probeStorageLocationHealth(dtos, locations, func(path string) (unix.Statfs_t, error) {
+		return statfsWithTimeout(path, statfsTimeout)
+	})
+	out.Body.Locations = dtos
 
 	if s.pool != nil {
 		out.Body.Queues = storageQueueHealthDTO{
