@@ -1778,14 +1778,15 @@ func TestCreateManualEdge(t *testing.T) {
 }
 
 // TestCreateManualEdgeRefusesProjectFileNodes backs #199: a manual edge must
-// link two media nodes, so a project file (.drp/.fcpxml/.edl/.dam.json/
-// .prproj) at either endpoint is refused with 422 -- the edge is never
-// created CONFIRMED. The child (target) case is the dangerous one: a
-// DERIVED_FROM edge targeting a project file would pass pickWinningParent
-// and make handleInheritMetadata run exiftool in-place against the project
-// archive; the source (parent) case is refused for the same "not a media
-// node" reason, since ProjectSidecarResolver always makes the project file
-// the child of a PROJECT_SIDECAR edge, never the source.
+// not link a project file (.drp/.fcpxml/.edl/.dam.json/.prproj) as an
+// endpoint of an identity-ancestry relationship -- the edge is never created
+// CONFIRMED. The child (target) case is the dangerous one: a DERIVED_FROM
+// edge targeting a project file would pass pickWinningParent and make
+// handleInheritMetadata run exiftool in-place against the project archive.
+// The target-side refusal is scoped to identity-ancestry relationship types
+// (see TestCreateManualEdgeAllowsProjectSidecarTarget); the source (parent)
+// case is refused unconditionally, since ProjectSidecarResolver always makes
+// the project file the child of a PROJECT_SIDECAR edge, never the source.
 func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()
@@ -1831,7 +1832,7 @@ func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("project-file-target status = %d, want 422, body = %s", rr.Code, rr.Body.String())
 	}
-	if got, want := strings.TrimSpace(rr.Body.String()), "cannot create an edge targeting a project file"; !strings.Contains(got, want) {
+	if got, want := strings.TrimSpace(rr.Body.String()), "cannot create an identity-ancestry edge targeting a project file"; !strings.Contains(got, want) {
 		t.Errorf("project-file-target body = %q, want it to contain %q", got, want)
 	}
 
@@ -1871,6 +1872,69 @@ func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 	}
 	if len(bySource) != 0 {
 		t.Errorf("expected no edges sourced from the project file, got %d", len(bySource))
+	}
+}
+
+// TestCreateManualEdgeAllowsProjectSidecarTarget backs #199's scoping of the
+// target-side project-file refusal: PROJECT_SIDECAR edges *legitimately*
+// target a project file -- ProjectSidecarResolver.Resolve always makes the
+// project file the child of such an edge (media node as parent/source). It is
+// excluded from validParentRelationships, so it can never reach
+// pickWinningParent/handleInheritMetadata's exiftool call, and the manual
+// path must keep allowing exactly the shape the automatic resolver emits.
+func TestCreateManualEdgeAllowsProjectSidecarTarget(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var media, proj sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		media, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media", FilePath: "/m.raw", FileName: "m.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		proj, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-project", FilePath: "/proj.drp", FileName: "proj.drp", FileExt: "drp", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// PROJECT_SIDECAR with the project file as the CHILD (target) -- the exact
+	// shape ProjectSidecarResolver emits -- is accepted, not refused.
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     media.ID,
+		"targetNodeId":     proj.ID,
+		"relationshipType": "PROJECT_SIDECAR",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PROJECT_SIDECAR->project-file status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var created edgeDTO
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if created.SourceNodeID != media.ID || created.TargetNodeID != proj.ID || created.RelationshipType != "PROJECT_SIDECAR" {
+		t.Errorf("created edge = %+v, unexpected fields", created)
+	}
+
+	// The edge really landed (CONFIRMED at insert time, manual resolver).
+	byTarget, err := database.Reader.ListEdgesByTarget(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("list edges by target: %v", err)
+	}
+	if len(byTarget) != 1 || byTarget[0].RelationshipType != "PROJECT_SIDECAR" || byTarget[0].ReviewState != "CONFIRMED" {
+		t.Errorf("edges targeting the project file = %+v, want exactly one CONFIRMED PROJECT_SIDECAR", byTarget)
 	}
 }
 
