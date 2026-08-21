@@ -135,6 +135,68 @@ func indexOf(s string, r rune) int {
 	return -1
 }
 
+// TestSidecarPath is deliberately case-preserving: on a case-sensitive
+// filesystem, a sidecar an editor actually wrote alongside "DSC01234.ARW"
+// is named "DSC01234.xmp", never the lowercased "dsc01234.xmp" internal/
+// naming.Stem would produce (naming.Stem exists for graph-identity
+// comparisons, not on-disk lookups -- see sidecarPath's doc comment).
+func TestSidecarPath(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"/media/DSC01234.ARW":        "/media/DSC01234.xmp",
+		"/media/DSC01234.arw":        "/media/DSC01234.xmp",
+		"/media/trip/IMG_0001.CR2":   "/media/trip/IMG_0001.xmp",
+		"/media/no_extension_at_all": "/media/no_extension_at_all.xmp",
+	}
+	for path, want := range cases {
+		if got := sidecarPath(path); got != want {
+			t.Errorf("sidecarPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestMergeSidecarRow proves the precedence match to exiftool's own
+// -tagsFromFile default ("-all": every source tag overwrites the same-
+// named destination tag), while sidecar bookkeeping about the sidecar file
+// itself (File:*, ExifTool:*, SourceFile) never leaks into the RAW's row.
+func TestMergeSidecarRow(t *testing.T) {
+	t.Parallel()
+	row := map[string]any{
+		"EXIF:Make":              "SONY",
+		"XMP:OriginalDocumentID": "raw-orig-id",
+		"File:FileName":          "raw.arw",
+		"File:FileSize":          float64(123),
+	}
+	sidecar := map[string]any{
+		"SourceFile":               "raw.xmp",
+		"File:FileName":            "raw.xmp",
+		"ExifTool:ExifToolVersion": 12.76,
+		"XMP:OriginalDocumentID":   "sidecar-orig-id",
+		"XMP:Subject":              "sidecar-keyword",
+	}
+
+	mergeSidecarRow(row, sidecar)
+
+	if row["XMP:OriginalDocumentID"] != "sidecar-orig-id" {
+		t.Errorf("OriginalDocumentID = %v, want sidecar-orig-id (sidecar must win)", row["XMP:OriginalDocumentID"])
+	}
+	if row["XMP:Subject"] != "sidecar-keyword" {
+		t.Errorf("XMP:Subject = %v, want sidecar-keyword (sidecar-only tag must be merged in)", row["XMP:Subject"])
+	}
+	if row["EXIF:Make"] != "SONY" {
+		t.Errorf("EXIF:Make = %v, want SONY (RAW-only tag must survive the merge)", row["EXIF:Make"])
+	}
+	if row["File:FileName"] != "raw.arw" {
+		t.Errorf("File:FileName = %v, want raw.arw (sidecar bookkeeping must not overwrite the RAW's own)", row["File:FileName"])
+	}
+	if _, ok := row["ExifTool:ExifToolVersion"]; ok {
+		t.Error("ExifTool:ExifToolVersion leaked from sidecar bookkeeping into row")
+	}
+	if row["File:FileSize"] != float64(123) {
+		t.Errorf("File:FileSize = %v, want 123 (RAW's own file bookkeeping must survive)", row["File:FileSize"])
+	}
+}
+
 func TestFFProbeArgsPathAfterSeparator(t *testing.T) {
 	t.Parallel()
 	for _, path := range adversarialPaths {

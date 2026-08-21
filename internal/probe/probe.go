@@ -10,6 +10,17 @@
 // when the corresponding binary is missing, and callers are expected to
 // fall back to fast_hash-only indexing per spec directive 9.4 -- this
 // package never fails loudly just because a machine lacks the tools.
+//
+// Exif additionally merges in a standalone XMP sidecar's tags when one sits
+// next to path (issue #227, gap 1: editors like Luminar write
+// non-destructive edits to a sidecar rather than embedding them in the RAW
+// itself). The sidecar path is derived deterministically from path alone
+// (same directory, same stem, ".xmp" extension -- see sidecarPath) and read
+// through the exact same fixed, never-writes argv as the RAW, so the
+// allowlist property holds for both invocations. Registering ".xmp" as its
+// own internal/projectfile extension so it stops surfacing as an orphan
+// media_nodes row (gap 2) is deliberately out of scope here -- tracked as a
+// separate follow-up issue.
 package probe
 
 import (
@@ -24,8 +35,10 @@ import (
 	_ "image/png"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -73,6 +86,64 @@ func (p *Prober) HasFFProbe() bool { return p.ffprobePath != "" }
 // whatever exec.CommandContext does with the result.
 func exiftoolArgs(path string) []string {
 	return []string{"-j", "-n", "-G", "--", path}
+}
+
+// sidecarExt is the fixed extension of a standalone XMP sidecar file (issue
+// #227, gap 1). Editors that write non-destructive edits to a sidecar
+// rather than embedding them in the RAW (Luminar among them) always use
+// this extension.
+const sidecarExt = ".xmp"
+
+// sidecarPath returns the deterministic path of path's possible XMP
+// sidecar: same directory, same stem (everything before path's own last
+// extension, case preserved), ".xmp" extension. Deliberately NOT built
+// from internal/naming.Stem -- that normalizes case and strips duplicate/
+// role suffixes for graph-identity comparisons, which would silently break
+// this on-disk lookup on a case-sensitive filesystem (a RAW named
+// "DSC01234.ARW" would look for "dsc01234.xmp" instead of the sidecar an
+// editor actually wrote, "DSC01234.xmp"). The result is derived only from
+// path itself -- never operator-supplied or accepted from external input --
+// which is what keeps this consistent with exiftoolArgs' fixed-argv
+// allowlist property: the sidecar path fed to exiftoolArgs can never be
+// attacker-controlled independent of the RAW's own already-trusted path.
+func sidecarPath(path string) string {
+	return strings.TrimSuffix(path, filepath.Ext(path)) + sidecarExt
+}
+
+// sidecarBookkeepingPrefixes are exiftool's own per-file plumbing groups --
+// file size/mtime/permissions and exiftool's own version banner -- which
+// describe the sidecar file itself, never something a sidecar merge should
+// overwrite on the RAW's own result row.
+var sidecarBookkeepingPrefixes = []string{"File:", "ExifTool:"}
+
+// mergeSidecarRow overlays sidecar's tags onto row, mutating row in place.
+// This mirrors exiftool's own -tagsFromFile precedence when no explicit tag
+// list is given: "the same as specifying -all" -- every tag from the
+// source (here, the sidecar) is copied into the destination's same-named
+// tag, overwriting whatever was already there. row plays the role of the
+// -tagsFromFile destination (the RAW's own read), sidecar plays the role of
+// the source; sidecar values win for every tag present in both, and
+// RAW-only tags (e.g. camera-embedded EXIF the sidecar never touches) are
+// left untouched. Per-file bookkeeping groups (File:*, ExifTool:*) and the
+// "SourceFile" key are never merged -- those describe the sidecar file
+// itself, not metadata about the asset.
+func mergeSidecarRow(row, sidecar map[string]any) {
+	for k, v := range sidecar {
+		if k == "SourceFile" {
+			continue
+		}
+		bookkeeping := false
+		for _, prefix := range sidecarBookkeepingPrefixes {
+			if strings.HasPrefix(k, prefix) {
+				bookkeeping = true
+				break
+			}
+		}
+		if bookkeeping {
+			continue
+		}
+		row[k] = v
+	}
 }
 
 // exiftoolWriteAllowlist is the closed set of tags the write path may emit.
@@ -215,6 +286,10 @@ func (p *Prober) Exif(ctx context.Context, path string) (*ExifResult, error) {
 	}
 	row := rows[0]
 
+	if sidecar, ok := p.readSidecarRow(ctx, path); ok {
+		mergeSidecarRow(row, sidecar)
+	}
+
 	result := &ExifResult{
 		OriginalDocumentID: valString(row, "XMP:OriginalDocumentID"),
 		DocumentID:         valString(row, "XMP:DocumentID"),
@@ -230,6 +305,62 @@ func (p *Prober) Exif(ctx context.Context, path string) (*ExifResult, error) {
 	result.CapturedAt = capturedAt(row)
 
 	return result, nil
+}
+
+// readSidecarRow looks for a standalone XMP sidecar next to path (see
+// sidecarPath) and, if one exists, reads it through exiftool the same
+// read-only way as the RAW itself -- exiftoolArgs, unchanged, so the
+// never-writes property TestExiftoolArgsNeverWrite proves stays intact for
+// this second invocation too. The stat check is what keeps exiftool's
+// behavior/exit code unchanged for the common case of no sidecar: exiftool
+// is never invoked a second time unless a sidecar file actually exists.
+// Returns ok=false whenever there's no sidecar to merge, or the sidecar
+// itself can't be read or parsed -- a missing or broken sidecar must never
+// fail probing of the RAW it sits next to.
+//
+// Guards against two failure modes:
+//   - path itself already IS a ".xmp" (gap 2 -- registering ".xmp" as its
+//     own internal/projectfile extension so indexer.Walk stops handing it
+//     to Exif at all -- is explicitly out of scope for this PR, so a bare
+//     .xmp can still reach here today). sidecarPath("x.xmp") is a fixed
+//     point ("x.xmp" again), so without this check Exif would spawn a
+//     second exiftool against the same file and merge its own row into
+//     itself on every sidecar node, doubling the subprocess cost for no
+//     effect.
+//   - os.Lstat, deliberately not os.Stat -- same non-following stat used by
+//     internal/prune.Execute's pre-delete check (see CLAUDE.md's key
+//     invariants): reject a symlink outright rather than following it, so
+//     a sidecar path that's actually a symlink escape can't get read.
+//     (storage.Guard.CheckWrite's own canonicalize step is the opposite
+//     mechanism -- it uses filepath.EvalSymlinks to resolve a symlink to
+//     its real target before checking that target, not to reject the
+//     symlink itself; not the right comparison here.) Mode().IsRegular()
+//     rather than a bare !IsDir() additionally rejects a FIFO planted at
+//     the sidecar path, which would otherwise block exiftool's read until
+//     probeTimeout fires on every scan of the RAW next to it.
+func (p *Prober) readSidecarRow(ctx context.Context, path string) (map[string]any, bool) {
+	if strings.EqualFold(filepath.Ext(path), sidecarExt) {
+		return nil, false
+	}
+
+	sidecar := sidecarPath(path)
+	info, err := os.Lstat(sidecar)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+
+	cmd := exec.CommandContext(ctx, p.exiftoolPath, exiftoolArgs(sidecar)...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil || len(rows) == 0 {
+		return nil, false
+	}
+	return rows[0], true
 }
 
 // exifTimeLayout matches exiftool's "YYYY:MM:DD HH:MM:SS[+-]HH:MM" format.
