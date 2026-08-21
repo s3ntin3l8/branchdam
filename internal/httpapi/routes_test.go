@@ -1779,14 +1779,16 @@ func TestCreateManualEdge(t *testing.T) {
 
 // TestCreateManualEdgeRefusesProjectFileNodes backs #199: a manual edge must
 // not link a project file (.drp/.fcpxml/.edl/.dam.json/.prproj) as an
-// endpoint of an identity-ancestry relationship -- the edge is never created
-// CONFIRMED. The child (target) case is the dangerous one: a DERIVED_FROM
-// edge targeting a project file would pass pickWinningParent and make
-// handleInheritMetadata run exiftool in-place against the project archive.
-// The target-side refusal is scoped to identity-ancestry relationship types
-// (see TestCreateManualEdgeAllowsProjectSidecarTarget); the source (parent)
-// case is refused unconditionally, since ProjectSidecarResolver always makes
-// the project file the child of a PROJECT_SIDECAR edge, never the source.
+// endpoint of an identity-ancestry relationship (DERIVED_FROM/FINAL_EXPORT/
+// PROXY_OF) -- the edge is never created CONFIRMED. The child (target) case
+// is the dangerous one: a DERIVED_FROM edge targeting a project file would
+// pass pickWinningParent and make handleInheritMetadata run exiftool
+// in-place against the project archive. Both the target-side and
+// source-side refusals are scoped to identity-ancestry relationship types
+// (see TestCreateManualEdgeAllowsProjectSidecarTarget for the target side,
+// TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship for
+// the source side) -- this test only exercises DERIVED_FROM, which is in
+// that set on both ends.
 func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()
@@ -1935,6 +1937,114 @@ func TestCreateManualEdgeAllowsProjectSidecarTarget(t *testing.T) {
 	}
 	if len(byTarget) != 1 || byTarget[0].RelationshipType != "PROJECT_SIDECAR" || byTarget[0].ReviewState != "CONFIRMED" {
 		t.Errorf("edges targeting the project file = %+v, want exactly one CONFIRMED PROJECT_SIDECAR", byTarget)
+	}
+}
+
+// TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship
+// backs the source-side scoping fix: DUPLICATE_OF is excluded from
+// validParentRelationships, so it can never reach pickWinningParent/
+// handleInheritMetadata's exiftool call regardless of which endpoint is a
+// project file -- a user marking two project files (or a project file and a
+// media node) as DUPLICATE_OF poses none of the hazard the source-side
+// refusal exists to close, and the web UI's ManualLinkModal lets the caller
+// pick source/target freely for exactly this relationship type.
+func TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var media, proj sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		media, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media", FilePath: "/m.raw", FileName: "m.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		proj, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-project", FilePath: "/proj.drp", FileName: "proj.drp", FileExt: "drp", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// DUPLICATE_OF with the project file as the SOURCE (parent) -- the shape
+	// the old unconditional source-side refusal used to block -- is accepted.
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     proj.ID,
+		"targetNodeId":     media.ID,
+		"relationshipType": "DUPLICATE_OF",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DUPLICATE_OF project-source status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	byTarget, err := database.Reader.ListEdgesByTarget(ctx, media.ID)
+	if err != nil {
+		t.Fatalf("list edges by target: %v", err)
+	}
+	if len(byTarget) != 1 || byTarget[0].RelationshipType != "DUPLICATE_OF" || byTarget[0].SourceNodeID != proj.ID {
+		t.Errorf("edges targeting media = %+v, want exactly one DUPLICATE_OF sourced from the project file", byTarget)
+	}
+}
+
+// TestCreateManualEdgeRefusesArchivedEndpoint backs the #115 lifecycle-state
+// guard: an ARCHIVED node passes the existence/FK check handleCreateEdge
+// already performs, but a manual edge to or from it is never traversed by
+// anything (v_media_edges_resolved / lineage walks all key off a live node),
+// so it would be a dead write masquerading as a real link.
+func TestCreateManualEdgeRefusesArchivedEndpoint(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var live, archived sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		live, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-live", FilePath: "/live.raw", FileName: "live.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		archived, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-archived", FilePath: "/archived.jpg", FileName: "archived.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	rrTarget := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     live.ID,
+		"targetNodeId":     archived.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrTarget.Code != http.StatusNotFound {
+		t.Errorf("archived-target status = %d, want 404, body = %s", rrTarget.Code, rrTarget.Body.String())
+	}
+
+	rrSource := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     archived.ID,
+		"targetNodeId":     live.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrSource.Code != http.StatusNotFound {
+		t.Errorf("archived-source status = %d, want 404, body = %s", rrSource.Code, rrSource.Body.String())
 	}
 }
 

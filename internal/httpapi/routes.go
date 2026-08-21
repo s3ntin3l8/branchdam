@@ -1017,20 +1017,31 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	// container of references, not a camera-derived asset: an edge whose CHILD
 	// is a project file would pass pickWinningParent's filters (its
 	// validParentRelationships) and make handleInheritMetadata run exiftool
-	// in-place against the project archive. The target-side refusal is scoped
-	// to those identity-ancestry relationship types: PROJECT_SIDECAR
-	// *legitimately* targets a project file (ProjectSidecarResolver.Resolve
-	// always makes the project file the edge's child), and being excluded from
-	// validParentRelationships it can never reach pickWinningParent/
-	// handleInheritMetadata regardless of endpoint shape. The source side is
-	// unconditional -- the resolver never makes a project file the source of
-	// any edge, so no legitimate manual edge needs a project file as parent.
+	// in-place against the project archive. Both the target-side and
+	// source-side refusals are scoped to those identity-ancestry relationship
+	// types: PROJECT_SIDECAR *legitimately* targets a project file
+	// (ProjectSidecarResolver.Resolve always makes the project file the
+	// edge's child, the media node its source/parent), and DUPLICATE_OF is a
+	// symmetric relationship a user may reasonably want between two project
+	// files. Both are excluded from validParentRelationships, so neither can
+	// ever reach pickWinningParent/handleInheritMetadata regardless of which
+	// endpoint is a project file -- scoping the refusal this way keeps every
+	// hazard-free manual edge the UI already offers (ManualLinkModal) intact
+	// while still closing the actual exiftool hazard on DERIVED_FROM/
+	// FINAL_EXPORT/PROXY_OF.
+	//
+	// Also refuses an ARCHIVED endpoint on either side (#115): it passes the
+	// existence/FK check but a manual edge to/from it is never traversed by
+	// anything, so it's a dead write masquerading as a real link.
 	target, err := s.db.Reader.GetMediaNodeByID(ctx, in.Body.TargetNodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, huma.Error404NotFound("target asset not found")
 	}
 	if err != nil {
 		return nil, huma.Error500InternalServerError("get target asset", err)
+	}
+	if target.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("target asset not found")
 	}
 	if _, ok := projectfile.GetParser(target.FilePath); ok && validParentRelationships[in.Body.RelationshipType] {
 		return nil, huma.Error422UnprocessableEntity("cannot create an identity-ancestry edge targeting a project file")
@@ -1042,8 +1053,11 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	if err != nil {
 		return nil, huma.Error500InternalServerError("get source asset", err)
 	}
-	if _, ok := projectfile.GetParser(source.FilePath); ok {
-		return nil, huma.Error422UnprocessableEntity("cannot create an edge sourced from a project file")
+	if source.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("source asset not found")
+	}
+	if _, ok := projectfile.GetParser(source.FilePath); ok && validParentRelationships[in.Body.RelationshipType] {
+		return nil, huma.Error422UnprocessableEntity("cannot create an identity-ancestry edge sourced from a project file")
 	}
 
 	var createdEdge sqlcgen.MediaEdge
