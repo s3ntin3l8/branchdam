@@ -39,18 +39,25 @@ var exportExts = map[string]bool{
 // extensions -- a low-resolution companion file that shares its real
 // sibling's filename stem (per internal/naming.Stem, which strips only the
 // extension) but carries no useful lineage information of its own. Issue
-// #228 seeds this with DJI's (and similar drones') ".lrf" low-res proxy;
-// issue #229 -- blocked on this PR -- reuses this exact set verbatim for
-// the identical-stem/arbitrary-direction PART of DJI's ".srt"
-// flight-telemetry sidecar problem. Kept as its own named, package-level
-// var (not inlined into FilenameStemResolver) specifically so extending
-// it is a one-line change, not a rewrite of the gating logic.
+// #228 seeds this with DJI's (and similar drones') ".lrf" low-res proxy.
+// Kept as its own named, package-level var (not inlined into
+// FilenameStemResolver) specifically so extending it is a one-line change,
+// not a rewrite of the gating logic.
 //
-// Caution for #229: ".srt" is not a video and must NOT also be added to
-// internal/pipeline's videoExts (it isn't an ffprobe-parseable container
-// the way .lrf is) -- adding it here only grants the direction gate.
-// Whether PROXY_OF is even the right relationship_type for a telemetry
-// sidecar (vs. introducing a new one) is #229's call, not assumed here.
+// ".srt" is deliberately NOT here, despite #229 adding a DJI flight-
+// telemetry .srt parser (internal/djisrt) in the same PR that first tried
+// this: unlike ".lrf" (DJI-proprietary, no collision risk), ".srt" is the
+// universal SubRip subtitle extension. internal/indexer.Walk has no
+// extension allowlist, so an ORDINARY movie.mp4/movie.srt pair (a
+// downloaded subtitle, nothing to do with DJI) reaches
+// FilenameStemResolver in any real catalog -- adding ".srt" here would
+// force every such pair into a spurious PROXY_OF edge (confidence 0.70,
+// clears the review floor), landing in the audit queue for every video +
+// subtitle pair in ANY catalog, not just drone footage. Reverted before
+// merge once this was caught in review. A content-sniff-based approach
+// (distinguishing a DJI telemetry .srt from a real subtitle by parsing its
+// content, not just its extension) is tracked in #251 -- do not re-add
+// ".srt" here without that.
 var proxyExts = map[string]bool{
 	"lrf": true,
 }

@@ -190,6 +190,97 @@ func TestDrainer_NodeCreated_And_Idempotency(t *testing.T) {
 	require.Equal(t, 0, stats.Failed)
 }
 
+// TestDrainer_NodeCreated_GPSMetadata proves a NodeCreatedPayload carrying
+// gpsLatitude/gpsLongitude (#229) lands in node_metadata under
+// source="exiftool" with exactly the key format
+// internal/pipeline/commit.go's exifMetadata would have written for a
+// scanned node -- Composite:GPSLatitude/Composite:GPSLongitude -- so
+// downstream readers like httpapi's loadTagSet (which filters strictly on
+// source=="exiftool") see an agent-ingested node's GPS point the same way
+// they'd see a scanned one.
+func TestDrainer_NodeCreated_GPSMetadata(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default())
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	filePath := filepath.Join(env.staging, "DJI_0001.MP4")
+	lat := 30.335120
+	lon := -81.655480
+	payload := agent.NodeCreatedPayload{
+		NodeUUID:     nodeUUID,
+		FilePath:     filePath,
+		FileName:     "DJI_0001.MP4",
+		FileExt:      ".MP4",
+		MtimeUnix:    time.Now().Unix(),
+		GPSLatitude:  &lat,
+		GPSLongitude: &lon,
+	}
+
+	enqueueEvent(t, env.db, agent.EventNodeCreated, payload)
+
+	stats, err := drainer.ProcessPending(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	var node sqlcgen.MediaNode
+	var rows []sqlcgen.NodeMetadatum
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		node, err = q.GetMediaNodeByUUID(ctx, nodeUUID)
+		if err != nil {
+			return err
+		}
+		rows, err = q.ListNodeMetadata(ctx, node.ID)
+		return err
+	})
+	require.NoError(t, err)
+
+	got := make(map[string]string, len(rows))
+	for _, r := range rows {
+		require.Equal(t, "exiftool", r.Source, "GPS rows must be written under source=exiftool to match a normal scan's exifMetadata convention")
+		got[r.Key] = r.Value
+	}
+	require.Equal(t, "30.33512", got["Composite:GPSLatitude"])
+	require.Equal(t, "-81.65548", got["Composite:GPSLongitude"])
+}
+
+// TestDrainer_NodeCreated_NoGPS_WritesNoMetadata proves a payload with no
+// GPS fields set (the common case: most agent-ingested files aren't
+// geotagged) writes zero node_metadata rows -- writeGPSMetadata must not
+// write empty/placeholder rows when the payload simply omits GPS.
+func TestDrainer_NodeCreated_NoGPS_WritesNoMetadata(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default())
+	ctx := context.Background()
+
+	nodeUUID := uuid.New().String()
+	filePath := filepath.Join(env.staging, "raw_002.arw")
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: nodeUUID,
+		FilePath: filePath,
+	})
+
+	stats, err := drainer.ProcessPending(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+
+	var node sqlcgen.MediaNode
+	var rows []sqlcgen.NodeMetadatum
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		node, err = q.GetMediaNodeByUUID(ctx, nodeUUID)
+		if err != nil {
+			return err
+		}
+		rows, err = q.ListNodeMetadata(ctx, node.ID)
+		return err
+	})
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
+
 func TestDrainer_EdgeAttached(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
