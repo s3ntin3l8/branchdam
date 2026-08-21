@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.1](https://github.com/s3ntin3l8/branchdam/compare/v0.3.0...v0.3.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **graph:** gate index-suffix filename_stem matches below auto-accept ([#214](https://github.com/s3ntin3l8/branchdam/issues/214)) ([847329f](https://github.com/s3ntin3l8/branchdam/commit/847329f2ae818c3806639819ec3cf403aa582d36))
+* **httpapi:** handleCreateEdge doesn't refuse a manual edge targeting a project-file node ([#210](https://github.com/s3ntin3l8/branchdam/issues/210)) ([26f48fc](https://github.com/s3ntin3l8/branchdam/commit/26f48fcad3009ebe004fcb8f06ca2258ed77362b))
+* **httpapi:** sanitize request path before logging (CodeQL go/log-injection) ([#215](https://github.com/s3ntin3l8/branchdam/issues/215)) ([036e89d](https://github.com/s3ntin3l8/branchdam/commit/036e89d278cc31d518a753e2da920161a1ac1ed5))
+* **pipeline,graph:** re-promote captured_at_unix on touch/rebase ([#204](https://github.com/s3ntin3l8/branchdam/issues/204)) ([#217](https://github.com/s3ntin3l8/branchdam/issues/217)) ([1809c16](https://github.com/s3ntin3l8/branchdam/commit/1809c16b2a686468358101328b85b41eb66e7204))
+* **web:** SSE progress nudges don't refresh a mounted asset detail/graph/lineage view ([#212](https://github.com/s3ntin3l8/branchdam/issues/212)) ([5139009](https://github.com/s3ntin3l8/branchdam/commit/51390094f99125f2cc33c44e6f7b3d726f844cbb))
+
+
+### Performance Improvements
+
+* **httpapi:** parallelize per-location statfs probes in handleStorageHealth ([#213](https://github.com/s3ntin3l8/branchdam/issues/213)) ([949125b](https://github.com/s3ntin3l8/branchdam/commit/949125be7244d20efe4c3342860c5811363b1639))
+
 ## [0.3.0](https://github.com/s3ntin3l8/branchdam/compare/v0.2.0...v0.3.0) (2026-08-20)
 
 
