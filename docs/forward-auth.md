@@ -150,18 +150,24 @@ Tailscale (or split-DNS/MagicDNS) resolving `dam.example.com` to the tailnet add
 routing through Traefik, so `Host()` matching, the TLS cert, and both middleware chains apply
 unchanged -- no new router, no `:8080` exposure, no second `Host()` rule needed.
 
-Given that, the auth model does **not** change based on network location. `AgentChain`
-authenticates on `X-API-Key` and routes by `PathPrefix` on `/api/v1/agent` -- neither reads
-source IP or cares which network the request arrived over, and (per §3) branchDAM has no
-`TRUSTED_PROXY_IPS`-style allowlist to reconfigure per network either way. The security boundary
-is the key, not the network: the same `BRANCHDAM_AGENT_API_KEY` that authenticates a request
-from the LAN authenticates one arriving over the tailnet, with the same 401-on-missing-key and
-503-on-unset-or-short-key behavior described in §3.
+Given that, the auth model does **not** change based on network location. `AgentChain` itself
+authenticates on `X-API-Key` and has no path-matching logic of its own -- the `PathPrefix`
+dispatch to it happens in `internal/auth.Route` ("the only place that decides which auth chain
+applies to a request", per its own doc comment) and in Traefik's `branchdam-agent` router rule
+(§2), not in `AgentChain`. Neither `Route` nor `AgentChain` reads source IP or cares which
+network the request arrived over, and (per §3) branchDAM has no `TRUSTED_PROXY_IPS`-style
+allowlist to reconfigure per network either way. The security boundary is the key, not the
+network: the same `BRANCHDAM_AGENT_API_KEY` that authenticates a request from the LAN
+authenticates one arriving over the tailnet, with the same 503-on-unset-or-short-key behavior
+described in §3 and the same 401-on-missing-key behavior demonstrated in §5's curl example.
 
 The overlay is what makes the *sync* land promptly, not what makes ingest work at all -- per
-Pillar 3 the (not-yet-built, see #62 / `docs/roadmap.md`) workstation agent queues ingest events
-locally regardless of connectivity and executes `SYNC_HANDSHAKE` on reconnect; reachability just
-determines whether "reconnect" means "back on the LAN" or "the tailnet came up."
+Pillar 3 the (not-yet-built) workstation agent queues ingest events locally regardless of
+connectivity and executes `SYNC_HANDSHAKE` on reconnect. That offline-queue/dual-copy/rebase
+behavior is #234 ("SD-card ingest engine -- dual-copy writer, offline queue, Tier-0/3 rebase"),
+not #62 -- #62 is now scoped to only the tray app and the Luminar `catalog.db` reader (see
+`docs/roadmap.md`). Reachability just determines whether "reconnect" means "back on the LAN" or
+"the tailnet came up."
 
 ## 5. Verifying it works
 
