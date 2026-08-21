@@ -373,13 +373,49 @@ func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.
 
 // reconcilePromotedColumns refreshes media_nodes' promoted EXIF/XMP columns
 // (camera_model, lens_model, camera_serial, original_document_id, document_id,
-// derived_from_id) from a freshly-probed Result, on the touched/rebased
-// branches that never re-run insertNewNode (#197). captured_at_unix is
-// deliberately NOT among them: re-promoting it on an existing node interacts
-// with HeuristicSpatialTemporalResolver's candidate matching (a node whose
-// captured_at_unix changes after other nodes already resolved edges against
-// it), which needs reasoning through before any write path does it -- tracked
-// as #204.
+// derived_from_id, captured_at_unix) from a freshly-probed Result, on the
+// touched/rebased branches that never re-run insertNewNode (#197, #204).
+//
+// captured_at_unix uses the same overwrite-on-differ contract as the other
+// six, not fill-only-when-NULL. That needed reasoning through, since it's the
+// one promoted column HeuristicSpatialTemporalResolver queries directly via
+// ix_media_nodes_camera_time:
+//
+//   - Edges are never deleted and UpsertMediaEdge only ever raises confidence
+//     (MAX(excluded, stored)), so re-resolution is monotone: it can upgrade
+//     or leave an edge, never downgrade or delete one. A captured_at_unix
+//     that changes here can therefore strand an already-committed Tier-3
+//     edge whose ±2s window no longer holds -- at its old (still valid at
+//     the time) confidence, not corrupted -- with nothing to walk it back.
+//     Accepted: leaving a superseded edge in place, for a human REJECT to
+//     clear, is this repo's universal posture for edges already (no
+//     deletes, no cascades), and a fill-only-when-NULL rule would buy safety
+//     from this case at the cost of an unexplainable asymmetry against the
+//     six sibling columns plus never letting a camera-clock correction
+//     propagate.
+//   - Re-resolution is one-directional: resolveEdgesForBatch re-resolves
+//     every node committed in the current scan batch (touched nodes
+//     included), so the node whose captured_at_unix just changed is
+//     re-resolved in the same pass -- but nodes that already resolved
+//     *against* it are not. A repaired blind spot on this node's own next
+//     resolve, not a retroactive fix for its peers.
+//   - inherit-metadata copies a parent's camera_serial/lens_model/captured
+//     time into the child, so promoting captured_at_unix can make the child
+//     score a "match" against the very parent whose timestamp it just
+//     inherited (0.70 base + 0.10 same lens + 0.09 pHash = 0.89, above
+//     Tier-3's 0.85 auto-accept). This is benign: every resolver (both
+//     Tier-2 ones and this one) derives Candidate.Rel from the same
+//     inferRelationship(childFileName, childExt, parentExt) -- a pure
+//     function of the pair -- so this Tier-3 candidate always lands in the
+//     same (parent, child, rel) group mergeCandidates already collapses via
+//     MAX(confidence), never a second edge alongside the stronger Tier-2 one
+//     pickWinningParent selected.
+//
+// No data-correction migration (contrast #132's 00006) is needed for
+// existing rows: a stale or NULL captured_at_unix here is repaired by the
+// node's very next Touched pass, unlike an edge already written
+// AUTO_ACCEPTED, which UpsertMediaEdge's confidence-only-increases rule can
+// never fix via rescan alone.
 //
 // Only a NON-EMPTY fresh value may overwrite a column, and only when it
 // differs from what's stored: a probe that ran but genuinely found no value
@@ -405,6 +441,20 @@ func reconcilePromotedColumns(ctx context.Context, q *sqlcgen.Queries, node sqlc
 	assign(r.CameraModel, node.CameraModel, &params.CameraModel)
 	assign(r.SerialNumber, node.CameraSerial, &params.CameraSerial)
 	assign(r.LensModel, node.LensModel, &params.LensModel)
+
+	// captured_at_unix is INTEGER, not TEXT, and Result carries it as a
+	// *time.Time -- it can't go through assign's sql.NullString closure.
+	// Same non-empty-only contract: a nil CapturedAt (exiftool absent from
+	// PATH, or a file with genuinely no DateTimeOriginal) must not clear a
+	// stored value.
+	params.CapturedAtUnix = node.CapturedAtUnix
+	if r.CapturedAt != nil && !r.CapturedAt.IsZero() {
+		if fresh := r.CapturedAt.Unix(); !node.CapturedAtUnix.Valid || node.CapturedAtUnix.Int64 != fresh {
+			params.CapturedAtUnix = sql.NullInt64{Int64: fresh, Valid: true}
+			changed = true
+		}
+	}
+
 	if !changed {
 		return false, nil
 	}
@@ -484,22 +534,26 @@ func ffprobeMetadata(r Result) map[string]string {
 // exiftool re-read in inheritWriteTimeout): this function does no deadline
 // of its own, matching probe.Exif's contract.
 //
-// Deliberately does NOT touch media_nodes' promoted columns (captured_at_unix,
-// camera_model, camera_serial, lens_model). The scan's touched/rebased
-// backfill refreshes the non-captured promoted columns from a freshly-probed
-// file (camera_model, camera_serial, lens_model, original_document_id,
-// document_id, derived_from_id -- #197, reconcileAllMetadata ->
-// reconcilePromotedColumns); captured_at_unix is deliberately not among them,
-// and this on-demand endpoint re-promotes nothing at all. The practical
-// effect: after an inherit-metadata call, a child's node_metadata can carry
-// an inherited EXIF:DateTimeOriginal while captured_at_unix stays NULL, so
-// HeuristicSpatialTemporalResolver (which queries captured_at_unix via
-// ix_media_nodes_camera_time) won't see it. loadTagSet is unaffected (it
-// prefers node_metadata), so this is a divergence between the two metadata
-// stores, not a live bug in the inheritance endpoint itself. Whether this
-// write path -- or any -- should re-promote captured_at_unix is a broader
-// question than this function answers alone -- tracked separately as #204,
-// not fixed here.
+// Deliberately does NOT touch media_nodes' promoted columns at all,
+// including captured_at_unix (#204, resolved). One write path owns
+// promotion: the scan's touched/rebased backfill (reconcileAllMetadata ->
+// reconcilePromotedColumns) refreshes every promoted column -- camera_model,
+// camera_serial, lens_model, original_document_id, document_id,
+// derived_from_id, and captured_at_unix -- from a freshly-probed file, and
+// #188 keeps fast_hash in agreement so an in-place write (this endpoint)
+// takes that Touched branch on the next scan instead of colliding. Giving
+// this endpoint a second, on-demand path to the same columns would be
+// redundant at best; #185 already flagged this backfill as best-effort
+// (logged, not returned) and ctx-derived, so it's a strictly less reliable
+// place to promote from than the scan itself. The practical effect: after an
+// inherit-metadata call, a child's node_metadata carries an inherited
+// EXIF:DateTimeOriginal (via ExifRaw/exifRawAllowlist, not through this
+// Result literal -- CapturedAt/CameraModel are intentionally left unset
+// here) while captured_at_unix and the other promoted columns stay at their
+// prior values until the next scan promotes them. loadTagSet is unaffected
+// in the meantime (it prefers node_metadata), so this is a temporary
+// divergence between the two metadata stores, not a live bug in the
+// inheritance endpoint itself.
 func PersistExifMetadata(ctx context.Context, database *db.DB, nodeID int64, exif *probe.ExifResult, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)

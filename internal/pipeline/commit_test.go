@@ -901,7 +901,9 @@ func TestTouchRefreshesPromotedColumnsWhenValueDiffers(t *testing.T) {
 
 	// Pass 2: same content, seen again -- but the file's XMP now carries the
 	// identity tags inherit-metadata wrote into it (DerivedFrom = parent
-	// node_uuid, plus Model/LensModel/SerialNumber/DocumentIDs).
+	// node_uuid, plus Model/LensModel/SerialNumber/DocumentIDs/CapturedAt --
+	// the last one is #204: captured_at_unix refreshes on this same branch).
+	capturedAt := time.Date(2026, 1, 2, 10, 30, 0, 0, time.UTC)
 	second := first
 	second.DerivedFromID = "uuid-parent"
 	second.OriginalDocumentID = "orig-doc-xyz"
@@ -909,6 +911,7 @@ func TestTouchRefreshesPromotedColumnsWhenValueDiffers(t *testing.T) {
 	second.CameraModel = "ILCE-7M4"
 	second.LensModel = "FE 24-70mm F2.8 GM"
 	second.SerialNumber = "1234567"
+	second.CapturedAt = &capturedAt
 	stats, err := Commit(ctx, database, locationID, []Result{second})
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched): %v", err)
@@ -942,6 +945,99 @@ func TestTouchRefreshesPromotedColumnsWhenValueDiffers(t *testing.T) {
 	if got.DocumentID.String != "doc-abc-123" {
 		t.Errorf("document_id = %q, want doc-abc-123", got.DocumentID.String)
 	}
+	if !got.CapturedAtUnix.Valid || got.CapturedAtUnix.Int64 != capturedAt.Unix() {
+		t.Errorf("captured_at_unix = %+v, want Valid with %d (%s)", got.CapturedAtUnix, capturedAt.Unix(), capturedAt)
+	}
+}
+
+// TestTouchPromotedColumnsCapturedAtNullToValue backs #204's literal
+// symptom: a node indexed before exiftool derived a capture time (or before
+// inherit-metadata copied one in) has captured_at_unix NULL; the next
+// Touched pass with a non-nil CapturedAt must promote it, exactly like the
+// six sibling columns.
+func TestTouchPromotedColumnsCapturedAtNullToValue(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	first := Result{
+		Path: "/timeless.jpg", FileName: "timeless.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "cccccccccccccccc",
+	}
+	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+		t.Fatalf("Commit (pass 1, probe-less insert): %v", err)
+	} else if stats.Inserted != 1 {
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
+	}
+	node := mustGetLiveNode(t, database, "/timeless.jpg")
+	if node.CapturedAtUnix.Valid {
+		t.Fatalf("pre-condition broken: captured_at_unix already set (%+v)", node.CapturedAtUnix)
+	}
+
+	capturedAt := time.Date(2026, 3, 4, 8, 0, 0, 0, time.UTC)
+	second := first
+	second.CapturedAt = &capturedAt
+	stats, err := Commit(ctx, database, locationID, []Result{second})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("pass 2: stats = %+v, want Touched=1", stats)
+	}
+	if stats.PromotedColumnsRefreshed != 1 {
+		t.Fatalf("pass 2: stats = %+v, want PromotedColumnsRefreshed=1", stats)
+	}
+
+	got := mustGetLiveNode(t, database, "/timeless.jpg")
+	if got.ID != node.ID {
+		t.Fatalf("node id changed %d -> %d (must be a touch, not a version collision)", node.ID, got.ID)
+	}
+	if !got.CapturedAtUnix.Valid || got.CapturedAtUnix.Int64 != capturedAt.Unix() {
+		t.Errorf("captured_at_unix = %+v, want Valid with %d (%s)", got.CapturedAtUnix, capturedAt.Unix(), capturedAt)
+	}
+}
+
+// TestTouchPromotedColumnsCapturedAtNilDoesNotClear guards the pointer-typed
+// case of the non-empty-only contract: captured_at_unix goes through its own
+// branch in reconcilePromotedColumns (not the sql.NullString assign
+// closure), so a nil CapturedAt on a later pass -- exiftool removed from
+// PATH, or a file that genuinely has no DateTimeOriginal on this probe --
+// must leave a previously-promoted captured_at_unix untouched, exactly like
+// an empty string does for the six sibling columns.
+func TestTouchPromotedColumnsCapturedAtNilDoesNotClear(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	capturedAt := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	first := Result{
+		Path: "/loses-probe.jpg", FileName: "loses-probe.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "dddddddddddddddd",
+		CapturedAt: &capturedAt,
+	}
+	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+		t.Fatalf("Commit (pass 1, insert): %v", err)
+	} else if stats.Inserted != 1 {
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
+	}
+
+	// Pass 2: probe-less Result -- CapturedAt nil, as if exiftool were gone
+	// from PATH on this scan.
+	probeLess := Result{
+		Path: "/loses-probe.jpg", FileName: "loses-probe.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "dddddddddddddddd",
+	}
+	stats, err := Commit(ctx, database, locationID, []Result{probeLess})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched, probe-less): %v", err)
+	}
+	if stats.PromotedColumnsRefreshed != 0 {
+		t.Fatalf("pass 2: stats = %+v, want PromotedColumnsRefreshed=0 (nil CapturedAt is a no-op, not a wipe)", stats)
+	}
+	got := mustGetLiveNode(t, database, "/loses-probe.jpg")
+	if !got.CapturedAtUnix.Valid || got.CapturedAtUnix.Int64 != capturedAt.Unix() {
+		t.Errorf("captured_at_unix = %+v, want it to survive the probe-less touch unchanged (%d)", got.CapturedAtUnix, capturedAt.Unix())
+	}
 }
 
 // TestTouchPromotedColumnsUnchangedWritesNothing pins the #105 property for
@@ -954,6 +1050,7 @@ func TestTouchPromotedColumnsUnchangedWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
 
+	stableCapturedAt := time.Date(2026, 2, 3, 9, 0, 0, 0, time.UTC)
 	first := Result{
 		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
 		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
@@ -961,6 +1058,7 @@ func TestTouchPromotedColumnsUnchangedWritesNothing(t *testing.T) {
 		LensModel:    "FE 24-70mm F2.8 GM",
 		SerialNumber: "1234567",
 		DocumentID:   "doc-abc-123",
+		CapturedAt:   &stableCapturedAt,
 	}
 	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
 		t.Fatalf("Commit (pass 1, insert): %v", err)
@@ -983,7 +1081,8 @@ func TestTouchPromotedColumnsUnchangedWritesNothing(t *testing.T) {
 
 	got := mustGetLiveNode(t, database, "/stable.jpg")
 	if got.CameraModel.String != "ILCE-7M4" || got.LensModel.String != "FE 24-70mm F2.8 GM" ||
-		got.CameraSerial.String != "1234567" || got.DocumentID.String != "doc-abc-123" {
+		got.CameraSerial.String != "1234567" || got.DocumentID.String != "doc-abc-123" ||
+		!got.CapturedAtUnix.Valid || got.CapturedAtUnix.Int64 != stableCapturedAt.Unix() {
 		t.Errorf("promoted columns regressed after unchanged touch: %+v", got)
 	}
 }
