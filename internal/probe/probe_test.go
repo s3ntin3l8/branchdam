@@ -125,6 +125,113 @@ func TestExifRealFile(t *testing.T) {
 	}
 }
 
+// TestExifSidecarMerge is issue #227's acceptance criterion: a RAW (here, a
+// JPEG fixture standing in for one) with a sibling .xmp sidecar has the
+// sidecar's metadata reflected in the probed Result -- specifically,
+// XMP:OriginalDocumentID from the sidecar, which is what internal/graph's
+// Tier-2 XMPOriginalDocumentIDResolver reads via media_nodes.
+// original_document_id. The sidecar overwrites OriginalDocumentID (present
+// in both), while Make/Model (RAW-only, the sidecar never touches them)
+// prove this is a genuine merge, not a full replace.
+func TestExifSidecarMerge(t *testing.T) {
+	exiftoolPath := requireTool(t, "exiftool")
+	dir := t.TempDir()
+	rawPath := makeFixtureJPEG(t, dir)
+
+	sidecarFile := rawPath[:len(rawPath)-len(filepath.Ext(rawPath))] + ".xmp"
+	tagCmd := exec.Command(exiftoolPath,
+		"-XMP-xmpMM:OriginalDocumentID=sidecar-orig-999",
+		"-XMP-dc:Subject+=sidecar-keyword",
+		sidecarFile,
+	)
+	if out, err := tagCmd.CombinedOutput(); err != nil {
+		t.Fatalf("write sidecar xmp: %v\n%s", err, out)
+	}
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := p.Exif(ctx, rawPath)
+	if err != nil {
+		t.Fatalf("Exif: %v", err)
+	}
+
+	// The sidecar's OriginalDocumentID must win over the RAW's own
+	// embedded value ("orig-doc-xyz", set by makeFixtureJPEG).
+	if result.OriginalDocumentID != "sidecar-orig-999" {
+		t.Errorf("OriginalDocumentID = %q, want sidecar-orig-999 (the sidecar's value)", result.OriginalDocumentID)
+	}
+	// A tag only the sidecar carries must show up in Raw too.
+	if result.Raw["XMP:Subject"] != "sidecar-keyword" {
+		t.Errorf("Raw[XMP:Subject] = %q, want sidecar-keyword (raw=%v)", result.Raw["XMP:Subject"], result.Raw)
+	}
+	// RAW-only fields the sidecar never mentions must survive the merge
+	// untouched -- this is what makes it a merge and not a replace.
+	if result.Make != "SONY" || result.Model != "ILCE-7M4" {
+		t.Errorf("Make/Model = %q/%q, want SONY/ILCE-7M4 (sidecar merge must not clobber RAW-only fields)", result.Make, result.Model)
+	}
+	// Sidecar bookkeeping (its own File:*/SourceFile) must never leak into
+	// the RAW's result row.
+	if result.Raw["File:FileName"] != filepath.Base(rawPath) {
+		t.Errorf("Raw[File:FileName] = %q, want the RAW's own filename %q (sidecar bookkeeping must not overwrite it)", result.Raw["File:FileName"], filepath.Base(rawPath))
+	}
+}
+
+// TestExifNoSidecarUnaffected proves the common case (no .xmp next to the
+// RAW) behaves exactly as before -- no second exiftool invocation changes
+// its behavior or exit code just because sidecarPath's stat check ran.
+func TestExifNoSidecarUnaffected(t *testing.T) {
+	requireTool(t, "exiftool")
+	path := makeFixtureJPEG(t, t.TempDir())
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := p.Exif(ctx, path)
+	if err != nil {
+		t.Fatalf("Exif: %v", err)
+	}
+	if result.OriginalDocumentID != "orig-doc-xyz" {
+		t.Errorf("OriginalDocumentID = %q, want orig-doc-xyz (no sidecar present, RAW's own value)", result.OriginalDocumentID)
+	}
+}
+
+// TestExifOnSidecarItselfDoesNotSelfMerge covers gap 2's leftover surface:
+// registering ".xmp" as its own internal/projectfile extension (so
+// indexer.Walk stops handing sidecars to Exif at all) is explicitly out of
+// scope for this PR, so a bare .xmp can still reach Exif directly today.
+// sidecarPath(".../x.xmp") is a fixed point ("x.xmp" again) -- without the
+// readSidecarRow guard, Exif would spawn a second exiftool against the same
+// file and merge its own row into itself on every call. This proves Exif on
+// an .xmp still succeeds and returns exactly the sidecar's own values, with
+// no doubled subprocess spawn.
+func TestExifOnSidecarItselfDoesNotSelfMerge(t *testing.T) {
+	exiftoolPath := requireTool(t, "exiftool")
+	dir := t.TempDir()
+	sidecarFile := filepath.Join(dir, "standalone.xmp")
+	tagCmd := exec.Command(exiftoolPath,
+		"-XMP-xmpMM:OriginalDocumentID=standalone-orig-id",
+		sidecarFile,
+	)
+	if out, err := tagCmd.CombinedOutput(); err != nil {
+		t.Fatalf("write standalone xmp: %v\n%s", err, out)
+	}
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := p.Exif(ctx, sidecarFile)
+	if err != nil {
+		t.Fatalf("Exif: %v", err)
+	}
+	if result.OriginalDocumentID != "standalone-orig-id" {
+		t.Errorf("OriginalDocumentID = %q, want standalone-orig-id", result.OriginalDocumentID)
+	}
+}
+
 func TestFFProbeRealFile(t *testing.T) {
 	requireTool(t, "ffprobe")
 	path := makeFixtureMP4(t, t.TempDir())
