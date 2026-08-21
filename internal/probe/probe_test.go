@@ -490,6 +490,33 @@ func TestExtractVideoPosterRealFile(t *testing.T) {
 	}
 }
 
+// TestExtractVideoPosterRespectsContextTimeout is the regression test for
+// the terminal-UNSUPPORTED-on-cancellation bug: an already-expired ctx must
+// come back as a real error (so internal/thumbs.Cache.Generate's caller
+// retries via FAILED), never as nil, nil (which maps to the terminal,
+// never-retried UNSUPPORTED thumb_state) -- mirrors
+// TestExifRespectsContextTimeout's shape for the exiftool path.
+func TestExtractVideoPosterRespectsContextTimeout(t *testing.T) {
+	requireTool(t, "ffmpeg")
+	path := makeFixtureMP4(t, t.TempDir())
+	p := New()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond) // ensure the deadline has actually passed
+
+	poster, err := p.ExtractVideoPoster(ctx, path)
+	if err == nil {
+		t.Fatal("ExtractVideoPoster with an already-expired context returned nil error, want a real error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("ExtractVideoPoster error = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	if poster != nil {
+		t.Errorf("ExtractVideoPoster with an expired context returned %d bytes, want nil", len(poster))
+	}
+}
+
 func TestExtractVideoPosterNoFFmpeg(t *testing.T) {
 	t.Parallel()
 	p := &Prober{} // zero value: ffmpegPath unset, HasFFmpeg() false regardless of the host

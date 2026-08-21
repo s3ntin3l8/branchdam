@@ -567,6 +567,18 @@ func TestIsVideoExt(t *testing.T) {
 	}
 }
 
+// TestIsVideoExtExportedMatchesUnexported proves the exported IsVideoExt
+// (added for internal/thumbs, #248) delegates to the exact same closed
+// videoExts set as the package-internal isVideoExt, rather than drifting
+// into a second copy of the classification.
+func TestIsVideoExtExportedMatchesUnexported(t *testing.T) {
+	for _, ext := range []string{"mp4", "MOV", ".mkv", "lrf", "jpg", "arw", "", "."} {
+		if got, want := IsVideoExt(ext), isVideoExt(ext); got != want {
+			t.Errorf("IsVideoExt(%q) = %v, want %v (isVideoExt's own answer)", ext, got, want)
+		}
+	}
+}
+
 func floatPtr(f float64) *float64 { return &f }
 
 func TestCommitPersistsFFProbeMetadata(t *testing.T) {

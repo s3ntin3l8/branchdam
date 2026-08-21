@@ -258,3 +258,61 @@ func TestCacheGenerateVideoPoster(t *testing.T) {
 		t.Errorf("thumbnail dimensions = %dx%d, want 320x240 (source unscaled, maxEdgePx exceeds source)", b.Dx(), b.Dy())
 	}
 }
+
+// TestCacheGenerateVideoExtensionGate proves decodeFallback never invokes
+// ffmpeg for a non-video extension, even when the file's actual CONTENT is a
+// perfectly decodable video -- ffmpeg detects container format from
+// content, not the filename, so if the pipeline.IsVideoExt gate were ever
+// dropped, this exact input would succeed via the ffmpeg fallback the same
+// way TestCacheGenerateVideoPoster's does, silently reintroducing the two
+// wasted ffmpeg spawns (plus three wasted exiftool spawns) this gate exists
+// to avoid for every non-media file a real scan encounters (sidecars,
+// .dam.json manifests, .xmp, stray .txt -- thumb_state defaults to PENDING
+// for every media_nodes row regardless of file type).
+func TestCacheGenerateVideoExtensionGate(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mp4 := makeFixtureMP4(t, dir)
+
+	data, err := os.ReadFile(mp4)
+	if err != nil {
+		t.Fatalf("read fixture mp4: %v", err)
+	}
+	renamed := filepath.Join(dir, "not-a-video.bin")
+	if err := os.WriteFile(renamed, data, 0o644); err != nil {
+		t.Fatalf("write renamed fixture: %v", err)
+	}
+
+	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if _, err := c.Generate(ctx, renamed); err != ErrUnsupported {
+		t.Errorf("Generate on real video bytes under a non-video extension = %v, want ErrUnsupported (the extension gate must prevent the ffmpeg fallback from ever running here)", err)
+	}
+}
+
+// TestCacheGenerateVideoPosterContextCancellation is the regression test for
+// the terminal-UNSUPPORTED-on-cancellation bug at the Cache.Generate level:
+// an already-expired ctx during the ffmpeg poster attempt must propagate as
+// a real error, not ErrUnsupported -- worker.processOne maps ErrUnsupported
+// to the terminal, never-retried UNSUPPORTED thumb_state, and a shutdown or
+// slow-storage timeout mid-video must NOT permanently give up on that node.
+func TestCacheGenerateVideoPosterContextCancellation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := makeFixtureMP4(t, dir)
+
+	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond) // ensure the deadline has actually passed
+
+	_, err := c.Generate(ctx, path)
+	if err == nil {
+		t.Fatal("Generate with an already-expired context returned nil error, want a real error")
+	}
+	if err == ErrUnsupported {
+		t.Error("Generate with an expired context returned ErrUnsupported -- want a real error so worker.processOne retries via FAILED instead of landing on terminal UNSUPPORTED")
+	}
+}

@@ -27,6 +27,7 @@ import (
 
 	xdraw "golang.org/x/image/draw"
 
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
@@ -123,15 +124,28 @@ func (c *Cache) Generate(ctx context.Context, filePath string) ([]byte, error) {
 }
 
 // decodeFallback tries, in order, an exiftool-extracted embedded preview
-// (RAW stills) and then an ffmpeg-extracted representative frame (video),
-// for a source Go's stdlib image package couldn't decode directly. Returns
-// ErrUnsupported, not a generic error, when neither path yields a decodable
-// image -- both ExtractPreviewJPEG and ExtractVideoPoster already validate
-// decodability themselves before returning non-empty bytes, so a decode
-// failure here is not expected to be reachable in practice; it falls
-// through to the next fallback (or ErrUnsupported) rather than returning a
-// hard error, since routing around one extractor's edge case at the cost of
-// a slower path is preferable to failing a thumbnail outright.
+// (RAW stills) and then -- ONLY for a recognized video extension -- an
+// ffmpeg-extracted representative frame, for a source Go's stdlib image
+// package couldn't decode directly. Returns ErrUnsupported, not a generic
+// error, when nothing yields a decodable image -- both ExtractPreviewJPEG
+// and ExtractVideoPoster already validate decodability themselves before
+// returning non-empty bytes, so a decode failure here is not expected to be
+// reachable in practice; it falls through to the next fallback (or
+// ErrUnsupported) rather than returning a hard error, since routing around
+// one extractor's edge case at the cost of a slower path is preferable to
+// failing a thumbnail outright.
+//
+// The pipeline.IsVideoExt gate before the ffmpeg attempt matters: thumb_state
+// defaults to PENDING for every media_nodes row regardless of file type, and
+// there is no upstream filter excluding sidecars, .dam.json manifests, .xmp,
+// or any other non-media file from ever reaching Generate. Without this
+// gate, every one of those would pay for exiftool's three preview-tag
+// attempts AND ffmpeg's two seek attempts just to conclude it has no
+// thumbnail -- five subprocess spawns per miss, which scales badly across a
+// real DAM tree where non-media files can be a large fraction of scanned
+// nodes. pipeline owns the video/non-video extension classification
+// (videoExts, #34/#228) -- IsVideoExt reuses it rather than keeping a second
+// copy here.
 func (c *Cache) decodeFallback(ctx context.Context, filePath string) (image.Image, error) {
 	preview, pErr := c.prober.ExtractPreviewJPEG(ctx, filePath)
 	if pErr != nil {
@@ -143,8 +157,18 @@ func (c *Cache) decodeFallback(ctx context.Context, filePath string) (image.Imag
 		}
 	}
 
+	if !pipeline.IsVideoExt(filepath.Ext(filePath)) {
+		return nil, ErrUnsupported
+	}
+
 	poster, vErr := c.prober.ExtractVideoPoster(ctx, filePath)
 	if vErr != nil {
+		// Not expected to be reachable except when ctx itself was
+		// cancelled/timed out mid-extraction (ExtractVideoPoster's own
+		// doc comment) -- propagated as a real error, not ErrUnsupported,
+		// so worker.processOne routes this to the retried FAILED path
+		// rather than permanently giving up on a node that just happened
+		// to be mid-flight during a shutdown or a slow-storage timeout.
 		return nil, fmt.Errorf("thumbs: extract video poster: %w", vErr)
 	}
 	if len(poster) > 0 {

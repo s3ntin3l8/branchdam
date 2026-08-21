@@ -604,25 +604,51 @@ func (p *Prober) ExtractPreviewJPEG(ctx context.Context, path string) ([]byte, e
 // yields nothing usable from that attempt without making the file itself an
 // error.
 //
-// Returns nil, nil -- not an error -- when ffmpeg is unavailable or no
-// attempt yields a decodable frame; that is the normal case for a
-// non-video/unreadable file, not a failure. This is a single-frame poster
-// image only (#224's stated scope) -- no animated preview or contact sheet.
+// Returns nil, nil -- not an error -- when ffmpeg is unavailable or every
+// seek attempt genuinely produced nothing usable; that is the normal case
+// for a non-video/unreadable file, not a failure. This is a single-frame
+// poster image only (#224's stated scope) -- no animated preview or contact
+// sheet.
+//
+// A ctx cancellation or deadline is deliberately NOT folded into that
+// nil-nil "nothing usable" case, unlike a plain ffmpeg failure (bad codec,
+// truncated file, etc.) -- ctx.Err() is checked after every failed attempt
+// and, if set, returned as a real error immediately rather than falling
+// through to try the next seek offset (which would fail instantly anyway,
+// against an already-dead context) or exhausting the loop silently. This
+// matters to internal/thumbs.Cache.Generate's caller: a nil-nil result maps
+// to the terminal, never-retried UNSUPPORTED thumb_state, while a real error
+// maps to FAILED, which IS retried up to the worker's max-attempts bound --
+// a shutdown or slow-storage timeout mid-video (the slowest file type this
+// package handles, and thus the most likely to be mid-flight when either
+// happens) must land on the latter, not silently and permanently give up on
+// that node.
 func (p *Prober) ExtractVideoPoster(ctx context.Context, path string) ([]byte, error) {
 	if !p.HasFFmpeg() {
 		return nil, nil
 	}
 	for _, seek := range videoPosterSeekOffsets {
 		cmd := exec.CommandContext(ctx, p.ffmpegPath, videoPosterArgs(path, seek)...)
-		var stdout bytes.Buffer
+		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
-		if err := cmd.Run(); err != nil || stdout.Len() == 0 {
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+		if runErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("probe: ffmpeg %s: %w (stderr: %s)", path, ctxErr, stderr.String())
+			}
+			continue
+		}
+		if stdout.Len() == 0 {
 			continue
 		}
 		if _, _, err := image.Decode(bytes.NewReader(stdout.Bytes())); err != nil {
 			continue
 		}
 		return stdout.Bytes(), nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("probe: ffmpeg %s: %w", path, ctxErr)
 	}
 	return nil, nil
 }
