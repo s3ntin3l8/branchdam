@@ -27,13 +27,46 @@ var exportExts = map[string]bool{
 	"jpg": true, "jpeg": true, "mp4": true, "mov": true,
 }
 
+// proxyExts is the closed, package-level set of "known proxy" filename
+// extensions -- a low-resolution companion file that shares its real
+// sibling's filename stem (per internal/naming.Stem, which strips only the
+// extension) but carries no useful lineage information of its own. Issue
+// #228 seeds this with DJI's (and similar drones') ".lrf" low-res proxy;
+// issue #229 -- blocked on this PR -- reuses this exact set verbatim for
+// the identical-stem/arbitrary-direction PART of DJI's ".srt"
+// flight-telemetry sidecar problem. Kept as its own named, package-level
+// var (not inlined into FilenameStemResolver) specifically so extending
+// it is a one-line change, not a rewrite of the gating logic.
+//
+// Caution for #229: ".srt" is not a video and must NOT also be added to
+// internal/pipeline's videoExts (it isn't an ffprobe-parseable container
+// the way .lrf is) -- adding it here only grants the direction gate.
+// Whether PROXY_OF is even the right relationship_type for a telemetry
+// sidecar (vs. introducing a new one) is #229's call, not assumed here.
+var proxyExts = map[string]bool{
+	"lrf": true,
+}
+
+func isProxyExt(ext string) bool {
+	return proxyExts[strings.ToLower(strings.TrimPrefix(ext, "."))]
+}
+
 // inferRelationship picks the relationship_type both Tier-2 resolvers use,
 // per the build plan's resolver table: PROXY_OF if the child's filename
-// says so, FINAL_EXPORT for raw-to-export pairs (both exts checked -- a raw
-// parent linked to a non-export child, e.g. a project-file sidecar, is not
-// a final export), DERIVED_FROM otherwise.
+// says so, or if the child's extension is a known proxy extension
+// (proxyExts, #228) and the parent's isn't; FINAL_EXPORT for raw-to-export
+// pairs (both exts checked -- a raw parent linked to a non-export child,
+// e.g. a project-file sidecar, is not a final export); DERIVED_FROM
+// otherwise. Callers that can propose a candidate in either direction for
+// an identical-stem, proxy-extension pair (FilenameStemResolver) are
+// responsible for always passing the proxy side as childExt/childFileName
+// -- this function itself has no notion of "which side was originally the
+// resolver's child."
 func inferRelationship(childFileName, childExt, parentExt string) string {
 	if strings.Contains(strings.ToLower(childFileName), "_proxy") {
+		return "PROXY_OF"
+	}
+	if isProxyExt(childExt) && !isProxyExt(parentExt) {
 		return "PROXY_OF"
 	}
 	if rawExts[strings.ToLower(parentExt)] && exportExts[strings.ToLower(childExt)] {
@@ -127,6 +160,19 @@ const indexMatchConfidenceCap = 0.89
 // " copy") is unaffected by any of this: collapsing role-suffixed
 // siblings to a shared stem is the resolver's original intended case, not
 // something #132 changes.
+//
+// Issue #228: a shared stem can also come from two bare, identically-named
+// files that differ only by extension, where one extension is a "known
+// proxy" (proxyExts, e.g. DJI's .lrf) with no content of its own worth
+// treating as authoritative. Neither side carries an index suffix here, so
+// #132's gate above never fires for this case -- Engine still calls
+// Resolve once per node as "child" (see Engine.ResolveAndCommit), so
+// without an explicit rule a DJI_0001.MP4/DJI_0001.LRF pair would propose
+// a candidate in BOTH directions, each independently scorable up to the
+// 0.90 clamp with no principled tiebreak for which one "wins" as parent.
+// Resolve forces the proxy side to always be the child (see the
+// childNode/parentNode swap below) and inferRelationship labels such a
+// pair PROXY_OF rather than the generic DERIVED_FROM.
 type FilenameStemResolver struct{}
 
 func (FilenameStemResolver) Name() string { return "filename_stem" }
@@ -161,6 +207,31 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 			continue
 		}
 
+		// #228: a bare, identically-stemmed pair where one side is a known
+		// proxy extension (proxyExts) always resolves with the proxy as
+		// the child -- regardless of which node THIS Resolve call is
+		// evaluating as "child". Without this, Engine calls Resolve once
+		// per node as "child" (see this type's doc comment on Engine's
+		// per-node resolve loop), so a DJI_0001.MP4/DJI_0001.LRF pair --
+		// neither side carries an index suffix, so indexGated above never
+		// fires for it -- would otherwise propose a candidate in BOTH
+		// directions, each scorable up to the 0.90 clamp; worse, whichever
+		// direction resolves SECOND (a real scan resolves every committed
+		// node in a batch, so both directions do run) would propose the
+		// reverse of whatever the first call already committed, and
+		// Engine's cycle guard would silently refuse it. childNode/
+		// parentNode below are what's actually emitted as ChildID/
+		// ParentID; child/parent (the resolver's own input pairing) are
+		// still used for the boost checks and evidence just below, which
+		// are symmetric (equality/same-day/same-dir) and don't depend on
+		// direction -- evidence intentionally still describes the pair
+		// from the pre-flip (child/parent) orientation even when
+		// childNode/parentNode end up swapped.
+		childNode, parentNode := child, parent
+		if isProxyExt(parent.FileExt) && !isProxyExt(child.FileExt) {
+			childNode, parentNode = parent, child
+		}
+
 		confidence := 0.60
 		evidence := map[string]any{"filename_stem": child.FilenameStem}
 
@@ -186,11 +257,14 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 				confidence = indexMatchConfidenceCap
 			}
 		}
+		if childNode.ID != child.ID {
+			evidence["proxy_ext_direction_forced"] = true
+		}
 
 		candidates = append(candidates, Candidate{
-			ParentID:   parent.ID,
-			ChildID:    child.ID,
-			Rel:        inferRelationship(child.FileName, child.FileExt, parent.FileExt),
+			ParentID:   parentNode.ID,
+			ChildID:    childNode.ID,
+			Rel:        inferRelationship(childNode.FileName, childNode.FileExt, parentNode.FileExt),
 			Confidence: confidence,
 			Tier:       2,
 			Resolver:   "filename_stem",

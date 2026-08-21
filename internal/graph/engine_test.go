@@ -567,6 +567,142 @@ func TestFilenameStemRoleSuffixStillAutoAccepts(t *testing.T) {
 	}
 }
 
+// TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder proves issue
+// #228: DJI_0001.MP4 and DJI_0001.LRF share an identical bare stem
+// (naming.Stem strips only the extension), so neither side carries an
+// index suffix and #132's indexGated rule never fires for this pair --
+// without the #228 fix, FilenameStemResolver would propose a candidate in
+// whichever direction Engine happens to resolve first, since it runs once
+// per node as "child" (Engine.ResolveAndCommit). Two subtests seed the
+// exact same pair and only vary which node is passed as the resolver's
+// "child" input, mirroring scan/resolve order being effectively random --
+// both must land on the identical edge: the proxy (.lrf) as the target
+// (child), the real video as the source (parent), relationship PROXY_OF.
+func TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder(t *testing.T) {
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+
+	assertProxyEdge := func(t *testing.T, edges []sqlcgen.MediaEdge, video, proxy sqlcgen.MediaNode) {
+		t.Helper()
+		if len(edges) != 1 {
+			t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
+		}
+		if edges[0].SourceNodeID != video.ID || edges[0].TargetNodeID != proxy.ID {
+			t.Errorf("edge = %d->%d, want video(%d)->proxy(%d) (proxy must always be the child)",
+				edges[0].SourceNodeID, edges[0].TargetNodeID, video.ID, proxy.ID)
+		}
+		if edges[0].RelationshipType != "PROXY_OF" {
+			t.Errorf("relationship_type = %q, want PROXY_OF", edges[0].RelationshipType)
+		}
+	}
+
+	t.Run("resolver evaluates the proxy as its child input", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.MP4", FileName: "DJI_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("3", 16),
+		})
+		proxy := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.LRF", FileName: "DJI_0001.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("4", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(proxy))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit: %v", err)
+		}
+		assertProxyEdge(t, edges, video, proxy)
+	})
+
+	t.Run("resolver evaluates the real video as its child input", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.MP4", FileName: "DJI_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("5", 16),
+		})
+		proxy := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.LRF", FileName: "DJI_0001.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("6", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(video))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit: %v", err)
+		}
+		assertProxyEdge(t, edges, video, proxy)
+	})
+
+	// A real scan resolves BOTH committed nodes against the same database,
+	// one ResolveAndCommit call per node in the batch (pipeline.
+	// drainAndCommit). Pre-#228, whichever node was resolved second would
+	// propose the edge in the OPPOSITE direction from the first, and
+	// Engine's cycle guard (WouldCreateCycle, fix #7) would silently
+	// refuse it -- the "near-coin-flip" the issue describes, since which
+	// direction wins depends on which node the engine happened to resolve
+	// first. Post-fix, the second call's flip reproduces the SAME
+	// (parent, child, rel) as the first, so UpsertMediaEdge treats it as
+	// an idempotent upsert, not a rejected cycle: exactly one edge must
+	// exist afterward, not zero.
+	t.Run("resolving both nodes in sequence converges on one edge, not a rejected cycle", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.MP4", FileName: "DJI_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("7", 16),
+		})
+		proxy := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.LRF", FileName: "DJI_0001.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("8", 16),
+		})
+
+		engine := newEngine(database)
+
+		// Resolve the proxy first (as a batch's first committed node
+		// might be either file, in either order).
+		firstEdges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(proxy))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(proxy): %v", err)
+		}
+		assertProxyEdge(t, firstEdges, video, proxy)
+
+		// Then resolve the video -- pre-#228 this proposes the reverse
+		// edge and gets silently refused as a cycle.
+		secondEdges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(video))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(video): %v", err)
+		}
+		assertProxyEdge(t, secondEdges, video, proxy)
+
+		edge, err := database.Reader.GetMediaEdgeBySourceTargetRel(ctx, sqlcgen.GetMediaEdgeBySourceTargetRelParams{
+			SourceNodeID: video.ID, TargetNodeID: proxy.ID, RelationshipType: "PROXY_OF",
+		})
+		if err != nil {
+			t.Fatalf("GetMediaEdgeBySourceTargetRel: %v", err)
+		}
+		if edge.ID != firstEdges[0].ID {
+			t.Errorf("second resolve created a distinct edge (id %d) instead of upserting the first (id %d)", edge.ID, firstEdges[0].ID)
+		}
+
+		// And the reverse edge must NOT exist -- confirming the second
+		// call converged on the same direction rather than being rejected
+		// as a cycle after proposing the opposite one.
+		if _, err := database.Reader.GetMediaEdgeBySourceTargetRel(ctx, sqlcgen.GetMediaEdgeBySourceTargetRelParams{
+			SourceNodeID: proxy.ID, TargetNodeID: video.ID, RelationshipType: "PROXY_OF",
+		}); err == nil {
+			t.Error("a reverse proxy->video edge exists; want only the forward video->proxy edge")
+		}
+	})
+}
+
 // TestIndexMatchCapBelowTier2Threshold is a one-line guard that
 // indexMatchConfidenceCap and AutoAcceptThresholdForTier(2) can never drift
 // out of the relationship FilenameStemResolver's doc comment depends on.
