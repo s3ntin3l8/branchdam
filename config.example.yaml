@@ -23,6 +23,17 @@ workers:
   perceptualHash: true            # default true; disable to skip pHash extraction
                                    # (Tier-3 heuristic matching needs this on)
 
+thumbnails:
+  # JPEG thumbnail cache (internal/thumbs). cacheDir lives on the app's own
+  # /data volume, NOT inside any storageLocations tier -- see
+  # internal/thumbs' package doc for why it deliberately does not route
+  # through storage.Guard. Must be absolute, same as database.path.
+  enabled: true
+  cacheDir: /data/thumbs
+  maxEdgePx: 512                  # longest edge in pixels; never upscaled
+  workers: 0                      # 0 = auto, same meaning as workers.hashWorkers
+  intervalSecs: 0                 # 0 = worker's built-in default poll interval
+
 agent:
   # Machine-principal key for /api/v1/agent/* routes, which bypass Authentik
   # ForwardAuth at the Traefik layer (see docs/forward-auth.md). Must be at

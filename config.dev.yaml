@@ -30,6 +30,12 @@ workers:
   hashWorkers: 0
   fullHashPolicy: tier3_and_collision
 
+thumbnails:
+  # cacheDir must be absolute (same reasoning as database.path above) --
+  # the /data/thumbs container default isn't valid for a bare local
+  # checkout, so this is the one thumbnails field dev-config overrides.
+  cacheDir: __REPO_ROOT__/data/thumbs
+
 agent:
   # Left unresolved on purpose: unset means agent routes fail closed with
   # 503 rather than silently accepting an empty key. Not fatal to startup --

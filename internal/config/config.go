@@ -34,6 +34,30 @@ type Config struct {
 
 	// PathRewrites maps host path prefixes to container path prefixes (PR 44/45).
 	PathRewrites []PathRewrite `yaml:"pathRewrites"`
+
+	Thumbnails Thumbnails `yaml:"thumbnails"`
+}
+
+// Thumbnails configures the JPEG thumbnail cache (internal/thumbs). The
+// cache directory lives on the app's own data volume, not inside any
+// storage_locations tier -- see internal/thumbs' package doc for why it
+// deliberately does not route through storage.Guard.
+type Thumbnails struct {
+	// Enabled turns the thumbnail worker on or off (default true).
+	Enabled bool `yaml:"enabled"`
+	// CacheDir is the root directory thumbnails are written under, sharded
+	// by node UUID. Must be absolute, same as database.path.
+	CacheDir string `yaml:"cacheDir"`
+	// MaxEdgePx is the longest-edge target in pixels a thumbnail is scaled
+	// to (never upscaled). 0 uses thumbs.DefaultMaxEdgePx.
+	MaxEdgePx int `yaml:"maxEdgePx"`
+	// Workers is the goroutine count for the thumbnail generation worker.
+	// 0 means auto, mirroring Workers.HashWorkers.
+	Workers int `yaml:"workers"`
+	// IntervalSecs is the polling interval between batches when the
+	// pending-thumbnail queue is empty. 0 uses the worker's built-in
+	// default, mirroring StorageLocation.SweepIntervalSecs.
+	IntervalSecs int `yaml:"intervalSecs"`
 }
 
 // PathRewrite maps host path prefixes to container path prefixes.
@@ -147,6 +171,13 @@ func defaultConfig() Config {
 			HashWorkers:    0,
 			FullHashPolicy: "tier3_and_collision",
 			PerceptualHash: true,
+		},
+		Thumbnails: Thumbnails{
+			Enabled:      true,
+			CacheDir:     "/data/thumbs",
+			MaxEdgePx:    0,
+			Workers:      0,
+			IntervalSecs: 0,
 		},
 	}
 }

@@ -12,6 +12,7 @@ require (
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/stretchr/testify v1.12.0
 	github.com/zeebo/blake3 v0.2.4
+	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
