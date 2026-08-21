@@ -71,18 +71,20 @@ describe("useEventStream", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     FakeEventSource.instances[0].emit("progress");
 
+    // Exact match, not arrayContaining -- this hook invalidates a fixed,
+    // known set of keys on every nudge, so a future omission (e.g. dropping
+    // one of ASSET_DETAIL_QUERY_KEYS by accident) should fail this test
+    // instead of passing silently.
     const keys = spy.mock.calls.map(([filters]) => filters?.queryKey);
-    expect(keys).toEqual(
-      expect.arrayContaining([
-        ["progress"],
-        ["assets"],
-        ["audit-queue"],
-        ["jobs"],
-        ["storage-health"],
-        ["asset"],
-        ["asset-lineage"],
-        ["asset-graph"],
-      ]),
-    );
+    expect(keys).toEqual([
+      ["progress"],
+      ["assets"],
+      ["audit-queue"],
+      ["jobs"],
+      ["storage-health"],
+      ["asset"],
+      ["asset-lineage"],
+      ["asset-graph"],
+    ]);
   });
 });

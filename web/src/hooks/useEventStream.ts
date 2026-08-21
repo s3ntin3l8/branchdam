@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { ASSET_DETAIL_QUERY_KEYS } from "./queries";
 
 /**
  * Subscribes to the SSE progress stream (GET /api/v1/events) and
@@ -26,18 +27,16 @@ export function useEventStream() {
       // else here.
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
-      // "asset" (singular, useAsset's key for GET /api/v1/assets/{id}) is a
-      // DIFFERENT query key namespace from "assets" (plural, the list) --
-      // TanStack Query's prefix matching only covers keys that start with the
-      // exact given key array, so invalidating "assets" does NOT also cover
-      // "asset". A background scan or graph-resolver pass changing a node's
+      // A background scan or graph-resolver pass changing a node's
       // graph_status -- not a manual confirm/reject/create action -- must
       // still refresh a mounted AssetDetailPage (its detail query, lineage,
       // and graph) within the query's staleTime, matching what queries.ts's
-      // invalidateEdgeReviewQueries already does for the mutation path.
-      void queryClient.invalidateQueries({ queryKey: ["asset"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset-lineage"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset-graph"] });
+      // invalidateEdgeReviewQueries already does for the mutation path. See
+      // ASSET_DETAIL_QUERY_KEYS's doc comment for why "asset" is a separate
+      // namespace from "assets" above.
+      for (const key of ASSET_DETAIL_QUERY_KEYS) {
+        void queryClient.invalidateQueries({ queryKey: [key] });
+      }
     };
 
     source.addEventListener("progress", onProgress);
