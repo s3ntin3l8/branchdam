@@ -123,11 +123,39 @@ mapping those two columns to `bool` when `internal/graph` (PR 7) starts consumin
 
 ## Post-Increment-1 Additions
 
+Every migration after `00001_init.sql`, in order:
+
+| Migration | Adds | Why |
+|---|---|---|
+| `00002_tier3_camera_fields.sql` | `media_nodes.camera_serial`, `.lens_model`; partial index `ix_media_nodes_camera_time` | Phase 3/issue #39 — see below |
+| `00003_event_queue_retry_count.sql` | `event_queue.retry_count` | Phase 8's agent drainer bounds retries the same way `remote_sync_state` does (below), rather than retrying a poison event forever |
+| `00004_remote_sync_state_index.sql` | `ix_remote_sync_state_remote_status ON remote_sync_state(remote, sync_status, last_attempt_at, node_id)` | Issue #165 — every hot query against this table (the sync worker's claim query, both crash-recovery re-claim queries) filters on `remote` + `sync_status`, but the only existing index was the `(node_id, remote)` PK; every one of those queries was a full table scan plus a filesort. `node_id` trails the index specifically to also satisfy the claim query's tiebreaker without an extra in-memory sort |
+| `00005_remote_sync_state_retry_count.sql` | `remote_sync_state.retry_count` | #182/#207 — bounds Immich push retries so a permanently-failing row (e.g. a stale `libraryId`) surfaces as exhausted rather than retrying forever |
+| `00006_downgrade_index_suffix_stem_edges.sql` | one-time `UPDATE` (not a schema change) | Issue #132's data-correction migration — see below |
+
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.
 - Added partial index `ix_media_nodes_camera_time ON media_nodes(camera_serial, captured_at_unix) WHERE camera_serial IS NOT NULL`.
 - Added migration `00002_tier3_camera_fields.sql`.
 - Added `ListTier3Candidates` query in `internal/db/queries/media_nodes.sql`.
+
+### Issue #132 (index-suffix `filename_stem` matches capped below auto-accept)
+- `internal/graph.FilenameStemResolver` now requires a live, bare anchor node before emitting a
+  candidate at all, and caps an index-suffix-derived match (`-N`/`(N)`, e.g. `trip-1.jpg`) at
+  `0.89` — strictly below Tier 2's `0.90` auto-accept threshold — so it always lands in the audit
+  queue unless corroborated by a non-`filename_stem` resolver. Role suffixes (`_edit`, `_proxy`,
+  `_vN`, `` copy``) are unaffected; collapsing those siblings to a shared stem remains the
+  resolver's intended case. See `CLAUDE.md`'s Key invariants for the full rationale.
+- This is a code fix, not a schema change, but `UpsertMediaEdge`'s confidence-only-increases rule
+  (`ON CONFLICT ... DO UPDATE ... confidence = MAX(excluded, stored)`) means it only governs
+  *future* resolves — an edge already written `AUTO_ACCEPTED` under the old, unbounded logic would
+  never self-correct on a rescan. Migration `00006_downgrade_index_suffix_stem_edges.sql` is the
+  matching one-time data correction: it downgrades exactly the rows the new logic wouldn't have
+  written (`resolver = 'filename_stem'`, `review_state = 'AUTO_ACCEPTED'`, and a character-adjacency
+  test that identifies the index-suffix case without `GLOB` or `LIKE` — see the migration's own
+  comment for the documented, deliberately conservative miss on multi-marker filenames), and
+  recomputes `graph_status` for the narrow `LINKED → NEEDS_REVIEW` transition that downgrade can
+  cause. `CONFIRMED`/`REJECTED` rows are never touched, migrations included.
 
 ### Phase 7 (#53): `remote_sync_state`'s first write path
 - `remote_sync_state` is no longer DDL-only. Phase 7 landed its first write path (#53): the query surface + `internal/sync` push state machine — idempotent on the `(node_id, remote)` PK, per-remote-scoped, with an atomic claim.

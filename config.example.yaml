@@ -20,6 +20,8 @@ workers:
   hashWorkers: 0                  # 0 = auto (min(4, NumCPU)); hashing is I/O
                                    # bound on a NAS, going wide thrashes disks
   fullHashPolicy: tier3_and_collision   # always | tier3_and_collision | never
+  perceptualHash: true            # default true; disable to skip pHash extraction
+                                   # (Tier-3 heuristic matching needs this on)
 
 agent:
   # Machine-principal key for /api/v1/agent/* routes, which bypass Authentik
@@ -44,6 +46,17 @@ immich:
   libraryId: ${IMMICH_LIBRARY_ID}
   exportPath: /storage/exports/immich
 
+# Operator-declared host-path -> container-path prefix rewrites for Tier-1
+# project-file introspection (.dam.json, .drp, .fcpxml, .edl) -- without at
+# least one matching rule, project files fall through to basename+size
+# fallback matching only. See docs/project-paths.md for the full resolution
+# strategy and docs/configuration.md for the field reference. Commented out
+# by default -- uncomment and adjust to your editing workstations' paths.
+# pathRewrites:
+#   - from: "D:\\Footage\\"
+#     to: "/storage/projects/Footage/"
+#   - from: "/Volumes/Video/Projects/"
+#     to: "/storage/projects/Video/"
 
 # One entry per mounted storage tier. Tier must be one of:
 #   TIER0_LOCAL_STAGING, TIER1_LOCAL_SCRATCH, TIER2_EXPORTS,

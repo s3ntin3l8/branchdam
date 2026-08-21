@@ -10,27 +10,37 @@ ForwardAuth, on SQLite in WAL mode.
   — committed as received; the implementation deliberately diverges from it
   in nine places. See [`docs/schema.md`](docs/schema.md) for the itemized
   deviations and why. Where they disagree, the code is right.
+- **Deploying:** [`docs/deploy.md`](docs/deploy.md) (first bring-up),
+  [`docs/configuration.md`](docs/configuration.md) (every `config.yaml` field),
+  [`docs/operations.md`](docs/operations.md) (upgrades, backups, troubleshooting)
 - **Forward-auth / Authentik setup:** [`docs/forward-auth.md`](docs/forward-auth.md)
 - **Roadmap (increment 2+):** [`docs/roadmap.md`](docs/roadmap.md)
+- **Design docs:** [`docs/agent-protocol.md`](docs/agent-protocol.md) (REST vs. gRPC ADR for the
+  agent contract), [`docs/project-paths.md`](docs/project-paths.md) (Tier-1 path resolution),
+  [`docs/dam-manifest.md`](docs/dam-manifest.md) (`.dam.json` spec),
+  [`docs/google-photos.md`](docs/google-photos.md) (feasibility spike, resolved no-go)
 
 ## Status
 
-Increment 1 (server + SPA) is complete: a corrected schema, storage-tier write
-guard, dual-hash fingerprinting, directory indexing, EXIF extraction, the scan
-pipeline, Tier-2 lineage resolution, Authentik/API-key auth, the full REST +
-SSE API, the React dashboard, and a production Docker image are all built,
-tested, and CI-verified — see [`CLAUDE.md`](CLAUDE.md) for the architecture
-and package map, and `docs/schema.md` for the schema decisions and deviation
-ledger against the original spec.
+Roadmap phases 0–9 are landed: the corrected schema, storage-tier write guard,
+dual-hash fingerprinting, directory indexing + fsnotify watching + differential
+sweeping, EXIF extraction, the scan pipeline (including move-detection —
+`MISSING`/rebase), Tier-2 and Tier-3 lineage resolution, Tier-1 project-file
+introspection, bounded multi-hop lineage traversal, group-based authorization,
+the agent-server contract (`event_queue` drain, handshake, path rebase),
+Authentik/API-key auth, the full REST + SSE API, the React dashboard, Immich
+push, TTL cache pruning, and a production Docker image — all built, tested,
+and CI-verified. See [`CLAUDE.md`](CLAUDE.md) for the architecture and package
+map, [`docs/schema.md`](docs/schema.md) for the schema decisions and deviation
+ledger, and [`docs/roadmap.md`](docs/roadmap.md) for phase-by-phase detail.
 
-A few pieces of increment 1 are built and tested but not yet wired into a
-production code path — notably fsnotify watching (`indexer.Watch`) and
-move-detection (nothing yet marks a vanished file `MISSING`, so its rebase
-logic in `internal/pipeline/commit.go` has never run outside a test). Closing
-those gaps is phase 1 of [`docs/roadmap.md`](docs/roadmap.md), which also
-covers everything else the spec still asks for: the workstation agent
-(Tauri/Rust), DaVinci Resolve hook, Luminar catalog reader, Tier-1/Tier-3
-graph resolution, Immich push, and a Google Photos feasibility spike.
+The one open roadmap item is phase 10, the workstation agent (Tauri/Rust) —
+filed as a placeholder tracking issue (#62), its repo location still an open
+decision. Everything else the original spec asked for either shipped or was
+resolved as a deliberate no-go (Google Photos push, see
+[`docs/google-photos.md`](docs/google-photos.md)).
+
+Ready to test against real media? Start with [`docs/deploy.md`](docs/deploy.md).
 
 ## Development
 

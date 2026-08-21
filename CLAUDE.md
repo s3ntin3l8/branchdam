@@ -416,6 +416,22 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 - [`docs/schema.md`](docs/schema.md) -- the itemized deviation ledger against that spec (nine
   numbered fixes) and the sqlc risk note.
 - [`docs/forward-auth.md`](docs/forward-auth.md) -- the Authentik/Traefik walkthrough.
+- [`docs/deploy.md`](docs/deploy.md) -- first-deploy runbook: Authentik/Traefik setup sequence,
+  `compose.override.yaml`, `config.yaml`/`.env`, bring-up, first scan.
+- [`docs/configuration.md`](docs/configuration.md) -- field-by-field reference for every
+  `config.yaml` key, including the two (`pathRewrites`, `workers.perceptualHash`) missing from
+  `config.example.yaml` itself.
+- [`docs/operations.md`](docs/operations.md) -- day-2: background workers, upgrades, backup/restore,
+  the pruning runbook, a troubleshooting table.
 - [`docs/roadmap.md`](docs/roadmap.md) -- the phased plan for everything after increment 1: the
   spec's remaining pillars plus the built-but-unwired surface increment 1 left connected to
-  nothing. Filed as GitHub issues per phase, worked through mullion task master.
+  nothing. Filed as GitHub issues per phase, worked through mullion task master. Phases 0-9 are
+  landed; only phase 10 (workstation agent) remains open.
+- [`docs/agent-protocol.md`](docs/agent-protocol.md) -- ADR: REST vs. gRPC for the phase-8 agent
+  event stream.
+- [`docs/project-paths.md`](docs/project-paths.md) -- Tier-1 project-file path resolution
+  strategy (`pathRewrites`, ambiguity policy, missing-node handling).
+- [`docs/dam-manifest.md`](docs/dam-manifest.md) -- the `.dam.json` project manifest schema.
+- [`docs/google-photos.md`](docs/google-photos.md) -- Google Photos push feasibility spike,
+  resolved as a no-go (branchDAM's sync layer has no byte-transfer capability, not a Google-side
+  restriction).
