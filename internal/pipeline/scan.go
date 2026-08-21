@@ -188,6 +188,26 @@ var ErrScanAlreadyRunning = errors.New("a scan is already running for this stora
 // location) -- without this guard, two concurrent differential requests
 // against the same location would both walk it independently, same failure
 // mode #163 already fixed for FULL_SCAN.
+//
+// This guard is deliberately same-kind-only: a FULL_SCAN and a manually
+// triggered differential INCREMENTAL can still run concurrently against the
+// same location (impossible before #226, since manual INCREMENTAL didn't
+// exist). That's a safe combination, not an oversight -- but the safety
+// comes from a genuinely separate mechanism, not from anything in this
+// guard. A file the differential sweep routes through Pool.Submit is
+// covered the same way #163 already covers two concurrent FULL_SCANs
+// (Submit's per-path dedup refuses the loser, marking its path
+// seen-but-uncertain, which excludes it from the MISSING sweep). But most
+// of a mostly-unchanged Tier-3 archive's files never reach Pool.Submit at
+// all -- sweepUnchanged routes them straight to touchBatcher.add, which has
+// no dedup or refusal handling of its own. What actually makes that path
+// safe against a concurrent FULL_SCAN's version collision is
+// TouchMediaNode's own MISSING-only CASE (internal/db/queries/media_nodes.sql):
+// a touch that lands on a node the concurrent FULL_SCAN just archived is a
+// no-op on lifecycle_state, never a resurrection into a live duplicate
+// alongside the FULL_SCAN's freshly inserted successor row. See that
+// query's comment and TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
+// (internal/pipeline) for the regression test proving it.
 func createScanJob(ctx context.Context, deps ScanDeps, location storage.Location, kind string) (sqlcgen.ScanJob, error) {
 	var job sqlcgen.ScanJob
 	err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {

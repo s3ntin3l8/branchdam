@@ -297,6 +297,20 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   index on `media_nodes(file_path)` only excludes `ARCHIVED` rows -- archiving the old row
   first is what keeps a live old row and a live new row from ever coexisting at the same path,
   even for an instant within the transaction.
+- **A manually-triggered differential scan (`POST /api/v1/scan {differential:true}`, #226,
+  Tier-3 only) is allowed to run concurrently with a `FULL_SCAN` against the same location --
+  this is a deliberate, safe gap, not an oversight.** `createScanJob`'s already-running guard
+  (#163, widened by #226) is same-kind-only: it blocks two concurrent `FULL_SCAN`s or two
+  concurrent `INCREMENTAL`s, but not a `FULL_SCAN` racing a differential `INCREMENTAL`, which
+  couldn't happen before #226 since a manually-triggered `INCREMENTAL` didn't exist. The safety
+  net for that combination is `TouchMediaNode`'s own `CASE WHEN lifecycle_state = 'MISSING'
+  THEN 'ACTIVE' ELSE lifecycle_state END` (`internal/db/queries/media_nodes.sql`): if a
+  concurrent `FULL_SCAN`'s version collision archives a node between the differential sweep's
+  `sweepUnchanged` check and its deferred `touchBatcher` flush, the flush's `UPDATE` lands on a
+  now-`ARCHIVED` row id and is a no-op on `lifecycle_state` (the `ELSE` branch) -- never a
+  resurrection into a live duplicate alongside the `FULL_SCAN`'s freshly inserted successor.
+  See `TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch`
+  (`internal/pipeline/sweep_test.go`) for the regression test.
 - **The asset graph endpoint is one hop, deliberately.** `GET /api/v1/assets/{id}/graph`
   returns direct parents/children only, not a bounded recursive traversal. This is a stated
   scope line for increment 1, not a hidden gap -- see `internal/httpapi/routes.go`.

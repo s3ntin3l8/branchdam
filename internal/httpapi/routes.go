@@ -1333,9 +1333,14 @@ type StartScanInput struct {
 		// short of a full re-hash. Omitted or false is a full, non-
 		// differential scan -- today's only behavior, unaffected by this
 		// field's addition. `omitempty` (matching PruneInput.Execute's own
-		// pattern below) is what keeps this optional in Huma's schema, so an
-		// existing `{"storageLocationId": N}` caller with no `differential`
-		// key still compiles/validates unchanged.
+		// pattern below) is what keeps this optional in Huma's generated
+		// schema: Huma v2's own struct-to-schema walk (schema.go) marks every
+		// field required by default and only flips a field to optional when
+		// its json tag contains "omitempty" (or "omitzero", or an explicit
+		// `required:"false"` tag) -- so an existing `{"storageLocationId": N}`
+		// caller with no `differential` key still compiles/validates
+		// unchanged. TestStartScanDifferentialOmittedDefaultsToFullScan
+		// pins this.
 		Differential bool `json:"differential,omitempty"`
 	}
 }

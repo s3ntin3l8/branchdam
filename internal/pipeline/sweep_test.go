@@ -279,6 +279,95 @@ func TestTouchBatcherFlushFailureMarksUncertain(t *testing.T) {
 	}
 }
 
+// TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch is the
+// regression test #226's widened createScanJob guard depends on but doesn't
+// itself provide: the guard is deliberately same-kind-only (see its doc
+// comment), so a FULL_SCAN and a manually-triggered differential
+// INCREMENTAL can now run concurrently against the same location. Most of a
+// mostly-unchanged Tier-3 archive's files never reach workers.Pool.Submit's
+// per-path dedup at all -- sweepUnchanged routes them straight to
+// touchBatcher, which has no dedup/refusal handling of its own. What
+// actually makes that combination safe is TouchMediaNode's own
+// MISSING-only CASE (internal/db/queries/media_nodes.sql): reproduces, by
+// deliberately sequencing the interleaving rather than racing goroutines
+// (the SQL-level safety property being tested doesn't depend on timing,
+// only on operation order), the case where a concurrent FULL_SCAN's version
+// collision archives a node id AFTER the differential sweep's
+// sweepUnchanged check already decided to touch it, but BEFORE that
+// deferred touchBatcher flush actually runs.
+func TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER3_MASTER_ARCHIVE", true)
+	const path = "/archive/master.raw"
+
+	// Baseline: the node a differential sweep's sweepUnchanged check will
+	// decide is unchanged and queue for a touch.
+	stats, err := Commit(ctx, database, locationID, []Result{
+		{Path: path, FileName: "master.raw", FileExt: "raw", Size: 100, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
+	})
+	if err != nil || stats.Inserted != 1 {
+		t.Fatalf("Commit (baseline insert): stats=%+v err=%v", stats, err)
+	}
+	node1 := mustGetLiveNode(t, database, path)
+
+	// The differential sweep's own machinery: sweepUnchanged already ran
+	// (elsewhere, conceptually) and decided node1 is unchanged, queuing a
+	// touch for it -- but the batch hasn't flushed yet.
+	uncertain := newUncertainPaths()
+	var filesFailed atomic.Int32
+	batch := newTouchBatcher(database, uncertain, &filesFailed, nil)
+	batch.add(ctx, node1.ID, path, node1.MtimeUnix)
+
+	// Before that deferred flush runs, a concurrent FULL_SCAN observes
+	// different content at the same path and commits a version collision:
+	// archive-then-insert (docs/schema.md fix #3) means node1 is archived
+	// and a fresh node2 takes over the live path.
+	collisionStats, err := Commit(ctx, database, locationID, []Result{
+		{Path: path, FileName: "master.raw", FileExt: "raw", Size: 200, ModTime: time.Now(), FastHash: "bbbbbbbbbbbbbbbb"},
+	})
+	if err != nil || collisionStats.VersionCollisions != 1 {
+		t.Fatalf("Commit (concurrent version collision): stats=%+v err=%v", collisionStats, err)
+	}
+	archivedBeforeTouch, err := database.Reader.GetMediaNodeByID(ctx, node1.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID(node1) after collision: %v", err)
+	}
+	if archivedBeforeTouch.LifecycleState != "ARCHIVED" {
+		t.Fatalf("node1 lifecycle_state = %q after concurrent collision, want ARCHIVED", archivedBeforeTouch.LifecycleState)
+	}
+
+	// Now the differential sweep's deferred touch finally lands, against the
+	// id of what is now an ARCHIVED row.
+	batch.flush(ctx)
+	if batch.total != 1 {
+		t.Errorf("touchBatcher.total = %d, want 1 (the touch itself is a valid UPDATE, not a failure)", batch.total)
+	}
+
+	// The core assertion: TouchMediaNode's MISSING-only CASE must not have
+	// resurrected node1 back to ACTIVE.
+	node1AfterTouch, err := database.Reader.GetMediaNodeByID(ctx, node1.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID(node1) after touch: %v", err)
+	}
+	if node1AfterTouch.LifecycleState != "ARCHIVED" {
+		t.Errorf("node1 lifecycle_state = %q after the deferred touch, want still ARCHIVED (must not be resurrected)", node1AfterTouch.LifecycleState)
+	}
+
+	// And no live duplicate exists at the path: the live row must still be
+	// node2, the FULL_SCAN's successor, exactly one of it.
+	liveNow := mustGetLiveNode(t, database, path)
+	if liveNow.ID == node1.ID {
+		t.Fatalf("live node at %q is node1 (%d), want the FULL_SCAN's successor node", path, node1.ID)
+	}
+	if liveNow.LifecycleState != "ACTIVE" {
+		t.Errorf("live node lifecycle_state = %q, want ACTIVE", liveNow.LifecycleState)
+	}
+	if liveNow.FastHash == nil || *liveNow.FastHash != "bbbbbbbbbbbbbbbb" {
+		t.Errorf("live node fast_hash = %v, want the collision's fast_hash (bbbb...)", liveNow.FastHash)
+	}
+}
+
 // TestSweepMarksDeletedFileMissing proves the differential sweep reuses the
 // exact same clean-completion-gated MISSING sweep a full scan uses (#60's
 // stated acceptance criterion), not an approximation of it: a file removed
