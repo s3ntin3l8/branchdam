@@ -79,3 +79,13 @@ server-visible would trade away the local editing performance this topology is b
 The practical consequence: cache pruning (`POST /api/v1/prune`, `cacheTtlHours`) has nothing to
 act on, since it requires a server-visible path to delete from. This is expected, not a
 misconfiguration — see `workflow-coverage.md`'s step 12.
+
+## 6. Reaching this server when a workstation isn't on the LAN
+
+Everything above assumes the ingest workstation is on the same LAN as the server host. For a
+travelling workstation doing field ingest away from home, see
+[`forward-auth.md` §4](forward-auth.md#4-reaching-the-agent-route-off-lan): an overlay network
+(Tailscale or equivalent) is the assumed transport, it has to land on the same Traefik hostname
+and router rather than exposing the container port directly, and `/api/v1/agent/*`'s
+`X-API-Key` auth model is unchanged either way — the security boundary is the key, not the
+network.
