@@ -1778,17 +1778,15 @@ func TestCreateManualEdge(t *testing.T) {
 }
 
 // TestCreateManualEdgeRefusesProjectFileNodes backs #199: a manual edge must
-// not link a project file (.drp/.fcpxml/.edl/.dam.json/.prproj) as an
-// endpoint of an identity-ancestry relationship (DERIVED_FROM/FINAL_EXPORT/
-// PROXY_OF) -- the edge is never created CONFIRMED. The child (target) case
-// is the dangerous one: a DERIVED_FROM edge targeting a project file would
-// pass pickWinningParent and make handleInheritMetadata run exiftool
-// in-place against the project archive. Both the target-side and
-// source-side refusals are scoped to identity-ancestry relationship types
-// (see TestCreateManualEdgeAllowsProjectSidecarTarget for the target side,
-// TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship for
-// the source side) -- this test only exercises DERIVED_FROM, which is in
-// that set on both ends.
+// not use a project file (.drp/.fcpxml/.edl/.dam.json/.prproj) as the
+// CHILD/target of an identity-ancestry relationship (DERIVED_FROM/
+// FINAL_EXPORT/PROXY_OF) -- the edge is never created CONFIRMED. This is the
+// dangerous shape: it would pass pickWinningParent and make
+// handleInheritMetadata run exiftool's write in-place against the project
+// archive (WriteTags always targets the CHILD's file). There is no
+// source-side (parent) refusal -- see
+// TestCreateManualEdgeAllowsProjectFileAsSource for why that shape is
+// hazard-free and must stay allowed.
 func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()
@@ -1838,18 +1836,7 @@ func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 		t.Errorf("project-file-target body = %q, want it to contain %q", got, want)
 	}
 
-	// 2. DERIVED_FROM with the project file as the SOURCE (parent) is refused.
-	bodySource := map[string]any{
-		"sourceNodeId":     proj.ID,
-		"targetNodeId":     media.ID,
-		"relationshipType": "DERIVED_FROM",
-	}
-	rrSource := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", bodySource)
-	if rrSource.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("project-file-source status = %d, want 422, body = %s", rrSource.Code, rrSource.Body.String())
-	}
-
-	// 3. A normal media->media edge is still accepted (the refusal is scoped
+	// 2. A normal media->media edge is still accepted (the refusal is scoped
 	// to project files, not to the manual-edge path in general).
 	rrOK := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
 		"sourceNodeId":     media.ID,
@@ -1860,20 +1847,13 @@ func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
 		t.Fatalf("media->media status = %d, want 200, body = %s", rrOK.Code, rrOK.Body.String())
 	}
 
-	// 4. No edge was created with the project file at either endpoint.
+	// 3. No edge was created targeting the project file.
 	byTarget, err := database.Reader.ListEdgesByTarget(ctx, proj.ID)
 	if err != nil {
 		t.Fatalf("list edges by target: %v", err)
 	}
 	if len(byTarget) != 0 {
 		t.Errorf("expected no edges targeting the project file, got %d", len(byTarget))
-	}
-	bySource, err := database.Reader.ListEdgesBySource(ctx, proj.ID)
-	if err != nil {
-		t.Fatalf("list edges by source: %v", err)
-	}
-	if len(bySource) != 0 {
-		t.Errorf("expected no edges sourced from the project file, got %d", len(bySource))
 	}
 }
 
@@ -1948,11 +1928,21 @@ func TestCreateManualEdgeAllowsProjectSidecarTarget(t *testing.T) {
 // media node) as DUPLICATE_OF poses none of the hazard the source-side
 // refusal exists to close, and the web UI's ManualLinkModal lets the caller
 // pick source/target freely for exactly this relationship type.
-func TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship(t *testing.T) {
+// TestCreateManualEdgeAllowsProjectFileAsSource backs Hermes's finding on
+// #199's review: unlike the target/child side, a project file as the
+// SOURCE/parent of ANY relationship type -- including the identity-ancestry
+// ones (DERIVED_FROM/FINAL_EXPORT/PROXY_OF) -- poses no exiftool hazard and
+// must be allowed. handleInheritMetadata's loadTagSet reads a node's tags
+// entirely from the DB (ListNodeMetadata + promoted columns); it never runs
+// exiftool against the PARENT's file, only WriteTags against the CHILD's.
+// So a real use case like "this export is the FINAL_EXPORT of this .drp
+// project" (ManualLinkModal already exposes source/target freely) must not
+// be refused just because the parent happens to be a project file.
+func TestCreateManualEdgeAllowsProjectFileAsSource(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()
 
-	var media, proj sqlcgen.MediaNode
+	var media, media2, proj sqlcgen.MediaNode
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
@@ -1967,6 +1957,12 @@ func TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship(t *
 		if err != nil {
 			return err
 		}
+		media2, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media2", FilePath: "/m2.jpg", FileName: "m2.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
 		proj, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			StorageLocationID: loc.ID, NodeUuid: "uuid-project", FilePath: "/proj.drp", FileName: "proj.drp", FileExt: "drp", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
 		})
@@ -1976,8 +1972,7 @@ func TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship(t *
 		t.Fatalf("seed nodes: %v", err)
 	}
 
-	// DUPLICATE_OF with the project file as the SOURCE (parent) -- the shape
-	// the old unconditional source-side refusal used to block -- is accepted.
+	// DUPLICATE_OF with the project file as the SOURCE (parent) is accepted.
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
 		"sourceNodeId":     proj.ID,
 		"targetNodeId":     media.ID,
@@ -1987,12 +1982,24 @@ func TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship(t *
 		t.Fatalf("DUPLICATE_OF project-source status = %d, want 200, body = %s", rr.Code, rr.Body.String())
 	}
 
-	byTarget, err := database.Reader.ListEdgesByTarget(ctx, media.ID)
-	if err != nil {
-		t.Fatalf("list edges by target: %v", err)
+	// DERIVED_FROM (identity-ancestry) with the project file as the SOURCE
+	// (parent) is ALSO accepted -- this is the shape the removed source-side
+	// check used to wrongly refuse.
+	rrAncestry := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     proj.ID,
+		"targetNodeId":     media2.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrAncestry.Code != http.StatusOK {
+		t.Fatalf("DERIVED_FROM project-source status = %d, want 200, body = %s", rrAncestry.Code, rrAncestry.Body.String())
 	}
-	if len(byTarget) != 1 || byTarget[0].RelationshipType != "DUPLICATE_OF" || byTarget[0].SourceNodeID != proj.ID {
-		t.Errorf("edges targeting media = %+v, want exactly one DUPLICATE_OF sourced from the project file", byTarget)
+
+	bySource, err := database.Reader.ListEdgesBySource(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("list edges by source: %v", err)
+	}
+	if len(bySource) != 2 {
+		t.Errorf("edges sourced from the project file = %+v, want 2 (DUPLICATE_OF and DERIVED_FROM)", bySource)
 	}
 }
 

@@ -1011,24 +1011,32 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		return nil, huma.Error422UnprocessableEntity("invalid relationship type")
 	}
 
-	// #199: a manual edge must not use a project file as an endpoint of an
-	// identity-ancestry relationship (.drp/.fcpxml/.edl/.dam.json/.prproj,
-	// whatever internal/projectfile's registry recognizes). Such a node is a
-	// container of references, not a camera-derived asset: an edge whose CHILD
-	// is a project file would pass pickWinningParent's filters (its
-	// validParentRelationships) and make handleInheritMetadata run exiftool
-	// in-place against the project archive. Both the target-side and
-	// source-side refusals are scoped to those identity-ancestry relationship
-	// types: PROJECT_SIDECAR *legitimately* targets a project file
+	// #199: a manual edge must not use a project file as the CHILD/target of
+	// an identity-ancestry relationship (.drp/.fcpxml/.edl/.dam.json/.prproj,
+	// whatever internal/projectfile's registry recognizes). That specific
+	// shape is the exiftool hazard: it would pass pickWinningParent's filters
+	// (its validParentRelationships) and make handleInheritMetadata run
+	// exiftool's write in-place against the project archive
+	// (s.prober.WriteTags always targets the CHILD's file path -- see below).
+	// The refusal is scoped to those identity-ancestry relationship types:
+	// PROJECT_SIDECAR *legitimately* targets a project file
 	// (ProjectSidecarResolver.Resolve always makes the project file the
 	// edge's child, the media node its source/parent), and DUPLICATE_OF is a
 	// symmetric relationship a user may reasonably want between two project
 	// files. Both are excluded from validParentRelationships, so neither can
 	// ever reach pickWinningParent/handleInheritMetadata regardless of which
-	// endpoint is a project file -- scoping the refusal this way keeps every
-	// hazard-free manual edge the UI already offers (ManualLinkModal) intact
-	// while still closing the actual exiftool hazard on DERIVED_FROM/
-	// FINAL_EXPORT/PROXY_OF.
+	// endpoint is a project file.
+	//
+	// There is deliberately NO source-side (parent) project-file refusal.
+	// loadTagSet (below) reads a node's tags entirely from the DB
+	// (ListNodeMetadata + promoted columns) -- inherit-metadata never runs
+	// exiftool against the PARENT's file at all, only WriteTags against the
+	// child's. A DERIVED_FROM/FINAL_EXPORT/PROXY_OF edge with a project file
+	// as the parent (e.g. "this export is the FINAL_EXPORT of this .drp
+	// project") is therefore hazard-free and legitimate -- refusing it would
+	// only block a real ManualLinkModal use case for no safety benefit. An
+	// earlier version of this check refused it unconditionally; removed after
+	// review traced the actual write path and found no hazard on that side.
 	//
 	// Also refuses an ARCHIVED endpoint on either side (#115): it passes the
 	// existence/FK check but a manual edge to/from it is never traversed by
@@ -1055,9 +1063,6 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	}
 	if source.LifecycleState == "ARCHIVED" {
 		return nil, huma.Error404NotFound("source asset not found")
-	}
-	if _, ok := projectfile.GetParser(source.FilePath); ok && validParentRelationships[in.Body.RelationshipType] {
-		return nil, huma.Error422UnprocessableEntity("cannot create an identity-ancestry edge sourced from a project file")
 	}
 
 	var createdEdge sqlcgen.MediaEdge
