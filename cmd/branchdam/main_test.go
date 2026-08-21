@@ -172,6 +172,130 @@ func TestSeedStorageLocationsReactivatesReturningLocation(t *testing.T) {
 	}
 }
 
+// TestSeedStorageLocationsPreservesCacheTTLHoursAcrossRootPathEdit backs
+// #238: cacheTtlHours is now a persisted column (seeded straight from
+// config on every startup), not re-joined later by root_path string match
+// -- so editing a prunable location's rootPath in config.yaml and
+// restarting must never orphan its TTL. UpsertStorageLocation's ON
+// CONFLICT (root_path) key means an edited rootPath always inserts a new
+// row rather than updating the old one in place; this proves the NEW row
+// still carries the correct cache_ttl_hours through that insert, and the
+// old (now-deactivated) row is left with whatever it already had.
+//
+// The edited entry uses a different Name, not just a different RootPath.
+// storage_locations.name is independently UNIQUE (00001_init.sql), but
+// UpsertStorageLocation's ON CONFLICT target is root_path only -- so the
+// realistic #238 scenario (an operator edits rootPath while keeping name
+// the SAME, intending to preserve the location's identity) does NOT reach
+// that ON CONFLICT branch at all: root_path is new, so this attempts a
+// plain INSERT, which collides with the still-live old row's name and
+// fails with SQLITE_CONSTRAINT_UNIQUE. seedStorageLocations propagates
+// that error straight to a log.Error + os.Exit(1) at startup, so today
+// that scenario doesn't silently orphan the TTL (this PR's fix) -- it
+// crashes the server on boot instead, which is worse. That's a real,
+// currently-unfixed bug, tracked in #253, not something this PR resolves.
+// This test deliberately uses a different Name specifically to sidestep
+// that crash and isolate what this PR *does* fix: cache_ttl_hours
+// surviving on whichever row root_path's ON CONFLICT key actually
+// produces. It is not a substitute for a same-name regression test --
+// #253 needs one once that bug has an actual fix to test.
+func TestSeedStorageLocationsPreservesCacheTTLHoursAcrossRootPathEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed-ttl-rootpath-edit.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	const ttlHours = 6
+	original := config.StorageLocation{
+		Name: "scratch", RootPath: "/old/root", Tier: "TIER1_LOCAL_SCRATCH",
+		Prunable: true, CacheTTLHours: ttlHours,
+	}
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{original}); err != nil {
+		t.Fatalf("initial seed: %v", err)
+	}
+	before, err := database.Reader.GetStorageLocationByPath(ctx, "/old/root")
+	if err != nil {
+		t.Fatalf("get location before edit: %v", err)
+	}
+	if before.CacheTtlHours != ttlHours {
+		t.Fatalf("cache_ttl_hours before edit = %d, want %d", before.CacheTtlHours, ttlHours)
+	}
+
+	// Simulate a restart with rootPath edited in config.yaml -- same
+	// cacheTtlHours, different path (and, per the comment above, a
+	// different name to avoid the unrelated name-UNIQUE constraint).
+	edited := original
+	edited.Name = "scratch-v2"
+	edited.RootPath = "/new/root"
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{edited}); err != nil {
+		t.Fatalf("re-seed with edited rootPath: %v", err)
+	}
+
+	newRow, err := database.Reader.GetStorageLocationByPath(ctx, "/new/root")
+	if err != nil {
+		t.Fatalf("get location at new root_path: %v", err)
+	}
+	if newRow.CacheTtlHours != ttlHours {
+		t.Errorf("cache_ttl_hours at new root_path = %d, want %d (must not be orphaned by the rootPath edit)", newRow.CacheTtlHours, ttlHours)
+	}
+
+	oldRow, err := database.Reader.GetStorageLocationByPath(ctx, "/old/root")
+	if err != nil {
+		t.Fatalf("get location at old root_path: %v", err)
+	}
+	if oldRow.IsActive != 0 {
+		t.Errorf("old row IsActive = %d, want 0 (self-healed inactive, M6)", oldRow.IsActive)
+	}
+}
+
+// TestSeedStorageLocationsPreservesCacheTTLHoursWhenRootPathUnchanged is
+// the ordinary path: re-seeding with the same rootPath (e.g. an unrelated
+// config change, or just a routine restart) must keep updating
+// cache_ttl_hours in place on the SAME row via UpsertStorageLocation's ON
+// CONFLICT branch, including picking up a changed value.
+func TestSeedStorageLocationsPreservesCacheTTLHoursWhenRootPathUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed-ttl-rootpath-unchanged.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	cfg := config.StorageLocation{
+		Name: "scratch", RootPath: "/stable/root", Tier: "TIER1_LOCAL_SCRATCH",
+		Prunable: true, CacheTTLHours: 6,
+	}
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{cfg}); err != nil {
+		t.Fatalf("initial seed: %v", err)
+	}
+	first, err := database.Reader.GetStorageLocationByPath(ctx, "/stable/root")
+	if err != nil {
+		t.Fatalf("get location: %v", err)
+	}
+	if first.CacheTtlHours != 6 {
+		t.Fatalf("cache_ttl_hours after initial seed = %d, want 6", first.CacheTtlHours)
+	}
+
+	cfg.CacheTTLHours = 12
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{cfg}); err != nil {
+		t.Fatalf("re-seed with changed TTL: %v", err)
+	}
+	second, err := database.Reader.GetStorageLocationByPath(ctx, "/stable/root")
+	if err != nil {
+		t.Fatalf("get location after re-seed: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("re-seed with an unchanged root_path minted a new row (id %d -> %d), want the same row updated in place", first.ID, second.ID)
+	}
+	if second.CacheTtlHours != 12 {
+		t.Errorf("cache_ttl_hours after re-seed = %d, want 12 (updated in place)", second.CacheTtlHours)
+	}
+}
+
 // TestDeactivateStorageLocations is the direct unit test for the helper
 // storage.LoadGuard's skippedLocationIDs feed into.
 func TestDeactivateStorageLocations(t *testing.T) {
