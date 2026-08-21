@@ -140,6 +140,15 @@ export interface ScanJob {
   lastError?: string;
 }
 
+export interface StartScanRequest {
+  storageLocationId: number;
+  // Differential, if true, uses the touch-only fast path instead of
+  // re-hashing every file -- permitted specifically against
+  // TIER3_MASTER_ARCHIVE locations (#226). Omitted or false is a full,
+  // non-differential scan -- unaffected by this field's addition.
+  differential?: boolean;
+}
+
 export interface LineageResponse {
   rootId: number;
   nodes: Asset[];

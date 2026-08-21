@@ -4,11 +4,18 @@ import { useProgress, useStartScan, useStorageLocations } from "../hooks/queries
 export default function IngestPage() {
   const { data, isLoading, isError, error } = useStorageLocations();
   const [selected, setSelected] = useState<number | "">("");
+  const [differential, setDifferential] = useState(false);
   const startScan = useStartScan();
   const progress = useProgress(10);
 
   const locations = data?.locations ?? [];
   const hasReadOnly = locations.some((l) => l.readOnly);
+  const selectedLocation = selected === "" ? undefined : locations.find((l) => l.id === selected);
+  // #226: differential is only accepted by the API against a
+  // TIER3_MASTER_ARCHIVE location -- every other tier already gets a
+  // differential pass for free via the opt-in background sweeper, so the
+  // toggle is hidden rather than shown-but-always-disabled for those.
+  const isTier3 = selectedLocation?.tier === "TIER3_MASTER_ARCHIVE";
 
   return (
     <div className="p-6">
@@ -18,7 +25,10 @@ export default function IngestPage() {
         <select
           value={selected}
           disabled={isLoading || startScan.isPending}
-          onChange={(e) => setSelected(e.target.value ? Number(e.target.value) : "")}
+          onChange={(e) => {
+            setSelected(e.target.value ? Number(e.target.value) : "");
+            setDifferential(false);
+          }}
           className="flex-1 rounded bg-neutral-900 px-3 py-2 text-sm"
         >
           <option value="">{isLoading ? "Loading locations…" : "Choose a storage location"}</option>
@@ -32,12 +42,23 @@ export default function IngestPage() {
         <button
           type="button"
           disabled={selected === "" || startScan.isPending}
-          onClick={() => selected !== "" && startScan.mutate(selected)}
+          onClick={() => selected !== "" && startScan.mutate({ storageLocationId: selected, differential })}
           className="rounded bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
         >
           {startScan.isPending ? "Starting…" : "Scan"}
         </button>
       </div>
+      {isTier3 && (
+        <label className="mb-4 flex items-center gap-2 text-xs text-neutral-400">
+          <input
+            type="checkbox"
+            checked={differential}
+            disabled={startScan.isPending}
+            onChange={(e) => setDifferential(e.target.checked)}
+          />
+          Differential (skip re-hashing files whose size and modified time are unchanged)
+        </label>
+      )}
       {startScan.isError && (
         <p className="mb-4 text-sm text-red-400">Failed to start scan: {String(startScan.error)}</p>
       )}

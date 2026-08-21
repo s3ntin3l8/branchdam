@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PruneRequest, PruneResponse, ScanJob, StorageHealth, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PruneRequest, PruneResponse, ScanJob, StartScanRequest, StorageHealth, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -76,10 +76,10 @@ export const api = {
   inheritMetadata: (id: number) =>
     request<{ inherited: Record<string, string> }>(`/api/v1/assets/${id}/inherit-metadata`, { method: "POST" }),
 
-  startScan: (storageLocationId: number) =>
+  startScan: (input: StartScanRequest) =>
     request<{ jobId: number }>("/api/v1/scan", {
       method: "POST",
-      body: JSON.stringify({ storageLocationId }),
+      body: JSON.stringify(input),
     }),
   listProgress: (limit = 10) => request<{ jobs: ScanJob[] }>(`/api/v1/progress?limit=${limit}`),
   listJobs: (params: JobsQueryParams = {}) => {

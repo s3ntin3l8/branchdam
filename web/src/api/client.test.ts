@@ -68,10 +68,23 @@ describe("api client", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await api.startScan(3);
+    const result = await api.startScan({ storageLocationId: 3 });
     expect(result).toEqual({ jobId: 7 });
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ storageLocationId: 3 });
     expect(init.method).toBe("POST");
+  });
+
+  it("startScan sends differential:true when set (#226)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ jobId: 9 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.startScan({ storageLocationId: 4, differential: true });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ storageLocationId: 4, differential: true });
   });
 });

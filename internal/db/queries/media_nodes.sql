@@ -220,6 +220,20 @@ WHERE id = ?1;
 -- and, if the row was MISSING (a file re-created at its old path), reactivates
 -- it in place -- a MISSING row found alive again is not a version collision
 -- and must not stay MISSING.
+--
+-- The CASE is MISSING-only, not a blanket reactivation, and that's what
+-- makes #226's now-possible concurrent FULL_SCAN + manual differential
+-- INCREMENTAL against the same Tier-3 location safe rather than merely
+-- untested: if a concurrent FULL_SCAN archives this node (a version
+-- collision on the same path) between the differential sweep's
+-- sweepUnchanged check and its deferred touchBatcher flush, this UPDATE
+-- still runs against the now-ARCHIVED row id -- but ARCHIVED falls into the
+-- ELSE branch and stays ARCHIVED. The touch is a harmless no-op on
+-- lifecycle_state (mtime_unix/last_seen_at/updated_at still advance on a
+-- dead row, a minor stale-audit-trail artifact), never a resurrection into
+-- a live duplicate alongside the FULL_SCAN's freshly inserted successor
+-- row. See TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
+-- in internal/pipeline for the regression test.
 UPDATE media_nodes
 SET mtime_unix = ?2, last_seen_at = unixepoch(),
     lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,

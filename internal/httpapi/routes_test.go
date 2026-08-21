@@ -1314,6 +1314,308 @@ func TestStartScanRejectsDuplicateRunningScan(t *testing.T) {
 	}
 }
 
+// TestStartScanDifferentialRejectedForNonTier3 backs #226's decision: the
+// differential fast path is permitted specifically against
+// TIER3_MASTER_ARCHIVE locations. A differential:true request against any
+// other tier must be rejected (422), not silently fall back to a full scan
+// or silently run the sweep anyway -- every other tier already gets a
+// differential pass for free via the opt-in background SweeperSupervisor,
+// so this field intentionally isn't a general-purpose trigger for that.
+func TestStartScanDifferentialRejectedForNonTier3(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	var locationID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "http-scan-differential-non-tier3", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		locationID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	srv.guard = storage.NewGuard([]storage.Location{
+		{ID: locationID, Name: "http-scan-differential-non-tier3", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false},
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]any{"storageLocationId": locationID, "differential": true})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /api/v1/scan {differential:true} against TIER2_EXPORTS: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	running, err := database.Reader.CountRunningScanJobs(ctx)
+	if err != nil {
+		t.Fatalf("CountRunningScanJobs: %v", err)
+	}
+	if running != 0 {
+		t.Errorf("running scan jobs = %d, want 0 (rejected request must not have created a job)", running)
+	}
+}
+
+// TestStartScanDifferentialOmittedDefaultsToFullScan proves an existing
+// caller sending only {"storageLocationId": N} -- with no "differential" key
+// at all -- keeps working unchanged: the field must be optional in Huma's
+// generated schema (StartScanInput.Differential's `omitempty` json tag), not
+// silently required, and its zero value must route through the ordinary
+// FULL_SCAN path.
+func TestStartScanDifferentialOmittedDefaultsToFullScan(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	var locationID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "http-scan-differential-omitted", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		locationID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	srv.guard = storage.NewGuard([]storage.Location{
+		{ID: locationID, Name: "http-scan-differential-omitted", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false},
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]int64{"storageLocationId": locationID})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/v1/scan with no differential key: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var scanResp struct {
+		JobID int64 `json:"jobId"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &scanResp); err != nil {
+		t.Fatalf("unmarshal scan response: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var job sqlcgen.ScanJob
+	for time.Now().Before(deadline) {
+		job, err = database.Reader.GetScanJob(ctx, scanResp.JobID)
+		if err != nil {
+			t.Fatalf("GetScanJob: %v", err)
+		}
+		if job.State != "RUNNING" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job.State != "COMPLETED" {
+		t.Fatalf("job state = %q, want COMPLETED (last_error=%v)", job.State, job.LastError)
+	}
+	if job.Kind != "FULL_SCAN" {
+		t.Errorf("job kind = %q, want FULL_SCAN (omitted differential must not route through the sweep path)", job.Kind)
+	}
+}
+
+// TestStartScanDifferentialAgainstTier3UsesSweepFastPath is #226's HTTP-level
+// wiring proof: differential:true against a TIER3_MASTER_ARCHIVE location
+// creates an INCREMENTAL job and reuses the same touch-only fast path
+// internal/pipeline's sweep tests already cover at the package level --
+// verified here via the node id staying stable (proof it never took
+// Commit's version-collision branch) and files_hashed counting only the
+// file that actually changed, exactly like TestScanEndToEndThroughHTTP's
+// full-scan capstone but through the differential branch.
+func TestStartScanDifferentialAgainstTier3UsesSweepFastPath(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "master-a.dng"), []byte("master alpha content"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	var locationID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "http-scan-differential-tier3", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		})
+		locationID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	srv.guard = storage.NewGuard([]storage.Location{
+		{ID: locationID, Name: "http-scan-differential-tier3", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
+	})
+
+	// Baseline full scan (differential omitted -- must still work against
+	// Tier 3, matching today's only path there).
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]int64{"storageLocationId": locationID})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/v1/scan (baseline) status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var scanResp struct {
+		JobID int64 `json:"jobId"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &scanResp); err != nil {
+		t.Fatalf("unmarshal scan response: %v", err)
+	}
+	waitForHTTPJobDone(t, ctx, database, scanResp.JobID)
+
+	before, err := database.Reader.GetLiveNodeByPath(ctx, filepath.Join(resolvedRoot, "master-a.dng"))
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath: %v", err)
+	}
+
+	// last_seen_at/updated_at are unixepoch() -- 1s granularity -- so the two
+	// scans must cross a second boundary or the "did it advance" assertion
+	// below is flaky by construction (mirrors internal/pipeline's own
+	// waitForNextSecond helper for the same reason).
+	time.Sleep(1100 * time.Millisecond)
+
+	rr = doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]any{"storageLocationId": locationID, "differential": true})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/v1/scan {differential:true} against TIER3_MASTER_ARCHIVE: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var scanResp2 struct {
+		JobID int64 `json:"jobId"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &scanResp2); err != nil {
+		t.Fatalf("unmarshal scan response: %v", err)
+	}
+	job2 := waitForHTTPJobDone(t, ctx, database, scanResp2.JobID)
+	if job2.Kind != "INCREMENTAL" {
+		t.Errorf("differential job kind = %q, want INCREMENTAL", job2.Kind)
+	}
+	if job2.FilesHashed != 0 {
+		t.Errorf("differential job files_hashed = %d, want 0 (unchanged file must not be re-hashed)", job2.FilesHashed)
+	}
+
+	after, err := database.Reader.GetLiveNodeByPath(ctx, filepath.Join(resolvedRoot, "master-a.dng"))
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath: %v", err)
+	}
+	if after.ID != before.ID {
+		t.Errorf("node id changed from %d to %d, want unchanged (differential must have touched, not Commit'd)", before.ID, after.ID)
+	}
+	if after.LastSeenAt <= before.LastSeenAt {
+		t.Errorf("last_seen_at did not advance (got %d, was %d)", after.LastSeenAt, before.LastSeenAt)
+	}
+}
+
+// waitForHTTPJobDone polls a scan_jobs row until it reaches a terminal
+// state, failing the test if it doesn't within 10s. Shared by the
+// differential-Tier-3 HTTP test above; other tests in this file inline the
+// same loop since it predates this helper.
+func waitForHTTPJobDone(t *testing.T, ctx context.Context, database *db.DB, jobID int64) sqlcgen.ScanJob {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var job sqlcgen.ScanJob
+	var err error
+	for time.Now().Before(deadline) {
+		job, err = database.Reader.GetScanJob(ctx, jobID)
+		if err != nil {
+			t.Fatalf("GetScanJob: %v", err)
+		}
+		if job.State != "RUNNING" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job.State != "COMPLETED" {
+		t.Fatalf("job %d state = %q, want COMPLETED (last_error=%v)", jobID, job.State, job.LastError)
+	}
+	return job
+}
+
+// TestStartScanDifferentialRejectsDuplicateRunningIncremental backs #226's
+// widening of createScanJob's already-running guard from FULL_SCAN-only to
+// FULL_SCAN-or-INCREMENTAL: before this PR a manual INCREMENTAL job could
+// never exist (only SweeperSupervisor created one, and its own ticker loop
+// already serializes per location), so this guard's INCREMENTAL branch was
+// unreachable. Now an operator can trigger it directly via
+// differential:true, so two concurrent differential requests against the
+// same Tier-3 location must be rejected exactly like #163 already rejects
+// two concurrent full scans -- otherwise both would walk the location
+// independently, the same starved-by-per-path-dedup failure mode #163
+// fixed for FULL_SCAN.
+//
+// The second assertion is the deliberate converse: with that INCREMENTAL
+// job still RUNNING, a plain (non-differential) POST for the same location
+// is accepted (202), not blocked -- the guard is same-kind-only by design.
+// A FULL_SCAN and a manually-triggered INCREMENTAL can therefore still run
+// concurrently against the same location after this PR (they couldn't
+// collide before it, since manual INCREMENTAL didn't exist) -- see the PR
+// description for why that's an accepted, fail-safe gap (Pool.Submit's
+// per-path dedup marks the loser's paths uncertain, which excludes them
+// from the MISSING sweep, rather than corrupting anything) and not
+// something this PR closes.
+func TestStartScanDifferentialRejectsDuplicateRunningIncremental(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	var locationID int64
+	var runningJobID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "http-scan-differential-dup-test", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locationID = loc.ID
+		job, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: loc.ID, Valid: true},
+			Kind:              "INCREMENTAL",
+		})
+		runningJobID = job.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location + running INCREMENTAL job: %v", err)
+	}
+	srv.guard = storage.NewGuard([]storage.Location{
+		{ID: locationID, Name: "http-scan-differential-dup-test", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]any{"storageLocationId": locationID, "differential": true})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("POST /api/v1/scan {differential:true} while an INCREMENTAL is RUNNING: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Converse: a plain FULL_SCAN request for the same location is a
+	// different kind, so it must NOT be blocked by the RUNNING INCREMENTAL.
+	rr = doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/scan", map[string]int64{"storageLocationId": locationID})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/v1/scan (full) while an INCREMENTAL is RUNNING: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.CompleteScanJob(ctx, runningJobID)
+	}); err != nil {
+		t.Fatalf("terminalize seeded job: %v", err)
+	}
+}
+
 // TestScanJobOutlivesRequestContext is the C1 regression guard: the scan
 // goroutine must outlive the HTTP request context that started it. A real TCP
 // server (httptest.NewServer) cancels the request's context the moment the

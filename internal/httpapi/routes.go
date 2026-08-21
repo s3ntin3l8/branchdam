@@ -1321,6 +1321,27 @@ func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*Ed
 type StartScanInput struct {
 	Body struct {
 		StorageLocationID int64 `json:"storageLocationId"`
+		// Differential, if true, uses the touch-only fast path (#60's
+		// sweepUnchanged/touchBatcher, the same one the background
+		// SweeperSupervisor already uses for other tiers) instead of a full
+		// walk that re-hashes every file: a file whose (mtime, size) still
+		// match its stored node is never opened or hashed, only touched. #226
+		// permits this specifically against TIER3_MASTER_ARCHIVE locations --
+		// SweeperSupervisor's own always-on background sweep deliberately
+		// never schedules Tier 3 (cmd/branchdam's sweptFromConfig, unchanged
+		// by #226), so this is the only way to get a differential pass there
+		// short of a full re-hash. Omitted or false is a full, non-
+		// differential scan -- today's only behavior, unaffected by this
+		// field's addition. `omitempty` (matching PruneInput.Execute's own
+		// pattern below) is what keeps this optional in Huma's generated
+		// schema: Huma v2's own struct-to-schema walk (schema.go) marks every
+		// field required by default and only flips a field to optional when
+		// its json tag contains "omitempty" (or "omitzero", or an explicit
+		// `required:"false"` tag) -- so an existing `{"storageLocationId": N}`
+		// caller with no `differential` key still compiles/validates
+		// unchanged. TestStartScanDifferentialOmittedDefaultsToFullScan
+		// pins this.
+		Differential bool `json:"differential,omitempty"`
 	}
 }
 
@@ -1343,6 +1364,18 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 		ID: row.ID, Name: row.Name, RootPath: row.RootPath, Tier: row.Tier, ReadOnly: row.ReadOnly != 0,
 	}
 
+	if in.Body.Differential && location.Tier != "TIER3_MASTER_ARCHIVE" {
+		// #226: differential is a Tier-3 capability specifically -- every
+		// other tier already gets a differential pass for free via the
+		// always-on SweeperSupervisor (opt-in per location via config's
+		// `sweep: true`), so a manual differential trigger for those tiers
+		// would just be a second, redundant path to the same behavior. Tier 3
+		// is excluded from that supervisor by design (sweptFromConfig), which
+		// is exactly the gap this field closes -- and it closes it only
+		// there.
+		return nil, huma.Error422UnprocessableEntity("differential scan is only permitted against a TIER3_MASTER_ARCHIVE location (tier " + location.Tier + ")")
+	}
+
 	fullHashPolicy := "tier3_and_collision"
 	disablePHash := false
 	if s.cfg != nil {
@@ -1350,7 +1383,7 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 		disablePHash = !s.cfg.Workers.PerceptualHash
 	}
 
-	jobID, err := pipeline.RunScan(ctx, pipeline.ScanDeps{
+	deps := pipeline.ScanDeps{
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
 		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
 		Tracker: s.tracker, Shutdown: s.shutdown,
@@ -1359,7 +1392,14 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 				s.hub.Broadcast()
 			}
 		},
-	}, location)
+	}
+
+	var jobID int64
+	if in.Body.Differential {
+		jobID, err = pipeline.RunSweep(ctx, deps, location)
+	} else {
+		jobID, err = pipeline.RunScan(ctx, deps, location)
+	}
 	if errors.Is(err, pipeline.ErrScanAlreadyRunning) {
 		return nil, huma.Error409Conflict("a scan is already running for this storage location")
 	}

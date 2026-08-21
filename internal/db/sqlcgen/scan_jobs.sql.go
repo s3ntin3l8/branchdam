@@ -50,30 +50,41 @@ func (q *Queries) CompleteScanJobWithWarning(ctx context.Context, arg CompleteSc
 	return err
 }
 
-const countRunningFullScansForLocation = `-- name: CountRunningFullScansForLocation :one
-SELECT COUNT(*) FROM scan_jobs
-WHERE storage_location_id = ?1 AND kind = 'FULL_SCAN' AND state = 'RUNNING'
-`
-
-// #163: called inside the same transaction as CreateScanJob (see
-// pipeline.RunScan) so the check-then-insert is one atomic unit, not just
-// an accident of the writer pool being single-connection. Scoped to
-// kind = 'FULL_SCAN' only -- WATCH jobs are already singleton-per-location
-// via WatcherSupervisor.Start's sync.Once and are long-lived by design, so
-// they must not block a FULL_SCAN (or vice versa).
-func (q *Queries) CountRunningFullScansForLocation(ctx context.Context, storageLocationID sql.NullInt64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countRunningFullScansForLocation, storageLocationID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const countRunningScanJobs = `-- name: CountRunningScanJobs :one
 SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
 `
 
 func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countRunningScanJobs)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countRunningScansForLocationByKind = `-- name: CountRunningScansForLocationByKind :one
+SELECT COUNT(*) FROM scan_jobs
+WHERE storage_location_id = ?1 AND kind = ?2 AND state = 'RUNNING'
+`
+
+type CountRunningScansForLocationByKindParams struct {
+	StorageLocationID sql.NullInt64
+	Kind              string
+}
+
+// #163/#226: called inside the same transaction as CreateScanJob (see
+// pipeline.createScanJob) so the check-then-insert is one atomic unit, not
+// just an accident of the writer pool being single-connection. Parameterized
+// on kind (rather than hardcoded to 'FULL_SCAN') since #226 added a second
+// HTTP-triggered path (POST /api/v1/scan {differential:true}) that creates
+// an INCREMENTAL job directly, which needs the same same-kind guard a
+// FULL_SCAN already got -- SweeperSupervisor's own INCREMENTAL passes are
+// still serialized by its own ticker loop (sweeper.go), so this check is a
+// no-op there, not a behavior change. WATCH jobs are excluded by the
+// caller only ever passing FULL_SCAN or INCREMENTAL here -- they're already
+// singleton-per-location via WatcherSupervisor.Start's sync.Once and are
+// long-lived by design, so they must not block (or be blocked by) either.
+func (q *Queries) CountRunningScansForLocationByKind(ctx context.Context, arg CountRunningScansForLocationByKindParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRunningScansForLocationByKind, arg.StorageLocationID, arg.Kind)
 	var count int64
 	err := row.Scan(&count)
 	return count, err

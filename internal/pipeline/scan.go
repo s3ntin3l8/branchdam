@@ -162,37 +162,67 @@ func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Locatio
 	return job.ID, nil
 }
 
-// ErrScanAlreadyRunning is returned by createScanJob (and so by RunScan) when
-// a FULL_SCAN job is already RUNNING for the same storage location (#163).
-// Two concurrent POSTs to /api/v1/scan for one location otherwise each walk
-// it independently; workers.Pool.Submit dedups by file path, so the second
-// scan's submissions are silently refused for every file, leaving a
-// confusing large files_failed count with no indication why. Rejecting the
-// second scan outright is clearer and fail-safe: ReconcileOrphanedScanJobs
-// already flips any stale RUNNING row to FAILED at startup, so a crashed
-// process can never permanently strand a location behind this guard.
+// ErrScanAlreadyRunning is returned by createScanJob (and so by RunScan and
+// RunSweep) when a job of the same kind is already RUNNING for the same
+// storage location (#163, widened by #226). Two concurrent POSTs to
+// /api/v1/scan for one location otherwise each walk it independently;
+// workers.Pool.Submit dedups by file path, so the second scan's submissions
+// are silently refused for every file, leaving a confusing large
+// files_failed count with no indication why. Rejecting the second scan
+// outright is clearer and fail-safe: ReconcileOrphanedScanJobs already flips
+// any stale RUNNING row to FAILED at startup, so a crashed process can never
+// permanently strand a location behind this guard.
 var ErrScanAlreadyRunning = errors.New("a scan is already running for this storage location")
 
 // createScanJob inserts the scan_jobs row for a new pass. Shared by
 // startScanAsync (FULL_SCAN/INCREMENTAL, fire-and-forget) and
 // SweeperSupervisor.runOneSweep (INCREMENTAL, synchronous). The
-// already-running check is scoped to kind == "FULL_SCAN" only -- WATCH jobs
-// are already singleton-per-location via WatcherSupervisor.Start's
-// sync.Once and are long-lived by design, and INCREMENTAL sweeps are
-// already serialized per-location by SweeperSupervisor's own loop -- so
-// neither needs (or should get) this guard.
+// already-running check covers both kind == "FULL_SCAN" and kind ==
+// "INCREMENTAL" -- WATCH jobs are excluded (never passed here) since
+// they're already singleton-per-location via WatcherSupervisor.Start's
+// sync.Once and are long-lived by design. INCREMENTAL was added to the
+// guard by #226: SweeperSupervisor's own INCREMENTAL passes stay serialized
+// by its own ticker loop regardless (so this check is a permanent no-op on
+// that path), but #226 also lets an HTTP request create an INCREMENTAL job
+// directly (POST /api/v1/scan {differential:true} against a Tier-3
+// location) -- without this guard, two concurrent differential requests
+// against the same location would both walk it independently, same failure
+// mode #163 already fixed for FULL_SCAN.
+//
+// This guard is deliberately same-kind-only: a FULL_SCAN and a manually
+// triggered differential INCREMENTAL can still run concurrently against the
+// same location (impossible before #226, since manual INCREMENTAL didn't
+// exist). That's a safe combination, not an oversight -- but the safety
+// comes from a genuinely separate mechanism, not from anything in this
+// guard. A file the differential sweep routes through Pool.Submit is
+// covered the same way #163 already covers two concurrent FULL_SCANs
+// (Submit's per-path dedup refuses the loser, marking its path
+// seen-but-uncertain, which excludes it from the MISSING sweep). But most
+// of a mostly-unchanged Tier-3 archive's files never reach Pool.Submit at
+// all -- sweepUnchanged routes them straight to touchBatcher.add, which has
+// no dedup or refusal handling of its own. What actually makes that path
+// safe against a concurrent FULL_SCAN's version collision is
+// TouchMediaNode's own MISSING-only CASE (internal/db/queries/media_nodes.sql):
+// a touch that lands on a node the concurrent FULL_SCAN just archived is a
+// no-op on lifecycle_state, never a resurrection into a live duplicate
+// alongside the FULL_SCAN's freshly inserted successor row. See that
+// query's comment and TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
+// (internal/pipeline) for the regression test proving it.
 func createScanJob(ctx context.Context, deps ScanDeps, location storage.Location, kind string) (sqlcgen.ScanJob, error) {
 	var job sqlcgen.ScanJob
 	err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-		if kind == "FULL_SCAN" {
+		if kind == "FULL_SCAN" || kind == "INCREMENTAL" {
 			// Checked inside the same transaction as the insert below so the
 			// check-then-create is one atomic unit -- the writer pool being
 			// single-connection makes this safe today, but the transaction
 			// is what makes it correct, not an accident of that connection
 			// count.
-			running, err := q.CountRunningFullScansForLocation(ctx, sql.NullInt64{Int64: location.ID, Valid: true})
+			running, err := q.CountRunningScansForLocationByKind(ctx, sqlcgen.CountRunningScansForLocationByKindParams{
+				StorageLocationID: sql.NullInt64{Int64: location.ID, Valid: true},
+				Kind:              kind,
+			})
 			if err != nil {
-				return fmt.Errorf("count running full scans: %w", err)
+				return fmt.Errorf("count running scans: %w", err)
 			}
 			if running > 0 {
 				return ErrScanAlreadyRunning

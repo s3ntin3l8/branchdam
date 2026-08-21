@@ -18,10 +18,13 @@ Resolve post-render hook, and no Luminar catalog reader (phase 10, tracked in #2
 
 Three things follow from that:
 
-1. **Getting a new master into the graph today means a full, non-differential rescan of the
-   entire archive** — `POST /api/v1/scan` forces a full BLAKE3 hash of every file on a read-only
-   (Tier-3) location, and there is no incremental Tier-3 path. This is the single biggest
-   practical cost until an ingest client exists.
+1. **Getting a new master into the graph still means an operator-triggered scan** — Tier 3 is
+   deliberately excluded from the always-on background sweeper (§4), so there is no automatic
+   pickup. As of #226, that manual scan no longer has to be a full BLAKE3 re-hash of every file
+   already on the archive: `POST /api/v1/scan {differential: true}` reuses the same touch-only
+   fast path the background sweeper uses for other tiers, so only new or changed files are
+   opened and hashed. This is a meaningful cost reduction for a multi-terabyte archive, but it's
+   still a manual step, not the automatic pickup an ingest client would give (see §4).
 2. **A DaVinci Resolve post-render hook is buildable now, independent of everything else in phase
    10.** `.dam.json` manifest ingestion already exists and yields confidence-1.00 lineage edges;
    the only missing piece is the small script that writes the manifest, which does not require a
@@ -34,7 +37,7 @@ Three things follow from that:
 | # | Step | Status | Detail |
 |---|---|---|---|
 | 1–2 | SD card → one copy to the NAS archive, one to local NVMe for editing | Not built | Phase 10 (#29/#62). A manual copy works in the meantime; the operator loses bit-for-bit verification, safe-eject signalling, and an automatic folder mirror between the two copies |
-| 3 | Server learns about the new master | Manual, and costly | `POST /api/v1/scan` re-hashes the entire archive; see §4 |
+| 3 | Server learns about the new master | Manual, cheaper since #226 | `POST /api/v1/scan` (full) or `{differential: true}` (touch-only fast path for unchanged files, Tier-3 only) — still operator-triggered, not automatic; see §4 |
 | 4 | Master indexed: fast/full hash, EXIF, pHash, promoted camera columns | Works | Requires `exiftool` and `ffprobe`; degrades gracefully (fast-hash only) if either is absent |
 | 5 | Luminar: edit local copy → export to Tier 2 | Works via heuristics | No confidence-1.00 path for stills — the Luminar `catalog.db` reader is phase 10. Falls back to Tier 2 (filename stem, `XMP:OriginalDocumentID`) and Tier 3 (camera serial + lens + ±2s + pHash Hamming ≤ 10) |
 | 6 | DaVinci Resolve: edit local copy → render + `.dam.json` to Tier 2 | Consumer built, producer not | The `.dam.json` parser is live and yields confidence-1.00 edges. The post-render hook that writes the manifest does not exist yet — see §5 |
@@ -91,14 +94,36 @@ render→master edge, if one exists, comes from the Tier 2/3 resolvers independe
 
 ## 4. Ingesting a new master without a full rescan
 
-There is no incremental Tier-3 scan path today: `POST /api/v1/scan` is always a full,
-non-differential walk, and the differential sweeper explicitly refuses `TIER3_MASTER_ARCHIVE`
-locations. The only way to record a master without rescanning the whole archive is the
-agent contract's `EVENT_NODE_CREATED` event, posted to `/api/v1/agent/events` — but no client
-exists yet that posts it. See the workstation-agent decomposition in
+As of #226, `POST /api/v1/scan` accepts a `differential: true` option, permitted specifically
+against `TIER3_MASTER_ARCHIVE` locations: it reuses the same touch-only fast path
+(`internal/pipeline/sweep.go`'s `sweepUnchanged`/`touchBatcher`) the always-on background
+sweeper already uses for other tiers — a file whose `(mtime, size)` still match its stored node
+is touched, never reopened or re-hashed, so only a new or genuinely changed master pays the
+BLAKE3 cost. This closes the "full re-hash of the entire archive on every pass" cost called out
+in §1, but two things are unchanged: the walk itself (a cheap `Lstat` per file, not a hash) still
+covers the whole archive, and the trigger is still manual, not automatic — Tier 3 stays
+deliberately excluded from the always-on background `SweeperSupervisor`
+(`cmd/branchdam/main.go`'s `sweptFromConfig`), since branchDAM never writes to it and the
+motivating cost (re-hashing) is what #226 addresses directly.
+
+The only way to record a master without an operator-triggered scan at all — differential or
+not — is the agent contract's `EVENT_NODE_CREATED` event, posted to `/api/v1/agent/events`, but
+no client exists yet that posts it. See the workstation-agent decomposition in
 [`roadmap.md`](roadmap.md#phase-10--workstation-agent) for the ingest-engine issue that closes
-this gap, and its notes on what an `EVENT_NODE_CREATED` payload can and cannot carry today
+this gap (#234), and its notes on what an `EVENT_NODE_CREATED` payload can and cannot carry today
 (no perceptual hash, no GPS, unless computed client-side and included explicitly).
+
+**A differential pass never backfills a missing or unverified `full_hash`.** `sweepUnchanged`
+gates purely on `lifecycle_state = 'ACTIVE'` plus a matching `(mtime, size)` — it never looks at
+`full_hash`/`indexing_status`, so a node that was never fully hashed (or whose hash failed) stays
+that way forever under a differential-only maintenance routine; only a full scan's
+`needsFullHash(policy, tierReadOnly=true, ...)` computes it. This matters beyond integrity
+verification: `ListPrunableNodes` requires a non-NULL, 64-length `full_hash` on the live Tier-3
+ancestor before a Tier-1 cache copy is purge-eligible (see `CLAUDE.md`'s pruning invariant), so
+an archive maintained exclusively via `differential: true` passes can silently block Tier-1
+pruning for any node whose hash was never computed. A periodic full (non-differential) scan is
+still what verifies integrity and keeps Tier-1 pruning eligibility current — differential is a
+cost reduction for routine "did anything change" passes, not a full scan's replacement.
 
 ## 5. The DaVinci Resolve hook is independently buildable
 
