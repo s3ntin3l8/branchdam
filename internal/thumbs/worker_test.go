@@ -34,10 +34,15 @@ func openWorkerTestDB(t *testing.T) *db.DB {
 
 func seedTestLocation(t *testing.T, database *db.DB, rootPath string) int64 {
 	t.Helper()
+	return seedTestLocationTier(t, database, rootPath, "PROJECTS")
+}
+
+func seedTestLocationTier(t *testing.T, database *db.DB, rootPath, tier string) int64 {
+	t.Helper()
 	var id int64
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
-			Name: "worker-test", RootPath: rootPath, Tier: "PROJECTS",
+			Name: "worker-test-" + tier, RootPath: rootPath, Tier: tier,
 		})
 		id = loc.ID
 		return err
@@ -121,6 +126,80 @@ func TestWorkerProcessPendingGeneratesReady(t *testing.T) {
 	}
 	if _, err := os.Stat(cache.Path(node.NodeUuid)); err != nil {
 		t.Errorf("thumbnail file not written: %v", err)
+	}
+}
+
+// TestWorkerProcessPendingSkipsTier0LocalStaging is the regression test for
+// #231: ListPendingThumbnails must never claim a PENDING node on a
+// TIER0_LOCAL_STAGING location, since the server has no guarantee those
+// bytes are locally readable (a future offline-ingest agent may record such
+// a node before its bytes have synced anywhere server-visible). An
+// equivalent node on a normal (server-readable) tier in the same pass must
+// still be claimed, so this also proves the exclusion is tier-scoped, not a
+// global regression that stops the worker from claiming anything.
+func TestWorkerProcessPendingSkipsTier0LocalStaging(t *testing.T) {
+	database := openWorkerTestDB(t)
+
+	stagingDir := t.TempDir()
+	stagingLocationID := seedTestLocationTier(t, database, stagingDir, "TIER0_LOCAL_STAGING")
+	stagingImgPath := filepath.Join(stagingDir, "staging.png")
+	writeWorkerTestPNG(t, stagingImgPath)
+	stagingNode := seedTestNode(t, database, stagingLocationID, "06", stagingImgPath)
+
+	activeDir := t.TempDir()
+	activeLocationID := seedTestLocation(t, database, activeDir) // PROJECTS tier
+	activeImgPath := filepath.Join(activeDir, "active.png")
+	writeWorkerTestPNG(t, activeImgPath)
+	activeNode := seedTestNode(t, database, activeLocationID, "07", activeImgPath)
+
+	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	w := NewWorker(database, cache, nil)
+
+	stats, err := w.ProcessPending(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessPending: %v", err)
+	}
+	// Only the non-staging node should have been claimed and generated.
+	if stats.Generated != 1 {
+		t.Errorf("stats.Generated = %d, want 1 (only the non-TIER0 node claimed)", stats.Generated)
+	}
+
+	gotStaging, err := database.Reader.GetMediaNodeByID(context.Background(), stagingNode.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID(staging): %v", err)
+	}
+	if gotStaging.ThumbState != "PENDING" {
+		t.Errorf("staging node thumb_state = %q, want unchanged PENDING (must never be claimed)", gotStaging.ThumbState)
+	}
+	if gotStaging.ThumbAttempts != 0 {
+		t.Errorf("staging node thumb_attempts = %d, want 0 (never attempted)", gotStaging.ThumbAttempts)
+	}
+	if _, err := os.Stat(cache.Path(stagingNode.NodeUuid)); err == nil {
+		t.Error("thumbnail file was written for a TIER0_LOCAL_STAGING node")
+	}
+
+	gotActive, err := database.Reader.GetMediaNodeByID(context.Background(), activeNode.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID(active): %v", err)
+	}
+	if gotActive.ThumbState != "READY" {
+		t.Errorf("active node thumb_state = %q, want READY", gotActive.ThumbState)
+	}
+
+	// A second pass must still leave the staging node untouched -- proving
+	// this isn't a one-time ordering fluke but a durable exclusion (the
+	// node's thumb_attempts never advances toward the retry bound at all,
+	// unlike TestWorkerProcessPendingFailedIncrementsAttempts).
+	if _, err := w.ProcessPending(context.Background()); err != nil {
+		t.Fatalf("ProcessPending (second pass): %v", err)
+	}
+	gotStagingAgain, err := database.Reader.GetMediaNodeByID(context.Background(), stagingNode.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID(staging, second pass): %v", err)
+	}
+	if gotStagingAgain.ThumbState != "PENDING" || gotStagingAgain.ThumbAttempts != 0 {
+		t.Errorf("staging node after second pass = state %q attempts %d, want PENDING/0 (never claimed or retried)",
+			gotStagingAgain.ThumbState, gotStagingAgain.ThumbAttempts)
 	}
 }
 
