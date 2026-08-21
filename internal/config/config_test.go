@@ -34,6 +34,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Workers.FullHashPolicy != "tier3_and_collision" {
 		t.Errorf("Workers.FullHashPolicy default = %q, want tier3_and_collision", cfg.Workers.FullHashPolicy)
 	}
+	if !cfg.Thumbnails.Enabled {
+		t.Error("Thumbnails.Enabled default = false, want true")
+	}
+	if cfg.Thumbnails.CacheDir != "/data/thumbs" {
+		t.Errorf("Thumbnails.CacheDir default = %q, want /data/thumbs", cfg.Thumbnails.CacheDir)
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
