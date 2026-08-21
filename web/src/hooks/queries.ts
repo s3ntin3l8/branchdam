@@ -162,7 +162,7 @@ export function useCreateEdge() {
 export function useStartScan() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (storageLocationId: number) => api.startScan(storageLocationId),
+    mutationFn: (input: Parameters<typeof api.startScan>[0]) => api.startScan(input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["progress"] });
     },

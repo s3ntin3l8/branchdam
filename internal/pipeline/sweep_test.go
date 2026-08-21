@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
+	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
 // TestSweepUnchangedFilesAreTouchedNotHashed is #60's headline behavior,
@@ -437,5 +440,146 @@ func TestSweepMissingNodeAlwaysRehashes(t *testing.T) {
 	}
 	if archived.LifecycleState != "ARCHIVED" {
 		t.Errorf("original node lifecycle_state = %q, want ARCHIVED (must not have been silently reactivated in place)", archived.LifecycleState)
+	}
+}
+
+// seedTier3Location mirrors seedPipelineLocation but for a
+// TIER3_MASTER_ARCHIVE/read-only location -- #226's differential-Tier-3
+// scenario needs a location whose full_hash policy actually forces a
+// BLAKE3 computation (needsFullHash's tierReadOnly branch), which
+// seedPipelineLocation's hardcoded TIER2_EXPORTS/ReadOnly:0 row never does.
+func seedTier3Location(t *testing.T, database *db.DB, rootPath string) int64 {
+	t.Helper()
+	var id int64
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "scan-test-tier3-" + t.Name(), RootPath: rootPath,
+			Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: 1, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		id = loc.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed tier-3 location: %v", err)
+	}
+	return id
+}
+
+// tier3ScanTestDeps builds ScanDeps for a TIER3_MASTER_ARCHIVE location.
+// Unlike scanTestDepsN (hardcoded to TIER2_EXPORTS/FullHashPolicy:"never"
+// for every other sweep test in this file), this uses the default
+// "tier3_and_collision" policy so needsFullHash actually escalates to a
+// full BLAKE3 hash on the read-only tier -- the behavior #226's differential
+// path must avoid re-running for files sweepUnchanged finds unchanged.
+func tier3ScanTestDeps(t *testing.T, database *db.DB, rootPath string, locationID int64) ScanDeps {
+	t.Helper()
+	pool := workers.New[string](2, 16)
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	t.Cleanup(cancelPool)
+	pool.Run(poolCtx)
+	return ScanDeps{
+		DB:     database,
+		Guard:  storage.NewGuard([]storage.Location{{ID: locationID, Name: "test-tier3", RootPath: rootPath, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true}}),
+		Prober: probe.New(),
+		Pool:   pool,
+		// FullHashPolicy left unset (zero value ""), so needsFullHash falls
+		// through to its documented default -- the same "tier3_and_collision"
+		// behavior handleStartScan wires up in production when config leaves
+		// workers.fullHashPolicy unset.
+	}
+}
+
+// TestDifferentialTier3ScanSkipsFullHashForUnchangedFiles is #226's headline
+// acceptance criterion: a TIER3_MASTER_ARCHIVE location swept with
+// RunSweep (the same call handleStartScan's differential:true branch makes)
+// must not reopen or re-BLAKE3 a file whose (mtime, size) still match its
+// stored node -- it goes through sweepUnchanged/touchBatcher exactly like
+// any other tier's differential pass, never through processFile/Commit.
+// Proven two ways: the unchanged node's id and full_hash are byte-identical
+// before and after (an id change would mean it took the version-collision
+// path; a recomputed-but-coincidentally-equal full_hash can't be ruled out
+// by value alone, so the id/FilesHashed checks are what actually establish
+// "never re-hashed", not the full_hash comparison by itself), and
+// scan_jobs.files_hashed only counts the one file that actually changed.
+// The changed file, by contrast, must still get a fresh full_hash --
+// existing full-hash-on-collision/change behavior is unaffected.
+func TestDifferentialTier3ScanSkipsFullHashForUnchangedFiles(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "master-a.dng"), "master alpha content")
+	writeFile(t, filepath.Join(root, "master-b.dng"), "master bravo content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedTier3Location(t, database, resolvedRoot)
+	deps := tier3ScanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-tier3", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 1, baseline full scan): %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("pass 1 state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	beforeA := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "master-a.dng"))
+	beforeB := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "master-b.dng"))
+	if beforeA.FullHash == nil || len(*beforeA.FullHash) != 64 {
+		t.Fatalf("master-a.dng full_hash not computed on baseline full scan (tier3_and_collision policy should force it): %v", beforeA.FullHash)
+	}
+	if beforeB.FullHash == nil || len(*beforeB.FullHash) != 64 {
+		t.Fatalf("master-b.dng full_hash not computed on baseline full scan: %v", beforeB.FullHash)
+	}
+
+	waitForNextSecond(t)
+	if err := os.WriteFile(filepath.Join(resolvedRoot, "master-b.dng"), []byte("master bravo content, edited"), 0o644); err != nil {
+		t.Fatalf("rewrite master-b.dng: %v", err)
+	}
+
+	jobID2, err := RunSweep(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunSweep (pass 2, differential): %v", err)
+	}
+	job2 := waitJobDone(t, database, jobID2)
+	if job2.State != "COMPLETED" {
+		t.Fatalf("pass 2 state = %q (last_error=%v)", job2.State, job2.LastError)
+	}
+	if job2.Kind != "INCREMENTAL" {
+		t.Errorf("pass 2 kind = %q, want INCREMENTAL", job2.Kind)
+	}
+	if job2.FilesSeen != 2 {
+		t.Errorf("pass 2 files_seen = %d, want 2", job2.FilesSeen)
+	}
+	if job2.FilesHashed != 1 {
+		t.Errorf("pass 2 files_hashed = %d, want exactly 1 (only master-b.dng changed; master-a.dng must not be re-hashed)", job2.FilesHashed)
+	}
+
+	afterA := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "master-a.dng"))
+	if afterA.ID != beforeA.ID {
+		t.Errorf("master-a.dng: id changed from %d to %d, want unchanged (must have taken the touch-only path, not Commit)", beforeA.ID, afterA.ID)
+	}
+	if afterA.FullHash == nil || beforeA.FullHash == nil || *afterA.FullHash != *beforeA.FullHash {
+		t.Error("master-a.dng: full_hash changed, want byte-identical (never reopened or re-hashed)")
+	}
+	if afterA.LastSeenAt <= beforeA.LastSeenAt {
+		t.Errorf("master-a.dng: last_seen_at did not advance (got %d, was %d)", afterA.LastSeenAt, beforeA.LastSeenAt)
+	}
+
+	afterB := mustGetLiveNode(t, database, filepath.Join(resolvedRoot, "master-b.dng"))
+	if afterB.ID == beforeB.ID {
+		t.Errorf("master-b.dng: id unchanged (%d), want a version collision (new id) since content changed", afterB.ID)
+	}
+	if afterB.FullHash == nil || len(*afterB.FullHash) != 64 {
+		t.Fatalf("master-b.dng full_hash not recomputed after content change: %v", afterB.FullHash)
+	}
+	if beforeB.FullHash != nil && *afterB.FullHash == *beforeB.FullHash {
+		t.Error("master-b.dng: full_hash unchanged despite content change, want a fresh hash")
 	}
 }

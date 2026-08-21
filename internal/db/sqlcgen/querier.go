@@ -43,14 +43,20 @@ type Querier interface {
 	// its complement, `>=`), so a misconfigured remote's silent backlog is
 	// visible in logs instead of only discoverable via a direct SQLite query.
 	CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error)
-	// #163: called inside the same transaction as CreateScanJob (see
-	// pipeline.RunScan) so the check-then-insert is one atomic unit, not just
-	// an accident of the writer pool being single-connection. Scoped to
-	// kind = 'FULL_SCAN' only -- WATCH jobs are already singleton-per-location
-	// via WatcherSupervisor.Start's sync.Once and are long-lived by design, so
-	// they must not block a FULL_SCAN (or vice versa).
-	CountRunningFullScansForLocation(ctx context.Context, storageLocationID sql.NullInt64) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
+	// #163/#226: called inside the same transaction as CreateScanJob (see
+	// pipeline.createScanJob) so the check-then-insert is one atomic unit, not
+	// just an accident of the writer pool being single-connection. Parameterized
+	// on kind (rather than hardcoded to 'FULL_SCAN') since #226 added a second
+	// HTTP-triggered path (POST /api/v1/scan {differential:true}) that creates
+	// an INCREMENTAL job directly, which needs the same same-kind guard a
+	// FULL_SCAN already got -- SweeperSupervisor's own INCREMENTAL passes are
+	// still serialized by its own ticker loop (sweeper.go), so this check is a
+	// no-op there, not a behavior change. WATCH jobs are excluded by the
+	// caller only ever passing FULL_SCAN or INCREMENTAL here -- they're already
+	// singleton-per-location via WatcherSupervisor.Start's sync.Once and are
+	// long-lived by design, so they must not block (or be blocked by) either.
+	CountRunningScansForLocationByKind(ctx context.Context, arg CountRunningScansForLocationByKindParams) (int64, error)
 	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
