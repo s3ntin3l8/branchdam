@@ -107,6 +107,13 @@ type Querier interface {
 	// Phase 1 (#33): EXIF/ffprobe overflow. Upsert on the table's natural key so
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
+	// Resets a node's thumbnail generation state to PENDING with attempts
+	// zeroed, so internal/thumbs.Worker regenerates it on its next pass.
+	// Called from internal/pipeline's reconcilePromotedColumns call site when
+	// fast_hash changes on the Touched/rebase branches: the bytes on disk
+	// changed, so whatever thumbnail (if any) is cached no longer represents
+	// them.
+	InvalidateThumbnail(ctx context.Context, id int64) error
 	// Recursively list ancestor node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
 	ListAncestors(ctx context.Context, id int64) ([]int64, error)
@@ -156,6 +163,18 @@ type Querier interface {
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
 	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
 	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
+	// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
+	// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
+	// index idx_media_nodes_thumb_pending (WHERE thumb_state = 'PENDING'), so
+	// the index stays cheap as the backlog drains rather than scanning every
+	// row regardless of state. thumb_attempts < ?1 excludes a node that has
+	// already exhausted the worker's retry bound -- a permanently-broken
+	// source (corrupt file, unsupported format that errors rather than
+	// returning thumbs.ErrUnsupported) stops being retried every pass forever,
+	// mirroring remote_sync_state's retry_count bound
+	// (ResetRemoteSyncStateFailed). lifecycle_state excludes MISSING/ARCHIVED:
+	// there is no live file left to read a thumbnail from.
+	ListPendingThumbnails(ctx context.Context, arg ListPendingThumbnailsParams) ([]ListPendingThumbnailsRow, error)
 	// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
 	// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
 	// TIER3_MASTER_ARCHIVE location has a verified (non-NULL, 64-hex) full_hash.
@@ -321,6 +340,13 @@ type Querier interface {
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
+	// The caller passes the effective thumb_attempts value itself (0 on a
+	// successful READY -- a later invalidation starts the attempt count fresh
+	// again; current+1 on a FAILED retry) rather than this query
+	// incrementing/resetting on its own, so one statement serves every
+	// transition -- same "caller passes effective values" contract as
+	// UpdateMediaNodePromotedColumns above.
+	SetThumbState(ctx context.Context, arg SetThumbStateParams) error
 	// Same content at the same path, seen again on a later scan. Records that
 	// and, if the row was MISSING (a file re-created at its old path), reactivates
 	// it in place -- a MISSING row found alive again is not a version collision

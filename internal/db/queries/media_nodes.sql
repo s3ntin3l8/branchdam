@@ -8,7 +8,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
@@ -21,7 +21,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE (sqlc.narg('lifecycle_state') IS NULL OR lifecycle_state = sqlc.narg('lifecycle_state'))
   AND (sqlc.narg('camera_model') IS NULL OR camera_model = sqlc.narg('camera_model'))
@@ -54,7 +54,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE id = ?1;
 
@@ -68,7 +68,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -81,7 +81,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
 LIMIT 1;
@@ -96,7 +96,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -110,7 +110,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -129,7 +129,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
 LIMIT ?2;
@@ -144,7 +144,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE camera_serial = ?1
   AND captured_at_unix >= ?2
@@ -160,7 +160,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -190,7 +190,7 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
           first_seen_at, last_seen_at, created_at, updated_at,
-          camera_serial, lens_model;
+          camera_serial, lens_model, thumb_state, thumb_attempts;
 
 -- name: ArchiveMediaNode :exec
 -- Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
@@ -334,7 +334,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE node_uuid = ?1;
 
@@ -408,3 +408,53 @@ WHERE n.storage_location_id = ?1
       AND length(m.full_hash) = 64
   )
 ORDER BY n.id;
+
+-- name: ListPendingThumbnails :many
+-- internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
+-- (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
+-- index idx_media_nodes_thumb_pending (WHERE thumb_state = 'PENDING'), so
+-- the index stays cheap as the backlog drains rather than scanning every
+-- row regardless of state. thumb_attempts < ?1 excludes a node that has
+-- already exhausted the worker's retry bound -- a permanently-broken
+-- source (corrupt file, unsupported format that errors rather than
+-- returning thumbs.ErrUnsupported) stops being retried every pass forever,
+-- mirroring remote_sync_state's retry_count bound
+-- (ResetRemoteSyncStateFailed). lifecycle_state excludes MISSING/ARCHIVED:
+-- there is no live file left to read a thumbnail from.
+--
+-- Plain positional params (?1, ?2), not sqlc.arg: this file already has
+-- earlier queries using bare ?N placeholders (ListTier3Candidates,
+-- ListPrunableNodes, UpdateMediaNodePromotedColumns), and sqlc v1.31.1
+-- mis-numbers/corrupts a later sqlc.arg(name) placeholder in the same file
+-- when a bare ?N appears anywhere earlier in it.
+SELECT id, node_uuid, file_path, thumb_attempts
+FROM media_nodes
+WHERE thumb_state = 'PENDING'
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND thumb_attempts < ?1
+ORDER BY id
+LIMIT ?2;
+
+-- name: SetThumbState :exec
+-- The caller passes the effective thumb_attempts value itself (0 on a
+-- successful READY -- a later invalidation starts the attempt count fresh
+-- again; current+1 on a FAILED retry) rather than this query
+-- incrementing/resetting on its own, so one statement serves every
+-- transition -- same "caller passes effective values" contract as
+-- UpdateMediaNodePromotedColumns above.
+UPDATE media_nodes SET thumb_state = ?2, thumb_attempts = ?3, updated_at = unixepoch() WHERE id = ?1;
+
+-- name: InvalidateThumbnail :exec
+-- Resets a node's thumbnail generation state to PENDING with attempts
+-- zeroed, so internal/thumbs.Worker regenerates it on its next pass. The
+-- Cache.Write path is os.CreateTemp + os.Rename to the same node_uuid path,
+-- so regeneration overwrites the stale file atomically -- no separate
+-- Cache.Delete is needed alongside this reset. Called from
+-- internal/httpapi's refreshNodeAfterInPlaceWrite, not from
+-- internal/pipeline: fast_hash is by construction unchanged on both the
+-- Touched branch (its own entry condition) and the rebase branch (it looks
+-- the node up BY fast_hash), so neither ever observes a fast_hash change --
+-- refreshNodeAfterInPlaceWrite is the one place a node's fast_hash changes
+-- while its node_uuid is preserved (the inherit-metadata endpoint's
+-- post-write DB sync, #188).
+UPDATE media_nodes SET thumb_state = 'PENDING', thumb_attempts = 0, updated_at = unixepoch() WHERE id = ?1;

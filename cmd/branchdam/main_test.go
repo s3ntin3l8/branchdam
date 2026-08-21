@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -19,6 +20,9 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
+	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/sse"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
@@ -520,6 +524,57 @@ func TestStartImmichWorkerEnabledWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestStartThumbWorkerDisabledWhenNotEnabled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	database := mainTestOpenDB(t)
+	cfg := &config.Config{Thumbnails: config.Thumbnails{Enabled: false, CacheDir: t.TempDir()}}
+	w := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
+	if w != nil {
+		t.Fatal("startThumbWorker with thumbnails.enabled=false = non-nil, want nil")
+	}
+}
+
+func TestStartThumbWorkerEnabledWhenConfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	database := mainTestOpenDB(t)
+	cfg := &config.Config{Thumbnails: config.Thumbnails{Enabled: true, CacheDir: filepath.Join(t.TempDir(), "thumbs")}}
+	w := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
+	if w == nil {
+		t.Fatal("startThumbWorker with thumbnails.enabled=true = nil, want a worker")
+	}
+	// Wait() blocks until ctx is cancelled (Start's background loop only
+	// returns on <-ctx.Done()) -- cancel explicitly and confirm it returns
+	// promptly, rather than deferring cancel() past this call and deadlocking.
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		w.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait() did not return within 5s of ctx cancellation")
+	}
+}
+
+func TestStartThumbWorkerDisabledWhenCacheDirUncreatable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	database := mainTestOpenDB(t)
+	// A regular file where the cache dir should be: MkdirAll fails on it.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+	cfg := &config.Config{Thumbnails: config.Thumbnails{Enabled: true, CacheDir: filepath.Join(blocker, "thumbs")}}
+	w := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
+	if w != nil {
+		t.Fatal("startThumbWorker with an uncreatable cacheDir = non-nil, want nil (fail loudly, don't run a worker that can never write)")
+	}
+}
+
 func TestValidatePruneConfig(t *testing.T) {
 	t.Run("cacheTtlHours without prunable is rejected", func(t *testing.T) {
 		cfg := []config.StorageLocation{
@@ -681,7 +736,7 @@ func TestRunReturnsErrorOnBindFailure(t *testing.T) {
 	pool.Run(ctx)
 
 	var dbUnsafeToClose bool
-	runErr := run(ctx, cancel, log, httpServer, nil, nil, scanTracker, nil, drainer, pool, &dbUnsafeToClose)
+	runErr := run(ctx, cancel, log, httpServer, nil, nil, scanTracker, nil, drainer, nil, pool, &dbUnsafeToClose)
 
 	if runErr == nil {
 		t.Fatal("run() = nil, want a non-nil error surfacing the bind failure")

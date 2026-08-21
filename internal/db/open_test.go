@@ -179,9 +179,14 @@ func assertTablesAbsent(t *testing.T, writerDB *sql.DB) {
 // ("-N"/"(N)") pair must be downgraded to NEEDS_REVIEW at confidence 0.89
 // on migrate-up; edges from a role-suffix ("_proxy" etc) pair are the
 // resolver's originally-intended AUTO_ACCEPTED case and must be left
-// untouched. Migration 00006 is DML-only, so the schema at goose version 5
-// is identical to version 6 -- the fixtures below use the normal generated
-// sqlcgen helpers rather than raw SQL.
+// untouched. The media_nodes fixture rows are inserted via raw SQL scoped
+// to goose version 5's column set, not the generated sqlcgen.InsertMediaNode
+// (which always targets the CURRENT/HEAD schema) -- since migration 00007
+// widened media_nodes, the generated INSERT would otherwise reference
+// columns that don't exist yet at version 5, where these rows must
+// originate so migration 00006's UPDATE has pre-existing data to act on.
+// media_edges itself is unaffected by 00007, so CreateMediaEdge/GetMediaEdge
+// still use the normal generated helpers.
 func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "downgrade.db")
@@ -205,23 +210,31 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 		t.Fatalf("CreateStorageLocation: %v", err)
 	}
 
-	insertNode := func(uuidSuffix, path, fileName, stem string) sqlcgen.MediaNode {
+	// Raw SQL, deliberately not the generated sqlcgen.InsertMediaNode: that
+	// helper's column list always matches the CURRENT (HEAD) schema, but
+	// these fixture rows must exist at goose version 5 specifically --
+	// version 6 is what this test migrates *to*, to observe its downgrade
+	// effect, so the rows have to predate it. Migration 00007 (unrelated:
+	// promotes thumb_state/thumb_attempts) later widened media_nodes, which
+	// would otherwise make the generated INSERT reference columns that
+	// don't exist yet at version 5.
+	insertNode := func(uuidSuffix, path, fileName, stem string) int64 {
 		t.Helper()
-		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
-			NodeUuid:          "00000000-0000-7000-8000-00000000" + uuidSuffix,
-			StorageLocationID: loc.ID,
-			FilePath:          path,
-			FileName:          fileName,
-			FileExt:           "jpg",
-			IndexingStatus:    "INDEXED_SHALLOW",
-			GraphStatus:       "LINKED",
-			LifecycleState:    "ACTIVE",
-			FilenameStem:      sql.NullString{String: stem, Valid: true},
-		})
+		res, err := writerDB.ExecContext(ctx, `INSERT INTO media_nodes (
+			node_uuid, storage_location_id, file_path, file_name, file_ext,
+			indexing_status, graph_status, lifecycle_state, filename_stem,
+			first_seen_at, last_seen_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, 'jpg', 'INDEXED_SHALLOW', 'LINKED', 'ACTIVE', ?,
+			unixepoch(), unixepoch(), unixepoch(), unixepoch())`,
+			"00000000-0000-7000-8000-00000000"+uuidSuffix, loc.ID, path, fileName, stem)
 		if err != nil {
-			t.Fatalf("InsertMediaNode %s: %v", path, err)
+			t.Fatalf("insert media_nodes fixture %s: %v", path, err)
 		}
-		return node
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId for %s: %v", path, err)
+		}
+		return id
 	}
 
 	// An index-suffix pair, mimicking a pre-#132 AUTO_ACCEPTED mesh edge:
@@ -229,7 +242,7 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	anchor := insertNode("0001", "/photo.jpg", "photo.jpg", "photo")
 	indexChild := insertNode("0002", "/photo-2.jpg", "photo-2.jpg", "photo")
 	indexEdge, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
-		SourceNodeID: anchor.ID, TargetNodeID: indexChild.ID, RelationshipType: "DERIVED_FROM",
+		SourceNodeID: anchor, TargetNodeID: indexChild, RelationshipType: "DERIVED_FROM",
 		Confidence: 0.90, Tier: 2, Resolver: "filename_stem", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
 	})
 	if err != nil {
@@ -241,15 +254,21 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	renderParent := insertNode("0003", "/render.jpg", "render.jpg", "render")
 	renderChild := insertNode("0004", "/render_proxy.jpg", "render_proxy.jpg", "render")
 	roleEdge, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
-		SourceNodeID: renderParent.ID, TargetNodeID: renderChild.ID, RelationshipType: "PROXY_OF",
+		SourceNodeID: renderParent, TargetNodeID: renderChild, RelationshipType: "PROXY_OF",
 		Confidence: 0.90, Tier: 2, Resolver: "filename_stem", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
 	})
 	if err != nil {
 		t.Fatalf("CreateMediaEdge (role pair): %v", err)
 	}
 
-	if err := goose.UpTo(writerDB, migrationsDir, 6); err != nil {
-		t.Fatalf("goose UpTo 6: %v", err)
+	// UpTo 7, not just 6: migration 00007 is unrelated additive DDL (adds
+	// thumb_state/thumb_attempts with defaults) that doesn't touch any row
+	// this test asserts on, but the generated Queries below (GetMediaEdge,
+	// GetMediaNodeByID) are built against the current schema and would
+	// otherwise fail with "no such column" against a database still sitting
+	// at version 6.
+	if err := goose.UpTo(writerDB, migrationsDir, 7); err != nil {
+		t.Fatalf("goose UpTo 7: %v", err)
 	}
 
 	gotIndex, err := q.GetMediaEdge(ctx, indexEdge.ID)
@@ -274,7 +293,7 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 		t.Errorf("role pair confidence = %v, want 0.90 (untouched)", gotRole.Confidence)
 	}
 
-	indexChildAfter, err := q.GetMediaNodeByID(ctx, indexChild.ID)
+	indexChildAfter, err := q.GetMediaNodeByID(ctx, indexChild)
 	if err != nil {
 		t.Fatalf("GetMediaNodeByID (index child) after migration: %v", err)
 	}
@@ -282,7 +301,7 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 		t.Errorf("index child graph_status = %q, want NEEDS_REVIEW", indexChildAfter.GraphStatus)
 	}
 
-	renderChildAfter, err := q.GetMediaNodeByID(ctx, renderChild.ID)
+	renderChildAfter, err := q.GetMediaNodeByID(ctx, renderChild)
 	if err != nil {
 		t.Fatalf("GetMediaNodeByID (role child) after migration: %v", err)
 	}

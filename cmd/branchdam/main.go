@@ -31,6 +31,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/sync"
+	"github.com/s3ntin3l8/branchdam/internal/thumbs"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 	"github.com/s3ntin3l8/branchdam/web"
 )
@@ -183,6 +184,8 @@ func main() {
 		agent.WithEngine(engine))
 	drainer.Start(ctx, 0)
 
+	thumbWorker := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)
+
 	spa, err := web.Dist()
 	if err != nil {
 		log.Error("embed spa", "err", err)
@@ -202,7 +205,7 @@ func main() {
 		WriteTimeout:      time.Duration(cfg.HTTP.WriteTimeoutSecs) * time.Second,
 	}
 
-	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichWorker, drainer, pool, &dbUnsafeToClose)
+	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichWorker, drainer, thumbWorker, pool, &dbUnsafeToClose)
 	closeDatabase(log, database, dbUnsafeToClose)
 	if runErr != nil {
 		log.Error("run", "err", runErr)
@@ -221,7 +224,7 @@ func main() {
 // though it never successfully started serving (#123).
 func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpServer *http.Server,
 	supervisor *pipeline.WatcherSupervisor, sweeper *pipeline.SweeperSupervisor, scanTracker *pipeline.ScanTracker,
-	immichWorker *sync.Worker, drainer *agent.Drainer, pool *workers.Pool[string], dbUnsafeToClose *bool,
+	immichWorker *sync.Worker, drainer *agent.Drainer, thumbWorker *thumbs.Worker, pool *workers.Pool[string], dbUnsafeToClose *bool,
 ) error {
 	// Buffered so the goroutine never blocks sending its result, whether or
 	// not run() is still around to receive it by the time it does.
@@ -300,6 +303,14 @@ func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpSer
 	// transaction against the writer DB) before the database closes.
 	if !waitBounded(joinCtx, log, "drainer.Wait()", drainer.Wait) {
 		*dbUnsafeToClose = true
+	}
+	if thumbWorker != nil {
+		// Same reasoning as drainer.Wait() above: thumbWorker's own pass
+		// holds the writer DB connection (each node's SetThumbState is its
+		// own transaction) and must finish before db.Close.
+		if !waitBounded(joinCtx, log, "thumbWorker.Wait()", thumbWorker.Wait) {
+			*dbUnsafeToClose = true
+		}
 	}
 	// Drain waits for worker goroutines to finish their current job before the database closes.
 	if !waitBounded(joinCtx, log, "pool.Drain()", pool.Drain) {
@@ -393,6 +404,31 @@ func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB,
 		}, log)
 	worker.Start(ctx)
 	log.Info("sync: immich worker started", "libraryID", cfg.Immich.LibraryID, "exportPath", exportPath)
+	return worker
+}
+
+// startThumbWorker wires the thumbnail generation worker and returns it, or
+// nil when thumbnails.enabled is false. cacheDir is created here (not left
+// to Cache.Write's own per-shard MkdirAll) so a misconfigured/unwritable
+// path fails loudly at startup rather than on the worker's first pass.
+func startThumbWorker(ctx context.Context, cfg *config.Config, database *db.DB, guard *storage.Guard, prober *probe.Prober, log *slog.Logger, hub *sse.Hub) *thumbs.Worker {
+	if !cfg.Thumbnails.Enabled {
+		return nil
+	}
+	cacheDir := cfg.Thumbnails.CacheDir
+	if cacheDir == "" {
+		cacheDir = "/data/thumbs"
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		log.Error("thumbs: create cache dir, thumbnails disabled", "cacheDir", cacheDir, "err", err)
+		return nil
+	}
+	cache := thumbs.New(cacheDir, guard, prober, cfg.Thumbnails.MaxEdgePx)
+	worker := thumbs.NewWorker(database, cache, log,
+		thumbs.WithNudge(func() { hub.Broadcast() }),
+		thumbs.WithConcurrency(cfg.Thumbnails.Workers))
+	worker.Start(ctx, time.Duration(cfg.Thumbnails.IntervalSecs)*time.Second)
+	log.Info("thumbs: worker started", "cacheDir", cacheDir)
 	return worker
 }
 
