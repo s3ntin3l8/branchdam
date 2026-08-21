@@ -548,13 +548,13 @@ func TestPersistExifMetadataWritesExiftoolRows(t *testing.T) {
 }
 
 func TestIsVideoExt(t *testing.T) {
-	video := []string{"mp4", "mov", "mkv", "m2ts"}
+	video := []string{"mp4", "mov", "mkv", "m2ts", "lrf"}
 	for _, ext := range video {
 		if !isVideoExt(ext) {
 			t.Errorf("isVideoExt(%q) = false, want true", ext)
 		}
 	}
-	for _, ext := range []string{"MP4", ".mkv", ".MP4"} {
+	for _, ext := range []string{"MP4", ".mkv", ".MP4", "LRF", ".lrf", ".LRF"} {
 		if !isVideoExt(ext) {
 			t.Errorf("isVideoExt(%q) = false, want true (gate must normalize case/dot)", ext)
 		}
@@ -623,6 +623,54 @@ func TestCommitPersistsFFProbeMetadata(t *testing.T) {
 	for _, r := range prows {
 		if r.Source == "ffprobe" {
 			t.Errorf("photo node has an ffprobe row: %s=%s", r.Key, r.Value)
+		}
+	}
+}
+
+// TestCommitPersistsFFProbeMetadataForLRF backs issue #228: DJI's (and
+// similar drones') .lrf low-res proxy is a real MOV-ish container under
+// the hood, now in videoExts (isVideoExt), so resolveFileResult's ffprobe
+// gate (scan.go) runs for it exactly like any other video and Commit
+// persists the resulting node_metadata rows exactly like
+// TestCommitPersistsFFProbeMetadata's .mp4 case -- an .lrf result is no
+// longer a special case that silently drops its FFProbe field on the
+// floor.
+func TestCommitPersistsFFProbeMetadataForLRF(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	result := Result{
+		Path: "/dcim/DJI_0001.LRF", FileName: "DJI_0001.LRF", FileExt: "lrf",
+		Size: 100, ModTime: time.Now(), FastHash: "dddddddddddddddd",
+		FFProbe: &probe.FFProbeResult{
+			FormatName: "mov,mp4,m4a,3gp,3g2,mj2", DurationSeconds: floatPtr(2.0),
+			VideoCodec: "h264", Width: 640, Height: 360,
+		},
+	}
+	if _, err := Commit(ctx, database, locationID, []Result{result}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/dcim/DJI_0001.LRF")
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeMetadata: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Key] = r.Value
+	}
+	want := map[string]string{
+		"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration_seconds": "2",
+		"video_codec": "h264", "width": "640", "height": "360",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ffprobe rows = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got[k], v)
 		}
 	}
 }

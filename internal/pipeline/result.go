@@ -109,11 +109,16 @@ func selectExifRaw(raw map[string]string) map[string]string {
 
 // videoExts is the closed set of extensions FFProbe runs for (#34). Kept
 // explicit so adding a format is a conscious one-line change. ".ts" here
-// means MPEG transport stream, not TypeScript source.
+// means MPEG transport stream, not TypeScript source. "lrf" is DJI's (and
+// similar drones') low-res proxy companion file -- a real MOV-ish
+// container under the hood, not an opaque format, so it goes through the
+// same ffprobe path as any other video (#228). Previously absent from
+// every extension set here, so an .lrf got no ffprobe metadata, no pHash,
+// and no promoted columns at all.
 var videoExts = map[string]bool{
 	"mp4": true, "mov": true, "m4v": true, "mkv": true, "avi": true,
 	"webm": true, "wmv": true, "mts": true, "m2ts": true, "ts": true,
-	"3gp": true, "flv": true, "mpg": true, "mpeg": true,
+	"3gp": true, "flv": true, "mpg": true, "mpeg": true, "lrf": true,
 }
 
 func isVideoExt(ext string) bool { return videoExts[strings.ToLower(strings.TrimPrefix(ext, "."))] }
