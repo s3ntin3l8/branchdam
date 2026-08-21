@@ -20,6 +20,13 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
+	// #225: used when the MISSING sweep is skipped because the walk saw zero
+	// files. The scan itself still completed cleanly -- state stays COMPLETED,
+	// not FAILED, since a walk *error* is a distinct, already-handled failure
+	// mode (see FailScanJob) -- but last_error carries a human-readable note so
+	// an operator can tell "swept nothing because there was genuinely nothing to
+	// see" apart from "swept nothing because the walk aborted."
+	CompleteScanJobWithWarning(ctx context.Context, arg CompleteScanJobWithWarningParams) error
 	// RETURNING target_node_id (rather than plain :exec) doubles as the
 	// existence check: sql.ErrNoRows means id didn't match any row, which the
 	// caller (internal/httpapi) turns into a 404 instead of a silent no-op

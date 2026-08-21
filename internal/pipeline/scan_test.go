@@ -303,6 +303,16 @@ func TestScanSweepTriggersMoveDetectionRebase(t *testing.T) {
 
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "alpha content")
+	// keepalive.txt stays on disk through every pass below -- #225's
+	// zero-only sweep guard means a pass where a.txt is the ONLY file on
+	// disk and gets removed would see filesSeen == 0 and (correctly, by
+	// that fix's own design) skip the sweep rather than mark a.txt MISSING.
+	// This test is about move-detection rebase after a real sweep, not
+	// about the zero-files guard itself (that's
+	// TestScanSkipsSweepWhenWalkSeesZeroFiles), so keepalive.txt keeps
+	// filesSeen > 0 on every pass and lets the ordinary per-path sweep
+	// logic run as before.
+	writeFile(t, filepath.Join(root, "keepalive.txt"), "keepalive content")
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatalf("resolve root: %v", err)
@@ -379,6 +389,139 @@ func TestScanSweepTriggersMoveDetectionRebase(t *testing.T) {
 	}
 	if edge, err := database.Reader.GetMediaEdge(ctx, edgeID); err != nil || edge.SourceNodeID != a.ID {
 		t.Errorf("edge %d on the moved node broken: err=%v src=%d want %d", edgeID, err, edge.SourceNodeID, a.ID)
+	}
+}
+
+// TestScanSkipsSweepWhenWalkSeesZeroFiles is #225's regression guard: a walk
+// that completes without error but observes zero files (a stale NFS handle
+// recovered as an empty directory, a remount at the wrong subpath, ...) must
+// not be treated as proof every previously-known file under the location
+// vanished. Unlike TestScanAbortedPartwayLeavesAllNodesActive (a walk
+// *error*, which the pre-existing guard already handled), this is a walk
+// that succeeds cleanly with filesSeen == 0 -- the case #225 reports nothing
+// ever guarded against. Both nodes previously indexed must stay ACTIVE, and
+// the job must land COMPLETED (not FAILED) with a distinguishing last_error
+// so an operator can tell "swept nothing because the location looked
+// genuinely empty" apart from "swept nothing because the walk itself
+// errored."
+func TestScanSkipsSweepWhenWalkSeesZeroFiles(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "alpha content")
+	writeFile(t, filepath.Join(root, "b.txt"), "bravo content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 1): %v", err)
+	}
+	job1 := waitJobDone(t, database, jobID)
+	if job1.State != "COMPLETED" {
+		t.Fatalf("pass 1 state = %q (last_error=%v)", job1.State, job1.LastError)
+	}
+	if job1.LastError.Valid {
+		t.Errorf("pass 1 last_error = %q, want unset on an ordinary clean scan", job1.LastError.String)
+	}
+
+	// Simulate a vanished/stale mount recovered as an empty directory: the
+	// files are gone but the root itself still exists and walks
+	// successfully, so this is NOT the walkErr path -- indexer.Walk returns
+	// nil with zero files observed.
+	if err := os.Remove(filepath.Join(resolvedRoot, "a.txt")); err != nil {
+		t.Fatalf("remove a.txt: %v", err)
+	}
+	if err := os.Remove(filepath.Join(resolvedRoot, "b.txt")); err != nil {
+		t.Fatalf("remove b.txt: %v", err)
+	}
+	waitForNextSecond(t)
+
+	jobID2, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 2): %v", err)
+	}
+	job2 := waitJobDone(t, database, jobID2)
+
+	// Distinct from a walk-error abort: this scan genuinely completed, it
+	// just chose not to sweep.
+	if job2.State != "COMPLETED" {
+		t.Fatalf("pass 2 state = %q, want COMPLETED (zero-files is not a walk error)", job2.State)
+	}
+	if job2.FilesSeen != 0 {
+		t.Fatalf("pass 2 files_seen = %d, want 0", job2.FilesSeen)
+	}
+	if !job2.LastError.Valid || job2.LastError.String == "" {
+		t.Fatalf("pass 2 last_error unset, want a warning distinguishing the skipped sweep from an ordinary clean pass")
+	}
+	if !strings.Contains(job2.LastError.String, "zero files") {
+		t.Errorf("pass 2 last_error = %q, want it to mention the zero-files skip", job2.LastError.String)
+	}
+
+	// The headline assertion: neither previously-known node was swept to
+	// MISSING just because this pass saw nothing.
+	a, err := database.Reader.GetLiveNodeByPath(ctx, filepath.Join(resolvedRoot, "a.txt"))
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath(a.txt): %v", err)
+	}
+	if a.LifecycleState != "ACTIVE" {
+		t.Errorf("a.txt lifecycle_state = %q, want ACTIVE (zero-files walk must not sweep)", a.LifecycleState)
+	}
+	b, err := database.Reader.GetLiveNodeByPath(ctx, filepath.Join(resolvedRoot, "b.txt"))
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath(b.txt): %v", err)
+	}
+	if b.LifecycleState != "ACTIVE" {
+		t.Errorf("b.txt lifecycle_state = %q, want ACTIVE (zero-files walk must not sweep)", b.LifecycleState)
+	}
+}
+
+// TestScanEmptyFirstScanOfNewLocationHasNoSweepWarning is #225's
+// false-positive guard: a genuinely brand-new, empty storage location (its
+// very first scan, zero previously-known nodes) must not be misreported as a
+// "possible vanished mount." MarkUnseenNodesMissing is still skipped
+// unconditionally on filesSeen == 0 (a correctness no-op here, since it would
+// have affected zero rows regardless), but the warning itself -- both the log
+// line and the job's last_error -- is gated on CountMediaNodesFiltered
+// finding at least one prior ACTIVE node for this location (an existing
+// query, reused rather than adding a new one). Zero prior ACTIVE nodes means
+// there was nothing this pass could have wrongly swept, so the job completes
+// with last_error left unset, same as any other ordinary clean scan.
+func TestScanEmptyFirstScanOfNewLocationHasNoSweepWarning(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir() // genuinely empty from the start
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	job := waitJobDone(t, database, jobID)
+	if job.State != "COMPLETED" {
+		t.Fatalf("state = %q (last_error=%v)", job.State, job.LastError)
+	}
+	if job.FilesSeen != 0 {
+		t.Fatalf("files_seen = %d, want 0", job.FilesSeen)
+	}
+	// The headline assertion: no prior ACTIVE nodes existed for this
+	// location, so the warning must not fire -- last_error stays unset, same
+	// as any other clean scan.
+	if job.LastError.Valid {
+		t.Fatalf("last_error = %q, want unset for a brand-new location with no prior ACTIVE nodes to lose", job.LastError.String)
 	}
 }
 
@@ -511,6 +654,14 @@ func TestSamePathRecreationReactivates(t *testing.T) {
 
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "alpha content")
+	// keepalive.txt stays on disk through every pass -- #225's zero-only
+	// sweep guard skips MarkUnseenNodesMissing entirely when a pass sees
+	// zero files, so a.txt being the ONLY file on disk and getting removed
+	// would otherwise never reach MISSING at all. This test is about
+	// same-path reactivation after a real sweep, not the zero-files guard
+	// itself (that's TestScanSkipsSweepWhenWalkSeesZeroFiles), so keep
+	// filesSeen > 0 throughout.
+	writeFile(t, filepath.Join(root, "keepalive.txt"), "keepalive content")
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatalf("resolve root: %v", err)
