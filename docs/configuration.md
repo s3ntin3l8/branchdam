@@ -91,6 +91,11 @@ One entry per mounted storage tier. `tier` must be one of `TIER0_LOCAL_STAGING`,
 every startup (`seedStorageLocations`, keyed on `rootPath`'s `UNIQUE` constraint) — no separate
 migration step needed when a mount is added, changed, or removed from config.
 
+A `TIER0_LOCAL_STAGING` location is scanned and indexed like any other tier, but its nodes never
+get a generated thumbnail (`ListPendingThumbnails` excludes this tier by design, #231) — bytes
+staged there aren't guaranteed to be the final synced copy the server should be spending
+generation work on. This is a permanent property of the tier, not a bug to work around.
+
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `name` | string | — | Display name only. |

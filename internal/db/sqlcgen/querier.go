@@ -174,6 +174,22 @@ type Querier interface {
 	// mirroring remote_sync_state's retry_count bound
 	// (ResetRemoteSyncStateFailed). lifecycle_state excludes MISSING/ARCHIVED:
 	// there is no live file left to read a thumbnail from.
+	//
+	// Joined against storage_locations to exclude TIER0_LOCAL_STAGING (#231):
+	// workstation-local staging a future offline-ingest agent may record a node
+	// for before its bytes have synced anywhere server-visible. Without this,
+	// the worker claims a node whose file the server can never open, fails,
+	// and burns a retry (and real read I/O against whatever remote/NFS tier it
+	// probes) every pass until thumb_attempts hits its bound -- self-limiting
+	// but noisy, and never productive. No other tier is excluded here: Tier 1
+	// scratch, Tier 2 exports, Tier 3 masters, and PROJECTS are all
+	// server-readable.
+	//
+	// Plain positional params (?1, ?2), not sqlc.arg: this file already has
+	// earlier queries using bare ?N placeholders (ListTier3Candidates,
+	// ListPrunableNodes, UpdateMediaNodePromotedColumns), and sqlc v1.31.1
+	// mis-numbers/corrupts a later sqlc.arg(name) placeholder in the same file
+	// when a bare ?N appears anywhere earlier in it.
 	ListPendingThumbnails(ctx context.Context, arg ListPendingThumbnailsParams) ([]ListPendingThumbnailsRow, error)
 	// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
 	// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a

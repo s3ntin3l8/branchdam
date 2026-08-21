@@ -1316,12 +1316,14 @@ func (q *Queries) ListPrunableNodes(ctx context.Context, arg ListPrunableNodesPa
 }
 
 const listPendingThumbnails = `-- name: ListPendingThumbnails :many
-SELECT id, node_uuid, file_path, thumb_attempts
-FROM media_nodes
-WHERE thumb_state = 'PENDING'
-  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
-  AND thumb_attempts < ?1
-ORDER BY id
+SELECT n.id, n.node_uuid, n.file_path, n.thumb_attempts
+FROM media_nodes n
+JOIN storage_locations s ON s.id = n.storage_location_id
+WHERE n.thumb_state = 'PENDING'
+  AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND n.thumb_attempts < ?1
+  AND s.tier <> 'TIER0_LOCAL_STAGING'
+ORDER BY n.id
 LIMIT ?2
 `
 
@@ -1348,6 +1350,22 @@ type ListPendingThumbnailsRow struct {
 // mirroring remote_sync_state's retry_count bound
 // (ResetRemoteSyncStateFailed). lifecycle_state excludes MISSING/ARCHIVED:
 // there is no live file left to read a thumbnail from.
+//
+// Joined against storage_locations to exclude TIER0_LOCAL_STAGING (#231):
+// workstation-local staging a future offline-ingest agent may record a node
+// for before its bytes have synced anywhere server-visible. Without this,
+// the worker claims a node whose file the server can never open, fails,
+// and burns a retry (and real read I/O against whatever remote/NFS tier it
+// probes) every pass until thumb_attempts hits its bound -- self-limiting
+// but noisy, and never productive. No other tier is excluded here: Tier 1
+// scratch, Tier 2 exports, Tier 3 masters, and PROJECTS are all
+// server-readable.
+//
+// Plain positional params (?1, ?2), not sqlc.arg: this file already has
+// earlier queries using bare ?N placeholders (ListTier3Candidates,
+// ListPrunableNodes, UpdateMediaNodePromotedColumns), and sqlc v1.31.1
+// mis-numbers/corrupts a later sqlc.arg(name) placeholder in the same file
+// when a bare ?N appears anywhere earlier in it.
 func (q *Queries) ListPendingThumbnails(ctx context.Context, arg ListPendingThumbnailsParams) ([]ListPendingThumbnailsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listPendingThumbnails, arg.ThumbAttempts, arg.Limit)
 	if err != nil {
