@@ -115,12 +115,12 @@ func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) 
 const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
-       sn.file_name AS source_file_name, sn.file_path AS source_file_path,
+       sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
        sn.captured_at_unix AS source_captured_at_unix, sn.camera_model AS source_camera_model,
-       sn.phash AS source_phash,
-       tn.file_name AS target_file_name, tn.file_path AS target_file_path,
+       sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
+       tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
        tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
-       tn.phash AS target_phash
+       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state
 FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
@@ -145,16 +145,20 @@ type ListAuditQueueDetailedRow struct {
 	EvidenceJson         string
 	ParentAlive          bool
 	ParentMissing        bool
+	SourceNodeUuid       string
 	SourceFileName       string
 	SourceFilePath       string
 	SourceCapturedAtUnix sql.NullInt64
 	SourceCameraModel    sql.NullString
 	SourcePhash          sql.NullInt64
+	SourceThumbState     string
+	TargetNodeUuid       string
 	TargetFileName       string
 	TargetFilePath       string
 	TargetCapturedAtUnix sql.NullInt64
 	TargetCameraModel    sql.NullString
 	TargetPhash          sql.NullInt64
+	TargetThumbState     string
 }
 
 func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error) {
@@ -177,16 +181,20 @@ func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueue
 			&i.EvidenceJson,
 			&i.ParentAlive,
 			&i.ParentMissing,
+			&i.SourceNodeUuid,
 			&i.SourceFileName,
 			&i.SourceFilePath,
 			&i.SourceCapturedAtUnix,
 			&i.SourceCameraModel,
 			&i.SourcePhash,
+			&i.SourceThumbState,
+			&i.TargetNodeUuid,
 			&i.TargetFileName,
 			&i.TargetFilePath,
 			&i.TargetCapturedAtUnix,
 			&i.TargetCameraModel,
 			&i.TargetPhash,
+			&i.TargetThumbState,
 		); err != nil {
 			return nil, err
 		}

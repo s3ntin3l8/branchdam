@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
+import Thumbnail from "../components/Thumbnail";
 import type { AuditEntry } from "../api/types";
 
 function formatTimestamp(unix?: number): string {
@@ -87,11 +88,21 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
           <div className="mb-2 text-xs font-bold uppercase tracking-wider text-blue-400">
             Parent (Node #{entry.sourceNodeId})
           </div>
-          <div className="truncate text-sm font-semibold text-neutral-200" title={entry.sourceNode?.fileName}>
-            {entry.sourceNode?.fileName || `Node ${entry.sourceNodeId}`}
-          </div>
-          <div className="truncate text-xs text-neutral-500" title={entry.sourceNode?.filePath}>
-            {entry.sourceNode?.filePath || "—"}
+          <div className="mb-2 flex items-start gap-3">
+            <Thumbnail
+              assetId={entry.sourceNodeId}
+              thumbState={entry.sourceNode?.thumbState ?? "PENDING"}
+              alt={entry.sourceNode?.fileName ?? `Node ${entry.sourceNodeId}`}
+              className="h-20 w-20 shrink-0 rounded object-cover"
+            />
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-neutral-200" title={entry.sourceNode?.fileName}>
+                {entry.sourceNode?.fileName || `Node ${entry.sourceNodeId}`}
+              </div>
+              <div className="truncate text-xs text-neutral-500" title={entry.sourceNode?.filePath}>
+                {entry.sourceNode?.filePath || "—"}
+              </div>
+            </div>
           </div>
           <div className="mt-2 space-y-1 text-xs text-neutral-400">
             <div>
@@ -136,11 +147,21 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
           <div className="mb-2 text-xs font-bold uppercase tracking-wider text-emerald-400">
             Child (Node #{entry.targetNodeId})
           </div>
-          <div className="truncate text-sm font-semibold text-neutral-200" title={entry.targetNode?.fileName}>
-            {entry.targetNode?.fileName || `Node ${entry.targetNodeId}`}
-          </div>
-          <div className="truncate text-xs text-neutral-500" title={entry.targetNode?.filePath}>
-            {entry.targetNode?.filePath || "—"}
+          <div className="mb-2 flex items-start gap-3">
+            <Thumbnail
+              assetId={entry.targetNodeId}
+              thumbState={entry.targetNode?.thumbState ?? "PENDING"}
+              alt={entry.targetNode?.fileName ?? `Node ${entry.targetNodeId}`}
+              className="h-20 w-20 shrink-0 rounded object-cover"
+            />
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-neutral-200" title={entry.targetNode?.fileName}>
+                {entry.targetNode?.fileName || `Node ${entry.targetNodeId}`}
+              </div>
+              <div className="truncate text-xs text-neutral-500" title={entry.targetNode?.filePath}>
+                {entry.targetNode?.filePath || "—"}
+              </div>
+            </div>
           </div>
           <div className="mt-2 space-y-1 text-xs text-neutral-400">
             <div>

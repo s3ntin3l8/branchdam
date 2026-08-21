@@ -22,6 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
+	"github.com/s3ntin3l8/branchdam/internal/thumbs"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
@@ -38,6 +39,11 @@ type Deps struct {
 	Hub     *sse.Hub
 	SPA     fs.FS
 	Version string
+
+	// ThumbCache serves GET /api/v1/assets/{id}/thumbnail. May be nil (a
+	// misconfigured/uncreatable cache dir at startup, or thumbnails not
+	// wired at all in a test) -- the route 404s rather than panicking.
+	ThumbCache *thumbs.Cache
 
 	// Tracker, if set, is passed through to every pipeline.ScanDeps this
 	// server builds, so cmd/branchdam can join scans started via
@@ -66,6 +72,7 @@ type Server struct {
 	version  string
 	tracker  *pipeline.ScanTracker
 	shutdown <-chan struct{}
+	thumbs   *thumbs.Cache
 }
 
 // New builds the HTTP server handler set.
@@ -92,6 +99,7 @@ func New(d Deps) *Server {
 		version:  version,
 		tracker:  d.Tracker,
 		shutdown: d.Shutdown,
+		thumbs:   d.ThumbCache,
 	}
 }
 
@@ -133,6 +141,10 @@ func (s *Server) Handler() http.Handler {
 	// SSE is registered directly on the mux, not through Huma -- Huma's
 	// response model fights a streaming text/event-stream handler.
 	mux.HandleFunc("GET /api/v1/events", s.handleEvents)
+	// Thumbnails are also registered directly on the mux, for the same
+	// reason -- Huma's response model expects a JSON body, not a raw
+	// image/jpeg byte stream.
+	mux.HandleFunc("GET /api/v1/assets/{id}/thumbnail", s.handleThumbnail)
 	mux.Handle("GET /", s.spaHandler())
 
 	var apiKey string

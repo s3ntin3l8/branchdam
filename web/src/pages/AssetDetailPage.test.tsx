@@ -16,6 +16,7 @@ vi.mock("../api/client", () => ({
     pruneCache: vi.fn(),
     listStorageLocations: vi.fn(),
     inheritMetadata: vi.fn(),
+    thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
   },
 }));
 
@@ -30,6 +31,7 @@ const asset: Asset = {
   graphStatus: "UNLINKED",
   lifecycleState: "ACTIVE",
   storageLocationId: 7,
+  thumbState: "PENDING",
 };
 
 const prunableLocation: StorageLocation = {

@@ -53,6 +53,12 @@ export const api = {
   getAssetSyncStatus: (id: number) => request<AssetSyncStatus>(`/api/v1/assets/${id}/sync-status`),
   retrySync: (id: number) => request<{ requeued: number }>(`/api/v1/assets/${id}/sync/retry`, { method: "POST" }),
 
+  // Not a request<T> call -- this is a plain URL for an <img src>, served
+  // directly off the mux (see internal/httpapi/thumbnail.go), not through
+  // Huma's JSON response path. The browser's own session cookie carries
+  // auth, same as any other same-origin image request.
+  thumbnailUrl: (id: number) => `/api/v1/assets/${id}/thumbnail`,
+
   listAuditQueue: (params: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
