@@ -247,6 +247,13 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   to touch it. `internal/prune.Execute` (#61) is `Guard.Remove`'s first and, by design, only
   production caller -- every purge still resolves through `CheckWrite` first, so a symlink from a
   prunable Tier-1 location into Tier 3 is refused the same way any other Guard caller is.
+  **`internal/thumbs.Cache` is the one deliberate exception**: it writes JPEGs under `/data/thumbs`
+  (`thumbnails.cacheDir`), which is app-owned state on the same volume as `branchdam.db`, not a
+  path under any configured `storage_locations` tier -- `Guard.Resolve` returns
+  `ErrUnknownLocation` for anything outside `storage_locations`, so routing the cache through
+  `Guard` is not just unnecessary but impossible. Reading the *source* media a thumbnail is
+  generated from still goes through `Guard.OpenRead`; only the cached JPEG's own
+  `os.CreateTemp`/`os.Rename`/`os.Remove` bypass `Guard`.
 - **A Tier-1 cache file is only prunable with a verified Tier-3 master.** `ListPrunableNodes`
   (#61) requires a *live* ancestor (`lifecycle_state IN ('ACTIVE','HIDDEN')`, walked via
   `media_edges` target→source, `REJECTED` edges excluded) on a `TIER3_MASTER_ARCHIVE` location

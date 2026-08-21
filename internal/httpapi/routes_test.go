@@ -533,6 +533,16 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 			return err
 		}
 
+		// As if a thumbnail had already been generated for the pre-write
+		// bytes and a prior generation attempt had failed once -- the write
+		// below must reset both back to a fresh PENDING, not leave the old
+		// cached thumbnail's state believing it still matches the file.
+		if err := q.SetThumbState(context.Background(), sqlcgen.SetThumbStateParams{
+			ID: child.ID, ThumbState: "READY", ThumbAttempts: 1,
+		}); err != nil {
+			return err
+		}
+
 		_, err = q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
 			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
 			Confidence: 1.0, Tier: 1, Resolver: "test", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
@@ -601,6 +611,12 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 	}
 	if after.IndexingStatus != "INDEXED_SHALLOW" {
 		t.Errorf("child indexing_status = %q, want INDEXED_SHALLOW (downgraded from INDEXED_FULL, whose full_hash is now stale)", after.IndexingStatus)
+	}
+	if after.ThumbState != "PENDING" {
+		t.Errorf("child thumb_state = %q, want PENDING (a thumbnail cached from the pre-write bytes no longer represents the file)", after.ThumbState)
+	}
+	if after.ThumbAttempts != 0 {
+		t.Errorf("child thumb_attempts = %d, want 0 (fresh retry budget after invalidation)", after.ThumbAttempts)
 	}
 }
 

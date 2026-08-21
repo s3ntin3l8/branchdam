@@ -107,6 +107,21 @@ Setting both `watch` and `sweep` on the same location is logged as a WARN at sta
 (both mechanisms will independently notice the same change) but not corrupting, since the writer
 DB connection is single-connection and serializes both Commits.
 
-## What's not here yet
+## `thumbnails`
 
-`thumbnails:` — see the thumbnail cache work; documented here once it lands, not yet.
+Configures the JPEG thumbnail cache (`internal/thumbs`). The cache directory lives on the app's
+own `/data` volume, not inside any `storageLocations` tier, and deliberately does not route
+through `storage.Guard` — see `internal/thumbs`' package doc.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `enabled` | bool | `true` | Turns the background thumbnail worker on or off. Reads of a JPEG already on disk still work either way; disabling just stops new/invalidated thumbnails from ever leaving `PENDING`. |
+| `cacheDir` | string | `/data/thumbs` | Root directory thumbnails are written under, sharded `<uuid[0:2]>/<uuid[2:4]>/<uuid>.jpg`. Must be absolute, same constraint as `database.path`. Already covered by the `branchdam-data` volume mount — no separate compose change needed. |
+| `maxEdgePx` | int | `0` (auto: `thumbs.DefaultMaxEdgePx`, 512px) | Longest-edge target in pixels a thumbnail is scaled to; never upscaled. |
+| `workers` | int | `0` (auto: `min(4, NumCPU)`) | Goroutine count the worker fans a batch out across for `Generate`/encode, which is CPU/exiftool-subprocess-bound. Mirrors `workers.hashWorkers`' "0 = auto" convention. Each node's DB write still serializes through the single-connection writer pool regardless of this value. |
+| `intervalSecs` | int | `0` (auto: `thumbs.DefaultInterval`, 5s) | Polling interval between batches when the pending-thumbnail queue is empty, mirroring `storageLocations[].sweepIntervalSecs`. |
+
+`thumb_state` on a node is one of `PENDING` (queued or just invalidated), `READY` (cached JPEG
+exists at `Cache.Path(uuid)`), `UNSUPPORTED` (neither natively decodable nor carrying an embedded
+preview — terminal, not retried), or `FAILED` (retried up to `internal/thumbs.DefaultMaxAttempts`
+times, then left alone). `GET /api/v1/assets/{id}/thumbnail` 404s unless `thumb_state = READY`.

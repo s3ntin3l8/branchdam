@@ -829,6 +829,14 @@ const inheritWriteTimeout = 30 * time.Second
 // it, the next scan observes a changed fast_hash at an unchanged path and
 // runs commitVersionCollision (see internal/pipeline/commit.go), archiving
 // this node and inserting a successor under a new node_uuid.
+//
+// This is also the one place a node's fast_hash changes while its node_uuid
+// is preserved -- internal/pipeline's Touched and rebase branches only ever
+// reach reconcilePromotedColumns when fast_hash is unchanged/already-matched,
+// by construction. So the thumbnail-invalidation reset lives here, not
+// there: any cached thumbnail was generated from the bytes before this
+// write and no longer represents the file, and it's committed in the same
+// transaction as the hash refresh so the two can't disagree.
 func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.MediaNode) error {
 	rctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
 	defer cancel()
@@ -850,12 +858,15 @@ func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.
 	}
 
 	return s.db.InTx(rctx, func(q *sqlcgen.Queries) error {
-		return q.RefreshMediaNodeAfterInPlaceWrite(rctx, sqlcgen.RefreshMediaNodeAfterInPlaceWriteParams{
+		if err := q.RefreshMediaNodeAfterInPlaceWrite(rctx, sqlcgen.RefreshMediaNodeAfterInPlaceWriteParams{
 			ID:        node.ID,
 			SizeBytes: stat.Size(),
 			MtimeUnix: stat.ModTime().Unix(),
 			FastHash:  &fastHash,
-		})
+		}); err != nil {
+			return err
+		}
+		return q.InvalidateThumbnail(rctx, node.ID)
 	})
 }
 

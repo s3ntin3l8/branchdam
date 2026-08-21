@@ -88,7 +88,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model
+       camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE id IN (SELECT value FROM json_each(?1))
   AND lifecycle_state <> 'ARCHIVED';
