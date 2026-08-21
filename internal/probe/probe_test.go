@@ -281,6 +281,37 @@ func TestExtractPHashNonImageFile(t *testing.T) {
 	}
 }
 
+func TestExtractPreviewJPEGNoExiftool(t *testing.T) {
+	t.Parallel()
+	p := &Prober{} // zero value: exiftoolPath unset, HasExiftool() false regardless of the host
+
+	preview, err := p.ExtractPreviewJPEG(context.Background(), "/nonexistent/path.arw")
+	if err != nil {
+		t.Fatalf("ExtractPreviewJPEG with no exiftool returned error: %v", err)
+	}
+	if preview != nil {
+		t.Errorf("ExtractPreviewJPEG with no exiftool returned %d bytes, want nil", len(preview))
+	}
+}
+
+func TestExtractPreviewJPEGNoEmbeddedPreview(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := makeFixtureJPEG(t, dir) // plain JPEG -- no PreviewImage/JpgFromRaw/ThumbnailImage tag
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	preview, err := p.ExtractPreviewJPEG(ctx, path)
+	if err != nil {
+		t.Fatalf("ExtractPreviewJPEG on a JPEG with no embedded preview tag returned error: %v", err)
+	}
+	if preview != nil {
+		t.Errorf("ExtractPreviewJPEG on a JPEG with no embedded preview tag returned %d bytes, want nil", len(preview))
+	}
+}
+
 func TestWriteTagsRoundTrip(t *testing.T) {
 	exiftool := requireTool(t, "exiftool")
 	requireTool(t, "ffmpeg")

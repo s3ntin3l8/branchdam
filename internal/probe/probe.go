@@ -386,35 +386,66 @@ func (p *Prober) FFProbe(ctx context.Context, path string) (*FFProbeResult, erro
 	return result, nil
 }
 
+// ExtractPreviewJPEG extracts a decodable embedded preview image from path
+// via exiftool, trying -PreviewImage, then -JpgFromRaw, then -ThumbnailImage
+// in order and returning the bytes of the first one that both produces
+// output and decodes successfully via Go's standard image library (a tag
+// can be present but corrupt or empty for a given camera/format, so a
+// decode failure falls through to the next tag rather than returning bad
+// bytes). Returns nil, nil -- not an error -- when exiftool is unavailable
+// or none of the three tags yield a decodable image; that is the normal
+// case for a file with no embedded preview, not a failure.
+func (p *Prober) ExtractPreviewJPEG(ctx context.Context, path string) ([]byte, error) {
+	if !p.HasExiftool() {
+		return nil, nil
+	}
+	for _, argsFn := range []func(string) []string{previewImageArgs, jpgFromRawArgs, thumbnailImageArgs} {
+		cmd := exec.CommandContext(ctx, p.exiftoolPath, argsFn(path)...)
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		if err := cmd.Run(); err != nil || stdout.Len() == 0 {
+			continue
+		}
+		if _, _, err := image.Decode(bytes.NewReader(stdout.Bytes())); err != nil {
+			continue
+		}
+		return stdout.Bytes(), nil
+	}
+	return nil, nil
+}
+
 // ExtractPHash attempts to compute a perceptual hash (pHash) for path.
 // It first attempts direct image decoding using Go's standard image library.
-// If direct decoding fails (e.g. for camera RAW files like .ARW, .CR2, .NEF, .DNG)
-// and exiftool is available, it extracts the embedded PreviewImage (falling back to
-// JpgFromRaw or ThumbnailImage) and computes pHash over the decoded preview image.
-// Returns nil, nil if the file is not an image or if pHash extraction is unsupported.
+// If direct decoding fails (e.g. for camera RAW files like .ARW, .CR2, .NEF, .DNG),
+// it falls back to ExtractPreviewJPEG and computes pHash over the decoded
+// preview image. Returns nil, nil if the file is not an image or if pHash
+// extraction is unsupported.
+//
+// Note: prior to the ExtractPreviewJPEG extraction (lifted out for reuse by
+// internal/thumbs), a failed hash computation after a successful decode
+// would try the next exiftool tag; it no longer does, since retrying a
+// different tag to work around a hashing-library failure on an already
+// -- successfully decoded image is not something a shared preview extractor
+// should encode. hashing.PerceptualHash failing on a validly decoded image
+// is not observed in practice.
 func (p *Prober) ExtractPHash(ctx context.Context, path string) (*int64, error) {
 	if ph, err := p.decodeFileAndHash(path); err == nil {
 		return ph, nil
 	}
 
-	if p.HasExiftool() {
-		for _, argsFn := range []func(string) []string{previewImageArgs, jpgFromRawArgs, thumbnailImageArgs} {
-			cmd := exec.CommandContext(ctx, p.exiftoolPath, argsFn(path)...)
-			var stdout bytes.Buffer
-			cmd.Stdout = &stdout
-			if err := cmd.Run(); err == nil && stdout.Len() > 0 {
-				img, _, err := image.Decode(&stdout)
-				if err == nil {
-					hash, err := hashing.PerceptualHash(img)
-					if err == nil {
-						return &hash, nil
-					}
-				}
-			}
-		}
+	preview, err := p.ExtractPreviewJPEG(ctx, path)
+	if err != nil || len(preview) == 0 {
+		return nil, nil
 	}
-
-	return nil, nil
+	img, _, err := image.Decode(bytes.NewReader(preview))
+	if err != nil {
+		return nil, nil
+	}
+	hash, err := hashing.PerceptualHash(img)
+	if err != nil {
+		return nil, nil
+	}
+	return &hash, nil
 }
 
 func (p *Prober) decodeFileAndHash(path string) (*int64, error) {
