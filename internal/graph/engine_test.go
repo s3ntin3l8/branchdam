@@ -703,45 +703,6 @@ func TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder(t *testing.T) {
 	})
 }
 
-// TestFilenameStemProxySRTSidecarUsesSharedProxyExtsSet is #229's addition
-// of ".srt" to proxyExts (internal/graph/resolvers.go), reusing exactly the
-// same direction-gating mechanism TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder
-// above proves for ".lrf" -- a DJI video and its per-frame flight-telemetry
-// .srt sidecar share a filename stem with no index suffix on either side,
-// so without this the pair would resolve in whichever direction the engine
-// happened to evaluate first, same failure mode #228 fixed for .lrf.
-func TestFilenameStemProxySRTSidecarUsesSharedProxyExtsSet(t *testing.T) {
-	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
-	database := openTestDB(t)
-	ctx := context.Background()
-	locationID := seedLocation(t, database)
-
-	video := seedNode(t, database, locationID, nodeFixture{
-		Path: "/dcim/DJI_0002.MP4", FileName: "DJI_0002.MP4", FileExt: "mp4",
-		CapturedAt: &capturedAt, FastHash: strings.Repeat("1", 15) + "a",
-	})
-	srt := seedNode(t, database, locationID, nodeFixture{
-		Path: "/dcim/DJI_0002.SRT", FileName: "DJI_0002.SRT", FileExt: "srt",
-		CapturedAt: &capturedAt, FastHash: strings.Repeat("2", 15) + "b",
-	})
-
-	engine := newEngine(database)
-	edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(srt))
-	if err != nil {
-		t.Fatalf("ResolveAndCommit: %v", err)
-	}
-	if len(edges) != 1 {
-		t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
-	}
-	if edges[0].SourceNodeID != video.ID || edges[0].TargetNodeID != srt.ID {
-		t.Errorf("edge = %d->%d, want video(%d)->srt(%d) (the .srt sidecar must always be the child)",
-			edges[0].SourceNodeID, edges[0].TargetNodeID, video.ID, srt.ID)
-	}
-	if edges[0].RelationshipType != "PROXY_OF" {
-		t.Errorf("relationship_type = %q, want PROXY_OF", edges[0].RelationshipType)
-	}
-}
-
 // TestFilenameStemProxyExtNeverOverridesIndexAnchorInvariant is a
 // regression test for a bug in the original #228 fix: the proxy-ext
 // direction swap ran unconditionally, even for a pair that had ALREADY

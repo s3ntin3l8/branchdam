@@ -91,3 +91,86 @@ func TestParseFirstPoint_CRLF(t *testing.T) {
 		t.Errorf("got (%v, %v), want (1.0, 2.0)", p.Latitude, p.Longitude)
 	}
 }
+
+// TestParseFirstPoint_SkipsPreLockZeroZero proves ParseFirstPoint skips
+// past DJI's common pre-GPS-lock leading (0,0) placeholder cues and returns
+// the aircraft's actual first fix later in the file, rather than returning
+// the bogus (0,0) point as if it were real (see isValidFix's doc comment).
+func TestParseFirstPoint_SkipsPreLockZeroZero(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "sample_prelock_zero.srt"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	p, err := ParseFirstPoint(strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatalf("ParseFirstPoint: %v", err)
+	}
+	if p.Latitude != 30.335120 {
+		t.Errorf("Latitude = %v, want 30.335120 (the first post-lock fix, not the (0,0) placeholder)", p.Latitude)
+	}
+	if p.Longitude != -81.655480 {
+		t.Errorf("Longitude = %v, want -81.655480 (the first post-lock fix, not the (0,0) placeholder)", p.Longitude)
+	}
+}
+
+// TestParseFirstPoint_ZeroZeroOnlyIsNoGPSData proves a file whose ONLY
+// coordinates are the pre-lock (0,0) placeholder (GPS lock never acquired
+// before the sidecar ends) correctly reports ErrNoGPSData rather than
+// returning (0,0) as if it were a real fix.
+func TestParseFirstPoint_ZeroZeroOnlyIsNoGPSData(t *testing.T) {
+	text := `[latitude: 0.000000] [longitude: 0.000000]`
+	_, err := ParseFirstPoint(strings.NewReader(text))
+	if !errors.Is(err, ErrNoGPSData) {
+		t.Fatalf("err = %v, want ErrNoGPSData", err)
+	}
+}
+
+// TestParseFirstPoint_OutOfRangeCoordinatesRejected proves a
+// syntactically-matched but out-of-range value (not a real decimal-degree
+// coordinate) is rejected rather than returned, and parsing continues to
+// look for a valid fix.
+func TestParseFirstPoint_OutOfRangeCoordinatesRejected(t *testing.T) {
+	t.Run("out of range then valid", func(t *testing.T) {
+		text := "[latitude: 3012.5] [longitude: 200.0]\n[latitude: 30.335120] [longitude: -81.655480]"
+		p, err := ParseFirstPoint(strings.NewReader(text))
+		if err != nil {
+			t.Fatalf("ParseFirstPoint: %v", err)
+		}
+		if p.Latitude != 30.335120 || p.Longitude != -81.655480 {
+			t.Errorf("got (%v, %v), want the valid second fix (30.335120, -81.655480)", p.Latitude, p.Longitude)
+		}
+	})
+
+	t.Run("out of range only is ErrNoGPSData", func(t *testing.T) {
+		text := "[latitude: 3012.5] [longitude: 200.0]"
+		_, err := ParseFirstPoint(strings.NewReader(text))
+		if !errors.Is(err, ErrNoGPSData) {
+			t.Fatalf("err = %v, want ErrNoGPSData", err)
+		}
+	})
+}
+
+func TestIsValidFix(t *testing.T) {
+	cases := []struct {
+		name     string
+		lat, lon float64
+		want     bool
+	}{
+		{"valid", 30.335120, -81.655480, true},
+		{"zero,zero rejected (pre-lock placeholder)", 0, 0, false},
+		{"lat too high", 90.1, 0, false},
+		{"lat too low", -90.1, 0, false},
+		{"lon too high", 0, 180.1, false},
+		{"lon too low", 0, -180.1, false},
+		{"boundary lat/lon accepted", 90, 180, true},
+		{"boundary negative lat/lon accepted", -90, -180, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidFix(tc.lat, tc.lon); got != tc.want {
+				t.Errorf("isValidFix(%v, %v) = %v, want %v", tc.lat, tc.lon, got, tc.want)
+			}
+		})
+	}
+}

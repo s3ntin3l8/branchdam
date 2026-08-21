@@ -79,7 +79,14 @@ var (
 // a real SRT cue parser here -- a single-pass regex search of the raw text
 // is both simpler and more tolerant of the block-formatting variance
 // (blank-line placement, a trailing <font> closing tag on its own line,
-// CRLF vs LF) observed across DJI models/firmware.
+// CRLF vs LF) observed across DJI models/firmware. This tolerance is
+// specifically about surrounding formatting, not field placement: both
+// [latitude: ...] and [longitude: ...] (or both halves of GPS(...,...))
+// must appear on the SAME line/cue to be matched together -- every sample
+// this package's format research turned up keeps them on one line, but a
+// firmware variant that splits them across lines within one cue would not
+// be recognized (ParseFirstPoint keeps scanning and eventually returns
+// ErrNoGPSData rather than combining a partial match across lines).
 func ParseFirstPoint(r io.Reader) (Point, error) {
 	scanner := bufio.NewScanner(r)
 	// DJI's real per-cue payload line is short, but some firmware wraps the
@@ -102,14 +109,16 @@ func ParseFirstPoint(r io.Reader) (Point, error) {
 }
 
 // extractPoint tries both supported formats against a single line/cue of
-// text and reports whether it found a usable point.
+// text and reports whether it found a usable point. A syntactically parsed
+// coordinate is still rejected (ok=false, ParseFirstPoint keeps scanning) if
+// it fails isValidFix -- see that function's doc comment.
 func extractPoint(text string) (Point, bool) {
 	latM := latBracketRe.FindStringSubmatch(text)
 	lonM := lonBracketRe.FindStringSubmatch(text)
 	if latM != nil && lonM != nil {
 		lat, errLat := strconv.ParseFloat(latM[1], 64)
 		lon, errLon := strconv.ParseFloat(lonM[1], 64)
-		if errLat == nil && errLon == nil {
+		if errLat == nil && errLon == nil && isValidFix(lat, lon) {
 			return Point{Latitude: lat, Longitude: lon}, true
 		}
 	}
@@ -117,10 +126,34 @@ func extractPoint(text string) (Point, bool) {
 	if m := gpsParenRe.FindStringSubmatch(text); m != nil {
 		lon, errLon := strconv.ParseFloat(m[1], 64)
 		lat, errLat := strconv.ParseFloat(m[2], 64)
-		if errLat == nil && errLon == nil {
+		if errLat == nil && errLon == nil && isValidFix(lat, lon) {
 			return Point{Latitude: lat, Longitude: lon}, true
 		}
 	}
 
 	return Point{}, false
+}
+
+// isValidFix rejects two classes of syntactically-parsed-but-unusable
+// coordinates:
+//
+//  1. Out of range for signed decimal degrees (-90..90 latitude, -180..180
+//     longitude) -- a value like "latitude: 3012.5" is not a real fix, just
+//     a field this parser's tolerant regex happened to match.
+//  2. Exactly (0, 0) -- DJI firmware commonly emits leading cues before GPS
+//     lock with a (0,0) placeholder fix while the aircraft is still
+//     acquiring satellites. Since ParseFirstPoint returns the FIRST match
+//     (correct per this package's single-point contract), treating (0,0) as
+//     real would silently return a bogus pre-lock placeholder instead of
+//     the aircraft's actual first fix later in the same file. A genuine
+//     (0,0) fix (Gulf of Guinea) is not a plausible drone flight location,
+//     so this heuristic costs nothing in practice.
+func isValidFix(lat, lon float64) bool {
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return false
+	}
+	if lat == 0 && lon == 0 {
+		return false
+	}
+	return true
 }
