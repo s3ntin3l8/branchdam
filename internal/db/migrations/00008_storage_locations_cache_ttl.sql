@@ -3,11 +3,25 @@
 -- restart-only value (config.yaml's storageLocations[].cacheTtlHours).
 -- Before this migration, internal/httpapi's handlePrune re-joined the live
 -- config back to this table by root_path string match to recover a
--- location's TTL at prune time -- editing a rootPath in config therefore
--- silently orphaned that location's TTL: the old row deactivates (M6's
--- self-heal), a new row appears with prunable carried over correctly (it
--- IS a persisted column), but nothing re-joins cacheTtlHours to it until
--- the rootPath strings line up again, with no error or warning (#238).
+-- location's TTL at prune time, instead of reading it off the row itself
+-- -- fragile any time a DB row's root_path no longer has a matching live
+-- entry in the current in-memory config (e.g. a location removed from
+-- config, so its row self-heals to inactive via M6 but isn't deleted, yet
+-- can still be targeted by ID), silently resolving to 0 ("never eligible")
+-- with no error or warning (#238).
+--
+-- This does NOT fix (and was never meant to fix) the separate, currently
+-- crashing scenario where an operator edits a location's rootPath while
+-- keeping its name unchanged: UpsertStorageLocation's ON CONFLICT target
+-- is root_path only, so that edit doesn't hit the ON CONFLICT branch at
+-- all (root_path is new) -- it attempts a plain INSERT, which collides
+-- with storage_locations.name's own independent UNIQUE constraint on the
+-- still-live old row and aborts seeding with SQLITE_CONSTRAINT_UNIQUE,
+-- which cmd/branchdam's seedStorageLocations propagates to a fatal
+-- log.Error + os.Exit(1) at startup. That's a real, unfixed bug, tracked
+-- in #253 -- worse than #238's silent-TTL-loss symptom, not a case this
+-- migration's column addition reaches at all.
+--
 -- Every existing row defaults to 0 ("never eligible", the same value
 -- handlePrune already treats as "no TTL configured"), so this is additive
 -- and needs no data-correction migration, matching thumb_state's (00007)

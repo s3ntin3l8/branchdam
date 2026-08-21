@@ -182,13 +182,23 @@ func TestSeedStorageLocationsReactivatesReturningLocation(t *testing.T) {
 // still carries the correct cache_ttl_hours through that insert, and the
 // old (now-deactivated) row is left with whatever it already had.
 //
-// The edited entry uses a different Name, not just a different RootPath:
-// storage_locations.name is independently UNIQUE (00001_init.sql), so an
-// operator editing rootPath under an unchanged name would hit that
-// constraint at seed time regardless of cache_ttl_hours -- a real but
-// separate limitation, out of scope for #238, which is specifically about
-// cacheTtlHours surviving on whichever row root_path's UNIQUE conflict key
-// actually produces.
+// The edited entry uses a different Name, not just a different RootPath.
+// storage_locations.name is independently UNIQUE (00001_init.sql), but
+// UpsertStorageLocation's ON CONFLICT target is root_path only -- so the
+// realistic #238 scenario (an operator edits rootPath while keeping name
+// the SAME, intending to preserve the location's identity) does NOT reach
+// that ON CONFLICT branch at all: root_path is new, so this attempts a
+// plain INSERT, which collides with the still-live old row's name and
+// fails with SQLITE_CONSTRAINT_UNIQUE. seedStorageLocations propagates
+// that error straight to a log.Error + os.Exit(1) at startup, so today
+// that scenario doesn't silently orphan the TTL (this PR's fix) -- it
+// crashes the server on boot instead, which is worse. That's a real,
+// currently-unfixed bug, tracked in #253, not something this PR resolves.
+// This test deliberately uses a different Name specifically to sidestep
+// that crash and isolate what this PR *does* fix: cache_ttl_hours
+// surviving on whichever row root_path's ON CONFLICT key actually
+// produces. It is not a substitute for a same-name regression test --
+// #253 needs one once that bug has an actual fix to test.
 func TestSeedStorageLocationsPreservesCacheTTLHoursAcrossRootPathEdit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seed-ttl-rootpath-edit.db")
 	database, err := db.Open(context.Background(), path)
