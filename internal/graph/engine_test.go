@@ -703,6 +703,72 @@ func TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder(t *testing.T) {
 	})
 }
 
+// TestFilenameStemProxyExtNeverOverridesIndexAnchorInvariant is a
+// regression test for a bug in the original #228 fix: the proxy-ext
+// direction swap ran unconditionally, even for a pair that had ALREADY
+// satisfied #132's own anchor+direction rules pre-swap. For
+// DJI_0001.LRF (bare anchor, proxy ext) paired with DJI_0001-2.MP4
+// (index-suffixed, non-proxy real video), the swap would flip the
+// already-valid (parent=LRF anchor, child=MP4-2 index-suffixed) pairing
+// into (parent=MP4-2, child=LRF) -- seating the index-suffixed node as
+// the PARENT, directly violating #132's direction rule ("only the child
+// may carry the index suffix. A derived duplicate is never treated as a
+// parent"). #228 must not silently win over #132: the fix is to skip
+// emitting any candidate for this pair rather than picking a winner
+// between the two invariants. Both evaluation orders are tested, exactly
+// like TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder above.
+func TestFilenameStemProxyExtNeverOverridesIndexAnchorInvariant(t *testing.T) {
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+
+	t.Run("resolver evaluates the bare proxy anchor as its child input", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		anchor := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.LRF", FileName: "DJI_0001.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("9", 16),
+		})
+		seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001-2.MP4", FileName: "DJI_0001-2.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("a", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(anchor))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(anchor): %v", err)
+		}
+		if len(edges) != 0 {
+			t.Fatalf("got %d edges, want 0 (the index-suffixed sibling can never be a parent, proxy-ext or not): %+v", len(edges), edges)
+		}
+	})
+
+	t.Run("resolver evaluates the index-suffixed real video as its child input", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001.LRF", FileName: "DJI_0001.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("b", 16),
+		})
+		indexedVideo := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DJI_0001-2.MP4", FileName: "DJI_0001-2.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("c", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(indexedVideo))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(indexedVideo): %v", err)
+		}
+		if len(edges) != 0 {
+			t.Fatalf("got %d edges, want 0 -- without the fix, the proxy-ext swap seats the index-suffixed node (DJI_0001-2.MP4) as the parent, violating #132: %+v", len(edges), edges)
+		}
+	})
+}
+
 // TestIndexMatchCapBelowTier2Threshold is a one-line guard that
 // indexMatchConfidenceCap and AutoAcceptThresholdForTier(2) can never drift
 // out of the relationship FilenameStemResolver's doc comment depends on.

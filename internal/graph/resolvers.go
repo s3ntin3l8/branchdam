@@ -27,6 +27,14 @@ var exportExts = map[string]bool{
 	"jpg": true, "jpeg": true, "mp4": true, "mov": true,
 }
 
+// rawExts, exportExts, and proxyExts must stay pairwise disjoint.
+// inferRelationship checks the proxy branch (isProxyExt) before the
+// FINAL_EXPORT branch (rawExts/exportExts) with no ordering guard between
+// them -- an extension present in both proxyExts and exportExts (or
+// rawExts) would silently pick whichever branch happens to be checked
+// first, not a considered choice. Relevant for #229: adding an extension
+// to proxyExts should not also live in exportExts/rawExts.
+
 // proxyExts is the closed, package-level set of "known proxy" filename
 // extensions -- a low-resolution companion file that shares its real
 // sibling's filename stem (per internal/naming.Stem, which strips only the
@@ -207,10 +215,16 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 			continue
 		}
 
-		// #228: a bare, identically-stemmed pair where one side is a known
-		// proxy extension (proxyExts) always resolves with the proxy as
-		// the child -- regardless of which node THIS Resolve call is
-		// evaluating as "child". Without this, Engine calls Resolve once
+		// #228: a bare, identically-stemmed pair where EXACTLY ONE side is
+		// a known proxy extension (proxyExts) always resolves with the
+		// proxy as the child -- regardless of which node THIS Resolve
+		// call is evaluating as "child". (Two proxy-extension siblings
+		// sharing a stem, e.g. two .lrf files, are NOT handled by this
+		// swap -- isProxyExt is true on both sides so the condition below
+		// never fires and they fall through to the resolver's ordinary,
+		// direction-ambiguous behavior. Unchanged from before #228, not a
+		// regression, just not something this fix covers.) Without this,
+		// Engine calls Resolve once
 		// per node as "child" (see this type's doc comment on Engine's
 		// per-node resolve loop), so a DJI_0001.MP4/DJI_0001.LRF pair --
 		// neither side carries an index suffix, so indexGated above never
@@ -221,29 +235,45 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 		// reverse of whatever the first call already committed, and
 		// Engine's cycle guard would silently refuse it. childNode/
 		// parentNode below are what's actually emitted as ChildID/
-		// ParentID; child/parent (the resolver's own input pairing) are
-		// still used for the boost checks and evidence just below, which
-		// are symmetric (equality/same-day/same-dir) and don't depend on
-		// direction -- evidence intentionally still describes the pair
-		// from the pre-flip (child/parent) orientation even when
-		// childNode/parentNode end up swapped.
+		// ParentID and are what evidence below is built from -- NOT the
+		// resolver's own pre-swap child/parent pairing, since fields like
+		// anchor_file_name are direction-dependent (not every evidence
+		// field is symmetric the way the confidence boosts below are).
+		//
+		// This swap can conflict with #132's own direction invariant
+		// (an index-suffixed node may never be the parent): by this point
+		// indexGated true guarantees childKind == SuffixIndex and
+		// parentKind == SuffixNone (the only combination that survives
+		// the gate above), so if THIS swap would additionally promote
+		// that already-index-suffixed node (the pre-swap child) into the
+		// parent role -- e.g. DJI_0001.LRF (bare anchor, proxy ext) paired
+		// with DJI_0001-2.MP4 (index-suffixed, non-proxy real video) --
+		// #228 must not silently override #132. Skip emitting any
+		// candidate for this pair rather than picking a winner between
+		// the two invariants, matching the "emit nothing" pattern used a
+		// few lines above for other #132 violations.
 		childNode, parentNode := child, parent
+		proxySwapped := false
 		if isProxyExt(parent.FileExt) && !isProxyExt(child.FileExt) {
 			childNode, parentNode = parent, child
+			proxySwapped = true
+		}
+		if proxySwapped && indexGated {
+			continue
 		}
 
 		confidence := 0.60
-		evidence := map[string]any{"filename_stem": child.FilenameStem}
+		evidence := map[string]any{"filename_stem": childNode.FilenameStem}
 
-		if sameCaptureDay(child.CapturedAt, parent.CapturedAt) {
+		if sameCaptureDay(childNode.CapturedAt, parentNode.CapturedAt) {
 			confidence += 0.15
 			evidence["same_capture_day"] = true
 		}
-		if child.CameraModel != "" && child.CameraModel == parent.CameraModel {
+		if childNode.CameraModel != "" && childNode.CameraModel == parentNode.CameraModel {
 			confidence += 0.10
-			evidence["same_camera_model"] = child.CameraModel
+			evidence["same_camera_model"] = childNode.CameraModel
 		}
-		if sameDirectory(child.FilePath, parent.FilePath) {
+		if sameDirectory(childNode.FilePath, parentNode.FilePath) {
 			confidence += 0.10
 			evidence["same_directory"] = true
 		}
@@ -252,12 +282,12 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 		}
 		if indexGated {
 			evidence["index_suffix_gated"] = true
-			evidence["anchor_file_name"] = parent.FileName
+			evidence["anchor_file_name"] = parentNode.FileName
 			if confidence > indexMatchConfidenceCap {
 				confidence = indexMatchConfidenceCap
 			}
 		}
-		if childNode.ID != child.ID {
+		if proxySwapped {
 			evidence["proxy_ext_direction_forced"] = true
 		}
 
