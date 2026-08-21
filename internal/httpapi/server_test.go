@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -91,6 +93,69 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (panic should be recovered, not propagated)", rr.Code)
+	}
+}
+
+// TestSanitizeForLog is the unit-level guard for the go/log-injection
+// CodeQL alerts on recoverMiddleware/logMiddleware: r.URL.Path is
+// client-controlled (a percent-encoded %0d%0a in the request line decodes
+// to a literal CR/LF by the time net/url has parsed it into r.URL.Path),
+// so a value containing CR/LF must have both replaced with a visible
+// escape before it's safe to hand to a plain-text log sink -- an actual
+// line break can never reach the sink, but (per Hermes review on #215) the
+// forged suffix stays visible as `\r`/`\n` rather than being silently
+// concatenated onto the path with no separator.
+func TestSanitizeForLog(t *testing.T) {
+	in := "/api/v1/assets\r\n2026-01-01 00:00:00 FORGED level=ERROR msg=\"fake entry\""
+	got := sanitizeForLog(in)
+	if strings.ContainsAny(got, "\r\n") {
+		t.Errorf("sanitizeForLog(%q) = %q, still contains an actual CR/LF", in, got)
+	}
+	want := `/api/v1/assets\r\n2026-01-01 00:00:00 FORGED level=ERROR msg="fake entry"`
+	if got != want {
+		t.Errorf("sanitizeForLog(%q) = %q, want %q", in, got, want)
+	}
+}
+
+// TestRecoveryMiddlewareSanitizesPathInLog proves the CR/LF strip actually
+// applies on the real logging path, not just in sanitizeForLog isolation:
+// a request whose URL.Path carries an injected CR/LF must not let that
+// CR/LF reach the log sink verbatim -- log/slog's TextHandler would
+// otherwise emit it as a literal newline, letting the attacker-controlled
+// suffix masquerade as a separate, forged log entry.
+func TestRecoveryMiddlewareSanitizesPathInLog(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	panicHandler := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.URL.Path = "/api/v1/assets\r\nlevel=ERROR msg=\"forged by client\""
+	rr := httptest.NewRecorder()
+
+	recoverMiddleware(log, panicHandler).ServeHTTP(rr, req)
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log output = %q, want exactly one line -- the injected CR/LF must not split it into %d", buf.String(), len(lines))
+	}
+}
+
+// TestLogMiddlewareSanitizesPathInLog is logMiddleware's counterpart to
+// TestRecoveryMiddlewareSanitizesPathInLog.
+func TestLogMiddlewareSanitizesPathInLog(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	noop := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.URL.Path = "/api/v1/assets\r\nlevel=ERROR msg=\"forged by client\""
+	rr := httptest.NewRecorder()
+
+	logMiddleware(log, noop).ServeHTTP(rr, req)
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log output = %q, want exactly one line -- the injected CR/LF must not split it into %d", buf.String(), len(lines))
 	}
 }
 
