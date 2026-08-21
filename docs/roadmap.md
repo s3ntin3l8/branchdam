@@ -5,10 +5,15 @@ pipeline, Tier-2 graph resolution, auth, SSE, the Huma REST API, the React SPA, 
 CI with branch protection. This document phases everything that's left — both what the spec
 still asks for, and a large slice of what increment 1 *built but never wired up*.
 
-**Current state:** phases 0–9 are landed. Only phase 10 (the workstation agent) remains open, as
-a placeholder tracking issue (#62) — its own repo location is an open decision, deferred until
-something outside this repo needs to consume the phase-8 agent contract for real. See
-[`deploy.md`](deploy.md) for turning a phases-0–9 build into a running deployment.
+**Current state:** phases 0–9 are landed. Phase 10 (the workstation agent) split in two once a
+workflow-coverage audit showed most of its scope doesn't need the Tauri stack: #233 (DaVinci
+Resolve `.dam.json` hook) and #234 (SD-card ingest engine) ship in *this* repo, independent of
+the agent's repo-location decision. #62 stays open, trimmed to the system tray app and the
+Luminar `catalog.db` reader — the one piece that genuinely needs that decision, now made:
+`branchdam-agent`, a new separate repo (see #62 for the reasoning). See
+[`deploy.md`](deploy.md) for turning a phases-0–9 build into a running deployment, and
+[`workflow-coverage.md`](workflow-coverage.md) for what the current build does and doesn't
+support end-to-end.
 
 Each phase below is filed as GitHub issues (one issue per PR) tracked on this repo's board and
 worked through [mullion task master](https://github.com/s3ntin3l8/mullion-session-manager). Task
@@ -64,7 +69,7 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
 | 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push — landed (see below) | 3 | Landed |
 | 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 | Landed |
 | 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 | Landed |
-| 10 | Workstation agent — placeholder tracking issue, decomposed later | 8 | Open (#62) |
+| 10 | Workstation agent — split: #233/#234 file in this repo, tray app + Luminar reader move to `branchdam-agent` | 8 | Open (#233, #234, #62) |
 
 Phase 2 has no dependencies and can land at any point — it closes a live authorization gap
 (`Principal.Groups` is parsed and echoed at `/api/v1/me` but nothing checks it today) rather than
@@ -78,9 +83,13 @@ confirming before any code is written. **Resolved as a no-go**, see
 [`docs/google-photos.md`](google-photos.md) — not on Google's restrictions (push survives, quota
 is ample, OAuth has a workable path pending confirmation) but on branchDAM's sync layer having no
 byte-transfer capability and no way to verify a Google Photos copy against `full_hash`. The
-workstation agent (phase 10) is filed as one
-placeholder tracking issue; its repo location (separate repo vs. a subdirectory here) is an open
-decision to make once phase 8 shows what the agent actually needs to talk to.
+workstation agent (phase 10) split once phase 8 had landed long enough to show what actually
+depends on it: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine) file in
+this repo, since neither needs a workstation UI or a new toolchain. #62 stays open, trimmed to the
+system tray app and the Luminar catalog reader, with its repo-location decision made —
+`branchdam-agent`, a new separate repo, for the same reasons `ansible-playbooks` (which deploys
+this repo) is itself separate: a different toolchain needs a different CI/release pipeline, and
+the two halves' release cadences are independent. See #62 for the full reasoning.
 
 Phase 7 is delivered: #53 shipped `remote_sync_state`'s first write path (`internal/sync`'s push
 state machine), #54 the EXIF/XMP inheritance endpoint, and #55 the Immich external-library

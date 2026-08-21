@@ -7,16 +7,30 @@ scratch is outside branchDAM's scope. For the deep detail on *why* each piece of
 looks the way it does, see [`forward-auth.md`](forward-auth.md); this document is the sequence of
 steps to actually stand the container up, with pointers into that doc rather than duplicating it.
 For field-by-field config reference, see [`configuration.md`](configuration.md). For what to do
-once it's running — upgrades, backups, troubleshooting — see [`operations.md`](operations.md).
+once it's running — upgrades, backups, troubleshooting — see [`operations.md`](operations.md). For
+a multi-machine setup — ingest and editing on separate workstations, a NAS-hosted master archive,
+exports and Immich on a separate server — see [`deploy-topology.md`](deploy-topology.md), which
+covers a specific worked topology and cross-references
+[`workflow-coverage.md`](workflow-coverage.md) for what that workflow does and does not support
+today. This document stays the portable runbook for a plain `docker compose` deployment; if your
+deployment target is managed by its own infrastructure-as-code (Ansible, Terraform, etc.) instead,
+treat this as the contract that tooling needs to satisfy rather than a sequence to run by hand.
 
 ## 0. Prerequisites
 
 - Traefik v3, with the `file` provider enabled (the two middlewares below are defined there, not
-  via Docker labels — they apply repo-wide, not just to this one container).
+  via Docker labels — they apply repo-wide, not just to this one container). If your Traefik
+  instance already centrally defines an equivalent ForwardAuth + identity-header-strip middleware
+  chain, reference that instead of redefining the two below — the ordering (strip identity
+  headers, then ForwardAuth) is what matters, not that this exact repo defines them.
 - Authentik, reachable from Traefik, with an embedded or standalone outpost.
 - An external Docker network named `proxy` that both Traefik and branchDAM's container join —
   `compose.yaml` declares it `external: true` rather than creating it, so `docker network create
   proxy` first if it doesn't already exist.
+- If branchDAM will trigger an Immich library scan, that library must be an Immich **external**
+  library pointed at branchDAM's export path — an existing Immich-managed (internally-ingested)
+  library is not reachable by this integration at all; see
+  [`workflow-coverage.md` §6](workflow-coverage.md#6-immich-integration).
 
 ## 1. Authentik: proxy provider, application, group
 
