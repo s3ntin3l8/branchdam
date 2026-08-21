@@ -312,6 +312,26 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   the resolver's original intended case. Migration `00006` is a one-time data correction for
   edges already written `AUTO_ACCEPTED` before this fix existed; `UpsertMediaEdge`'s
   confidence-only-increases rule means a rescan alone would never have fixed them.
+- **All seven promoted `media_nodes` columns refresh on the touched/rebased branches, not just
+  at insert (#197, #204).** `original_document_id`, `document_id`, `derived_from_id`,
+  `camera_model`, `camera_serial`, `lens_model`, and `captured_at_unix` were historically set
+  exactly once, by `insertNewNode` -- no `UPDATE` anywhere touched them, so an in-place metadata
+  write (`POST /api/v1/assets/{id}/inherit-metadata`) that only refreshes `fast_hash` (#188)
+  left them frozen at their insert-time values forever. `internal/pipeline.reconcileAllMetadata`
+  -> `reconcilePromotedColumns` now refreshes all seven from a freshly-probed `Result` on both
+  the Touched branch and the rebase/move branches, using the same non-empty-only, diff-first
+  contract as the `node_metadata` reconcile (a probe that ran but found nothing, or never ran at
+  all, must not clear a stored value). `PersistExifMetadata` (the inherit-metadata endpoint's
+  own backfill) deliberately promotes none of them -- the next scan's Touched branch is the one
+  write path that owns promotion, since #188 keeps `fast_hash` in agreement so that scan takes
+  the Touched branch rather than colliding. Because `UpsertMediaEdge` only ever raises
+  confidence (`MAX(excluded, stored)`), re-resolution is monotone and one-directional: promoting
+  a node's own `captured_at_unix` lets *that node's* next resolve see it, but a peer that
+  already resolved against its old value is not re-run, so a changed `captured_at_unix` can
+  leave an already-committed Tier-3 edge stale with no automatic repair. No data-correction
+  migration is needed for this, unlike #132's `00006` -- a stale or `NULL` `captured_at_unix` is
+  repaired by the node's own next Touched pass, whereas an edge already written
+  `AUTO_ACCEPTED` never self-corrects via rescan.
 
 ## CI
 

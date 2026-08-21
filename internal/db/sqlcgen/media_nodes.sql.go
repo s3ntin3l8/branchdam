@@ -1035,6 +1035,7 @@ UPDATE media_nodes SET
     camera_model = ?5,
     camera_serial = ?6,
     lens_model = ?7,
+    captured_at_unix = ?8,
     updated_at = unixepoch()
 WHERE id = ?1
 `
@@ -1047,6 +1048,7 @@ type UpdateMediaNodePromotedColumnsParams struct {
 	CameraModel        sql.NullString
 	CameraSerial       sql.NullString
 	LensModel          sql.NullString
+	CapturedAtUnix     sql.NullInt64
 }
 
 // #197: the touched/rebased branches' backfill (reconcileAllMetadata ->
@@ -1058,6 +1060,21 @@ type UpdateMediaNodePromotedColumnsParams struct {
 // the node takes commitOne's Touched branch and would otherwise keep its
 // insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
 // inherit-metadata that never reaches media_nodes.derived_from_id.
+//
+// captured_at_unix (#204) is included on the same overwrite-on-differ
+// contract as the other six, not fill-only-when-NULL: UpsertMediaEdge's
+// confidence = MAX(excluded, stored) makes re-resolution monotone (it can
+// only upgrade or leave an edge, never downgrade or delete one), so a value
+// that changes here can at worst strand an already-committed Tier-3 edge at
+// its old confidence -- not corrupt it -- while a NULL that never gets
+// promoted is a permanent, not just temporary, blind spot for
+// HeuristicSpatialTemporalResolver. See reconcilePromotedColumns' doc
+// comment for the full reasoning, including why the inherit-metadata path's
+// circular evidence (a child temporally matching the parent because the
+// parent's own timestamp was just copied into it) is benign: every resolver
+// derives Rel from the same inferRelationship, so a Tier-3 candidate always
+// merges into the same (parent, child, rel) group as any stronger Tier-2
+// edge and never creates a second one.
 //
 // The caller passes effective values: a column whose fresh probe value was
 // empty (or unchanged) is passed through as the node's current value, so this
@@ -1071,6 +1088,7 @@ func (q *Queries) UpdateMediaNodePromotedColumns(ctx context.Context, arg Update
 		arg.CameraModel,
 		arg.CameraSerial,
 		arg.LensModel,
+		arg.CapturedAtUnix,
 	)
 	return err
 }

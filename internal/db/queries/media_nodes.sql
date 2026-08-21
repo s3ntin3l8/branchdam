@@ -269,10 +269,25 @@ WHERE id = ?1;
 -- insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
 -- inherit-metadata that never reaches media_nodes.derived_from_id.
 --
+-- captured_at_unix (#204) is included on the same overwrite-on-differ
+-- contract as the other six, not fill-only-when-NULL: UpsertMediaEdge's
+-- confidence = MAX(excluded, stored) makes re-resolution monotone (it can
+-- only upgrade or leave an edge, never downgrade or delete one), so a value
+-- that changes here can at worst strand an already-committed Tier-3 edge at
+-- its old confidence -- not corrupt it -- while a NULL that never gets
+-- promoted is a permanent, not just temporary, blind spot for
+-- HeuristicSpatialTemporalResolver. See reconcilePromotedColumns' doc
+-- comment for the full reasoning, including why the inherit-metadata path's
+-- circular evidence (a child temporally matching the parent because the
+-- parent's own timestamp was just copied into it) is benign: every resolver
+-- derives Rel from the same inferRelationship, so a Tier-3 candidate always
+-- merges into the same (parent, child, rel) group as any stronger Tier-2
+-- edge and never creates a second one.
+--
 -- The caller passes effective values: a column whose fresh probe value was
 -- empty or unchanged is passed through as the node's current value, so this
 -- query is only ever reached with at least one genuine change. Plain
--- positional params (?1..?7), not sqlc.arg: this file already has earlier
+-- positional params (?1..?8), not sqlc.arg: this file already has earlier
 -- queries using bare ?N placeholders (ListTier3Candidates, ListPrunableNodes),
 -- and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder in
 -- the same file when a bare ?N appears anywhere earlier in it.
@@ -283,6 +298,7 @@ UPDATE media_nodes SET
     camera_model = ?5,
     camera_serial = ?6,
     lens_model = ?7,
+    captured_at_unix = ?8,
     updated_at = unixepoch()
 WHERE id = ?1;
 

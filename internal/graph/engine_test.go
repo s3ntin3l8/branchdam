@@ -1442,6 +1442,108 @@ func TestHeuristicSpatialTemporalResolver(t *testing.T) {
 	}
 }
 
+// TestPromotedCapturedAtUnixEnablesTier3MatchAfterReconcile backs #204: a
+// child indexed before it had a capture time (the inherit-metadata case --
+// node_metadata can carry an inherited EXIF:DateTimeOriginal while
+// captured_at_unix stays NULL until the pipeline's touched-branch reconcile,
+// internal/pipeline.reconcilePromotedColumns, promotes it) is invisible to
+// HeuristicSpatialTemporalResolver, since ListTier3Candidates matches on
+// camera_serial + captured_at_unix via ix_media_nodes_camera_time and a NULL
+// captured_at_unix can never fall inside anyone's ±2s window. Once that
+// column is promoted -- exercised here via the same
+// UpdateMediaNodePromotedColumns query the pipeline uses, not raw SQL -- a
+// re-resolve of the same child finds the match. There is no test elsewhere
+// that re-resolves after a node field changes underneath an already-seeded
+// node; this is that case.
+func TestPromotedCapturedAtUnixEnablesTier3MatchAfterReconcile(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	t0 := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	phash := int64(0x0000000000000000)
+
+	parent := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/parent.arw",
+		FileName:     "parent.arw",
+		FileExt:      "arw",
+		CameraSerial: "SERIAL_ABC",
+		LensModel:    "FE 85mm F1.4 GM",
+		CapturedAt:   &t0,
+		PHash:        &phash,
+	})
+
+	// Child seeded with no CapturedAt at all -- captured_at_unix NULL, as if
+	// indexed before exiftool derived a capture time (or before an
+	// inherit-metadata call copied one in).
+	child := seedNode(t, database, locationID, nodeFixture{
+		Path:         "/child.jpg",
+		FileName:     "child.jpg",
+		FileExt:      "jpg",
+		CameraSerial: "SERIAL_ABC",
+		LensModel:    "FE 85mm F1.4 GM",
+		PHash:        &phash,
+	})
+	if child.CapturedAtUnix.Valid {
+		t.Fatalf("pre-condition broken: child already has captured_at_unix set (%+v)", child.CapturedAtUnix)
+	}
+
+	engine := NewEngine(database, nil, HeuristicSpatialTemporalResolver{})
+
+	edgesBefore, _, err := engine.ResolveAndCommit(ctx, asGraphNode(child))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (captured_at_unix NULL): %v", err)
+	}
+	if len(edgesBefore) != 0 {
+		t.Fatalf("edges before promotion = %d, want 0 (NULL captured_at_unix can't fall in any ±2s window)", len(edgesBefore))
+	}
+
+	// Promote captured_at_unix the same way the pipeline's touched-branch
+	// reconcile does -- via UpdateMediaNodePromotedColumns, not raw SQL --
+	// landing the child within the parent's ±2s window.
+	t1 := t0.Add(1 * time.Second)
+	// Pass every column as an effective value, not just the one under test --
+	// the query's contract (see its doc comment) is that the caller always
+	// passes a full effective set, never a partial one; a partial call here
+	// would otherwise model (and silently normalize) misuse of the query.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.UpdateMediaNodePromotedColumns(ctx, sqlcgen.UpdateMediaNodePromotedColumnsParams{
+			ID:                 child.ID,
+			OriginalDocumentID: child.OriginalDocumentID,
+			DocumentID:         child.DocumentID,
+			DerivedFromID:      child.DerivedFromID,
+			CameraModel:        child.CameraModel,
+			CameraSerial:       child.CameraSerial,
+			LensModel:          child.LensModel,
+			CapturedAtUnix:     sql.NullInt64{Int64: t1.Unix(), Valid: true},
+		})
+	}); err != nil {
+		t.Fatalf("UpdateMediaNodePromotedColumns: %v", err)
+	}
+
+	reconciledChild, err := database.Reader.GetLiveNodeByPath(ctx, "/child.jpg")
+	if err != nil {
+		t.Fatalf("re-fetch child: %v", err)
+	}
+	if !reconciledChild.CapturedAtUnix.Valid || reconciledChild.CapturedAtUnix.Int64 != t1.Unix() {
+		t.Fatalf("pre-condition broken: promotion didn't take (%+v)", reconciledChild.CapturedAtUnix)
+	}
+
+	edgesAfter, _, err := engine.ResolveAndCommit(ctx, asGraphNode(reconciledChild))
+	if err != nil {
+		t.Fatalf("ResolveAndCommit (captured_at_unix promoted): %v", err)
+	}
+	if len(edgesAfter) != 1 {
+		t.Fatalf("edges after promotion = %d, want 1 (the match the resolver couldn't previously see)", len(edgesAfter))
+	}
+	if edgesAfter[0].SourceNodeID != parent.ID {
+		t.Errorf("SourceNodeID = %d, want %d", edgesAfter[0].SourceNodeID, parent.ID)
+	}
+	if edgesAfter[0].ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("ReviewState = %q, want AUTO_ACCEPTED", edgesAfter[0].ReviewState)
+	}
+}
+
 // TestHeuristicSpatialTemporalResolverSameFormatBurstProducesNoEdges backs
 // #162: a continuous-drive burst of same-format frames (all raw, here) must
 // produce zero candidates -- with no raw->export role asymmetry, there is
