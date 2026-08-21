@@ -1511,10 +1511,10 @@ type AgentEventOutput struct {
 	}
 }
 
-// handleAgentEvent persists the event and returns 202 Accepted; actually
-// draining/processing event_queue ships with the
-// deferred workstation-agent increment (see internal/db's event_queue
-// migration comment).
+// handleAgentEvent persists the event and returns 202 Accepted; draining and
+// processing event_queue is handled asynchronously by internal/agent.Drainer,
+// which polls PENDING rows and applies them (#166, shipped and running in
+// production, not deferred).
 func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*AgentEventOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)

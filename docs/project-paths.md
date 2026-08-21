@@ -23,7 +23,7 @@ When raw reference paths originate from external workstations, operator-declared
 ### Step 3: Fallback Matching (Basename + Size)
 If prefix rewrite does not yield a live node match (e.g., files were moved under a subfolder or path rewrites are partially configured):
 - Search live `media_nodes` by exact `file_name` (basename).
-- If the project file format includes asset file size metadata (e.g., `.dam.json` or `.fcpxml`), filter candidate nodes to match `size_bytes`.
+- **Not yet implemented / aspirational:** if the project file format includes asset file size metadata (e.g., `.dam.json` or `.fcpxml`), filter candidate nodes to match `size_bytes`. `internal/projectfile.Reference` (`internal/projectfile/types.go`) has no size field today, so no parser currently extracts or supplies one for this filter to consume; this is conservative (fewer auto-resolved edges, not incorrect ones), not unsafe.
 - If a single unique candidate node matches, evaluate candidate.
 - If multiple candidate nodes exist after filtering, apply the ambiguity policy (Section 3 policy).
 
