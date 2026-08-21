@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"image"
@@ -461,6 +462,80 @@ func TestWriteTagsRoundTrip(t *testing.T) {
 	// under the generic XMP group when reading back with -G.
 	if res.Raw["XMP:Identifier"] != "uuid-child" {
 		t.Errorf("XMP:Identifier = %q, want uuid-child (raw=%v)", res.Raw["XMP:Identifier"], res.Raw)
+	}
+}
+
+func TestExtractVideoPosterRealFile(t *testing.T) {
+	requireTool(t, "ffmpeg")
+	path := makeFixtureMP4(t, t.TempDir())
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	poster, err := p.ExtractVideoPoster(ctx, path)
+	if err != nil {
+		t.Fatalf("ExtractVideoPoster: %v", err)
+	}
+	if len(poster) == 0 {
+		t.Fatal("ExtractVideoPoster returned no bytes for a valid mp4 fixture")
+	}
+	img, _, err := image.Decode(bytes.NewReader(poster))
+	if err != nil {
+		t.Fatalf("ExtractVideoPoster returned bytes that don't decode as an image: %v", err)
+	}
+	b := img.Bounds()
+	if b.Dx() != 320 || b.Dy() != 240 {
+		t.Errorf("poster frame dimensions = %dx%d, want 320x240 (matching the fixture)", b.Dx(), b.Dy())
+	}
+}
+
+func TestExtractVideoPosterNoFFmpeg(t *testing.T) {
+	t.Parallel()
+	p := &Prober{} // zero value: ffmpegPath unset, HasFFmpeg() false regardless of the host
+
+	poster, err := p.ExtractVideoPoster(context.Background(), "/nonexistent/video.mp4")
+	if err != nil {
+		t.Fatalf("ExtractVideoPoster with no ffmpeg returned error: %v", err)
+	}
+	if poster != nil {
+		t.Errorf("ExtractVideoPoster with no ffmpeg returned %d bytes, want nil", len(poster))
+	}
+}
+
+func TestExtractVideoPosterNonVideoFile(t *testing.T) {
+	requireTool(t, "ffmpeg")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("not a video file"), 0o644); err != nil {
+		t.Fatalf("write text file: %v", err)
+	}
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	poster, err := p.ExtractVideoPoster(ctx, path)
+	if err != nil {
+		t.Fatalf("ExtractVideoPoster on a non-video file returned error: %v", err)
+	}
+	if poster != nil {
+		t.Errorf("ExtractVideoPoster on a non-video file returned %d bytes, want nil", len(poster))
+	}
+}
+
+func TestExtractVideoPosterMissingFile(t *testing.T) {
+	requireTool(t, "ffmpeg")
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	poster, err := p.ExtractVideoPoster(ctx, filepath.Join(t.TempDir(), "does-not-exist.mp4"))
+	if err != nil {
+		t.Fatalf("ExtractVideoPoster on a nonexistent file returned error: %v", err)
+	}
+	if poster != nil {
+		t.Errorf("ExtractVideoPoster on a nonexistent file returned %d bytes, want nil", len(poster))
 	}
 }
 

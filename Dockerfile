@@ -8,14 +8,20 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# --- Stage 2: static ffprobe, pinned by digest (not tag) for supply-chain
-# integrity -- see docs/schema.md's Dockerfile note. mwader/static-ffmpeg
-# builds a genuinely static (no shared libs) ffprobe binary; copying just
-# that one ~135MB binary avoids apt-get install ffmpeg's much larger
-# transitive dependency tree (GTK, SDL2, PulseAudio, Sphinx, etc. --
-# branchDAM only ever runs ffprobe, never ffmpeg/ffplay). Multi-arch: the
-# manifest list covers both linux/amd64 and linux/arm64, matching
-# docker-publish.yml's build matrix.
+# --- Stage 2: static ffprobe + ffmpeg, pinned by digest (not tag) for
+# supply-chain integrity. mwader/static-ffmpeg builds genuinely static (no
+# shared libs) binaries; copying just these two avoids apt-get install
+# ffmpeg's much larger transitive dependency tree (GTK, SDL2, PulseAudio,
+# Sphinx, etc.). branchDAM previously only ever ran ffprobe, never
+# ffmpeg/ffplay -- #224 added ffmpeg too, for video poster-frame thumbnail
+# extraction (internal/probe.ExtractVideoPoster /
+# internal/thumbs.Cache.Generate); ffplay is still never shipped, since
+# nothing in this codebase plays media. The ffmpeg binary itself is
+# ~134MB uncompressed, ~55MB gzip-compressed on the wire (measured against
+# this exact digest) -- a deliberate, documented tradeoff, not an oversight;
+# see docs/operations.md's Docker image size note. Multi-arch: the manifest
+# list covers both linux/amd64 and linux/arm64, matching docker-publish.yml's
+# build matrix.
 FROM mwader/static-ffmpeg@sha256:78ebc8cc0368a109db21961a14a4e890a7b1ccafb373a1b3109f0be7fcec8171 AS ffprobe
 
 # --- Stage 3: build the Go binary (with embedded dist) ---
@@ -49,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -r -u 65532 -m -d /nonexistent -s /usr/sbin/nologin nonroot
 COPY --from=build /out/branchdam /usr/local/bin/branchdam
 COPY --from=ffprobe /ffprobe /usr/local/bin/ffprobe
+COPY --from=ffprobe /ffmpeg /usr/local/bin/ffmpeg
 # /data must exist and be owned by nonroot BEFORE the volume mount happens:
 # Docker copies a fresh named volume's initial content (and the mount
 # point's ownership) from what's already in the image at that path. Without

@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,6 +16,35 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
+
+// requireFFmpeg skips the test with a clear message when ffmpeg isn't
+// installed, rather than failing -- mirrors internal/probe's requireTool:
+// neither exiftool nor ffprobe/ffmpeg is present on every machine that runs
+// `go test ./...` (notably, the CI Go job doesn't install them), and this
+// package must still build and its non-ffmpeg tests must still pass without
+// it.
+func requireFFmpeg(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed, skipping")
+	}
+}
+
+// makeFixtureMP4 generates a tiny real MP4 via ffmpeg, mirroring
+// internal/probe's own probe_test.go fixture helper.
+func makeFixtureMP4(t *testing.T, dir string) string {
+	t.Helper()
+	requireFFmpeg(t)
+
+	path := filepath.Join(dir, "fixture.mp4")
+	cmd := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:duration=1",
+		"-c:v", "libx264", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture mp4: %v\n%s", err, out)
+	}
+	return path
+}
 
 func writeTestPNG(t *testing.T, path string, w, h int) {
 	t.Helper()
@@ -196,5 +226,35 @@ func TestCacheGenerateMissingFile(t *testing.T) {
 	}
 	if err == ErrUnsupported {
 		t.Error("Generate on a nonexistent file returned ErrUnsupported, want a real I/O error -- OpenRead should fail before extraction is even attempted")
+	}
+}
+
+// TestCacheGenerateVideoPoster is the acceptance-criteria test for #224: a
+// video file -- neither natively decodable via image.Decode nor carrying an
+// exiftool-extractable embedded preview -- gets a real READY-able JPEG
+// thumbnail via the ffmpeg poster-frame fallback, instead of landing on
+// ErrUnsupported the way it did before this fallback existed.
+func TestCacheGenerateVideoPoster(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := makeFixtureMP4(t, dir)
+
+	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	data, err := c.Generate(ctx, path)
+	if err != nil {
+		t.Fatalf("Generate on a video file: %v", err)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("generated video thumbnail is not a decodable JPEG: %v", err)
+	}
+	b := img.Bounds()
+	// The fixture is 320x240 (landscape); maxEdgePx=500 exceeds the source's
+	// longest edge, so scaleToMaxEdge must leave it unscaled.
+	if b.Dx() != 320 || b.Dy() != 240 {
+		t.Errorf("thumbnail dimensions = %dx%d, want 320x240 (source unscaled, maxEdgePx exceeds source)", b.Dx(), b.Dy())
 	}
 }
