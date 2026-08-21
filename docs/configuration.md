@@ -127,6 +127,16 @@ through `storage.Guard` — see `internal/thumbs`' package doc.
 | `intervalSecs` | int | `0` (auto: `thumbs.DefaultInterval`, 5s) | Polling interval between batches when the pending-thumbnail queue is empty, mirroring `storageLocations[].sweepIntervalSecs`. |
 
 `thumb_state` on a node is one of `PENDING` (queued or just invalidated), `READY` (cached JPEG
-exists at `Cache.Path(uuid)`), `UNSUPPORTED` (neither natively decodable nor carrying an embedded
-preview — terminal, not retried), or `FAILED` (retried up to `internal/thumbs.DefaultMaxAttempts`
-times, then left alone). `GET /api/v1/assets/{id}/thumbnail` 404s unless `thumb_state = READY`.
+exists at `Cache.Path(uuid)`), `UNSUPPORTED` (neither natively decodable, nor carrying an embedded
+preview, nor — for video — yielding a decodable poster frame via `ffmpeg` — terminal, not
+retried), or `FAILED` (retried up to `internal/thumbs.DefaultMaxAttempts` times, then left alone).
+`GET /api/v1/assets/{id}/thumbnail` 404s unless `thumb_state = READY`.
+
+Video files get a thumbnail the same way RAW stills do: `Cache.Generate` falls back to
+`probe.Prober.ExtractVideoPoster` (a single representative frame via `ffmpeg -ss ... -frames:v 1`,
+trying a one-second-in seek first and the very first frame as a guaranteed-to-exist fallback) when
+the source is neither natively decodable nor carries an exiftool-extractable embedded preview.
+This is why the runtime image ships `ffmpeg` alongside `ffprobe` as of #224 — see the Dockerfile's
+ffprobe/ffmpeg stage comment and docs/operations.md's Docker image size note for the size
+tradeoff that decision carries (an extra static binary, on the same order as `ffprobe` itself),
+and why video thumbnails weren't bundled into the original thumbnail-cache work.

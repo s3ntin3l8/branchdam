@@ -27,16 +27,18 @@ import (
 
 	xdraw "golang.org/x/image/draw"
 
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
 // ErrUnsupported is returned by Generate when path is neither a natively
-// decodable image (Go's stdlib image package) nor a file exiftool can
-// extract a decodable embedded preview from. Distinct from a transient or
-// I/O failure -- a caller should mark the node permanently UNSUPPORTED on
-// this error, not retry it on an unbounded schedule.
-var ErrUnsupported = errors.New("thumbs: no decodable image or embedded preview available")
+// decodable image (Go's stdlib image package), a file exiftool can extract a
+// decodable embedded preview from, nor a video ffmpeg can extract a
+// decodable representative frame from. Distinct from a transient or I/O
+// failure -- a caller should mark the node permanently UNSUPPORTED on this
+// error, not retry it on an unbounded schedule.
+var ErrUnsupported = errors.New("thumbs: no decodable image, embedded preview, or video frame available")
 
 // DefaultMaxEdgePx is the longest-edge target used when Cache is
 // constructed with maxEdgePx <= 0.
@@ -86,14 +88,17 @@ func (c *Cache) shardDir(nodeUUID string) string {
 	return filepath.Join(c.root, nodeUUID[0:2], nodeUUID[2:4])
 }
 
-// Generate produces a thumbnail JPEG for the media file at filePath,
-// trying direct decoding (via guard.OpenRead) first and falling back to
+// Generate produces a thumbnail JPEG for the media file at filePath, trying
+// direct decoding (via guard.OpenRead) first, falling back to
 // prober.ExtractPreviewJPEG for formats Go's stdlib image package can't
-// handle -- camera RAW. Returns ErrUnsupported, not a generic error, when
-// the source opened fine but neither decoding path yields a decodable
-// image; a source that couldn't be opened at all (missing, permission
-// denied) is a real error, distinct from ErrUnsupported, since there was
-// nothing to even attempt extraction against.
+// handle -- camera RAW -- and, if that also yields nothing, falling back
+// further to prober.ExtractVideoPoster (a single representative frame via
+// ffmpeg) for video files, which are neither natively decodable nor carry an
+// exiftool-extractable preview at all. Returns ErrUnsupported, not a generic
+// error, when the source opened fine but none of the three paths yields a
+// decodable image; a source that couldn't be opened at all (missing,
+// permission denied) is a real error, distinct from ErrUnsupported, since
+// there was nothing to even attempt extraction against.
 func (c *Cache) Generate(ctx context.Context, filePath string) ([]byte, error) {
 	f, err := c.guard.OpenRead(filePath)
 	if err != nil {
@@ -103,20 +108,9 @@ func (c *Cache) Generate(ctx context.Context, filePath string) ([]byte, error) {
 	_ = f.Close()
 
 	if decodeErr != nil {
-		preview, pErr := c.prober.ExtractPreviewJPEG(ctx, filePath)
-		if pErr != nil {
-			return nil, fmt.Errorf("thumbs: extract preview: %w", pErr)
-		}
-		if len(preview) == 0 {
-			return nil, ErrUnsupported
-		}
-		img, _, err = image.Decode(bytes.NewReader(preview))
+		img, err = c.decodeFallback(ctx, filePath)
 		if err != nil {
-			// ExtractPreviewJPEG already validates decodability itself, so
-			// this branch is not expected to be reachable in practice --
-			// treated as unsupported rather than a hard error since there
-			// is no further fallback available.
-			return nil, ErrUnsupported
+			return nil, err
 		}
 	}
 
@@ -127,6 +121,63 @@ func (c *Cache) Generate(ctx context.Context, filePath string) ([]byte, error) {
 		return nil, fmt.Errorf("thumbs: encode jpeg: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// decodeFallback tries, in order, an exiftool-extracted embedded preview
+// (RAW stills) and then -- ONLY for a recognized video extension -- an
+// ffmpeg-extracted representative frame, for a source Go's stdlib image
+// package couldn't decode directly. Returns ErrUnsupported, not a generic
+// error, when nothing yields a decodable image -- both ExtractPreviewJPEG
+// and ExtractVideoPoster already validate decodability themselves before
+// returning non-empty bytes, so a decode failure here is not expected to be
+// reachable in practice; it falls through to the next fallback (or
+// ErrUnsupported) rather than returning a hard error, since routing around
+// one extractor's edge case at the cost of a slower path is preferable to
+// failing a thumbnail outright.
+//
+// The pipeline.IsVideoExt gate before the ffmpeg attempt matters: thumb_state
+// defaults to PENDING for every media_nodes row regardless of file type, and
+// there is no upstream filter excluding sidecars, .dam.json manifests, .xmp,
+// or any other non-media file from ever reaching Generate. Without this
+// gate, every one of those would pay for exiftool's three preview-tag
+// attempts AND ffmpeg's two seek attempts just to conclude it has no
+// thumbnail -- five subprocess spawns per miss, which scales badly across a
+// real DAM tree where non-media files can be a large fraction of scanned
+// nodes. pipeline owns the video/non-video extension classification
+// (videoExts, #34/#228) -- IsVideoExt reuses it rather than keeping a second
+// copy here.
+func (c *Cache) decodeFallback(ctx context.Context, filePath string) (image.Image, error) {
+	preview, pErr := c.prober.ExtractPreviewJPEG(ctx, filePath)
+	if pErr != nil {
+		return nil, fmt.Errorf("thumbs: extract preview: %w", pErr)
+	}
+	if len(preview) > 0 {
+		if img, _, err := image.Decode(bytes.NewReader(preview)); err == nil {
+			return img, nil
+		}
+	}
+
+	if !pipeline.IsVideoExt(filepath.Ext(filePath)) {
+		return nil, ErrUnsupported
+	}
+
+	poster, vErr := c.prober.ExtractVideoPoster(ctx, filePath)
+	if vErr != nil {
+		// Not expected to be reachable except when ctx itself was
+		// cancelled/timed out mid-extraction (ExtractVideoPoster's own
+		// doc comment) -- propagated as a real error, not ErrUnsupported,
+		// so worker.processOne routes this to the retried FAILED path
+		// rather than permanently giving up on a node that just happened
+		// to be mid-flight during a shutdown or a slow-storage timeout.
+		return nil, fmt.Errorf("thumbs: extract video poster: %w", vErr)
+	}
+	if len(poster) > 0 {
+		if img, _, err := image.Decode(bytes.NewReader(poster)); err == nil {
+			return img, nil
+		}
+	}
+
+	return nil, ErrUnsupported
 }
 
 // scaleToMaxEdge returns img scaled so its longest edge is maxEdgePx,

@@ -21,6 +21,15 @@
 // own internal/projectfile extension so it stops surfacing as an orphan
 // media_nodes row (gap 2) is deliberately out of scope here -- tracked as a
 // separate follow-up issue.
+//
+// ffmpeg (as opposed to ffprobe) was historically deliberately excluded --
+// see the Dockerfile's ffprobe stage comment, prior to #224. ExtractVideoPoster
+// revisits that: internal/thumbs needs a real decoded frame, not just stream
+// metadata, to give video assets a non-UNSUPPORTED thumbnail, and ffprobe has
+// no frame-decoding capability of its own. This is strictly additive --
+// FFProbe's stream-metadata extraction is untouched -- and mirrors the same
+// resolve-once/ErrToolUnavailable/fixed-argv shape as exiftool and ffprobe
+// above, never invoking ffmpeg in any mode that could modify the source file.
 package probe
 
 import (
@@ -48,16 +57,18 @@ import (
 // binary was not found on PATH at Prober construction time.
 var ErrToolUnavailable = errors.New("probe: required external tool is not installed")
 
-// Prober resolves exiftool and ffprobe's paths once and reuses them.
+// Prober resolves exiftool, ffprobe, and ffmpeg's paths once and reuses
+// them.
 type Prober struct {
 	exiftoolPath string
 	ffprobePath  string
+	ffmpegPath   string
 }
 
-// New resolves exiftool and ffprobe via exec.LookPath. A missing tool is not
-// an error here -- it only becomes one if a caller actually tries to use it,
-// so a machine with only one of the two tools installed can still use the
-// other.
+// New resolves exiftool, ffprobe, and ffmpeg via exec.LookPath. A missing
+// tool is not an error here -- it only becomes one if a caller actually
+// tries to use it, so a machine with only some of the three tools installed
+// can still use the others.
 func New() *Prober {
 	p := &Prober{}
 	if path, err := exec.LookPath("exiftool"); err == nil {
@@ -65,6 +76,9 @@ func New() *Prober {
 	}
 	if path, err := exec.LookPath("ffprobe"); err == nil {
 		p.ffprobePath = path
+	}
+	if path, err := exec.LookPath("ffmpeg"); err == nil {
+		p.ffmpegPath = path
 	}
 	return p
 }
@@ -74,6 +88,9 @@ func (p *Prober) HasExiftool() bool { return p.exiftoolPath != "" }
 
 // HasFFProbe reports whether ffprobe was found at construction time.
 func (p *Prober) HasFFProbe() bool { return p.ffprobePath != "" }
+
+// HasFFmpeg reports whether ffmpeg was found at construction time.
+func (p *Prober) HasFFmpeg() bool { return p.ffmpegPath != "" }
 
 // exiftoolArgs builds exiftool's argv from a fixed allowlist: JSON output
 // (-j), grouped tag names (-G) so e.g. "EXIF:Make" and "XMP:Identifier"
@@ -229,6 +246,38 @@ func jpgFromRawArgs(path string) []string {
 
 func thumbnailImageArgs(path string) []string {
 	return []string{"-b", "-ThumbnailImage", "--", path}
+}
+
+// videoPosterSeekOffsets are the -ss timestamps ExtractVideoPoster tries in
+// order. "1" (one second in) is preferred -- it skips a common all-black or
+// fade-in opening frame -- but a clip shorter than one second has nothing
+// there, so "0" (the very first frame) is the guaranteed-to-exist fallback.
+var videoPosterSeekOffsets = []string{"1", "0"}
+
+// videoPosterArgs builds ffmpeg's argv for extracting a single representative
+// frame as an MJPEG stream on stdout: -ss (input-side, fast) seek before -i,
+// -frames:v 1 to stop after exactly one frame, "-f image2pipe -vcodec mjpeg"
+// to encode that frame as JPEG and write it to the pipe:1 (stdout) sink
+// rather than a file on disk. -y suppresses ffmpeg's interactive
+// overwrite-prompt (irrelevant here since there's no output file to
+// overwrite, but keeps the invocation non-interactive regardless of ffmpeg
+// version defaults). -nostdin additionally guarantees ffmpeg never tries to
+// read from stdin and blocks. path is always ffmpeg's -i argument's own
+// value -- consumed positionally as that flag's required argument by
+// ffmpeg's own parser, never re-parsed as a flag itself, so a path starting
+// with "-" can't be misread the way it could in a flag-value-ambiguous
+// context.
+func videoPosterArgs(path, seekSeconds string) []string {
+	return []string{
+		"-y", "-nostdin", "-v", "error",
+		"-ss", seekSeconds,
+		"-i", path,
+		"-frames:v", "1",
+		"-q:v", "3",
+		"-f", "image2pipe",
+		"-vcodec", "mjpeg",
+		"pipe:1",
+	}
 }
 
 // ExifResult holds the fields spec Pillar 4 inherits from parent to child
@@ -541,6 +590,65 @@ func (p *Prober) ExtractPreviewJPEG(ctx context.Context, path string) ([]byte, e
 			continue
 		}
 		return stdout.Bytes(), nil
+	}
+	return nil, nil
+}
+
+// ExtractVideoPoster extracts a single representative frame from a video at
+// path via ffmpeg, encoded as a JPEG, trying videoPosterSeekOffsets in order
+// (one second in, then the very first frame) and returning the bytes of the
+// first attempt that both produces output and decodes successfully via Go's
+// standard image library -- the same "try a few things, verify decodability,
+// fall through" shape as ExtractPreviewJPEG above, and for the same reason: a
+// seek target past a very short clip's end (or a corrupt/truncated file)
+// yields nothing usable from that attempt without making the file itself an
+// error.
+//
+// Returns nil, nil -- not an error -- when ffmpeg is unavailable or every
+// seek attempt genuinely produced nothing usable; that is the normal case
+// for a non-video/unreadable file, not a failure. This is a single-frame
+// poster image only (#224's stated scope) -- no animated preview or contact
+// sheet.
+//
+// A ctx cancellation or deadline is deliberately NOT folded into that
+// nil-nil "nothing usable" case, unlike a plain ffmpeg failure (bad codec,
+// truncated file, etc.) -- ctx.Err() is checked after every failed attempt
+// and, if set, returned as a real error immediately rather than falling
+// through to try the next seek offset (which would fail instantly anyway,
+// against an already-dead context) or exhausting the loop silently. This
+// matters to internal/thumbs.Cache.Generate's caller: a nil-nil result maps
+// to the terminal, never-retried UNSUPPORTED thumb_state, while a real error
+// maps to FAILED, which IS retried up to the worker's max-attempts bound --
+// a shutdown or slow-storage timeout mid-video (the slowest file type this
+// package handles, and thus the most likely to be mid-flight when either
+// happens) must land on the latter, not silently and permanently give up on
+// that node.
+func (p *Prober) ExtractVideoPoster(ctx context.Context, path string) ([]byte, error) {
+	if !p.HasFFmpeg() {
+		return nil, nil
+	}
+	for _, seek := range videoPosterSeekOffsets {
+		cmd := exec.CommandContext(ctx, p.ffmpegPath, videoPosterArgs(path, seek)...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+		if runErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("probe: ffmpeg %s: %w (stderr: %s)", path, ctxErr, stderr.String())
+			}
+			continue
+		}
+		if stdout.Len() == 0 {
+			continue
+		}
+		if _, _, err := image.Decode(bytes.NewReader(stdout.Bytes())); err != nil {
+			continue
+		}
+		return stdout.Bytes(), nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("probe: ffmpeg %s: %w", path, ctxErr)
 	}
 	return nil, nil
 }

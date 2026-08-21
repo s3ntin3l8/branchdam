@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,6 +16,35 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
+
+// requireFFmpeg skips the test with a clear message when ffmpeg isn't
+// installed, rather than failing -- mirrors internal/probe's requireTool:
+// neither exiftool nor ffprobe/ffmpeg is present on every machine that runs
+// `go test ./...` (notably, the CI Go job doesn't install them), and this
+// package must still build and its non-ffmpeg tests must still pass without
+// it.
+func requireFFmpeg(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed, skipping")
+	}
+}
+
+// makeFixtureMP4 generates a tiny real MP4 via ffmpeg, mirroring
+// internal/probe's own probe_test.go fixture helper.
+func makeFixtureMP4(t *testing.T, dir string) string {
+	t.Helper()
+	requireFFmpeg(t)
+
+	path := filepath.Join(dir, "fixture.mp4")
+	cmd := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:duration=1",
+		"-c:v", "libx264", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture mp4: %v\n%s", err, out)
+	}
+	return path
+}
 
 func writeTestPNG(t *testing.T, path string, w, h int) {
 	t.Helper()
@@ -196,5 +226,93 @@ func TestCacheGenerateMissingFile(t *testing.T) {
 	}
 	if err == ErrUnsupported {
 		t.Error("Generate on a nonexistent file returned ErrUnsupported, want a real I/O error -- OpenRead should fail before extraction is even attempted")
+	}
+}
+
+// TestCacheGenerateVideoPoster is the acceptance-criteria test for #224: a
+// video file -- neither natively decodable via image.Decode nor carrying an
+// exiftool-extractable embedded preview -- gets a real READY-able JPEG
+// thumbnail via the ffmpeg poster-frame fallback, instead of landing on
+// ErrUnsupported the way it did before this fallback existed.
+func TestCacheGenerateVideoPoster(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := makeFixtureMP4(t, dir)
+
+	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	data, err := c.Generate(ctx, path)
+	if err != nil {
+		t.Fatalf("Generate on a video file: %v", err)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("generated video thumbnail is not a decodable JPEG: %v", err)
+	}
+	b := img.Bounds()
+	// The fixture is 320x240 (landscape); maxEdgePx=500 exceeds the source's
+	// longest edge, so scaleToMaxEdge must leave it unscaled.
+	if b.Dx() != 320 || b.Dy() != 240 {
+		t.Errorf("thumbnail dimensions = %dx%d, want 320x240 (source unscaled, maxEdgePx exceeds source)", b.Dx(), b.Dy())
+	}
+}
+
+// TestCacheGenerateVideoExtensionGate proves decodeFallback never invokes
+// ffmpeg for a non-video extension, even when the file's actual CONTENT is a
+// perfectly decodable video -- ffmpeg detects container format from
+// content, not the filename, so if the pipeline.IsVideoExt gate were ever
+// dropped, this exact input would succeed via the ffmpeg fallback the same
+// way TestCacheGenerateVideoPoster's does, silently reintroducing the two
+// wasted ffmpeg spawns (plus three wasted exiftool spawns) this gate exists
+// to avoid for every non-media file a real scan encounters (sidecars,
+// .dam.json manifests, .xmp, stray .txt -- thumb_state defaults to PENDING
+// for every media_nodes row regardless of file type).
+func TestCacheGenerateVideoExtensionGate(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mp4 := makeFixtureMP4(t, dir)
+
+	data, err := os.ReadFile(mp4)
+	if err != nil {
+		t.Fatalf("read fixture mp4: %v", err)
+	}
+	renamed := filepath.Join(dir, "not-a-video.bin")
+	if err := os.WriteFile(renamed, data, 0o644); err != nil {
+		t.Fatalf("write renamed fixture: %v", err)
+	}
+
+	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if _, err := c.Generate(ctx, renamed); err != ErrUnsupported {
+		t.Errorf("Generate on real video bytes under a non-video extension = %v, want ErrUnsupported (the extension gate must prevent the ffmpeg fallback from ever running here)", err)
+	}
+}
+
+// TestCacheGenerateVideoPosterContextCancellation is the regression test for
+// the terminal-UNSUPPORTED-on-cancellation bug at the Cache.Generate level:
+// an already-expired ctx during the ffmpeg poster attempt must propagate as
+// a real error, not ErrUnsupported -- worker.processOne maps ErrUnsupported
+// to the terminal, never-retried UNSUPPORTED thumb_state, and a shutdown or
+// slow-storage timeout mid-video must NOT permanently give up on that node.
+func TestCacheGenerateVideoPosterContextCancellation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := makeFixtureMP4(t, dir)
+
+	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond) // ensure the deadline has actually passed
+
+	_, err := c.Generate(ctx, path)
+	if err == nil {
+		t.Fatal("Generate with an already-expired context returned nil error, want a real error")
+	}
+	if err == ErrUnsupported {
+		t.Error("Generate with an expired context returned ErrUnsupported -- want a real error so worker.processOne retries via FAILED instead of landing on terminal UNSUPPORTED")
 	}
 }

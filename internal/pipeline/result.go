@@ -123,6 +123,15 @@ var videoExts = map[string]bool{
 
 func isVideoExt(ext string) bool { return videoExts[strings.ToLower(strings.TrimPrefix(ext, "."))] }
 
+// IsVideoExt is the exported form of isVideoExt, for callers outside this
+// package that need the same closed extension set -- internal/thumbs gates
+// its ffmpeg poster-frame fallback on it (#248), so a non-video file (a
+// sidecar, a .dam.json manifest, a stray .txt) never pays for two ffmpeg
+// subprocess spawns just to conclude it has no thumbnail. pipeline remains
+// the single owner of what counts as "video" for extraction purposes; this
+// is a read-only accessor, not a second copy of videoExts.
+func IsVideoExt(ext string) bool { return isVideoExt(ext) }
+
 // imageExts is the set of image and camera RAW extensions for which pHash is attempted.
 var imageExts = map[string]bool{
 	"jpg": true, "jpeg": true, "png": true, "gif": true, "webp": true,

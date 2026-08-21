@@ -247,6 +247,90 @@ func TestPreviewImageArgsNeverWrite(t *testing.T) {
 	}
 }
 
+// TestVideoPosterArgsPathAfterInputFlag proves path always lands directly
+// after "-i" -- ffmpeg consumes the argument immediately following a flag
+// like -i positionally, as that flag's own required value, never re-parsing
+// it as a flag itself, so this is the ffmpeg-side analogue of exiftool's "--"
+// separator proof above: even an adversarial path can't be misread as an
+// option.
+func TestVideoPosterArgsPathAfterInputFlag(t *testing.T) {
+	t.Parallel()
+	for _, seek := range videoPosterSeekOffsets {
+		for _, path := range adversarialPaths {
+			args := videoPosterArgs(path, seek)
+
+			idx := -1
+			for i, a := range args {
+				if a == "-i" {
+					idx = i
+					break
+				}
+			}
+			if idx == -1 {
+				t.Fatalf("videoPosterArgs(%q, %q) has no -i flag: %v", path, seek, args)
+			}
+			if idx+1 >= len(args) || args[idx+1] != path {
+				t.Errorf("videoPosterArgs(%q, %q) does not place path immediately after -i: %v", path, seek, args)
+			}
+		}
+	}
+}
+
+// TestVideoPosterArgsNeverInteractive proves the constructed argv can never
+// block waiting on a TTY prompt or stdin: -y (auto-confirm any overwrite
+// prompt, even though there is no output file to overwrite here) and
+// -nostdin (never read from stdin) must always be present, since this
+// argv's stdout is itself the JPEG payload -- there is no terminal attached
+// to answer a prompt in the worker's actual runtime.
+func TestVideoPosterArgsNeverInteractive(t *testing.T) {
+	t.Parallel()
+	for _, seek := range videoPosterSeekOffsets {
+		args := videoPosterArgs("/some/video.mp4", seek)
+		var sawY, sawNostdin bool
+		for _, a := range args {
+			switch a {
+			case "-y":
+				sawY = true
+			case "-nostdin":
+				sawNostdin = true
+			}
+		}
+		if !sawY {
+			t.Errorf("videoPosterArgs(seek=%q) missing -y: %v", seek, args)
+		}
+		if !sawNostdin {
+			t.Errorf("videoPosterArgs(seek=%q) missing -nostdin: %v", seek, args)
+		}
+	}
+}
+
+// TestVideoPosterArgsOutputsToStdout proves the argv writes its single-frame
+// JPEG to stdout (pipe:1) rather than a file on disk -- ExtractVideoPoster
+// reads cmd.Stdout directly, so a change here that redirected output to a
+// file would silently make every call return empty bytes.
+func TestVideoPosterArgsOutputsToStdout(t *testing.T) {
+	t.Parallel()
+	args := videoPosterArgs("/some/video.mov", "1")
+	if got := args[len(args)-1]; got != "pipe:1" {
+		t.Errorf("videoPosterArgs last arg = %q, want pipe:1", got)
+	}
+}
+
+// TestVideoPosterSeekOffsetsFallsBackToFirstFrame proves the seek schedule
+// tries a non-zero offset (to skip a likely black/fade-in opening frame)
+// before falling back to "0" -- the one offset guaranteed to exist in any
+// video with at least one frame, however short.
+func TestVideoPosterSeekOffsetsFallsBackToFirstFrame(t *testing.T) {
+	t.Parallel()
+	if len(videoPosterSeekOffsets) == 0 {
+		t.Fatal("videoPosterSeekOffsets is empty, want at least one offset")
+	}
+	last := videoPosterSeekOffsets[len(videoPosterSeekOffsets)-1]
+	if last != "0" {
+		t.Errorf("last videoPosterSeekOffsets entry = %q, want \"0\" (guaranteed fallback)", last)
+	}
+}
+
 func FuzzArgvConstructors(f *testing.F) {
 	for _, path := range adversarialPaths {
 		f.Add(path)
