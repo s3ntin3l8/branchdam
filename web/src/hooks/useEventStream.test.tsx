@@ -55,7 +55,14 @@ describe("useEventStream", () => {
   // added after this hook and never wired into its "progress" nudge --
   // they previously only updated on their own poll interval instead of
   // reacting live like assets/audit-queue/progress already did.
-  it("invalidates jobs and storage-health on a progress nudge, alongside progress/assets/audit-queue", () => {
+  //
+  // #153: a background scan or graph-resolver pass changing a node's
+  // graph_status -- not a manual confirm/reject/create action -- must also
+  // refresh a mounted AssetDetailPage. "asset" (singular) is a different key
+  // namespace from "assets" (plural) and prefix matching doesn't bridge them
+  // (see the same note in queries.ts's invalidateEdgeReviewQueries), so the
+  // detail query, lineage, and graph need their own entries here.
+  it("invalidates the graph_status-dependent asset queries on a progress nudge, alongside every other key", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const spy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -64,15 +71,20 @@ describe("useEventStream", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     FakeEventSource.instances[0].emit("progress");
 
+    // Exact match, not arrayContaining -- this hook invalidates a fixed,
+    // known set of keys on every nudge, so a future omission (e.g. dropping
+    // one of ASSET_DETAIL_QUERY_KEYS by accident) should fail this test
+    // instead of passing silently.
     const keys = spy.mock.calls.map(([filters]) => filters?.queryKey);
-    expect(keys).toEqual(
-      expect.arrayContaining([
-        ["progress"],
-        ["assets"],
-        ["audit-queue"],
-        ["jobs"],
-        ["storage-health"],
-      ]),
-    );
+    expect(keys).toEqual([
+      ["progress"],
+      ["assets"],
+      ["audit-queue"],
+      ["jobs"],
+      ["storage-health"],
+      ["asset"],
+      ["asset-lineage"],
+      ["asset-graph"],
+    ]);
   });
 });

@@ -1,6 +1,14 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 
+// The query key namespaces backing a single asset's detail page (useAsset,
+// useAssetGraph, useAssetLineage) -- "asset" (singular) is a DIFFERENT
+// namespace from "assets" (plural, the list), so invalidating "assets" does
+// NOT also cover these. Shared between invalidateEdgeReviewQueries below
+// (the mutation-triggered path) and useEventStream's SSE-nudge path so the
+// two invalidation lists can't drift apart the way they did before #153.
+export const ASSET_DETAIL_QUERY_KEYS = ["asset", "asset-lineage", "asset-graph"] as const;
+
 export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: api.me });
 }
@@ -118,16 +126,12 @@ export function useAuditQueue(params: { limit?: number; offset?: number } = {}) 
 function invalidateEdgeReviewQueries(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
   void queryClient.invalidateQueries({ queryKey: ["assets"] });
-  // "asset" (singular, useAsset's key for GET /api/v1/assets/{id}) is a
-  // DIFFERENT query key namespace from "assets" (plural, the list) --
-  // TanStack Query's prefix matching only covers keys that start with the
-  // exact given key array, so invalidating "assets" does NOT also cover
-  // "asset". AssetDetailPage renders graphStatus directly from this query,
-  // so omitting it left a mounted detail page stale for the query's full
+  // AssetDetailPage renders graphStatus directly from these queries, so
+  // omitting them left a mounted detail page stale for the query's full
   // staleTime (main.tsx) after confirming/rejecting/creating an edge.
-  void queryClient.invalidateQueries({ queryKey: ["asset"] });
-  void queryClient.invalidateQueries({ queryKey: ["asset-lineage"] });
-  void queryClient.invalidateQueries({ queryKey: ["asset-graph"] });
+  for (const key of ASSET_DETAIL_QUERY_KEYS) {
+    void queryClient.invalidateQueries({ queryKey: [key] });
+  }
   void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
 }
 
