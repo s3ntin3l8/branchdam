@@ -110,6 +110,38 @@ func TestHandleThumbnailNotFoundWhenNotReady(t *testing.T) {
 	}
 }
 
+func TestHandleThumbnailReadMissSelfHeals(t *testing.T) {
+	database := openThumbnailTestDB(t)
+
+	// thumb_state is READY in the DB (as it would be after a partial
+	// restore that brought back branchdam.db but not /data/thumbs), but no
+	// cache file is written for this node -- simulates the cached JPEG
+	// being genuinely gone despite the DB believing otherwise.
+	cache := thumbs.New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	node := thumbnailTestNode(t, database, "READY")
+
+	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+
+	got, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if got.ThumbState != "PENDING" {
+		t.Errorf("thumb_state = %q, want PENDING (self-heal on read miss)", got.ThumbState)
+	}
+	if got.ThumbAttempts != 0 {
+		t.Errorf("thumb_attempts = %d, want 0 after invalidation", got.ThumbAttempts)
+	}
+}
+
 func TestHandleThumbnailNotFoundWhenCacheNil(t *testing.T) {
 	database := openThumbnailTestDB(t)
 
