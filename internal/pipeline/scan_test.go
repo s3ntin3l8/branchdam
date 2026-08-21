@@ -525,6 +525,84 @@ func TestScanEmptyFirstScanOfNewLocationHasNoSweepWarning(t *testing.T) {
 	}
 }
 
+// TestScanZeroFilesWarningFailsOpenWhenPriorCountErrors covers the
+// CountMediaNodesFiltered error branch in runScan's zero-files sweep-skip
+// path: if the "were there prior ACTIVE nodes" count itself can't be
+// answered, the code must assume the warning applies (fail open) rather than
+// silently completing as an ordinary clean scan -- a possible vanished mount
+// is exactly the kind of signal that must never go silently missing just
+// because a secondary lookup failed.
+//
+// The error is forced by renaming media_nodes out from under the query
+// between pass 1 (which needs the real table to create a node) and pass 2
+// (the zero-files pass, where the count lookup then hits "no such table").
+// The table is renamed back before the test ends so database.Close (via
+// t.Cleanup) and any later assertions see a normal schema.
+func TestScanZeroFilesWarningFailsOpenWhenPriorCountErrors(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "alpha content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "test-export", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 1): %v", err)
+	}
+	if job := waitJobDone(t, database, jobID); job.State != "COMPLETED" {
+		t.Fatalf("pass 1 state = %q (last_error=%v)", job.State, job.LastError)
+	}
+
+	if err := os.Remove(filepath.Join(resolvedRoot, "a.txt")); err != nil {
+		t.Fatalf("remove a.txt: %v", err)
+	}
+	waitForNextSecond(t)
+
+	if _, err := database.ExecInTx(ctx, `ALTER TABLE media_nodes RENAME TO media_nodes_hidden_for_test`); err != nil {
+		t.Fatalf("rename media_nodes away: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		if _, err := database.ExecInTx(ctx, `ALTER TABLE media_nodes_hidden_for_test RENAME TO media_nodes`); err != nil {
+			t.Fatalf("restore media_nodes: %v", err)
+		}
+		restored = true
+	}
+	t.Cleanup(restore)
+
+	jobID2, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan (pass 2): %v", err)
+	}
+	job2 := waitJobDoneWithin(t, database, jobID2, 10*time.Second)
+	restore() // put the table back before any further DB reads in this test
+
+	if job2.State != "COMPLETED" {
+		t.Fatalf("pass 2 state = %q, want COMPLETED (a count error must not fail the scan itself)", job2.State)
+	}
+	if job2.FilesSeen != 0 {
+		t.Fatalf("pass 2 files_seen = %d, want 0", job2.FilesSeen)
+	}
+	// The headline assertion: fail open. CountMediaNodesFiltered erroring
+	// must still produce the warning, not silently swallow it.
+	if !job2.LastError.Valid || job2.LastError.String == "" {
+		t.Fatalf("pass 2 last_error unset, want the zero-files warning even when the prior-count lookup itself errored (fail open, not fail silent)")
+	}
+	if !strings.Contains(job2.LastError.String, "zero files") {
+		t.Errorf("pass 2 last_error = %q, want it to mention the zero-files skip", job2.LastError.String)
+	}
+}
+
 // TestScanAbortedPartwayLeavesAllNodesActive is the data-loss regression
 // guard for the whole #31 design: the MISSING sweep must NEVER fire on a
 // failed walk. A walk error (here: forced via the WalkFn seam) marks the
