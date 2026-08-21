@@ -5,6 +5,11 @@ pipeline, Tier-2 graph resolution, auth, SSE, the Huma REST API, the React SPA, 
 CI with branch protection. This document phases everything that's left — both what the spec
 still asks for, and a large slice of what increment 1 *built but never wired up*.
 
+**Current state:** phases 0–9 are landed. Only phase 10 (the workstation agent) remains open, as
+a placeholder tracking issue (#62) — its own repo location is an open decision, deferred until
+something outside this repo needs to consume the phase-8 agent contract for real. See
+[`deploy.md`](deploy.md) for turning a phases-0–9 build into a running deployment.
+
 Each phase below is filed as GitHub issues (one issue per PR) tracked on this repo's board and
 worked through [mullion task master](https://github.com/s3ntin3l8/mullion-session-manager). Task
 master has no dependency or ordering concept of its own — it polls for issues labelled
@@ -47,19 +52,19 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
 
 ## Phases
 
-| Phase | Goal | Depends on |
-|---|---|---|
-| 0 | Groundwork: labels, milestones, this document | — |
-| 1 | Close the wiring gaps; fix the latent MISSING bug | 0 |
-| 2 | Authorization — group checks on mutating routes and the OpenAPI surface | — |
-| 3 | Perceptual hashing and the promoted camera fields Tier 3 needs | 1 |
-| 4 | Tier-3 heuristic resolver (serial + lens + ±2s + Hamming ≤ 10) | 3 |
-| 5 | Tier-1 project introspection: `.dam.json`, `.drp`, `.fcpxml`/`.edl` | 1 |
-| 6 | Multi-hop graph traversal and the spec's remaining UI surfaces | 4, 5 |
-| 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push — landed (see below) | 3 |
-| 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 |
-| 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 |
-| 10 | Workstation agent — placeholder tracking issue, decomposed later | 8 |
+| Phase | Goal | Depends on | Status |
+|---|---|---|---|
+| 0 | Groundwork: labels, milestones, this document | — | Landed |
+| 1 | Close the wiring gaps; fix the latent MISSING bug | 0 | Landed |
+| 2 | Authorization — group checks on mutating routes and the OpenAPI surface | — | Landed |
+| 3 | Perceptual hashing and the promoted camera fields Tier 3 needs | 1 | Landed |
+| 4 | Tier-3 heuristic resolver (serial + lens + ±2s + Hamming ≤ 10) | 3 | Landed |
+| 5 | Tier-1 project introspection: `.dam.json`, `.drp`, `.fcpxml`/`.edl` | 1 | Landed |
+| 6 | Multi-hop graph traversal and the spec's remaining UI surfaces | 4, 5 | Landed |
+| 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push — landed (see below) | 3 | Landed |
+| 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 | Landed |
+| 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 | Landed |
+| 10 | Workstation agent — placeholder tracking issue, decomposed later | 8 | Open (#62) |
 
 Phase 2 has no dependencies and can land at any point — it closes a live authorization gap
 (`Principal.Groups` is parsed and echoed at `/api/v1/me` but nothing checks it today) rather than

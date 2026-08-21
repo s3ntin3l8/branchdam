@@ -33,6 +33,14 @@ services:
       - /mnt/nas/exports:/storage/exports:rw # TIER2_EXPORTS
       - /mnt/nas/projects:/storage/projects:rw # PROJECTS
       - /mnt/nas/archive:/storage/archive:ro # TIER3_MASTER_ARCHIVE — always read-only
+      # Example SMB/NFS share matching config.example.yaml's `nas-share`
+      # location (sweep-only, since fsnotify doesn't fire reliably over
+      # SMB/NFS -- #60). Uncomment both the mount here and the
+      # storageLocations entry if you have one; otherwise leave both out --
+      # a storageLocations entry with no matching mount degrades gracefully
+      # (storage.LoadGuard skips it, marks it inactive) but is unnecessary
+      # drift to carry.
+      # - /mnt/nas/share:/storage/nas-share:rw # TIER2_EXPORTS (nas-share)
     healthcheck:
       test: ["CMD", "/usr/local/bin/branchdam", "-healthcheck", "-config", "/config/config.yaml"]
       interval: 30s
