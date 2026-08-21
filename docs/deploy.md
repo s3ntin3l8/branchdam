@@ -154,7 +154,7 @@ curl -s -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.yourdomain.example/
 ```
 
 If `/api/v1/me` returns an empty `name`, or a write that should work returns `403 authentication
-required`, see [`forward-auth.md` §4](forward-auth.md#4-verifying-it-works) — almost always
+required`, see [`forward-auth.md` §5](forward-auth.md#5-verifying-it-works) — almost always
 `authResponseHeaders` on the Authentik middleware not listing a header Traefik would otherwise
 strip.
 
