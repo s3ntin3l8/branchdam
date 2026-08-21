@@ -470,40 +470,83 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		}
 	}
 
-	// The sweep runs on every successful walk, excluding this pass's
-	// seen-but-uncertain paths. A file the walk saw but failed to commit never
-	// had last_seen_at bumped -- sweeping it would flip a live file to MISSING
-	// and can feed a spurious RebaseMissingNodePath steal -- so exclusion, not
-	// a whole-location skip, is the fix: everything else this scan genuinely
-	// did not see is still swept.
-	keepActive := uncertain.list()
-	if len(keepActive) == 0 {
-		// sqlc substitutes NULL for an empty slice, and file_path NOT IN
-		// (NULL) is unknown -- false -- in SQL's three-valued logic: an empty
-		// list would silently disable the sweep on every clean pass. A real
-		// file_path is always a non-empty absolute path, so this sentinel can
-		// never match one and NOT IN stays true for every row.
-		keepActive = []string{""}
-	} else {
-		log.Info("pipeline: excluding seen-but-uncertain paths from MISSING sweep", "jobID", jobID, "excluded", len(keepActive))
-	}
-
-	// A sweep failure is logged, never fatal -- the scan itself succeeded, and
-	// the node is simply swept one pass later (delayed-not-wrong).
+	// #225: a walk that completed without error but observed zero files is
+	// not proof the location is genuinely empty -- a stale NFS handle
+	// recovered as an empty directory, or a remount at the wrong subpath,
+	// walks successfully with filesSeen == 0 too. Unlike the walkErr guard
+	// above (which catches a walk that errored outright), nothing previously
+	// stood between a *successful-but-empty* walk and MarkUnseenNodesMissing,
+	// which would then flip every previously ACTIVE node under this location
+	// to MISSING in one transaction, since none of them were "seen" this
+	// pass. The call is skipped unconditionally on filesSeen == 0 alone --
+	// not scaled by what fraction of previously known nodes would be
+	// affected -- per #225's decision to take the zero-only fix.
+	sweepSkippedZeroFiles := filesSeen.Load() == 0
 	var swept int64
-	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-		jsonKeepActive, _ := json.Marshal(keepActive)
-		var err error
-		swept, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
-			StorageLocationID: location.ID,
-			LastSeenAt:        startedAt,
-			JsonEach:          string(jsonKeepActive),
+	var sweepWarningNeeded bool
+	if sweepSkippedZeroFiles {
+		// A brand-new, genuinely empty location (first-ever scan, zero
+		// previously known nodes) must not be misreported as a possible
+		// vanished mount -- MarkUnseenNodesMissing would have affected zero
+		// rows for it regardless, so the skip above is a no-op either way.
+		// CountMediaNodesFiltered (existing query, backing the audit/asset
+		// list filters) already gives an exact ACTIVE-node count scoped to
+		// this location -- the same population MarkUnseenNodesMissing would
+		// have targeted -- so reusing it here, rather than adding a new
+		// query, is what lets the warning be conditioned on "there was
+		// something to lose" instead of firing unconditionally.
+		priorActive, err := deps.DB.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{
+			LifecycleState:    sql.NullString{String: "ACTIVE", Valid: true},
+			StorageLocationID: sql.NullInt64{Int64: location.ID, Valid: true},
 		})
-		return err
-	}); err != nil {
-		log.Error("pipeline: MISSING sweep failed (delayed-not-wrong, swept next pass)", "jobID", jobID, "err", err)
-	} else if swept > 0 {
-		log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", swept)
+		if err != nil {
+			// Can't tell whether prior live nodes exist -- err on the side of
+			// surfacing the warning rather than silently swallowing a
+			// possible vanished-mount signal.
+			log.Warn("pipeline: count prior ACTIVE nodes for zero-files sweep skip (assuming warning applies)", "jobID", jobID, "locationID", location.ID, "err", err)
+			priorActive = 1
+		}
+		sweepWarningNeeded = priorActive > 0
+		if sweepWarningNeeded {
+			log.Warn("pipeline: skipping MISSING sweep -- scan saw zero files, possible unmounted or misconfigured storage location", "jobID", jobID, "locationID", location.ID, "locationRoot", location.RootPath, "priorActiveNodes", priorActive)
+		} else {
+			log.Info("pipeline: skipping MISSING sweep -- scan saw zero files, but the location has no prior ACTIVE nodes to lose (first scan of a genuinely empty location)", "jobID", jobID, "locationID", location.ID, "locationRoot", location.RootPath)
+		}
+	} else {
+		// The sweep runs on every successful, non-empty walk, excluding this
+		// pass's seen-but-uncertain paths. A file the walk saw but failed to
+		// commit never had last_seen_at bumped -- sweeping it would flip a
+		// live file to MISSING and can feed a spurious RebaseMissingNodePath
+		// steal -- so exclusion, not a whole-location skip, is the fix:
+		// everything else this scan genuinely did not see is still swept.
+		keepActive := uncertain.list()
+		if len(keepActive) == 0 {
+			// sqlc substitutes NULL for an empty slice, and file_path NOT IN
+			// (NULL) is unknown -- false -- in SQL's three-valued logic: an empty
+			// list would silently disable the sweep on every clean pass. A real
+			// file_path is always a non-empty absolute path, so this sentinel can
+			// never match one and NOT IN stays true for every row.
+			keepActive = []string{""}
+		} else {
+			log.Info("pipeline: excluding seen-but-uncertain paths from MISSING sweep", "jobID", jobID, "excluded", len(keepActive))
+		}
+
+		// A sweep failure is logged, never fatal -- the scan itself succeeded, and
+		// the node is simply swept one pass later (delayed-not-wrong).
+		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+			jsonKeepActive, _ := json.Marshal(keepActive)
+			var err error
+			swept, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
+				StorageLocationID: location.ID,
+				LastSeenAt:        startedAt,
+				JsonEach:          string(jsonKeepActive),
+			})
+			return err
+		}); err != nil {
+			log.Error("pipeline: MISSING sweep failed (delayed-not-wrong, swept next pass)", "jobID", jobID, "err", err)
+		} else if swept > 0 {
+			log.Info("pipeline: marked unseen nodes MISSING", "jobID", jobID, "count", swept)
+		}
 	}
 
 	// #89: prune node_metadata rows belonging to ARCHIVED nodes. ARCHIVED
@@ -565,18 +608,36 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// one transaction would instead widen the "RUNNING forever" failure
 	// window on a mid-write crash.
 	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-		if interruptedByShutdown {
+		switch {
+		case interruptedByShutdown:
 			return q.CancelScanJob(ctx, jobID)
+		case sweepWarningNeeded:
+			// #225: distinguishable, on the job row itself, from a walkErr
+			// abort -- this scan reaches COMPLETED (it did complete, cleanly),
+			// not FAILED, but last_error still carries a note an operator can
+			// see without cross-referencing server logs. Only reached when
+			// there were prior ACTIVE nodes this pass would otherwise have
+			// swept -- a genuinely empty, never-before-seen location gets a
+			// plain COMPLETED with no warning (the default case below).
+			return q.CompleteScanJobWithWarning(ctx, sqlcgen.CompleteScanJobWithWarningParams{
+				ID: jobID,
+				LastError: sql.NullString{
+					String: fmt.Sprintf("MISSING sweep skipped: scan saw zero files under %s (possible unmounted or misconfigured storage location) -- no nodes were marked MISSING this pass", location.RootPath),
+					Valid:  true,
+				},
+			})
+		default:
+			return q.CompleteScanJob(ctx, jobID)
 		}
-		return q.CompleteScanJob(ctx, jobID)
 	}); err != nil {
-		log.Error("pipeline: terminalize scan job", "jobID", jobID, "cancelled", interruptedByShutdown, "err", err)
+		log.Error("pipeline: terminalize scan job", "jobID", jobID, "cancelled", interruptedByShutdown, "sweepSkippedZeroFiles", sweepSkippedZeroFiles, "sweepWarningNeeded", sweepWarningNeeded, "err", err)
 	}
 	log.Info("pipeline: scan finished", "jobID", jobID, "seen", filesSeen.Load(), "failed", filesFailed.Load(),
 		"cancelled", interruptedByShutdown, "inserted", total.Inserted, "touched", total.Touched,
 		"versionCollisions", total.VersionCollisions, "moved", total.Moved, "edgesCreated", total.EdgesCreated,
 		"metadataWritten", total.MetadataWritten, "promotedColumnsRefreshed", total.PromotedColumnsRefreshed,
-		"differential", differential, "sweepTouched", touchBatch.total)
+		"differential", differential, "sweepTouched", touchBatch.total, "sweepSkippedZeroFiles", sweepSkippedZeroFiles,
+		"sweepWarningNeeded", sweepWarningNeeded)
 }
 
 // isClosed reports whether ch has been closed, without blocking. A nil

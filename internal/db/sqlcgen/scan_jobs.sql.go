@@ -30,6 +30,26 @@ func (q *Queries) CompleteScanJob(ctx context.Context, id int64) error {
 	return err
 }
 
+const completeScanJobWithWarning = `-- name: CompleteScanJobWithWarning :exec
+UPDATE scan_jobs SET state = 'COMPLETED', last_error = ?2, finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
+`
+
+type CompleteScanJobWithWarningParams struct {
+	ID        int64
+	LastError sql.NullString
+}
+
+// #225: used when the MISSING sweep is skipped because the walk saw zero
+// files. The scan itself still completed cleanly -- state stays COMPLETED,
+// not FAILED, since a walk *error* is a distinct, already-handled failure
+// mode (see FailScanJob) -- but last_error carries a human-readable note so
+// an operator can tell "swept nothing because there was genuinely nothing to
+// see" apart from "swept nothing because the walk aborted."
+func (q *Queries) CompleteScanJobWithWarning(ctx context.Context, arg CompleteScanJobWithWarningParams) error {
+	_, err := q.db.ExecContext(ctx, completeScanJobWithWarning, arg.ID, arg.LastError)
+	return err
+}
+
 const countRunningFullScansForLocation = `-- name: CountRunningFullScansForLocation :one
 SELECT COUNT(*) FROM scan_jobs
 WHERE storage_location_id = ?1 AND kind = 'FULL_SCAN' AND state = 'RUNNING'

@@ -22,6 +22,15 @@ WHERE id = ?1;
 -- name: CompleteScanJob :exec
 UPDATE scan_jobs SET state = 'COMPLETED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
 
+-- name: CompleteScanJobWithWarning :exec
+-- #225: used when the MISSING sweep is skipped because the walk saw zero
+-- files. The scan itself still completed cleanly -- state stays COMPLETED,
+-- not FAILED, since a walk *error* is a distinct, already-handled failure
+-- mode (see FailScanJob) -- but last_error carries a human-readable note so
+-- an operator can tell "swept nothing because there was genuinely nothing to
+-- see" apart from "swept nothing because the walk aborted."
+UPDATE scan_jobs SET state = 'COMPLETED', last_error = ?2, finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
+
 -- name: FailScanJob :exec
 UPDATE scan_jobs SET state = 'FAILED', last_error = ?2, finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1;
 

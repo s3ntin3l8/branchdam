@@ -349,6 +349,13 @@ func TestSweepMissingNodeAlwaysRehashes(t *testing.T) {
 	path := filepath.Join(root, "a.txt")
 	const originalContent = "original-content"
 	writeFile(t, path, originalContent)
+	// keepalive.txt stays on disk through every pass -- #225's zero-only
+	// sweep guard skips MarkUnseenNodesMissing entirely when a pass sees
+	// zero files, so a.txt being the ONLY file on disk and getting removed
+	// would otherwise never reach MISSING at all. This test is about
+	// re-hashing a MISSING node on reappearance, not the zero-files guard
+	// itself, so keep filesSeen > 0 throughout.
+	writeFile(t, filepath.Join(root, "keepalive.txt"), "keepalive content")
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatalf("resolve root: %v", err)
