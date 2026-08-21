@@ -52,7 +52,17 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		// the library; same "gone on its own is not an error, anything
 		// else is" distinction internal/prune.Execute draws around
 		// os.Lstat (see CLAUDE.md).
-		if errors.Is(err, fs.ErrNotExist) {
+		//
+		// Also gated on lifecycle_state IN ('ACTIVE', 'HIDDEN') to match
+		// ListPendingThumbnails' own claim-query filter exactly
+		// (internal/db/queries/media_nodes.sql): an ARCHIVED/MISSING node
+		// invalidated here would never be reclaimed by
+		// internal/thumbs.Worker.ProcessPending, so it would land on
+		// thumb_state='PENDING' and 404 forever instead of self-healing --
+		// worse than leaving it on its stale READY. There's no live file to
+		// regenerate a thumbnail from for those nodes anyway, so leaving
+		// thumb_state alone is correct, not merely a smaller bug.
+		if errors.Is(err, fs.ErrNotExist) && (node.LifecycleState == "ACTIVE" || node.LifecycleState == "HIDDEN") {
 			// Use a detached context with its own short timeout rather than
 			// r.Context(): a browser aborting an in-flight thumbnail GET
 			// (routine on a scrolled/lazy-loaded asset grid) must not

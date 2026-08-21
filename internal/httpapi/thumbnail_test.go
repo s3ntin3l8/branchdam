@@ -30,6 +30,11 @@ func openThumbnailTestDB(t *testing.T) *db.DB {
 
 func thumbnailTestNode(t *testing.T, database *db.DB, thumbState string) sqlcgen.MediaNode {
 	t.Helper()
+	return thumbnailTestNodeWithLifecycle(t, database, thumbState, "ACTIVE")
+}
+
+func thumbnailTestNodeWithLifecycle(t *testing.T, database *db.DB, thumbState, lifecycleState string) sqlcgen.MediaNode {
+	t.Helper()
 	var node sqlcgen.MediaNode
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
@@ -41,7 +46,7 @@ func thumbnailTestNode(t *testing.T, database *db.DB, thumbState string) sqlcgen
 		node, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
 			NodeUuid: "0198abcd-0000-7000-8000-000000000001", StorageLocationID: loc.ID,
 			FilePath: "/tmp/does-not-matter.jpg", FileName: "photo.jpg", FileExt: "jpg",
-			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: lifecycleState,
 		})
 		if err != nil {
 			return err
@@ -54,6 +59,7 @@ func thumbnailTestNode(t *testing.T, database *db.DB, thumbState string) sqlcgen
 		t.Fatalf("seed node: %v", err)
 	}
 	node.ThumbState = thumbState
+	node.LifecycleState = lifecycleState
 	return node
 }
 
@@ -139,6 +145,99 @@ func TestHandleThumbnailReadMissSelfHeals(t *testing.T) {
 	}
 	if got.ThumbAttempts != 0 {
 		t.Errorf("thumb_attempts = %d, want 0 after invalidation", got.ThumbAttempts)
+	}
+}
+
+func TestHandleThumbnailReadMissLeavesArchivedOrMissingNodeAlone(t *testing.T) {
+	// internal/thumbs.Worker.ProcessPending (via ListPendingThumbnails) only
+	// ever claims lifecycle_state IN ('ACTIVE', 'HIDDEN') -- an ARCHIVED or
+	// MISSING node has no live file to regenerate a thumbnail from anyway.
+	// Invalidating one of these on a read miss would flip it from "stuck
+	// READY, 404 forever" to "stuck PENDING, 404 forever" (the worker would
+	// never reclaim it either), which is not a self-heal -- so
+	// handleThumbnail must leave thumb_state untouched for these instead.
+	for _, lifecycle := range []string{"ARCHIVED", "MISSING"} {
+		t.Run(lifecycle, func(t *testing.T) {
+			database := openThumbnailTestDB(t)
+
+			cache := thumbs.New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+			node := thumbnailTestNodeWithLifecycle(t, database, "READY", lifecycle)
+
+			srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", rr.Code)
+			}
+
+			got, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+			if err != nil {
+				t.Fatalf("GetMediaNodeByID: %v", err)
+			}
+			if got.ThumbState != "READY" {
+				t.Errorf("thumb_state = %q, want unchanged READY for a %s node", got.ThumbState, lifecycle)
+			}
+		})
+	}
+}
+
+// TestHandleThumbnailInvalidateSurvivesCanceledRequestContext proves the
+// design choice behind handleThumbnail's context.WithoutCancel(r.Context())
+// derivation: without it, a canceled request context (a browser aborting an
+// in-flight thumbnail GET, routine on a scrolled/lazy-loaded asset grid)
+// would roll back the self-heal write along with the response.
+//
+// This is deliberately NOT wired through a full srv.Handler().ServeHTTP()
+// round trip with a pre-canceled http.Request context: handleThumbnail's
+// very first DB call, GetMediaNodeByID(r.Context(), id), also uses
+// r.Context() and fails immediately given an already-canceled context (an
+// empirical check with database.Reader.GetMediaNodeByID confirmed this
+// returns "context canceled" before ever reaching the fs.ErrNotExist
+// branch), so pre-canceling before ServeHTTP can never exercise the
+// invalidation path at all -- it would just 404 for the wrong reason and
+// leave thumb_state untouched, which isn't what this test is meant to
+// prove. There is also no way to reliably cancel the context mid-handler
+// (i.e. strictly after the read succeeds but before the write) without
+// depending on driver-internal call timing, which would make the test
+// flaky. So this reproduces the exact same context derivation
+// handleThumbnail performs -- context.WithTimeout(context.WithoutCancel(reqCtx),
+// thumbnailInvalidateTimeout) -- directly against a canceled reqCtx, and
+// contrasts it with reqCtx used unmodified, to prove the derivation is load
+// bearing.
+func TestHandleThumbnailInvalidateSurvivesCanceledRequestContext(t *testing.T) {
+	database := openThumbnailTestDB(t)
+	node := thumbnailTestNode(t, database, "READY")
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate the client having already aborted the request
+
+	// Sanity check: using the canceled request context directly (i.e. what
+	// handleThumbnail would do without context.WithoutCancel) must fail --
+	// otherwise this test wouldn't be exercising anything meaningful.
+	if err := database.InTx(reqCtx, func(q *sqlcgen.Queries) error {
+		return q.InvalidateThumbnail(reqCtx, node.ID)
+	}); err == nil {
+		t.Fatal("InTx with a canceled context unexpectedly succeeded -- sanity check invalid")
+	}
+
+	// The actual derivation handleThumbnail uses.
+	ictx, healCancel := context.WithTimeout(context.WithoutCancel(reqCtx), thumbnailInvalidateTimeout)
+	defer healCancel()
+	if err := database.InTx(ictx, func(q *sqlcgen.Queries) error {
+		return q.InvalidateThumbnail(ictx, node.ID)
+	}); err != nil {
+		t.Fatalf("InTx with context.WithoutCancel(canceled): %v", err)
+	}
+
+	got, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if got.ThumbState != "PENDING" {
+		t.Errorf("thumb_state = %q, want PENDING -- the heal must survive a canceled request context", got.ThumbState)
 	}
 }
 
