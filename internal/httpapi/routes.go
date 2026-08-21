@@ -1501,7 +1501,7 @@ type AgentEventInput struct {
 	Body struct {
 		AgentID   string `json:"agentId" required:"true"`
 		EventType string `json:"eventType" required:"true" enum:"EVENT_NODE_CREATED,EVENT_EDGE_ATTACHED,EVENT_NODE_MOVED,EVENT_NODE_DELETED,EVENT_PATH_REBASED"`
-		Payload   string `json:"payload" required:"true"` // opaque JSON, validated/processed by the deferred agent-events increment
+		Payload   string `json:"payload" required:"true"` // opaque JSON, applied asynchronously by internal/agent.Drainer (#166)
 	}
 }
 
