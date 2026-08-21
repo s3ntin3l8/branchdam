@@ -39,20 +39,28 @@ var exportExts = map[string]bool{
 // extensions -- a low-resolution companion file that shares its real
 // sibling's filename stem (per internal/naming.Stem, which strips only the
 // extension) but carries no useful lineage information of its own. Issue
-// #228 seeds this with DJI's (and similar drones') ".lrf" low-res proxy;
-// issue #229 -- blocked on this PR -- reuses this exact set verbatim for
-// the identical-stem/arbitrary-direction PART of DJI's ".srt"
-// flight-telemetry sidecar problem. Kept as its own named, package-level
-// var (not inlined into FilenameStemResolver) specifically so extending
-// it is a one-line change, not a rewrite of the gating logic.
+// #228 seeds this with DJI's (and similar drones') ".lrf" low-res proxy.
+// Issue #229 adds ".srt": DJI's per-frame flight-telemetry sidecar has the
+// same identical-stem/arbitrary-direction problem #228 already solved here
+// (DJI_0001.MP4 / DJI_0001.SRT), so #229 reuses this exact set and
+// mechanism verbatim rather than inventing a second one. Kept as its own
+// named, package-level var (not inlined into FilenameStemResolver)
+// specifically so extending it is a one-line change, not a rewrite of the
+// gating logic.
 //
-// Caution for #229: ".srt" is not a video and must NOT also be added to
-// internal/pipeline's videoExts (it isn't an ffprobe-parseable container
-// the way .lrf is) -- adding it here only grants the direction gate.
-// Whether PROXY_OF is even the right relationship_type for a telemetry
-// sidecar (vs. introducing a new one) is #229's call, not assumed here.
+// ".srt" is deliberately NOT added to internal/pipeline's videoExts -- it
+// isn't an ffprobe-parseable container the way .lrf is, so adding it here
+// only grants the direction gate, nothing else. PROXY_OF is a slight
+// misnomer for a telemetry sidecar (it isn't a low-res rendition of the
+// video), but introducing a distinct relationship_type for one sidecar kind
+// is real schema/API design work out of scope for #229 -- inferRelationship
+// has no other bucket for "identical-stem companion file with no lineage
+// signal of its own" today, and PROXY_OF's existing consumers (audit queue,
+// asset graph) already treat it as "non-authoritative companion," which
+// covers a telemetry sidecar too.
 var proxyExts = map[string]bool{
 	"lrf": true,
+	"srt": true,
 }
 
 func isProxyExt(ext string) bool {

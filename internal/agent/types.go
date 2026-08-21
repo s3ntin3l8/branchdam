@@ -71,6 +71,16 @@ type NodeCreatedPayload struct {
 	DocumentID         *string `json:"documentId,omitempty"`
 	DerivedFromID      *string `json:"derivedFromId,omitempty"`
 	FilenameStem       *string `json:"filenameStem,omitempty"`
+	// GPSLatitude/GPSLongitude are signed decimal degrees, the same
+	// hemisphere-corrected convention as probe.ExifResult.GPSLatitude/
+	// GPSLongitude (Composite:GPSLatitude/Longitude, not the unsigned
+	// EXIF:GPSLatitude magnitude -- see probe.go's doc comment on that
+	// distinction). applyNodeCreated writes them into node_metadata with
+	// source="exiftool" so they land in exactly the rows a normal scan's
+	// exifMetadata would have written, even though no exiftool process ever
+	// ran on this path (#229).
+	GPSLatitude  *float64 `json:"gpsLatitude,omitempty"`
+	GPSLongitude *float64 `json:"gpsLongitude,omitempty"`
 }
 
 // EdgeAttachedPayload represents the payload for EVENT_EDGE_ATTACHED.

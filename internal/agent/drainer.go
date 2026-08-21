@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -502,7 +503,52 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 	if err != nil {
 		return 0, err
 	}
+
+	// GPS is deliberately not a promoted media_nodes column (see
+	// docs/schema.md's promoted-column list) -- it lands in node_metadata
+	// the same way a normal scan's exiftool probe would (#229). Written
+	// inside the same enclosing transaction as InsertMediaNode (ProcessPending
+	// wraps applyEvent in one d.db.InTx call), so an insert failure here rolls
+	// back the node too rather than leaving it without its GPS point.
+	if err := writeGPSMetadata(ctx, q, inserted.ID, p); err != nil {
+		return 0, err
+	}
+
 	return inserted.ID, nil
+}
+
+// writeGPSMetadata upserts node_metadata rows for p's GPS point, if any,
+// under source="exiftool" using exactly the same key format and value
+// encoding internal/pipeline/commit.go's exifMetadata writes during a
+// normal scan (Composite:GPSLatitude/Composite:GPSLongitude, signed decimal
+// degrees via strconv.FormatFloat(_, 'f', -1, 64)) -- so a downstream reader
+// like httpapi's loadTagSet, which filters strictly on source=="exiftool",
+// sees an agent-ingested node's GPS point exactly the way it would see a
+// scanned one, even though no exiftool process ever ran on this path.
+// Reuses node_metadata.sql's existing InsertNodeMetadata upsert (ON
+// CONFLICT (node_id, source, key) DO UPDATE) rather than a new query.
+func writeGPSMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, p NodeCreatedPayload) error {
+	if p.GPSLatitude != nil {
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: nodeID,
+			Source: "exiftool",
+			Key:    "Composite:GPSLatitude",
+			Value:  strconv.FormatFloat(*p.GPSLatitude, 'f', -1, 64),
+		}); err != nil {
+			return fmt.Errorf("insert node_metadata Composite:GPSLatitude: %w", err)
+		}
+	}
+	if p.GPSLongitude != nil {
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: nodeID,
+			Source: "exiftool",
+			Key:    "Composite:GPSLongitude",
+			Value:  strconv.FormatFloat(*p.GPSLongitude, 'f', -1, 64),
+		}); err != nil {
+			return fmt.Errorf("insert node_metadata Composite:GPSLongitude: %w", err)
+		}
+	}
+	return nil
 }
 
 func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
