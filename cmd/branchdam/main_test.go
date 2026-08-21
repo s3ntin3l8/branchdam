@@ -529,9 +529,12 @@ func TestStartThumbWorkerDisabledWhenNotEnabled(t *testing.T) {
 	defer cancel()
 	database := mainTestOpenDB(t)
 	cfg := &config.Config{Thumbnails: config.Thumbnails{Enabled: false, CacheDir: t.TempDir()}}
-	w := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
+	w, cache := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
 	if w != nil {
-		t.Fatal("startThumbWorker with thumbnails.enabled=false = non-nil, want nil")
+		t.Fatal("startThumbWorker with thumbnails.enabled=false = non-nil worker, want nil")
+	}
+	if cache == nil {
+		t.Fatal("startThumbWorker with thumbnails.enabled=false = nil cache, want a usable cache (existing thumbnails must still be servable)")
 	}
 }
 
@@ -539,9 +542,12 @@ func TestStartThumbWorkerEnabledWhenConfigured(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	database := mainTestOpenDB(t)
 	cfg := &config.Config{Thumbnails: config.Thumbnails{Enabled: true, CacheDir: filepath.Join(t.TempDir(), "thumbs")}}
-	w := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
+	w, cache := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
 	if w == nil {
 		t.Fatal("startThumbWorker with thumbnails.enabled=true = nil, want a worker")
+	}
+	if cache == nil {
+		t.Fatal("startThumbWorker with thumbnails.enabled=true = nil cache, want a usable cache")
 	}
 	// Wait() blocks until ctx is cancelled (Start's background loop only
 	// returns on <-ctx.Done()) -- cancel explicitly and confirm it returns
@@ -569,9 +575,12 @@ func TestStartThumbWorkerDisabledWhenCacheDirUncreatable(t *testing.T) {
 		t.Fatalf("write blocker file: %v", err)
 	}
 	cfg := &config.Config{Thumbnails: config.Thumbnails{Enabled: true, CacheDir: filepath.Join(blocker, "thumbs")}}
-	w := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
+	w, cache := startThumbWorker(ctx, cfg, database, storage.NewGuard(nil), probe.New(), slog.New(slog.DiscardHandler), sse.New())
 	if w != nil {
-		t.Fatal("startThumbWorker with an uncreatable cacheDir = non-nil, want nil (fail loudly, don't run a worker that can never write)")
+		t.Fatal("startThumbWorker with an uncreatable cacheDir = non-nil worker, want nil (fail loudly, don't run a worker that can never write)")
+	}
+	if cache != nil {
+		t.Fatal("startThumbWorker with an uncreatable cacheDir = non-nil cache, want nil")
 	}
 }
 

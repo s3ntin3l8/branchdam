@@ -12,6 +12,7 @@ vi.mock("../api/client", () => ({
     confirmEdge: vi.fn(),
     rejectEdge: vi.fn(),
     createEdge: vi.fn(),
+    thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
   },
 }));
 
@@ -44,13 +45,17 @@ describe("AuditQueuePage", () => {
           parentMissing: true,
           sourceNode: {
             id: 10,
+            nodeUuid: "uuid-10",
             fileName: "RAW_001.ARW",
             filePath: "/storage/RAW_001.ARW",
+            thumbState: "READY",
           },
           targetNode: {
             id: 20,
+            nodeUuid: "uuid-20",
             fileName: "EXPORT_001.JPG",
             filePath: "/storage/EXPORT_001.JPG",
+            thumbState: "READY",
           },
           captureDeltaSeconds: 5,
           phashDistance: 2,
@@ -81,8 +86,8 @@ describe("AuditQueuePage", () => {
           evidenceJson: "{}",
           parentAlive: true,
           parentMissing: false,
-          sourceNode: { id: 1, fileName: "src.arw", filePath: "/src.arw" },
-          targetNode: { id: 2, fileName: "tgt.jpg", filePath: "/tgt.jpg" },
+          sourceNode: { id: 1, nodeUuid: "uuid-1", fileName: "src.arw", filePath: "/src.arw", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "tgt.jpg", filePath: "/tgt.jpg", thumbState: "READY" },
         },
       ],
     });
@@ -143,8 +148,8 @@ describe("AuditQueuePage", () => {
           evidenceJson: "{}",
           parentAlive: true,
           parentMissing: false,
-          sourceNode: { id: 1, fileName: "s.arw", filePath: "/s.arw" },
-          targetNode: { id: 2, fileName: "t.jpg", filePath: "/t.jpg" },
+          sourceNode: { id: 1, nodeUuid: "uuid-1", fileName: "s.arw", filePath: "/s.arw", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
     });
@@ -171,8 +176,8 @@ describe("AuditQueuePage", () => {
           evidenceJson: "{}",
           parentAlive: true,
           parentMissing: false,
-          sourceNode: { id: 1, fileName: "s.arw", filePath: "/s.arw" },
-          targetNode: { id: 3, fileName: "t.jpg", filePath: "/t.jpg" },
+          sourceNode: { id: 1, nodeUuid: "uuid-1", fileName: "s.arw", filePath: "/s.arw", thumbState: "READY" },
+          targetNode: { id: 3, nodeUuid: "uuid-3", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
     });

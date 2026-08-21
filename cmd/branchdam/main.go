@@ -184,7 +184,7 @@ func main() {
 		agent.WithEngine(engine))
 	drainer.Start(ctx, 0)
 
-	thumbWorker := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)
+	thumbWorker, thumbCache := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)
 
 	spa, err := web.Dist()
 	if err != nil {
@@ -195,7 +195,7 @@ func main() {
 	srv := httpapi.New(httpapi.Deps{
 		Config: &cfg, Log: log, DB: database, Guard: guard, Prober: prober,
 		Pool: pool, Engine: engine, Hub: hub, SPA: spa, Version: version,
-		Tracker: scanTracker, Shutdown: ctx.Done(),
+		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -407,29 +407,37 @@ func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB,
 	return worker
 }
 
-// startThumbWorker wires the thumbnail generation worker and returns it, or
-// nil when thumbnails.enabled is false. cacheDir is created here (not left
-// to Cache.Write's own per-shard MkdirAll) so a misconfigured/unwritable
-// path fails loudly at startup rather than on the worker's first pass.
-func startThumbWorker(ctx context.Context, cfg *config.Config, database *db.DB, guard *storage.Guard, prober *probe.Prober, log *slog.Logger, hub *sse.Hub) *thumbs.Worker {
-	if !cfg.Thumbnails.Enabled {
-		return nil
-	}
+// startThumbWorker builds the thumbnail cache and, if thumbnails.enabled,
+// the background generation worker. cacheDir is created here (not left to
+// Cache.Write's own per-shard MkdirAll) so a misconfigured/unwritable path
+// fails loudly at startup rather than on the worker's first pass or a
+// client's first GET.
+//
+// The cache is built regardless of thumbnails.enabled: GET
+// /api/v1/assets/{id}/thumbnail (internal/httpapi) must still be able to
+// serve thumbnails generated while the worker was previously running, even
+// if it's since been turned off -- only new generation is gated on the
+// config flag. worker is nil when disabled or the cache dir couldn't be
+// created; cache is nil only in the latter case.
+func startThumbWorker(ctx context.Context, cfg *config.Config, database *db.DB, guard *storage.Guard, prober *probe.Prober, log *slog.Logger, hub *sse.Hub) (worker *thumbs.Worker, cache *thumbs.Cache) {
 	cacheDir := cfg.Thumbnails.CacheDir
 	if cacheDir == "" {
 		cacheDir = "/data/thumbs"
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		log.Error("thumbs: create cache dir, thumbnails disabled", "cacheDir", cacheDir, "err", err)
-		return nil
+		log.Error("thumbs: create cache dir, thumbnails unavailable", "cacheDir", cacheDir, "err", err)
+		return nil, nil
 	}
-	cache := thumbs.New(cacheDir, guard, prober, cfg.Thumbnails.MaxEdgePx)
-	worker := thumbs.NewWorker(database, cache, log,
+	cache = thumbs.New(cacheDir, guard, prober, cfg.Thumbnails.MaxEdgePx)
+	if !cfg.Thumbnails.Enabled {
+		return nil, cache
+	}
+	worker = thumbs.NewWorker(database, cache, log,
 		thumbs.WithNudge(func() { hub.Broadcast() }),
 		thumbs.WithConcurrency(cfg.Thumbnails.Workers))
 	worker.Start(ctx, time.Duration(cfg.Thumbnails.IntervalSecs)*time.Second)
 	log.Info("thumbs: worker started", "cacheDir", cacheDir)
-	return worker
+	return worker, cache
 }
 
 // reconcileOrphanedScanJobs moves every scan_jobs row still RUNNING to

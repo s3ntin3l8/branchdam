@@ -35,6 +35,8 @@ export interface StorageLocation {
   prunable: boolean;
 }
 
+export type ThumbState = "PENDING" | "READY" | "UNSUPPORTED" | "FAILED";
+
 export interface Asset {
   id: number;
   nodeUuid: string;
@@ -50,6 +52,7 @@ export interface Asset {
   storageLocationId: number;
   originalDocumentId?: string;
   cameraModel?: string;
+  thumbState: ThumbState;
 }
 
 export interface Edge {
@@ -69,11 +72,13 @@ export interface AssetGraph {
 
 export interface AuditNode {
   id: number;
+  nodeUuid: string;
   fileName: string;
   filePath: string;
   capturedAtUnix?: number;
   cameraModel?: string;
   phash?: number;
+  thumbState: ThumbState;
 }
 
 export interface AuditEntry {

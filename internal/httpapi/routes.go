@@ -207,6 +207,7 @@ type assetDTO struct {
 	StorageLocationID  int64   `json:"storageLocationId"`
 	OriginalDocumentID string  `json:"originalDocumentId,omitempty"`
 	CameraModel        string  `json:"cameraModel,omitempty"`
+	ThumbState         string  `json:"thumbState"`
 }
 
 func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
@@ -223,6 +224,7 @@ func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
 		GraphStatus:       n.GraphStatus,
 		LifecycleState:    n.LifecycleState,
 		StorageLocationID: n.StorageLocationID,
+		ThumbState:        n.ThumbState,
 	}
 	if n.OriginalDocumentID.Valid {
 		dto.OriginalDocumentID = n.OriginalDocumentID.String
@@ -1136,11 +1138,13 @@ type AuditQueueInput struct {
 
 type auditNodeDTO struct {
 	ID             int64   `json:"id"`
+	NodeUUID       string  `json:"nodeUuid"`
 	FileName       string  `json:"fileName"`
 	FilePath       string  `json:"filePath"`
 	CapturedAtUnix *int64  `json:"capturedAtUnix,omitempty"`
 	CameraModel    *string `json:"cameraModel,omitempty"`
 	Phash          *int64  `json:"phash,omitempty"`
+	ThumbState     string  `json:"thumbState"`
 }
 
 type auditEntryDTO struct {
@@ -1175,9 +1179,11 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 	out.Body.Entries = make([]auditEntryDTO, len(rows))
 	for i, r := range rows {
 		sn := auditNodeDTO{
-			ID:       r.SourceNodeID,
-			FileName: r.SourceFileName,
-			FilePath: r.SourceFilePath,
+			ID:         r.SourceNodeID,
+			NodeUUID:   r.SourceNodeUuid,
+			FileName:   r.SourceFileName,
+			FilePath:   r.SourceFilePath,
+			ThumbState: r.SourceThumbState,
 		}
 		if r.SourceCapturedAtUnix.Valid {
 			sn.CapturedAtUnix = &r.SourceCapturedAtUnix.Int64
@@ -1190,9 +1196,11 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 		}
 
 		tn := auditNodeDTO{
-			ID:       r.TargetNodeID,
-			FileName: r.TargetFileName,
-			FilePath: r.TargetFilePath,
+			ID:         r.TargetNodeID,
+			NodeUUID:   r.TargetNodeUuid,
+			FileName:   r.TargetFileName,
+			FilePath:   r.TargetFilePath,
+			ThumbState: r.TargetThumbState,
 		}
 		if r.TargetCapturedAtUnix.Valid {
 			tn.CapturedAtUnix = &r.TargetCapturedAtUnix.Int64

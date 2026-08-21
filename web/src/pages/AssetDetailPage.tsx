@@ -10,6 +10,7 @@ import {
   useStorageLocations,
 } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
+import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
 // identityTags are the two tags Plan (internal/metadata) always emits
@@ -217,9 +218,17 @@ export default function AssetDetailPage() {
   return (
     <div className="space-y-6 p-6">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-semibold">{asset.fileName}</h1>
-          <p className="text-sm text-neutral-500">{asset.filePath}</p>
+        <div className="flex items-start gap-4">
+          <Thumbnail
+            assetId={asset.id}
+            thumbState={asset.thumbState}
+            alt={asset.fileName}
+            className="h-24 w-24 shrink-0 rounded-lg object-cover"
+          />
+          <div>
+            <h1 className="text-xl font-semibold">{asset.fileName}</h1>
+            <p className="text-sm text-neutral-500">{asset.filePath}</p>
+          </div>
         </div>
         <AssetPruneControl asset={asset} />
       </div>

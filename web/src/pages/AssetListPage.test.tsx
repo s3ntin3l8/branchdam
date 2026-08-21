@@ -10,6 +10,7 @@ vi.mock("../api/client", () => ({
     listAssets: vi.fn(),
     getAssetFacets: vi.fn(),
     listStorageLocations: vi.fn(),
+    thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
   },
 }));
 
@@ -42,6 +43,7 @@ describe("AssetListPage", () => {
           lifecycleState: "ACTIVE",
           storageLocationId: 1,
           cameraModel: "Sony A7IV",
+          thumbState: "READY",
         },
       ],
       total: 1,

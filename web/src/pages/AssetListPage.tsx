@@ -1,5 +1,6 @@
 import { useSearchParams, Link } from "react-router";
 import { useAssetFacets, useAssets, useStorageLocations } from "../hooks/queries";
+import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
 const statusColor: Record<string, string> = {
@@ -176,6 +177,7 @@ export default function AssetListPage() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-neutral-800 text-neutral-400">
               <tr>
+                <th className="py-2 pr-4"></th>
                 <th className="py-2 pr-4">Path</th>
                 <th className="py-2 pr-4">Camera Model</th>
                 <th className="py-2 pr-4">Tier status</th>
@@ -186,6 +188,9 @@ export default function AssetListPage() {
             <tbody>
               {assets.map((a) => (
                 <tr key={a.id} className="border-b border-neutral-900 hover:bg-neutral-900">
+                  <td className="py-2 pr-4">
+                    <Thumbnail assetId={a.id} thumbState={a.thumbState} alt={a.fileName} />
+                  </td>
                   <td className="py-2 pr-4">
                     <Link to={`/assets/${a.id}`} className="text-sky-400 hover:underline font-mono text-xs">
                       {a.filePath}

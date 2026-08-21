@@ -57,6 +57,7 @@ describe("AssetGraphCanvas", () => {
                 graphStatus: "LINKED",
                 lifecycleState: "ACTIVE",
                 storageLocationId: 1,
+                thumbState: "PENDING",
               },
               {
                 id: 2,
@@ -69,6 +70,7 @@ describe("AssetGraphCanvas", () => {
                 graphStatus: "LINKED",
                 lifecycleState: "ACTIVE",
                 storageLocationId: 1,
+                thumbState: "PENDING",
               },
             ],
             edges: [
