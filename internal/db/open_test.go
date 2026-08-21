@@ -174,6 +174,123 @@ func assertTablesAbsent(t *testing.T, writerDB *sql.DB) {
 	}
 }
 
+// TestDowngradeIndexSuffixStemEdges backs issue #132's migration 00006:
+// AUTO_ACCEPTED filename_stem edges already written for an index-suffix
+// ("-N"/"(N)") pair must be downgraded to NEEDS_REVIEW at confidence 0.89
+// on migrate-up; edges from a role-suffix ("_proxy" etc) pair are the
+// resolver's originally-intended AUTO_ACCEPTED case and must be left
+// untouched. Migration 00006 is DML-only, so the schema at goose version 5
+// is identical to version 6 -- the fixtures below use the normal generated
+// sqlcgen helpers rather than raw SQL.
+func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "downgrade.db")
+	writerDB := openRawWriter(t, path)
+
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("SetDialect: %v", err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 5); err != nil {
+		t.Fatalf("goose UpTo 5: %v", err)
+	}
+
+	q := sqlcgen.New(writerDB)
+
+	loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+		Name: "downgrade_test", RootPath: "/tmp/downgrade_test", Tier: "TIER2_EXPORTS",
+	})
+	if err != nil {
+		t.Fatalf("CreateStorageLocation: %v", err)
+	}
+
+	insertNode := func(uuidSuffix, path, fileName, stem string) sqlcgen.MediaNode {
+		t.Helper()
+		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "00000000-0000-7000-8000-00000000" + uuidSuffix,
+			StorageLocationID: loc.ID,
+			FilePath:          path,
+			FileName:          fileName,
+			FileExt:           "jpg",
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "LINKED",
+			LifecycleState:    "ACTIVE",
+			FilenameStem:      sql.NullString{String: stem, Valid: true},
+		})
+		if err != nil {
+			t.Fatalf("InsertMediaNode %s: %v", path, err)
+		}
+		return node
+	}
+
+	// An index-suffix pair, mimicking a pre-#132 AUTO_ACCEPTED mesh edge:
+	// "photo.jpg" (anchor) -> "photo-2.jpg" (index-suffixed).
+	anchor := insertNode("0001", "/photo.jpg", "photo.jpg", "photo")
+	indexChild := insertNode("0002", "/photo-2.jpg", "photo-2.jpg", "photo")
+	indexEdge, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+		SourceNodeID: anchor.ID, TargetNodeID: indexChild.ID, RelationshipType: "DERIVED_FROM",
+		Confidence: 0.90, Tier: 2, Resolver: "filename_stem", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+	})
+	if err != nil {
+		t.Fatalf("CreateMediaEdge (index pair): %v", err)
+	}
+
+	// A role-suffix pair -- the resolver's originally-intended case, must
+	// be left untouched: "render.jpg" -> "render_proxy.jpg".
+	renderParent := insertNode("0003", "/render.jpg", "render.jpg", "render")
+	renderChild := insertNode("0004", "/render_proxy.jpg", "render_proxy.jpg", "render")
+	roleEdge, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+		SourceNodeID: renderParent.ID, TargetNodeID: renderChild.ID, RelationshipType: "PROXY_OF",
+		Confidence: 0.90, Tier: 2, Resolver: "filename_stem", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+	})
+	if err != nil {
+		t.Fatalf("CreateMediaEdge (role pair): %v", err)
+	}
+
+	if err := goose.UpTo(writerDB, migrationsDir, 6); err != nil {
+		t.Fatalf("goose UpTo 6: %v", err)
+	}
+
+	gotIndex, err := q.GetMediaEdge(ctx, indexEdge.ID)
+	if err != nil {
+		t.Fatalf("GetMediaEdge (index pair) after migration: %v", err)
+	}
+	if gotIndex.ReviewState != "NEEDS_REVIEW" {
+		t.Errorf("index pair review_state = %q, want NEEDS_REVIEW", gotIndex.ReviewState)
+	}
+	if gotIndex.Confidence != 0.89 {
+		t.Errorf("index pair confidence = %v, want 0.89", gotIndex.Confidence)
+	}
+
+	gotRole, err := q.GetMediaEdge(ctx, roleEdge.ID)
+	if err != nil {
+		t.Fatalf("GetMediaEdge (role pair) after migration: %v", err)
+	}
+	if gotRole.ReviewState != "AUTO_ACCEPTED" {
+		t.Errorf("role pair review_state = %q, want AUTO_ACCEPTED (untouched)", gotRole.ReviewState)
+	}
+	if gotRole.Confidence != 0.90 {
+		t.Errorf("role pair confidence = %v, want 0.90 (untouched)", gotRole.Confidence)
+	}
+
+	indexChildAfter, err := q.GetMediaNodeByID(ctx, indexChild.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID (index child) after migration: %v", err)
+	}
+	if indexChildAfter.GraphStatus != "NEEDS_REVIEW" {
+		t.Errorf("index child graph_status = %q, want NEEDS_REVIEW", indexChildAfter.GraphStatus)
+	}
+
+	renderChildAfter, err := q.GetMediaNodeByID(ctx, renderChild.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID (role child) after migration: %v", err)
+	}
+	if renderChildAfter.GraphStatus != "LINKED" {
+		t.Errorf("role child graph_status = %q, want LINKED (untouched)", renderChildAfter.GraphStatus)
+	}
+}
+
 func TestListTier3Candidates(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
