@@ -327,12 +327,17 @@ func (p *Prober) Exif(ctx context.Context, path string) (*ExifResult, error) {
 //     second exiftool against the same file and merge its own row into
 //     itself on every sidecar node, doubling the subprocess cost for no
 //     effect.
-//   - os.Lstat, deliberately not os.Stat -- same symlink-defeat direction
-//     as storage.Guard.CheckWrite's own canonicalize step and prune.
-//     Execute's pre-delete check (see CLAUDE.md's key invariants) -- plus
-//     Mode().IsRegular() rather than a bare !IsDir(), so a FIFO planted at
-//     the sidecar path can't block exiftool's read until probeTimeout
-//     fires on every scan of the RAW next to it.
+//   - os.Lstat, deliberately not os.Stat -- same non-following stat used by
+//     internal/prune.Execute's pre-delete check (see CLAUDE.md's key
+//     invariants): reject a symlink outright rather than following it, so
+//     a sidecar path that's actually a symlink escape can't get read.
+//     (storage.Guard.CheckWrite's own canonicalize step is the opposite
+//     mechanism -- it uses filepath.EvalSymlinks to resolve a symlink to
+//     its real target before checking that target, not to reject the
+//     symlink itself; not the right comparison here.) Mode().IsRegular()
+//     rather than a bare !IsDir() additionally rejects a FIFO planted at
+//     the sidecar path, which would otherwise block exiftool's read until
+//     probeTimeout fires on every scan of the RAW next to it.
 func (p *Prober) readSidecarRow(ctx context.Context, path string) (map[string]any, bool) {
 	if strings.EqualFold(filepath.Ext(path), sidecarExt) {
 		return nil, false
