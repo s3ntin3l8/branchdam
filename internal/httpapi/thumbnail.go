@@ -1,11 +1,21 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
+
+// thumbnailInvalidateTimeout bounds the self-heal write handleThumbnail
+// issues on a read miss (see below) -- short because it's a single-row
+// UPDATE on the writer's sole connection, not a batch operation.
+const thumbnailInvalidateTimeout = 5 * time.Second
 
 // handleThumbnail serves a node's cached JPEG thumbnail. Registered
 // directly on the mux (see server.go), not through Huma, since a raw
@@ -32,6 +42,46 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 
 	f, err := os.Open(s.thumbs.Path(node.NodeUuid))
 	if err != nil {
+		// thumb_state says READY but the cached JPEG isn't on disk. Only
+		// self-heal when the file is genuinely gone (fs.ErrNotExist) --
+		// e.g. branchdam.db was restored from backup without /data/thumbs
+		// alongside it (docs/operations.md's backup guidance covers the
+		// whole /data volume, but a partial restore is an easy mistake).
+		// A transient EACCES/EMFILE/EIO is not evidence the cached file is
+		// missing and must not trigger a reset -> regenerate storm across
+		// the library; same "gone on its own is not an error, anything
+		// else is" distinction internal/prune.Execute draws around
+		// os.Lstat (see CLAUDE.md).
+		//
+		// Also gated on lifecycle_state IN ('ACTIVE', 'HIDDEN') to match
+		// ListPendingThumbnails' own claim-query filter exactly
+		// (internal/db/queries/media_nodes.sql): an ARCHIVED/MISSING node
+		// invalidated here would never be reclaimed by
+		// internal/thumbs.Worker.ProcessPending, so it would land on
+		// thumb_state='PENDING' and 404 forever instead of self-healing --
+		// worse than leaving it on its stale READY. There's no live file to
+		// regenerate a thumbnail from for those nodes anyway, so leaving
+		// thumb_state alone is correct, not merely a smaller bug.
+		if errors.Is(err, fs.ErrNotExist) && (node.LifecycleState == "ACTIVE" || node.LifecycleState == "HIDDEN") {
+			// Use a detached context with its own short timeout rather than
+			// r.Context(): a browser aborting an in-flight thumbnail GET
+			// (routine on a scrolled/lazy-loaded asset grid) must not
+			// cancel the heal along with the response -- it should still
+			// land so the node reaches PENDING on this first miss rather
+			// than needing a second request to retry it.
+			ictx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), thumbnailInvalidateTimeout)
+			defer cancel()
+			// Resets thumb_state back to PENDING via the same
+			// InvalidateThumbnail query refreshNodeAfterInPlaceWrite uses
+			// (see routes.go), so internal/thumbs.Worker.ProcessPending
+			// reclaims and regenerates it on its next pass instead of
+			// leaving it stuck READY forever with no automatic recovery.
+			if invalidateErr := s.db.InTx(ictx, func(q *sqlcgen.Queries) error {
+				return q.InvalidateThumbnail(ictx, node.ID)
+			}); invalidateErr != nil {
+				s.log.Warn("thumbnail read miss: invalidate thumb_state failed", "nodeID", node.ID, "err", invalidateErr)
+			}
+		}
 		http.NotFound(w, r)
 		return
 	}
