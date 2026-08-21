@@ -408,6 +408,56 @@ func fastHashOf(t *testing.T, path string) (hash string, size, mtimeUnix int64) 
 	return hash, stat.Size(), stat.ModTime().Unix()
 }
 
+// TestInheritMetadataRefusesProjectFileChild backs #199's defense-in-depth
+// guard: even when an AUTO_ACCEPTED DERIVED_FROM edge already exists with a
+// project file as the child (e.g. created before handleCreateEdge's guard
+// shipped, or via a filename-stem/XMP match during automatic resolution),
+// handleInheritMetadata must refuse to run exiftool in-place against the
+// project archive. The refusal fires before any exiftool call, so this test
+// needs neither exiftool nor ffmpeg installed.
+func TestInheritMetadataRefusesProjectFileChild(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var parent, child sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		parent, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-parent", FilePath: "/parent.jpg", FileName: "parent.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		child, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-child", FilePath: "/edit.dam.json", FileName: "edit.dam.json", FileExt: "dam.json", IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 1.0, Tier: 1, Resolver: "manual", EvidenceJson: "{}", ReviewState: "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); !strings.Contains(got, "project file") {
+		t.Errorf("body = %q, want it to mention the project file refusal", got)
+	}
+}
+
 // TestInheritMetadataRefreshesNodeStateAfterWrite is the happy-path test:
 // exiftool actually rewrites the child's file, and the endpoint must update
 // media_nodes.size_bytes/mtime_unix/fast_hash to match the rewritten file --
@@ -1724,6 +1774,328 @@ func TestCreateManualEdge(t *testing.T) {
 	rrCycle := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", cycleBody)
 	if rrCycle.Code != http.StatusConflict {
 		t.Errorf("cycle status = %d, want 409, body = %s", rrCycle.Code, rrCycle.Body.String())
+	}
+}
+
+// TestCreateManualEdgeRefusesProjectFileNodes backs #199: a manual edge must
+// not use a project file (.drp/.fcpxml/.edl/.dam.json/.prproj) as the
+// CHILD/target of an identity-ancestry relationship (DERIVED_FROM/
+// FINAL_EXPORT/PROXY_OF) -- the edge is never created CONFIRMED. This is the
+// dangerous shape: it would pass pickWinningParent and make
+// handleInheritMetadata run exiftool's write in-place against the project
+// archive (WriteTags always targets the CHILD's file). There is no
+// source-side (parent) refusal -- see
+// TestCreateManualEdgeAllowsProjectFileAsSource for why that shape is
+// hazard-free and must stay allowed.
+func TestCreateManualEdgeRefusesProjectFileNodes(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var loc sqlcgen.StorageLocation
+	var media, media2, proj sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		media, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media", FilePath: "/m.raw", FileName: "m.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		media2, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media2", FilePath: "/m2.jpg", FileName: "m2.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		proj, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-project", FilePath: "/proj.drp", FileName: "proj.drp", FileExt: "drp", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// 1. DERIVED_FROM with the project file as the CHILD (target) is refused.
+	body := map[string]any{
+		"sourceNodeId":     media.ID,
+		"targetNodeId":     proj.ID,
+		"relationshipType": "DERIVED_FROM",
+	}
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", body)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("project-file-target status = %d, want 422, body = %s", rr.Code, rr.Body.String())
+	}
+	if got, want := strings.TrimSpace(rr.Body.String()), "cannot create an identity-ancestry edge targeting a project file"; !strings.Contains(got, want) {
+		t.Errorf("project-file-target body = %q, want it to contain %q", got, want)
+	}
+
+	// 2. A normal media->media edge is still accepted (the refusal is scoped
+	// to project files, not to the manual-edge path in general).
+	rrOK := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     media.ID,
+		"targetNodeId":     media2.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrOK.Code != http.StatusOK {
+		t.Fatalf("media->media status = %d, want 200, body = %s", rrOK.Code, rrOK.Body.String())
+	}
+
+	// 3. No edge was created targeting the project file.
+	byTarget, err := database.Reader.ListEdgesByTarget(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("list edges by target: %v", err)
+	}
+	if len(byTarget) != 0 {
+		t.Errorf("expected no edges targeting the project file, got %d", len(byTarget))
+	}
+}
+
+// TestCreateManualEdgeAllowsProjectSidecarTarget backs #199's scoping of the
+// target-side project-file refusal: PROJECT_SIDECAR edges *legitimately*
+// target a project file -- ProjectSidecarResolver.Resolve always makes the
+// project file the child of such an edge (media node as parent/source). It is
+// excluded from validParentRelationships, so it can never reach
+// pickWinningParent/handleInheritMetadata's exiftool call, and the manual
+// path must keep allowing exactly the shape the automatic resolver emits.
+func TestCreateManualEdgeAllowsProjectSidecarTarget(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var media, proj sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		media, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media", FilePath: "/m.raw", FileName: "m.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		proj, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-project", FilePath: "/proj.drp", FileName: "proj.drp", FileExt: "drp", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// PROJECT_SIDECAR with the project file as the CHILD (target) -- the exact
+	// shape ProjectSidecarResolver emits -- is accepted, not refused.
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     media.ID,
+		"targetNodeId":     proj.ID,
+		"relationshipType": "PROJECT_SIDECAR",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PROJECT_SIDECAR->project-file status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var created edgeDTO
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if created.SourceNodeID != media.ID || created.TargetNodeID != proj.ID || created.RelationshipType != "PROJECT_SIDECAR" {
+		t.Errorf("created edge = %+v, unexpected fields", created)
+	}
+
+	// The edge really landed (CONFIRMED at insert time, manual resolver).
+	byTarget, err := database.Reader.ListEdgesByTarget(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("list edges by target: %v", err)
+	}
+	if len(byTarget) != 1 || byTarget[0].RelationshipType != "PROJECT_SIDECAR" || byTarget[0].ReviewState != "CONFIRMED" {
+		t.Errorf("edges targeting the project file = %+v, want exactly one CONFIRMED PROJECT_SIDECAR", byTarget)
+	}
+}
+
+// TestCreateManualEdgeAllowsProjectFileAsSourceForNonAncestryRelationship
+// backs the source-side scoping fix: DUPLICATE_OF is excluded from
+// validParentRelationships, so it can never reach pickWinningParent/
+// handleInheritMetadata's exiftool call regardless of which endpoint is a
+// project file -- a user marking two project files (or a project file and a
+// media node) as DUPLICATE_OF poses none of the hazard the source-side
+// refusal exists to close, and the web UI's ManualLinkModal lets the caller
+// pick source/target freely for exactly this relationship type.
+// TestCreateManualEdgeAllowsProjectFileAsSource backs Hermes's finding on
+// #199's review: unlike the target/child side, a project file as the
+// SOURCE/parent of ANY relationship type -- including the identity-ancestry
+// ones (DERIVED_FROM/FINAL_EXPORT/PROXY_OF) -- poses no exiftool hazard and
+// must be allowed. handleInheritMetadata's loadTagSet reads a node's tags
+// entirely from the DB (ListNodeMetadata + promoted columns); it never runs
+// exiftool against the PARENT's file, only WriteTags against the CHILD's.
+// So a real use case like "this export is the FINAL_EXPORT of this .drp
+// project" (ManualLinkModal already exposes source/target freely) must not
+// be refused just because the parent happens to be a project file.
+func TestCreateManualEdgeAllowsProjectFileAsSource(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var media, media2, proj sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		media, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media", FilePath: "/m.raw", FileName: "m.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		media2, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-media2", FilePath: "/m2.jpg", FileName: "m2.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		proj, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-project", FilePath: "/proj.drp", FileName: "proj.drp", FileExt: "drp", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// DUPLICATE_OF with the project file as the SOURCE (parent) is accepted.
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     proj.ID,
+		"targetNodeId":     media.ID,
+		"relationshipType": "DUPLICATE_OF",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DUPLICATE_OF project-source status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// DERIVED_FROM (identity-ancestry) with the project file as the SOURCE
+	// (parent) is ALSO accepted -- this is the shape the removed source-side
+	// check used to wrongly refuse.
+	rrAncestry := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     proj.ID,
+		"targetNodeId":     media2.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrAncestry.Code != http.StatusOK {
+		t.Fatalf("DERIVED_FROM project-source status = %d, want 200, body = %s", rrAncestry.Code, rrAncestry.Body.String())
+	}
+
+	bySource, err := database.Reader.ListEdgesBySource(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("list edges by source: %v", err)
+	}
+	if len(bySource) != 2 {
+		t.Errorf("edges sourced from the project file = %+v, want 2 (DUPLICATE_OF and DERIVED_FROM)", bySource)
+	}
+}
+
+// TestCreateManualEdgeRefusesArchivedEndpoint backs the #115 lifecycle-state
+// guard: an ARCHIVED node passes the existence/FK check handleCreateEdge
+// already performs, but a manual edge to or from it is never traversed by
+// anything (v_media_edges_resolved / lineage walks all key off a live node),
+// so it would be a dead write masquerading as a real link.
+func TestCreateManualEdgeRefusesArchivedEndpoint(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var live, archived sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		live, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-live", FilePath: "/live.raw", FileName: "live.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		archived, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-archived", FilePath: "/archived.jpg", FileName: "archived.jpg", FileExt: "jpg", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	rrTarget := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     live.ID,
+		"targetNodeId":     archived.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrTarget.Code != http.StatusNotFound {
+		t.Errorf("archived-target status = %d, want 404, body = %s", rrTarget.Code, rrTarget.Body.String())
+	}
+
+	rrSource := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     archived.ID,
+		"targetNodeId":     live.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrSource.Code != http.StatusNotFound {
+		t.Errorf("archived-source status = %d, want 404, body = %s", rrSource.Code, rrSource.Body.String())
+	}
+}
+
+// TestCreateManualEdgeMissingNodeReturns404 covers the node lookups
+// handleCreateEdge now performs for its project-file check: a nonexistent
+// source or target is a 404, not the 500 a foreign-key violation used to
+// produce.
+func TestCreateManualEdgeMissingNodeReturns404(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	var node sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "loc", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			StorageLocationID: loc.ID, NodeUuid: "uuid-m", FilePath: "/m.raw", FileName: "m.raw", FileExt: "raw", IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+
+	rrMissingTarget := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     node.ID,
+		"targetNodeId":     node.ID + 1,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrMissingTarget.Code != http.StatusNotFound {
+		t.Errorf("missing target status = %d, want 404, body = %s", rrMissingTarget.Code, rrMissingTarget.Body.String())
+	}
+
+	rrMissingSource := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/edges", map[string]any{
+		"sourceNodeId":     node.ID + 1,
+		"targetNodeId":     node.ID,
+		"relationshipType": "DERIVED_FROM",
+	})
+	if rrMissingSource.Code != http.StatusNotFound {
+		t.Errorf("missing source status = %d, want 404, body = %s", rrMissingSource.Code, rrMissingSource.Body.String())
 	}
 }
 

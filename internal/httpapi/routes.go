@@ -22,6 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/metadata"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/projectfile"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/sync"
@@ -705,6 +706,18 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error404NotFound("asset not found")
 	}
 
+	// #199: the child of an inherit-metadata write must be a real media file,
+	// never a project archive (.drp/.fcpxml/.edl/.dam.json/.prproj). A
+	// manual edge created before handleCreateEdge's guard shipped, or a
+	// filename-stem/XMP match that lands a project file as the child of a
+	// DERIVED_FROM/FINAL_EXPORT/PROXY_OF edge, would otherwise clear
+	// pickWinningParent and run exiftool in-place against a container file
+	// that isn't an image or video. Refuse before any exiftool subprocess
+	// spawns.
+	if _, ok := projectfile.GetParser(child.FilePath); ok {
+		return nil, huma.Error409Conflict("cannot inherit metadata into a project file")
+	}
+
 	// Refuse a write into a read-only location BEFORE spawning exiftool.
 	if s.guard != nil {
 		if err := s.guard.CheckWrite(child.FilePath); err != nil {
@@ -998,8 +1011,62 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		return nil, huma.Error422UnprocessableEntity("invalid relationship type")
 	}
 
+	// #199: a manual edge must not use a project file as the CHILD/target of
+	// an identity-ancestry relationship (.drp/.fcpxml/.edl/.dam.json/.prproj,
+	// whatever internal/projectfile's registry recognizes). That specific
+	// shape is the exiftool hazard: it would pass pickWinningParent's filters
+	// (its validParentRelationships) and make handleInheritMetadata run
+	// exiftool's write in-place against the project archive
+	// (s.prober.WriteTags always targets the CHILD's file path -- see below).
+	// The refusal is scoped to those identity-ancestry relationship types:
+	// PROJECT_SIDECAR *legitimately* targets a project file
+	// (ProjectSidecarResolver.Resolve always makes the project file the
+	// edge's child, the media node its source/parent), and DUPLICATE_OF is a
+	// symmetric relationship a user may reasonably want between two project
+	// files. Both are excluded from validParentRelationships, so neither can
+	// ever reach pickWinningParent/handleInheritMetadata regardless of which
+	// endpoint is a project file.
+	//
+	// There is deliberately NO source-side (parent) project-file refusal.
+	// loadTagSet (below) reads a node's tags entirely from the DB
+	// (ListNodeMetadata + promoted columns) -- inherit-metadata never runs
+	// exiftool against the PARENT's file at all, only WriteTags against the
+	// child's. A DERIVED_FROM/FINAL_EXPORT/PROXY_OF edge with a project file
+	// as the parent (e.g. "this export is the FINAL_EXPORT of this .drp
+	// project") is therefore hazard-free and legitimate -- refusing it would
+	// only block a real ManualLinkModal use case for no safety benefit. An
+	// earlier version of this check refused it unconditionally; removed after
+	// review traced the actual write path and found no hazard on that side.
+	//
+	// Also refuses an ARCHIVED endpoint on either side (#115): it passes the
+	// existence/FK check but a manual edge to/from it is never traversed by
+	// anything, so it's a dead write masquerading as a real link.
+	target, err := s.db.Reader.GetMediaNodeByID(ctx, in.Body.TargetNodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("target asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get target asset", err)
+	}
+	if target.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("target asset not found")
+	}
+	if _, ok := projectfile.GetParser(target.FilePath); ok && validParentRelationships[in.Body.RelationshipType] {
+		return nil, huma.Error422UnprocessableEntity("cannot create an identity-ancestry edge targeting a project file")
+	}
+	source, err := s.db.Reader.GetMediaNodeByID(ctx, in.Body.SourceNodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("source asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get source asset", err)
+	}
+	if source.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("source asset not found")
+	}
+
 	var createdEdge sqlcgen.MediaEdge
-	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		wouldCycle, err := q.WouldCreateCycle(ctx, sqlcgen.WouldCreateCycleParams{
 			ParentNodeID: in.Body.SourceNodeID,
 			ChildNodeID:  in.Body.TargetNodeID,
