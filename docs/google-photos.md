@@ -194,9 +194,12 @@ not by the archive.
    filesystem mount Immich also reads, and the "push" is one HTTP call telling Immich to rescan
    it — see the spec's *"Renders written to `/storage/exports/immich/` are indexed natively by
    Immich without duplicating bytes."* `remote_sync_state` today tracks a *notification*, not a
-   *transfer*. The repo currently has zero outbound HTTP client code, no `golang.org/x/oauth2`
-   dependency, and no token storage of any kind anywhere — the only secret-handling precedent is
-   the *inbound* agent `X-API-Key` in
+   *transfer*. The repo does have an outbound HTTP client now
+   ([`internal/immich/client.go`](../internal/immich/client.go)), but it is a thin,
+   static-API-key control-plane call (`POST /api/libraries/{id}/scan`) that never moves file
+   bytes — there is still no `golang.org/x/oauth2` dependency, no OAuth token storage, and no
+   code anywhere in the repo that transfers media bytes over HTTP. The only secret-handling
+   precedent beyond that static Immich API key is the *inbound* agent `X-API-Key` in
    [`internal/config/config.go:73-79`](../internal/config/config.go). All of that would need to
    be built new to support Google Photos.
 
@@ -209,8 +212,10 @@ single-user path (pending the empirical 8-day confirmation below).
 
 The actual blocker is branchDAM's own current shape. Google Photos would be the first remote
 target that moves real bytes, and reaching it needs an OAuth2 token store, a refresh loop, an
-outbound HTTP client, resumable upload, and a `PushFunc` signature change — none of which exist
-today — in order to land on a destination that **cannot be integrity-verified** against
+OAuth2-authenticated byte-transfer HTTP client, resumable upload, and a `PushFunc` signature
+change — none of which exist today (the repo's one outbound HTTP client, for Immich, is a
+static-API-key control-plane call that never moves bytes; see point 4 above) — in order to land
+on a destination that **cannot be integrity-verified** against
 `full_hash`, whose accessibility is permanently pinned to one OAuth client ID, and that can never
 be read back with GPS metadata intact.
 

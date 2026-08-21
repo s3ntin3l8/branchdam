@@ -1501,7 +1501,7 @@ type AgentEventInput struct {
 	Body struct {
 		AgentID   string `json:"agentId" required:"true"`
 		EventType string `json:"eventType" required:"true" enum:"EVENT_NODE_CREATED,EVENT_EDGE_ATTACHED,EVENT_NODE_MOVED,EVENT_NODE_DELETED,EVENT_PATH_REBASED"`
-		Payload   string `json:"payload" required:"true"` // opaque JSON, validated/processed by the deferred agent-events increment
+		Payload   string `json:"payload" required:"true"` // opaque JSON, applied asynchronously by internal/agent.Drainer (#166)
 	}
 }
 
@@ -1511,10 +1511,10 @@ type AgentEventOutput struct {
 	}
 }
 
-// handleAgentEvent persists the event and returns 202 Accepted; actually
-// draining/processing event_queue ships with the
-// deferred workstation-agent increment (see internal/db's event_queue
-// migration comment).
+// handleAgentEvent persists the event and returns 202 Accepted; draining and
+// processing event_queue is handled asynchronously by internal/agent.Drainer,
+// which polls PENDING rows and applies them (#166, shipped and running in
+// production, not deferred).
 func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*AgentEventOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
