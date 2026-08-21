@@ -23,8 +23,11 @@ const pruneOldMtime = 1000 // any TTL cutoff derived from "now" is far past this
 // pruneTestServer seeds a prunable TIER1_LOCAL_SCRATCH location (with a
 // real file on disk) and a TIER3_MASTER_ARCHIVE location, plus a PROXY_OF
 // edge from the Tier-3 master to the Tier-1 candidate. cacheTTLHours, if
-// >0, is wired into the server's config for the Tier-1 location's
-// root_path, matching how handlePrune resolves TTL by root_path.
+// >0, is persisted directly on the Tier-1 location's DB row (#238:
+// handlePrune reads cache_ttl_hours off the row itself, not by re-joining
+// the live config by root_path), and mirrored into the server's config
+// too so config-level tests (e.g. validatePruneConfig-style checks) still
+// see a consistent value.
 func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, sqlcgen.MediaNode) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "prune.db")
@@ -69,6 +72,7 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		t1, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
 			Name: "t1", RootPath: resolvedTier1, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: 0, Prunable: 1,
+			CacheTtlHours: int64(cacheTTLHours),
 		})
 		if err != nil {
 			return err
@@ -170,6 +174,47 @@ func TestHandlePruneDryRunDefault(t *testing.T) {
 	}
 	if after.LifecycleState != "ACTIVE" {
 		t.Errorf("lifecycle_state = %q after dry run, want ACTIVE (unchanged)", after.LifecycleState)
+	}
+}
+
+// TestHandlePruneUsesPersistedCacheTTLNotConfigReJoin proves #238's fix:
+// handlePrune must resolve cacheTtlHours from the storage_locations row
+// itself, not by re-joining the live config by root_path. Before the fix,
+// clearing (or otherwise mismatching) s.cfg.StorageLocations after the row
+// was seeded -- the same shape as an operator editing rootPath in
+// config.yaml and restarting, where the DB row that survives (or, as here,
+// is inspected) no longer has any config entry whose RootPath matches it
+// -- silently made ttlHours resolve to 0 ("never eligible") with no error.
+// The cache_ttl_hours column is set once at seed time and never needs a
+// second lookup, so this must still find the candidate.
+func TestHandlePruneUsesPersistedCacheTTLNotConfigReJoin(t *testing.T) {
+	srv, _, tier1ID, candidate := pruneTestServer(t, 1) // 1h TTL persisted on the DB row
+	// Simulate the orphaning scenario directly: the live config no longer
+	// has any entry matching this location's root_path (e.g. because it
+	// was edited and the server restarted with a config that doesn't
+	// mention this exact path anymore). The pre-fix re-join loop would
+	// find nothing here and silently treat the location as "never
+	// eligible" for pruning.
+	srv.cfg.StorageLocations = []config.StorageLocation{
+		{Name: "unrelated", RootPath: "/nowhere/near/this/location", Tier: "TIER1_LOCAL_SCRATCH", Prunable: true, CacheTTLHours: 1},
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/prune", map[string]any{
+		"storageLocationId": tier1ID,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Candidates []struct {
+			NodeID int64 `json:"nodeId"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Candidates) != 1 || out.Candidates[0].NodeID != candidate.ID {
+		t.Fatalf("candidates = %+v, want exactly node %d (TTL must come from the DB row, not a config re-join)", out.Candidates, candidate.ID)
 	}
 }
 

@@ -2015,20 +2015,14 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 		return out, nil
 	}
 
-	// cacheTtlHours is config-only (#61's design: no new migration), so the
-	// DB row alone can't answer "what's this location's TTL" -- match it
-	// against the live config by root_path, the same join key
-	// GetStorageLocationByPath already uses as the source of truth for a
-	// location's identity.
-	ttlHours := 0
-	if s.cfg != nil {
-		for _, c := range s.cfg.StorageLocations {
-			if c.RootPath == loc.RootPath {
-				ttlHours = c.CacheTTLHours
-				break
-			}
-		}
-	}
+	// cache_ttl_hours is a persisted column (#238) -- read straight off the
+	// DB row instead of re-joining the live config by root_path. That
+	// re-join used to silently orphan a location's TTL whenever its
+	// rootPath was edited in config: the old row deactivates (M6's
+	// self-heal) and a new row appears with a different root_path, so
+	// nothing matched the old config entry until the strings lined up
+	// again, with no error or warning.
+	ttlHours := int(loc.CacheTtlHours)
 	if ttlHours <= 0 {
 		// prunable=true with no configured TTL means "never eligible" --
 		// not a config error, just nothing to plan.

@@ -104,15 +104,16 @@ type ScanJob struct {
 }
 
 type StorageLocation struct {
-	ID        int64
-	Name      string
-	RootPath  string
-	Tier      string
-	ReadOnly  int64
-	Prunable  int64
-	IsActive  int64
-	CreatedAt int64
-	UpdatedAt int64
+	ID            int64
+	Name          string
+	RootPath      string
+	Tier          string
+	ReadOnly      int64
+	Prunable      int64
+	IsActive      int64
+	CreatedAt     int64
+	UpdatedAt     int64
+	CacheTtlHours int64
 }
 
 type VMediaEdgesResolved struct {

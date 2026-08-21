@@ -203,12 +203,23 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 
 	q := sqlcgen.New(writerDB)
 
-	loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
-		Name: "downgrade_test", RootPath: "/tmp/downgrade_test", Tier: "TIER2_EXPORTS",
-	})
+	// Raw SQL, deliberately not the generated sqlcgen.CreateStorageLocation:
+	// that helper's column list always matches the CURRENT (HEAD) schema,
+	// which since migration 00008 (#238) includes cache_ttl_hours -- a
+	// column that doesn't exist yet at goose version 5, where this fixture
+	// row must originate (same reasoning as insertNode below for
+	// media_nodes).
+	res, err := writerDB.ExecContext(ctx, `INSERT INTO storage_locations (
+		name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
+	) VALUES ('downgrade_test', '/tmp/downgrade_test', 'TIER2_EXPORTS', 0, 0, 1, unixepoch(), unixepoch())`)
 	if err != nil {
-		t.Fatalf("CreateStorageLocation: %v", err)
+		t.Fatalf("insert storage_locations fixture: %v", err)
 	}
+	locID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId for storage_locations fixture: %v", err)
+	}
+	loc := sqlcgen.StorageLocation{ID: locID}
 
 	// Raw SQL, deliberately not the generated sqlcgen.InsertMediaNode: that
 	// helper's column list always matches the CURRENT (HEAD) schema, but

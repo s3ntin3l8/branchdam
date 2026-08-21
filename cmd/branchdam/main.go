@@ -505,6 +505,7 @@ func seedStorageLocations(ctx context.Context, database *db.DB, locations []conf
 			if _, err := q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
 				Name: loc.Name, RootPath: loc.RootPath, Tier: loc.Tier,
 				ReadOnly: readOnly, Prunable: prunable,
+				CacheTtlHours: int64(loc.CacheTTLHours),
 			}); err != nil {
 				return err
 			}
