@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0](https://github.com/s3ntin3l8/branchdam/compare/v0.3.1...v0.4.0) (2026-08-21)
+
+
+### Features
+
+* **httpapi,web:** thumbnail HTTP route and SPA rendering (T4) ([#223](https://github.com/s3ntin3l8/branchdam/issues/223)) ([98a05b8](https://github.com/s3ntin3l8/branchdam/commit/98a05b803658b6c91e26101f746d588dba2f81af))
+* **thumbs,config:** add the JPEG thumbnail cache package and its config ([#220](https://github.com/s3ntin3l8/branchdam/issues/220)) ([fe02eb5](https://github.com/s3ntin3l8/branchdam/commit/fe02eb53ee80cc6f74cc7a19798d53cdabfe125f))
+* **thumbs,db,httpapi:** thumbnail state tracking and background worker (T3) ([#222](https://github.com/s3ntin3l8/branchdam/issues/222)) ([0a14e98](https://github.com/s3ntin3l8/branchdam/commit/0a14e98258efc9db1b772168b98f4455ce39ad9e))
+
 ## [0.3.1](https://github.com/s3ntin3l8/branchdam/compare/v0.3.0...v0.3.1) (2026-08-21)
 
 
