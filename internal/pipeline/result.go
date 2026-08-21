@@ -65,12 +65,13 @@ type Result struct {
 // Stats summarizes what a Commit call actually did, for scan_jobs progress
 // reporting and test assertions.
 type Stats struct {
-	Inserted          int // brand new nodes
-	Touched           int // same content at the same path, no new row
-	VersionCollisions int // docs/schema.md fix #3: old archived, new inserted
-	Moved             int // Pillar 5: MISSING node's path rebased
-	EdgesCreated      int // graph.Engine.ResolveAndCommit's newly-created (not merely refreshed) edges
-	MetadataWritten   int // #105: node_metadata rows actually upserted on touched/rebased nodes (0 when unchanged)
+	Inserted                 int // brand new nodes
+	Touched                  int // same content at the same path, no new row
+	VersionCollisions        int // docs/schema.md fix #3: old archived, new inserted
+	Moved                    int // Pillar 5: MISSING node's path rebased
+	EdgesCreated             int // graph.Engine.ResolveAndCommit's newly-created (not merely refreshed) edges
+	MetadataWritten          int // #105: node_metadata rows actually upserted on touched/rebased nodes (0 when unchanged)
+	PromotedColumnsRefreshed int // #197: nodes whose promoted columns were refreshed on a touched/rebased pass (0 when nothing differed)
 }
 
 // exifRawAllowlist is the closed set of exiftool tag names persisted into

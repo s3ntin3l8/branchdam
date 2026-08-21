@@ -490,7 +490,7 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 			// commit.go's reconcileAllMetadata doc comment, #86, and #105.
 			// No *Stats in scope here (inside an InTx closure returning bare
 			// error) -- reconcileAllMetadata logs the written count instead.
-			return reconcileAllMetadata(ctx, q, n.ID, *result, nil, w.log)
+			return reconcileAllMetadata(ctx, q, n, *result, nil, w.log)
 		}); err != nil {
 			return false, fmt.Errorf("rebase moved node %d: %w", n.ID, err)
 		}

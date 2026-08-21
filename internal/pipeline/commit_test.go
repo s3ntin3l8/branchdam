@@ -868,6 +868,220 @@ func TestTouchWithChangedMetadataWritesOnlyTheDelta(t *testing.T) {
 	}
 }
 
+// TestTouchRefreshesPromotedColumnsWhenValueDiffers backs #197: a node whose
+// freshly-probed promoted EXIF/XMP values differ from what's stored must have
+// its media_nodes columns refreshed on the Touched branch. Before #188 this
+// happened incidentally -- an in-place metadata write (inherit-metadata)
+// changed fast_hash, the next scan version-collided, and insertNewNode
+// repopulated the columns from the freshly-probed file. #188 made the node
+// touch instead, and the touch's backfill (reconcileAllMetadata) only wrote
+// node_metadata; without this fix a XMP-xmpMM:DerivedFrom written by
+// inherit-metadata would never reach media_nodes.derived_from_id. This test
+// models exactly that: pass 1 indexes the file probe-less, pass 2 touches it
+// (same fast_hash -- the #188 refresh made the DB and file agree) carrying the
+// inherited identity tags.
+func TestTouchRefreshesPromotedColumnsWhenValueDiffers(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	first := Result{
+		Path: "/inherit/child.jpg", FileName: "child.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+	}
+	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+		t.Fatalf("Commit (pass 1, probe-less insert): %v", err)
+	} else if stats.Inserted != 1 {
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
+	}
+	node := mustGetLiveNode(t, database, "/inherit/child.jpg")
+	if node.DerivedFromID.Valid || node.CameraModel.Valid {
+		t.Fatalf("pre-condition broken: node already has promoted columns set (%+v)", node)
+	}
+
+	// Pass 2: same content, seen again -- but the file's XMP now carries the
+	// identity tags inherit-metadata wrote into it (DerivedFrom = parent
+	// node_uuid, plus Model/LensModel/SerialNumber/DocumentIDs).
+	second := first
+	second.DerivedFromID = "uuid-parent"
+	second.OriginalDocumentID = "orig-doc-xyz"
+	second.DocumentID = "doc-abc-123"
+	second.CameraModel = "ILCE-7M4"
+	second.LensModel = "FE 24-70mm F2.8 GM"
+	second.SerialNumber = "1234567"
+	stats, err := Commit(ctx, database, locationID, []Result{second})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("pass 2: stats = %+v, want Touched=1", stats)
+	}
+	if stats.PromotedColumnsRefreshed != 1 {
+		t.Fatalf("pass 2: stats = %+v, want PromotedColumnsRefreshed=1", stats)
+	}
+
+	got := mustGetLiveNode(t, database, "/inherit/child.jpg")
+	if got.ID != node.ID {
+		t.Fatalf("node id changed %d -> %d (must be a touch, not a version collision)", node.ID, got.ID)
+	}
+	if got.DerivedFromID.String != "uuid-parent" {
+		t.Errorf("derived_from_id = %q, want %q (the inherited XMP-xmpMM:DerivedFrom must reach the promoted column)", got.DerivedFromID.String, "uuid-parent")
+	}
+	if got.CameraModel.String != "ILCE-7M4" {
+		t.Errorf("camera_model = %q, want ILCE-7M4", got.CameraModel.String)
+	}
+	if got.LensModel.String != "FE 24-70mm F2.8 GM" {
+		t.Errorf("lens_model = %q, want FE 24-70mm F2.8 GM", got.LensModel.String)
+	}
+	if got.CameraSerial.String != "1234567" {
+		t.Errorf("camera_serial = %q, want 1234567", got.CameraSerial.String)
+	}
+	if got.OriginalDocumentID.String != "orig-doc-xyz" {
+		t.Errorf("original_document_id = %q, want orig-doc-xyz", got.OriginalDocumentID.String)
+	}
+	if got.DocumentID.String != "doc-abc-123" {
+		t.Errorf("document_id = %q, want doc-abc-123", got.DocumentID.String)
+	}
+}
+
+// TestTouchPromotedColumnsUnchangedWritesNothing pins the #105 property for
+// the promoted columns: a touched (unchanged fast_hash) node whose fresh
+// probe values match what's already stored must not issue the refresh UPDATE
+// at all. Stats.PromotedColumnsRefreshed is the oracle -- it must be 0 on the
+// unchanged pass, just as MetadataWritten is for node_metadata.
+func TestTouchPromotedColumnsUnchangedWritesNothing(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	first := Result{
+		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+		CameraModel:  "ILCE-7M4",
+		LensModel:    "FE 24-70mm F2.8 GM",
+		SerialNumber: "1234567",
+		DocumentID:   "doc-abc-123",
+	}
+	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+		t.Fatalf("Commit (pass 1, insert): %v", err)
+	} else if stats.Inserted != 1 || stats.PromotedColumnsRefreshed != 0 {
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1, PromotedColumnsRefreshed=0 (insert sets columns, reconcile only runs on touch/rebase)", stats)
+	}
+
+	// Pass 2: identical Result, same content, same promoted values -- the
+	// ordinary "re-scan an unchanged file" case.
+	stats, err := Commit(ctx, database, locationID, []Result{first})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched): %v", err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("pass 2: stats = %+v, want Touched=1", stats)
+	}
+	if stats.PromotedColumnsRefreshed != 0 {
+		t.Fatalf("pass 2: stats = %+v, want PromotedColumnsRefreshed=0 (identical promoted values, no UPDATE)", stats)
+	}
+
+	got := mustGetLiveNode(t, database, "/stable.jpg")
+	if got.CameraModel.String != "ILCE-7M4" || got.LensModel.String != "FE 24-70mm F2.8 GM" ||
+		got.CameraSerial.String != "1234567" || got.DocumentID.String != "doc-abc-123" {
+		t.Errorf("promoted columns regressed after unchanged touch: %+v", got)
+	}
+}
+
+// TestTouchPromotedColumnsEmptyFreshValueDoesNotClear: a probe that never ran
+// (or ran and found nothing) must not wipe stored promoted columns. The
+// reconcile contract is one-directional -- non-empty fresh values may
+// overwrite, empty ones are ignored -- so a file re-scanned while exiftool is
+// absent from PATH keeps its previously-promoted camera_model etc.
+func TestTouchPromotedColumnsEmptyFreshValueDoesNotClear(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	first := Result{
+		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+		CameraModel: "ILCE-7M4",
+	}
+	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+		t.Fatalf("Commit (pass 1, insert): %v", err)
+	} else if stats.Inserted != 1 {
+		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
+	}
+
+	// Pass 2: probe-less Result -- every promoted field empty, exactly what a
+	// scan with no exiftool on PATH produces.
+	probeLess := Result{
+		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
+		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
+	}
+	stats, err := Commit(ctx, database, locationID, []Result{probeLess})
+	if err != nil {
+		t.Fatalf("Commit (pass 2, touched, probe-less): %v", err)
+	}
+	if stats.PromotedColumnsRefreshed != 0 {
+		t.Fatalf("pass 2: stats = %+v, want PromotedColumnsRefreshed=0 (empty fresh values are a no-op, not a wipe)", stats)
+	}
+	got := mustGetLiveNode(t, database, "/stable.jpg")
+	if got.CameraModel.String != "ILCE-7M4" {
+		t.Errorf("camera_model = %q, want %q (probe-less touch must not clear it)", got.CameraModel.String, "ILCE-7M4")
+	}
+}
+
+// TestRebasedNodeRefreshesPromotedColumns: the rebase/move branch uses the
+// same reconcileAllMetadata backfill as the touched branch, so a node that
+// was indexed probe-less and then moved (with the tools now available) gains
+// its promoted columns on the rebase pass too -- not just its node_metadata
+// rows (TestRebasedNodeBackfillsMetadata).
+func TestRebasedNodeRefreshesPromotedColumns(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	// First pass: no probe data at all, as if exiftool/ffprobe were absent.
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/old/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee"},
+	}); err != nil {
+		t.Fatalf("Commit (initial, probe-less): %v", err)
+	}
+	original := mustGetLiveNode(t, database, "/old/place.jpg")
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.MarkNodeMissing(ctx, original.ID)
+	}); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+
+	// Second pass: same content at a new path, now with probe data.
+	stats, err := Commit(ctx, database, locationID, []Result{
+		{
+			Path: "/new/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee",
+			CameraModel:  "ILCE-7M4",
+			SerialNumber: "1234567",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Commit (after move): %v", err)
+	}
+	if stats.Moved != 1 {
+		t.Fatalf("stats = %+v, want Moved=1", stats)
+	}
+	if stats.PromotedColumnsRefreshed != 1 {
+		t.Fatalf("stats = %+v, want PromotedColumnsRefreshed=1 (rebase must refresh promoted columns like a touch)", stats)
+	}
+
+	moved := mustGetLiveNode(t, database, "/new/place.jpg")
+	if moved.ID != original.ID {
+		t.Fatalf("moved node id = %d, want %d (same row, rebased)", moved.ID, original.ID)
+	}
+	if moved.CameraModel.String != "ILCE-7M4" {
+		t.Errorf("camera_model = %q, want ILCE-7M4", moved.CameraModel.String)
+	}
+	if moved.CameraSerial.String != "1234567" {
+		t.Errorf("camera_serial = %q, want 1234567", moved.CameraSerial.String)
+	}
+}
+
 // TestCapTruncatedMetadataIsStableAcrossPasses: #105's diff runs on the
 // already-sorted-and-capped key set, not the raw kv map -- otherwise a large,
 // stable metadata set past metadataCap would spuriously "change" every pass

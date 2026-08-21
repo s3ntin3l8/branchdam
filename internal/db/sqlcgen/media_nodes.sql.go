@@ -1027,6 +1027,54 @@ func (q *Queries) RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg Ref
 	return err
 }
 
+const updateMediaNodePromotedColumns = `-- name: UpdateMediaNodePromotedColumns :exec
+UPDATE media_nodes SET
+    original_document_id = ?2,
+    document_id = ?3,
+    derived_from_id = ?4,
+    camera_model = ?5,
+    camera_serial = ?6,
+    lens_model = ?7,
+    updated_at = unixepoch()
+WHERE id = ?1
+`
+
+type UpdateMediaNodePromotedColumnsParams struct {
+	ID                 int64
+	OriginalDocumentID sql.NullString
+	DocumentID         sql.NullString
+	DerivedFromID      sql.NullString
+	CameraModel        sql.NullString
+	CameraSerial       sql.NullString
+	LensModel          sql.NullString
+}
+
+// #197: the touched/rebased branches' backfill (reconcileAllMetadata ->
+// reconcilePromotedColumns, internal/pipeline/commit.go) refreshes the
+// promoted EXIF/XMP columns from a freshly-probed Result. Before #188 these
+// columns were repopulated incidentally whenever an in-place metadata write
+// (e.g. inherit-metadata) forced a version collision on the next scan; now
+// that the write refreshes fast_hash instead (RefreshMediaNodeAfterInPlaceWrite),
+// the node takes commitOne's Touched branch and would otherwise keep its
+// insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
+// inherit-metadata that never reaches media_nodes.derived_from_id.
+//
+// The caller passes effective values: a column whose fresh probe value was
+// empty (or unchanged) is passed through as the node's current value, so this
+// query is only ever reached with at least one genuine change.
+func (q *Queries) UpdateMediaNodePromotedColumns(ctx context.Context, arg UpdateMediaNodePromotedColumnsParams) error {
+	_, err := q.db.ExecContext(ctx, updateMediaNodePromotedColumns,
+		arg.ID,
+		arg.OriginalDocumentID,
+		arg.DocumentID,
+		arg.DerivedFromID,
+		arg.CameraModel,
+		arg.CameraSerial,
+		arg.LensModel,
+	)
+	return err
+}
+
 const updateMediaNodeGraphStatus = `-- name: UpdateMediaNodeGraphStatus :exec
 ;
 

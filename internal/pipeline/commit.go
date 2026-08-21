@@ -81,8 +81,11 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			// changes and it always takes this branch (see #86).
 			// reconcileAllMetadata (not persistAllMetadata) here: this branch
 			// runs on EVERY unchanged file on EVERY scan pass, so skipping the
-			// write when nothing actually changed matters (see #105).
-			return reconcileAllMetadata(ctx, q, existing.ID, r, stats, log)
+			// write when nothing actually changed matters (see #105). Since
+			// #197 it also refreshes the promoted columns the same diff-first
+			// way -- the branch is what keeps a freshly-written
+			// XMP-xmpMM:DerivedFrom from getting stuck invisible in the DB.
+			return reconcileAllMetadata(ctx, q, existing, r, stats, log)
 		}
 		return commitVersionCollision(ctx, q, locationID, existing, r, stats, log)
 
@@ -129,7 +132,7 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 			}
 			// A rebased node backfills metadata the same way a touched one
 			// does -- see the touched branch above, #86, and #105.
-			return reconcileAllMetadata(ctx, q, missing.ID, r, stats, log)
+			return reconcileAllMetadata(ctx, q, missing, r, stats, log)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("get missing node by fast_hash: %w", err)
@@ -301,49 +304,114 @@ type metadataRowKey struct {
 // call correct here too, just wastefully so: every unchanged file on every
 // scan pass was otherwise rewriting its full metadata set (#105).
 //
+// Since #197 it also refreshes media_nodes' promoted EXIF/XMP columns
+// (camera_model, lens_model, camera_serial, original_document_id, document_id,
+// derived_from_id) from the freshly-probed Result, with the same diff-first,
+// non-empty-values-only contract as the node_metadata reconcile. This is what
+// makes #188 safe: an in-place metadata write (inherit-metadata) now refreshes
+// fast_hash so the node touches instead of version-colliding, and the touch
+// repopulates the columns -- including a XMP-xmpMM:DerivedFrom that, before
+// #188, only reached media_nodes.derived_from_id because the collision happened
+// to re-run insertNewNode.
+//
 // stats may be nil (watcher.rebaseIfMoved has no *Stats in scope, being
 // called from inside an InTx closure returning bare error) -- in that case
-// the written count is logged at DEBUG instead of accumulated.
-func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, r Result, stats *Stats, log *slog.Logger) error {
+// the written counts are logged at DEBUG instead of accumulated.
+func reconcileAllMetadata(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode, r Result, stats *Stats, log *slog.Logger) error {
 	exif := exifMetadata(r)
 	ffprobe := ffprobeMetadata(r)
-	if len(exif) == 0 && len(ffprobe) == 0 {
-		// Nothing this Result derives at all -- exiftool/ffprobe absent from
-		// PATH, or a non-media file. The pre-#105 persistAllMetadata path
-		// made zero DB calls in this case (cappedSortedKeys' len(kv)==0
-		// short-circuit); reconcileAllMetadata must preserve that, not spend
-		// a ListNodeMetadata read on the writer connection for nothing to
-		// reconcile against. A node that already has metadata from an
-		// earlier pass (tools installed then later removed, or genuinely
-		// probe-less content) simply keeps its existing rows untouched.
-		return nil
+	if len(exif) > 0 || len(ffprobe) > 0 {
+		// Only spend a ListNodeMetadata read on the writer connection when
+		// the probe actually derived rows to diff against. The pre-#105
+		// persistAllMetadata path made zero DB calls when neither tool
+		// produced anything (cappedSortedKeys' len(kv)==0 short-circuit);
+		// reconcileAllMetadata must preserve that. A node that derives
+		// nothing on this pass -- exiftool/ffprobe absent from PATH, or a
+		// genuinely probe-less file -- skips the read and simply keeps its
+		// existing rows untouched.
+		existing, err := q.ListNodeMetadata(ctx, node.ID)
+		if err != nil {
+			return fmt.Errorf("list node_metadata for reconcile: %w", err)
+		}
+		prior := make(map[metadataRowKey]string, len(existing))
+		for _, row := range existing {
+			prior[metadataRowKey{row.Source, row.Key}] = row.Value
+		}
+
+		written, err := reconcileMetadata(ctx, q, node.ID, "exiftool", exif, metadataCap, prior, log)
+		if err != nil {
+			return err
+		}
+		n, err := reconcileMetadata(ctx, q, node.ID, "ffprobe", ffprobe, metadataCap, prior, log)
+		if err != nil {
+			return err
+		}
+		written += n
+
+		if stats != nil {
+			stats.MetadataWritten += written
+		} else if written > 0 {
+			log.Debug("pipeline: node_metadata reconciled", "nodeID", node.ID, "written", written)
+		}
 	}
 
-	existing, err := q.ListNodeMetadata(ctx, nodeID)
-	if err != nil {
-		return fmt.Errorf("list node_metadata for reconcile: %w", err)
-	}
-	prior := make(map[metadataRowKey]string, len(existing))
-	for _, row := range existing {
-		prior[metadataRowKey{row.Source, row.Key}] = row.Value
-	}
-
-	written, err := reconcileMetadata(ctx, q, nodeID, "exiftool", exif, metadataCap, prior, log)
-	if err != nil {
+	// Promoted-column reconcile runs even when r derives no free-form rows: a
+	// file whose only EXIF field is a promoted one (e.g. Model) still needs
+	// its media_nodes column refreshed -- and when the probe is absent, the
+	// non-empty-only rule inside reconcilePromotedColumns makes this a no-op.
+	if refreshed, err := reconcilePromotedColumns(ctx, q, node, r); err != nil {
 		return err
-	}
-	n, err := reconcileMetadata(ctx, q, nodeID, "ffprobe", ffprobe, metadataCap, prior, log)
-	if err != nil {
-		return err
-	}
-	written += n
-
-	if stats != nil {
-		stats.MetadataWritten += written
-	} else if written > 0 {
-		log.Debug("pipeline: node_metadata reconciled", "nodeID", nodeID, "written", written)
+	} else if refreshed {
+		if stats != nil {
+			stats.PromotedColumnsRefreshed++
+		} else {
+			log.Debug("pipeline: media_nodes promoted columns reconciled", "nodeID", node.ID)
+		}
 	}
 	return nil
+}
+
+// reconcilePromotedColumns refreshes media_nodes' promoted EXIF/XMP columns
+// (camera_model, lens_model, camera_serial, original_document_id, document_id,
+// derived_from_id) from a freshly-probed Result, on the touched/rebased
+// branches that never re-run insertNewNode (#197). captured_at_unix is
+// deliberately NOT among them: re-promoting it on an existing node interacts
+// with HeuristicSpatialTemporalResolver's candidate matching (a node whose
+// captured_at_unix changes after other nodes already resolved edges against
+// it), which needs reasoning through before any write path does it -- tracked
+// as #204.
+//
+// Only a NON-EMPTY fresh value may overwrite a column, and only when it
+// differs from what's stored: a probe that ran but genuinely found no value
+// for a tag -- or a probe that never ran at all (exiftool absent from PATH) --
+// must not clear a column. This is the same one-directional contract
+// reconcileMetadata applies to node_metadata (never delete, only add/update
+// changed values), so an absent probe degrades to a no-op rather than a
+// destructive wipe. Returns true when an UPDATE was actually issued.
+func reconcilePromotedColumns(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode, r Result) (bool, error) {
+	params := sqlcgen.UpdateMediaNodePromotedColumnsParams{ID: node.ID}
+	changed := false
+	assign := func(fresh string, stored sql.NullString, target *sql.NullString) {
+		if fresh != "" && stored.String != fresh {
+			*target = sql.NullString{String: fresh, Valid: true}
+			changed = true
+		} else {
+			*target = stored
+		}
+	}
+	assign(r.OriginalDocumentID, node.OriginalDocumentID, &params.OriginalDocumentID)
+	assign(r.DocumentID, node.DocumentID, &params.DocumentID)
+	assign(r.DerivedFromID, node.DerivedFromID, &params.DerivedFromID)
+	assign(r.CameraModel, node.CameraModel, &params.CameraModel)
+	assign(r.SerialNumber, node.CameraSerial, &params.CameraSerial)
+	assign(r.LensModel, node.LensModel, &params.LensModel)
+	if !changed {
+		return false, nil
+	}
+	if err := q.UpdateMediaNodePromotedColumns(ctx, params); err != nil {
+		return false, fmt.Errorf("refresh media_nodes promoted columns: %w", err)
+	}
+	return true, nil
 }
 
 // exifMetadata assembles the source='exiftool' rows for a fresh node: the
@@ -417,20 +485,21 @@ func ffprobeMetadata(r Result) map[string]string {
 // of its own, matching probe.Exif's contract.
 //
 // Deliberately does NOT touch media_nodes' promoted columns (captured_at_unix,
-// camera_model, camera_serial, lens_model) -- only insertNewNode and
-// commitVersionCollision's successor insert ever set those. Even
-// TouchMediaNode (same content, seen again) never refreshes them for an
-// existing node, so leaving them alone here matches that same repo-wide
-// "promoted at insert, not on update" pattern rather than making this one
-// caller special. The practical effect: after an inherit-metadata call, a
-// child's node_metadata can carry an inherited EXIF:DateTimeOriginal while
-// captured_at_unix stays NULL, so HeuristicSpatialTemporalResolver (which
-// queries captured_at_unix via ix_media_nodes_camera_time) won't see it.
-// loadTagSet is unaffected (it prefers node_metadata), so this is a
-// divergence between the two metadata stores, not a live bug in the
-// inheritance endpoint itself. Whether ANY update-existing-node path should
-// re-promote these columns is a broader question than this function answers
-// alone -- tracked separately as #204, not fixed here.
+// camera_model, camera_serial, lens_model). The scan's touched/rebased
+// backfill refreshes the non-captured promoted columns from a freshly-probed
+// file (camera_model, camera_serial, lens_model, original_document_id,
+// document_id, derived_from_id -- #197, reconcileAllMetadata ->
+// reconcilePromotedColumns); captured_at_unix is deliberately not among them,
+// and this on-demand endpoint re-promotes nothing at all. The practical
+// effect: after an inherit-metadata call, a child's node_metadata can carry
+// an inherited EXIF:DateTimeOriginal while captured_at_unix stays NULL, so
+// HeuristicSpatialTemporalResolver (which queries captured_at_unix via
+// ix_media_nodes_camera_time) won't see it. loadTagSet is unaffected (it
+// prefers node_metadata), so this is a divergence between the two metadata
+// stores, not a live bug in the inheritance endpoint itself. Whether this
+// write path -- or any -- should re-promote captured_at_unix is a broader
+// question than this function answers alone -- tracked separately as #204,
+// not fixed here.
 func PersistExifMetadata(ctx context.Context, database *db.DB, nodeID int64, exif *probe.ExifResult, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
