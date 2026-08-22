@@ -282,6 +282,15 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   (before even checking the API key) on the router that bypasses Authentik ForwardAuth by
   design -- `TestNoDirectAuthentikHeaderReads` greps the rest of the repo and fails the build if
   anything else reads them directly.
+- **`storage_location_id` on an agent-facing DTO is never trusted as supplied.** Every
+  `/api/v1/agent/*` write route derives it from `storage.Guard.Resolve(filePath)`, the only
+  verifiable source -- `AgentRebaseInput.StorageLocationID` and the events payloads' equivalent
+  fields are accepted but ignored. `POST /api/v1/agent/node-status` (#230-adjacent; see
+  `docs/agent-protocol.md` §3.1.E) is the one deliberate read-only exception to "agent routes
+  never read without writing" -- it exists so `branchdam-agent` can ask whether a `NodeUUID` it
+  already has locally is now a live, hash-verified node, without ever resolving a path or
+  touching `Guard`. Real Tier-1 `LOCAL_SCRATCH` pruning stays blocked on exactly this invariant:
+  nothing can mint a `storage_location_id` for an unmounted tier without breaking it.
 - **The writer pool is a single connection, on purpose.** `db.DB`'s writer has
   `SetMaxOpenConns(1)` -- that's what makes `graph.Engine`'s cycle-check-then-insert
   (`WouldCreateCycle` inside the same transaction as the edge upsert) sound without any

@@ -85,6 +85,13 @@ func (s *Server) registerRoutes(api huma.API) {
 		Summary:       "Rebase staged media node path",
 		DefaultStatus: http.StatusOK,
 	}, s.handleAgentRebase)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
+		Path:          "/api/v1/agent/node-status",
+		OperationID:   "agentNodeStatus",
+		Summary:       "Look up lifecycle/verification status for a batch of node UUIDs",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentNodeStatus)
 }
 
 // --- /api/v1/me ---
@@ -1645,13 +1652,21 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 
 type AgentRebaseInput struct {
 	Body struct {
-		NodeUUID          string  `json:"nodeUuid" required:"true"`
-		TargetPath        string  `json:"targetPath" required:"true"`
-		MtimeUnix         int64   `json:"mtimeUnix,omitempty"`
-		FileName          string  `json:"fileName,omitempty"`
-		FileExt           string  `json:"fileExt,omitempty"`
-		SizeBytes         int64   `json:"sizeBytes,omitempty"`
-		FastHash          *string `json:"fastHash,omitempty"`
+		NodeUUID   string  `json:"nodeUuid" required:"true"`
+		TargetPath string  `json:"targetPath" required:"true"`
+		MtimeUnix  int64   `json:"mtimeUnix,omitempty"`
+		FileName   string  `json:"fileName,omitempty"`
+		FileExt    string  `json:"fileExt,omitempty"`
+		SizeBytes  int64   `json:"sizeBytes,omitempty"`
+		FastHash   *string `json:"fastHash,omitempty"`
+		// FullHash is only consumed on the unknown-NodeUUID (insert) branch below --
+		// the known-node branch never overwrites content hashes on a path rebase (see
+		// RebaseNodePathByUUID's own comment). It exists to close an ordering anomaly:
+		// if this call ever arrives before its EVENT_NODE_CREATED was applied (the
+		// normal dwell-gated flow never does this, but nothing enforces it server-side),
+		// the freshly-inserted node would otherwise get a permanently NULL full_hash and
+		// never become prune-eligible via POST /api/v1/agent/node-status.
+		FullHash          *string `json:"fullHash,omitempty"`
 		StorageLocationID int64   `json:"storageLocationId,omitempty"`
 	}
 }
@@ -1765,7 +1780,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			SizeBytes:          in.Body.SizeBytes,
 			MtimeUnix:          mtime,
 			FastHash:           in.Body.FastHash,
-			FullHash:           nil,
+			FullHash:           in.Body.FullHash,
 			Phash:              sql.NullInt64{},
 			IndexingStatus:     "INDEXED_SHALLOW",
 			GraphStatus:        "UNLINKED",
@@ -1797,6 +1812,107 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		return nil, huma.Error404NotFound("asset not found")
 	}
 
+	return out, nil
+}
+
+// --- /api/v1/agent/node-status ---
+
+// agentNodeStatusMaxUUIDs bounds one request's batch size -- large enough for
+// an agent's prune pass to check a whole queue.db worth of candidates in a
+// handful of calls, small enough that a single request can't force an
+// unbounded number of GetMediaNodeByUUID/GetStorageLocationByID round trips.
+const agentNodeStatusMaxUUIDs = 200
+
+type AgentNodeStatusInput struct {
+	Body struct {
+		NodeUUIDs []string `json:"nodeUuids" required:"true"`
+	}
+}
+
+type AgentNodeStatusEntry struct {
+	NodeUUID string `json:"nodeUuid"`
+	// Found is false when no media_nodes row has this node_uuid -- not an
+	// error, just nothing to report (e.g. the node was never scanned/synced,
+	// or the UUID is stale).
+	Found bool `json:"found"`
+	// LifecycleState/Tier are only meaningful when Found is true.
+	LifecycleState string `json:"lifecycleState,omitempty"`
+	Tier           string `json:"tier,omitempty"`
+	// Verified is true only when full_hash is non-NULL and 64 hex characters
+	// (BLAKE3-256) -- the same predicate ListPrunableNodes uses to decide a
+	// Tier-3 ancestor authorizes a purge. False whenever Found is false.
+	Verified bool `json:"verified"`
+}
+
+type AgentNodeStatusOutput struct {
+	Body struct {
+		Statuses []AgentNodeStatusEntry `json:"statuses"`
+	}
+}
+
+// handleAgentNodeStatus answers "what does the server currently know about
+// these NodeUUIDs" for a batch of nodes an agent already has locally --
+// there was previously no agent-reachable read endpoint at all (every other
+// /api/v1/agent/* route is POST-only, write-oriented). It exists to let the
+// agent decide whether it's safe to delete its own local-edit mirror of a
+// file it already durably archived: only once the server confirms the node
+// is live (ACTIVE/HIDDEN, matching v_media_edges_resolved's own definition
+// of "live") and hash-verified. This never resolves a filesystem path and
+// never touches storage.Guard -- it's a pure media_nodes/storage_locations
+// read, which is what makes it safe to expose to the agent chain in the
+// first place.
+func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusInput) (*AgentNodeStatusOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+	if len(in.Body.NodeUUIDs) == 0 {
+		return nil, huma.Error400BadRequest("nodeUuids must not be empty", nil)
+	}
+	if len(in.Body.NodeUUIDs) > agentNodeStatusMaxUUIDs {
+		return nil, huma.Error400BadRequest(fmt.Sprintf("nodeUuids must not exceed %d per request", agentNodeStatusMaxUUIDs), nil)
+	}
+
+	out := &AgentNodeStatusOutput{}
+	out.Body.Statuses = make([]AgentNodeStatusEntry, 0, len(in.Body.NodeUUIDs))
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, uuid := range in.Body.NodeUUIDs {
+			entry := AgentNodeStatusEntry{NodeUUID: uuid}
+			node, err := q.GetMediaNodeByUUID(ctx, uuid)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					out.Body.Statuses = append(out.Body.Statuses, entry)
+					continue
+				}
+				return err
+			}
+			entry.Found = true
+			entry.LifecycleState = node.LifecycleState
+			// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
+			// exactly rather than additionally validating hex charset (the schema's own
+			// full_hash CHECK also enforces length only, not charset) -- this endpoint's
+			// contract is to answer identically to that predicate, not a stricter one,
+			// so a caller can't observe a divergence between the two. Low residual risk:
+			// hashing.FullHash (the only writer) always emits lowercase hex.
+			entry.Verified = node.FullHash != nil && len(*node.FullHash) == 64
+			loc, err := q.GetStorageLocationByID(ctx, node.StorageLocationID)
+			if err != nil {
+				if !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				// Storage location vanished out from under an otherwise-found
+				// node -- shouldn't happen (RESTRICT FKs), but report the node
+				// as found/unverified-of-tier rather than erroring the whole
+				// batch over it.
+			} else {
+				entry.Tier = loc.Tier
+			}
+			out.Body.Statuses = append(out.Body.Statuses, entry)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("node status query failed", err)
+	}
 	return out, nil
 }
 
