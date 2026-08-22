@@ -251,6 +251,59 @@ func TestSeedStorageLocationsPreservesCacheTTLHoursAcrossRootPathEdit(t *testing
 	}
 }
 
+// TestSeedStorageLocationsAllowsSameNameRootPathEdit backs #253: an operator
+// editing rootPath in config.yaml while keeping Name unchanged (e.g. updating
+// mount point for "archive") must succeed without crashing on a name UNIQUE
+// constraint collision. The new rootPath is inserted as active, and the old
+// rootPath is deactivated (M6).
+func TestSeedStorageLocationsAllowsSameNameRootPathEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed-same-name-rootpath-edit.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+
+	const ttlHours = 12
+	original := config.StorageLocation{
+		Name: "archive", RootPath: "/old/archive", Tier: "TIER1_LOCAL_SCRATCH",
+		Prunable: true, CacheTTLHours: ttlHours,
+	}
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{original}); err != nil {
+		t.Fatalf("initial seed: %v", err)
+	}
+
+	// Edit rootPath while keeping Name the exact SAME ("archive")
+	edited := original
+	edited.RootPath = "/new/archive"
+	if err := seedStorageLocations(ctx, database, []config.StorageLocation{edited}); err != nil {
+		t.Fatalf("re-seed with edited rootPath under same Name: %v", err)
+	}
+
+	newRow, err := database.Reader.GetStorageLocationByPath(ctx, "/new/archive")
+	if err != nil {
+		t.Fatalf("get location at new root_path: %v", err)
+	}
+	if newRow.Name != "archive" {
+		t.Errorf("newRow.Name = %q, want %q", newRow.Name, "archive")
+	}
+	if newRow.IsActive != 1 {
+		t.Errorf("newRow.IsActive = %d, want 1", newRow.IsActive)
+	}
+	if newRow.CacheTtlHours != ttlHours {
+		t.Errorf("newRow.CacheTtlHours = %d, want %d", newRow.CacheTtlHours, ttlHours)
+	}
+
+	oldRow, err := database.Reader.GetStorageLocationByPath(ctx, "/old/archive")
+	if err != nil {
+		t.Fatalf("get location at old root_path: %v", err)
+	}
+	if oldRow.IsActive != 0 {
+		t.Errorf("oldRow.IsActive = %d, want 0 (deactivated)", oldRow.IsActive)
+	}
+}
+
 // TestSeedStorageLocationsPreservesCacheTTLHoursWhenRootPathUnchanged is
 // the ordinary path: re-seeding with the same rootPath (e.g. an unrelated
 // config change, or just a routine restart) must keep updating

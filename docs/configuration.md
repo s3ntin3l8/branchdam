@@ -100,7 +100,7 @@ generation work on. This is a permanent property of the tier, not a bug to work 
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `name` | string | — | Display name only. |
+| `name` | string | — | Display name only (non-unique; `rootPath` is the unique mount key, so `rootPath` can be freely edited under an unchanged `name`). |
 | `rootPath` | string | — | **Container path**, not host path — must match the right-hand side of the corresponding compose volume mount. See [`deploy.md`](deploy.md)'s tier table. |
 | `tier` | string | — | See above. |
 | `readOnly` | bool | `false` | Enforced twice: at the DB `CHECK` level and by `storage.Guard.CheckWrite`, which refuses any write against a read-only location before any syscall. Tier 3 must always be `true`. |
