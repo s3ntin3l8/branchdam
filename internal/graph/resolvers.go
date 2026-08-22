@@ -592,6 +592,69 @@ func (r *ProjectSidecarResolver) Resolve(ctx context.Context, child Node, lookup
 		})
 	}
 
+	// For .xmp sidecars without explicit internal references (or where references didn't match),
+	// link to sibling media sharing the same stem in the same directory (#249).
+	if strings.EqualFold(child.FileExt, "xmp") || strings.HasSuffix(strings.ToLower(child.FileName), ".xmp") {
+		stem := child.FilenameStem
+		if stem == "" {
+			stem = naming.Stem(child.FileName)
+		}
+		stemsToTry := []string{stem}
+		nameWithoutXmp := strings.TrimSuffix(strings.ToLower(child.FileName), ".xmp")
+		if altStem := naming.Stem(nameWithoutXmp); altStem != "" && altStem != stem {
+			stemsToTry = append(stemsToTry, altStem)
+		}
+
+		childDir := filepath.Dir(child.FilePath)
+		for _, s := range stemsToTry {
+			nodes, err := lookup.ByFilenameStem(ctx, s)
+			if err != nil {
+				continue
+			}
+			for _, n := range nodes {
+				if n.ID == child.ID || seenParents[n.ID] {
+					continue
+				}
+				if strings.EqualFold(n.FileExt, "xmp") || strings.HasSuffix(strings.ToLower(n.FileName), ".xmp") {
+					continue
+				}
+				if filepath.Dir(n.FilePath) != childDir {
+					continue
+				}
+				// A sibling whose own filename carries an index suffix ("-2", "(1)")
+				// only matched this stem because naming.Stem stripped that suffix --
+				// e.g. "IMG_1234.xmp" stem-matching "IMG_1234-2.CR3". That suffix means
+				// "second copy", not "same asset", so unlike an exact non-suffixed
+				// sibling this pairing must not auto-accept (mirrors the
+				// indexMatchConfidenceCap safeguard in FilenameStemResolver, #132).
+				// Only admit it when the xmp's own name literally matches the
+				// sibling's base name including that suffix (no stripping involved).
+				if naming.Kind(n.FileName) == naming.SuffixIndex {
+					rawBase := strings.TrimSuffix(strings.ToLower(n.FileName), "."+strings.ToLower(n.FileExt))
+					if rawBase != nameWithoutXmp {
+						continue
+					}
+				}
+
+				seenParents[n.ID] = true
+				candidates = append(candidates, Candidate{
+					ParentID:   n.ID,
+					ChildID:    child.ID,
+					Rel:        "PROJECT_SIDECAR",
+					Confidence: 1.00,
+					Tier:       1,
+					Resolver:   "project_sidecar",
+					Evidence: map[string]any{
+						"project_file_path": child.FilePath,
+						"raw_reference":     n.FileName,
+						"role":              "sidecar",
+						"match_type":        "same_stem_sibling",
+					},
+				})
+			}
+		}
+	}
+
 	return candidates, nil
 }
 
