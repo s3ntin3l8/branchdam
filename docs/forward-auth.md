@@ -164,10 +164,11 @@ described in §3 and the same 401-on-missing-key behavior demonstrated in §5's 
 The overlay is what makes the *sync* land promptly, not what makes ingest work at all -- per
 Pillar 3 the (not-yet-built) workstation agent queues ingest events locally regardless of
 connectivity and executes `SYNC_HANDSHAKE` on reconnect. That offline-queue/dual-copy/rebase
-behavior is #234 ("SD-card ingest engine -- dual-copy writer, offline queue, Tier-0/3 rebase"),
-not #62 -- #62 is now scoped to only the tray app and the Luminar `catalog.db` reader (see
-`docs/roadmap.md`). Reachability just determines whether "reconnect" means "back on the LAN" or
-"the tailnet came up."
+behavior is `s3ntin3l8/branchdam-agent#2` ("SD-card ingest engine -- dual-copy writer, offline
+queue, Tier-0/3 rebase"; this repo's own #234, which originally tracked it, is closed in favor of
+that issue), not #62 -- #62 is now scoped to only the tray app and the Luminar `catalog.db`
+reader, which also ships in `branchdam-agent` (see `docs/roadmap.md`). Reachability just
+determines whether "reconnect" means "back on the LAN" or "the tailnet came up."
 
 ## 5. Verifying it works
 
@@ -177,13 +178,18 @@ curl -s https://dam.example.com/api/v1/me | jq
 # → {"kind": "user", "name": "your-username", "groups": [...]}
 
 # Agent path, with the shared key:
-curl -s -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.example.com/api/v1/agent/hello | jq
+curl -s -X POST -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.example.com/api/v1/agent/hello | jq
 # → {"ok": true, "version": "..."}
 
 # Agent path WITHOUT the key -- must be 401, not silently authenticated:
-curl -s -o /dev/null -w '%{http_code}\n' https://dam.example.com/api/v1/agent/hello
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dam.example.com/api/v1/agent/hello
 # → 401
 ```
+
+`hello` is registered `POST`-only, so `-X POST` above is required. Auth runs ahead of routing, so
+the no-key 401 check fires the same with or without it. A bare (`GET`) `curl` against this path is
+not an error, either -- the SPA's catch-all route (`GET /`) absorbs it and returns `200` with the
+HTML shell, not `405` and not JSON, which makes it easy to mistake for a working call.
 
 If `/api/v1/me` returns `"kind": "user"` with an empty `name` -- or a write request that used to
 work now returns `403 authentication required` -- confirm:

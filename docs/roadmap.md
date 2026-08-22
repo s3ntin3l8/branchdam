@@ -5,13 +5,14 @@ pipeline, Tier-2 graph resolution, auth, SSE, the Huma REST API, the React SPA, 
 CI with branch protection. This document phases everything that's left — both what the spec
 still asks for, and a large slice of what increment 1 *built but never wired up*.
 
-**Current state:** phases 0–9 are landed. Phase 10 (the workstation agent) split in two once a
-workflow-coverage audit showed most of its scope doesn't need the Tauri stack: #233 (DaVinci
-Resolve `.dam.json` hook) and #234 (SD-card ingest engine) ship in *this* repo, independent of
-the agent's repo-location decision. #62 stays open, trimmed to the system tray app and the
-Luminar `catalog.db` reader — the one piece that genuinely needs that decision, now made:
-`branchdam-agent`, a new separate repo (see #62 for the reasoning). See
-[`deploy.md`](deploy.md) for turning a phases-0–9 build into a running deployment, and
+**Current state:** phases 0–9 are landed. Phase 10 (the workstation agent) ships entirely in a new
+separate repo, `s3ntin3l8/branchdam-agent` (see #62 for the repo-location reasoning). This reverses
+an earlier record: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine) were
+briefly split out to ship in *this* repo, independent of the agent's repo-location decision, but
+both moved into `branchdam-agent` once that repo existed — #233's scope is tracked there as
+`branchdam-agent#5`, #234's as `branchdam-agent#2` (with `#1`/`#3`/`#4` as the surrounding
+scaffold/tray/queue work). This repo's own #233 and #234 are closed, pointing at their new home.
+See [`deploy.md`](deploy.md) for turning a phases-0–9 build into a running deployment, and
 [`workflow-coverage.md`](workflow-coverage.md) for what the current build does and doesn't
 support end-to-end.
 
@@ -69,7 +70,7 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
 | 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push — landed (see below) | 3 | Landed |
 | 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 | Landed |
 | 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 | Landed |
-| 10 | Workstation agent — split: #233/#234 file in this repo, tray app + Luminar reader move to `branchdam-agent` | 8 | Open (#233, #234, #62) |
+| 10 | Workstation agent — all of it ships in `s3ntin3l8/branchdam-agent` | 8 | Open (`branchdam-agent`#1–#6, this repo's #62) |
 
 Phase 2 has no dependencies and can land at any point — it closes a live authorization gap
 (`Principal.Groups` is parsed and echoed at `/api/v1/me` but nothing checks it today) rather than
@@ -83,13 +84,16 @@ confirming before any code is written. **Resolved as a no-go**, see
 [`docs/google-photos.md`](google-photos.md) — not on Google's restrictions (push survives, quota
 is ample, OAuth has a workable path pending confirmation) but on branchDAM's sync layer having no
 byte-transfer capability and no way to verify a Google Photos copy against `full_hash`. The
-workstation agent (phase 10) split once phase 8 had landed long enough to show what actually
-depends on it: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine) file in
-this repo, since neither needs a workstation UI or a new toolchain. #62 stays open, trimmed to the
-system tray app and the Luminar catalog reader, with its repo-location decision made —
-`branchdam-agent`, a new separate repo, for the same reasons `ansible-playbooks` (which deploys
-this repo) is itself separate: a different toolchain needs a different CI/release pipeline, and
-the two halves' release cadences are independent. See #62 for the full reasoning.
+workstation agent (phase 10) briefly split once phase 8 had landed long enough to show what
+actually depends on it: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine)
+were filed in this repo, on the reasoning that neither needed a workstation UI or the tray app's
+repo-location decision. That record is reversed: all of phase 10, including #233's and #234's
+scope, now ships in `s3ntin3l8/branchdam-agent`, a new separate repo — for the same reasons
+`ansible-playbooks` (which deploys this repo) is itself separate: a desktop installer's platform
+packaging/signing and release cadence are independent of the server's, not because the agent needs
+a different *language* (it's Go, same as this repo — see #62 for why that was reconsidered and
+kept Go rather than Rust/Tauri). This repo's #233 and #234 are closed, pointing at
+`branchdam-agent#5` and `branchdam-agent#2` respectively. See #62 for the full reasoning.
 
 Phase 7 is delivered: #53 shipped `remote_sync_state`'s first write path (`internal/sync`'s push
 state machine), #54 the EXIF/XMP inheritance endpoint, and #55 the Immich external-library
