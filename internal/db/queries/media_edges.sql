@@ -60,6 +60,31 @@ WITH RECURSIVE ancestors(id) AS (
 )
 SELECT ancestors.id FROM ancestors;
 
+-- name: ListVerifiedTier3Ancestors :many
+-- Walks ancestor lineage target->source for node ?1 (REJECTED edges and
+-- ARCHIVED nodes excluded) and returns every live ancestor on a
+-- TIER3_MASTER_ARCHIVE location with a verified full_hash.
+-- Used by internal/prune.Execute to re-verify the ancestor file on disk (via
+-- os.Lstat) immediately before deleting the candidate (#246).
+WITH RECURSIVE ancestors(ancestor_id) AS (
+    SELECT ?1 AS ancestor_id
+    UNION
+    SELECT e.source_node_id AS ancestor_id
+    FROM media_edges e
+    JOIN ancestors a ON e.target_node_id = a.ancestor_id
+    JOIN media_nodes n ON e.source_node_id = n.id
+    WHERE e.review_state <> 'REJECTED'
+      AND n.lifecycle_state <> 'ARCHIVED'
+)
+SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id
+FROM media_nodes
+WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
+  AND media_nodes.id <> ?1
+  AND media_nodes.storage_location_id IN (SELECT id FROM storage_locations WHERE tier = 'TIER3_MASTER_ARCHIVE')
+  AND media_nodes.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND media_nodes.full_hash IS NOT NULL
+  AND length(media_nodes.full_hash) = 64;
+
 -- name: ListDescendants :many
 -- Recursively list descendant node IDs.
 -- Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.

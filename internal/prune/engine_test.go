@@ -337,7 +337,7 @@ func TestExecuteSymlinkEscapeRefused(t *testing.T) {
 		{ID: tier3ID, Name: "t3", RootPath: tier3Root, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
 	})
 
-	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("escape")})
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: tier3File, mtimeUnix: oldMtime, fullHash: hash64("escape")})
 	candidateNode := seedNode(t, database, nodeSpec{locationID: tier1ID, path: linkPath, mtimeUnix: oldMtime})
 	seedEdge(t, database, master.ID, candidateNode.ID, "AUTO_ACCEPTED")
 
@@ -405,6 +405,58 @@ func TestExecuteAbortsWhenNoLongerEligible(t *testing.T) {
 	}
 }
 
+// TestExecuteAbortsWhenTier3AncestorUnreachable proves issue #246: a candidate
+// whose Tier-3 ancestor's DB row says ACTIVE and carries a verified full_hash,
+// but whose file on disk is unreachable (e.g. empty-mount / stale NFS handle /
+// deleted master), is refused with ErrAncestorUnreachable and its Tier-1 file is
+// never deleted -- preventing data loss when the DB is out of sync with disk.
+func TestExecuteAbortsWhenTier3AncestorUnreachable(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache.jpg")
+	if err := os.WriteFile(filePath, []byte("cache content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	fileInfo, err := os.Lstat(filePath)
+	if err != nil {
+		t.Fatalf("lstat file: %v", err)
+	}
+
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	tier3Root := t.TempDir()
+	tier3Path := filepath.Join(tier3Root, "unreachable_master.jpg") // NOT created on disk
+	tier3ID := seedLocation(t, database, "t3", tier3Root, "TIER3_MASTER_ARCHIVE", true, false)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
+
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: tier3Path, mtimeUnix: oldMtime, fullHash: hash64("unreachable")})
+	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
+
+	results := Execute(context.Background(), database, guard, []Candidate{
+		{
+			NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID,
+			MtimeUnix: fileInfo.ModTime().Unix(), SizeBytes: fileInfo.Size(),
+		},
+	}, cutoffUnix)
+
+	if len(results) != 1 || results[0].Purged {
+		t.Fatalf("results = %+v, want candidate refused (not purged)", results)
+	}
+	if !errors.Is(results[0].Err, ErrAncestorUnreachable) {
+		t.Errorf("err = %v, want ErrAncestorUnreachable", results[0].Err)
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		t.Errorf("Tier-1 cache file missing after refused purge: %v", err)
+	}
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Errorf("lifecycle_state = %q, want ACTIVE (must not be marked MISSING when purge refused)", after.LifecycleState)
+	}
+}
+
 // TestExecutePurgesFileAndMarksMissing proves the happy path: the file is
 // deleted from disk, the node lands in MISSING (never deleted -- rows are
 // never deleted, matching this repo's invariant), and superseded_by chains
@@ -422,10 +474,15 @@ func TestExecutePurgesFileAndMarksMissing(t *testing.T) {
 	}
 
 	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
-	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+	tier3Root := t.TempDir()
+	tier3Path := filepath.Join(tier3Root, "master.jpg")
+	if err := os.WriteFile(tier3Path, []byte("master content"), 0o644); err != nil {
+		t.Fatalf("write master file: %v", err)
+	}
+	tier3ID := seedLocation(t, database, "t3", tier3Root, "TIER3_MASTER_ARCHIVE", true, false)
 	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
 
-	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("purge")})
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: tier3Path, mtimeUnix: oldMtime, fullHash: hash64("purge")})
 	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
 	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
 
@@ -481,10 +538,15 @@ func TestExecuteRefusesWhenFileChangedSincePlan(t *testing.T) {
 	}
 
 	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
-	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+	tier3Root := t.TempDir()
+	tier3Path := filepath.Join(tier3Root, "master.jpg")
+	if err := os.WriteFile(tier3Path, []byte("master content"), 0o644); err != nil {
+		t.Fatalf("write master file: %v", err)
+	}
+	tier3ID := seedLocation(t, database, "t3", tier3Root, "TIER3_MASTER_ARCHIVE", true, false)
 	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
 
-	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("stale")})
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: tier3Path, mtimeUnix: oldMtime, fullHash: hash64("stale")})
 	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
 	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
 
@@ -542,10 +604,15 @@ func TestExecuteMarksMissingWhenFileAlreadyGone(t *testing.T) {
 	}
 
 	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
-	tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+	tier3Root := t.TempDir()
+	tier3Path := filepath.Join(tier3Root, "master.jpg")
+	if err := os.WriteFile(tier3Path, []byte("master content"), 0o644); err != nil {
+		t.Fatalf("write master file: %v", err)
+	}
+	tier3ID := seedLocation(t, database, "t3", tier3Root, "TIER3_MASTER_ARCHIVE", true, false)
 	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
 
-	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("gone")})
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: tier3Path, mtimeUnix: oldMtime, fullHash: hash64("gone")})
 	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
 	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
 
