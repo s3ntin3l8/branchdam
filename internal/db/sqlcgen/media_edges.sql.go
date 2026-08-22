@@ -49,6 +49,61 @@ func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]int64, error) 
 	return items, nil
 }
 
+const listVerifiedTier3Ancestors = `-- name: ListVerifiedTier3Ancestors :many
+WITH RECURSIVE ancestors(ancestor_id) AS (
+    SELECT ?1 AS ancestor_id
+    UNION
+    SELECT e.source_node_id AS ancestor_id
+    FROM media_edges e
+    JOIN ancestors a ON e.target_node_id = a.ancestor_id
+    JOIN media_nodes n ON e.source_node_id = n.id
+    WHERE e.review_state <> 'REJECTED'
+      AND n.lifecycle_state <> 'ARCHIVED'
+)
+SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id
+FROM media_nodes
+WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
+  AND media_nodes.id <> ?1
+  AND media_nodes.storage_location_id IN (SELECT id FROM storage_locations WHERE tier = 'TIER3_MASTER_ARCHIVE')
+  AND media_nodes.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND media_nodes.full_hash IS NOT NULL
+  AND length(media_nodes.full_hash) = 64
+`
+
+type ListVerifiedTier3AncestorsRow struct {
+	ID                int64
+	FilePath          string
+	StorageLocationID int64
+}
+
+// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
+// ARCHIVED nodes excluded) and returns every live ancestor on a
+// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
+// os.Lstat) immediately before deleting the candidate (#246).
+func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listVerifiedTier3Ancestors, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListVerifiedTier3AncestorsRow{}
+	for rows.Next() {
+		var i ListVerifiedTier3AncestorsRow
+		if err := rows.Scan(&i.ID, &i.FilePath, &i.StorageLocationID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAuditQueue = `-- name: ListAuditQueue :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        resolver, evidence_json, parent_alive, parent_missing

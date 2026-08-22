@@ -20,6 +20,11 @@ import (
 // Execute's own doc comment for why this re-check exists.
 var ErrNoLongerEligible = errors.New("node is no longer eligible for pruning: verified Tier-3 ancestor lost since Plan")
 
+// ErrAncestorUnreachable is returned for a candidate whose verified Tier-3
+// ancestor file on disk cannot be reached at Execute time -- see Execute's
+// own doc comment for why this check exists (#246).
+var ErrAncestorUnreachable = errors.New("verified Tier-3 ancestor file on disk is unreachable: refusing to delete candidate")
+
 // ErrFileChangedSincePlan is returned for a candidate whose on-disk file no
 // longer matches the (mtime, size) Plan recorded -- see Execute's own doc
 // comment for why this re-check exists.
@@ -67,6 +72,8 @@ type Result struct {
 }
 
 // Execute purges every candidate: re-verifies DB eligibility, re-verifies
+// every verified Tier-3 ancestor file is reachable on disk (os.Lstat,
+// aborting with ErrAncestorUnreachable if unreachable -- #246), re-verifies
 // the on-disk file hasn't changed since Plan, then storage.Guard.Remove
 // (so a read-only tier or a symlink escape is refused before any DB write
 // -- resolved and defeated by Guard.CheckWrite's own canonicalize step,
@@ -131,6 +138,22 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 			}
 			if !found {
 				return ErrNoLongerEligible
+			}
+
+			// Pre-delete re-verification of the Tier-3 ancestor's file on disk (#246):
+			// stat every verified Tier-3 ancestor. If any ancestor is unreachable,
+			// refuse to delete the Tier-1 candidate.
+			ancestors, err := q.ListVerifiedTier3Ancestors(ctx, c.NodeID)
+			if err != nil {
+				return err
+			}
+			if len(ancestors) == 0 {
+				return ErrNoLongerEligible
+			}
+			for _, a := range ancestors {
+				if _, statErr := os.Lstat(a.FilePath); statErr != nil {
+					return ErrAncestorUnreachable
+				}
 			}
 
 			info, statErr := os.Lstat(c.FilePath)

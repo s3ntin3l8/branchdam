@@ -130,6 +130,12 @@ type Querier interface {
 	// Recursively list ancestor node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
 	ListAncestors(ctx context.Context, id int64) ([]int64, error)
+	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
+	// ARCHIVED nodes excluded) and returns every live ancestor on a
+	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
+	// os.Lstat) immediately before deleting the candidate (#246).
+	ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error)
 	// The audit queue (spec §7) is this query over review_state, not a second
 	// table. v_media_edges_resolved's parent_missing works for every
 	// relationship_type -- the spec's deleted trigger never did. See

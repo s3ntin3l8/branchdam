@@ -52,6 +52,10 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	if err := os.WriteFile(filePath, []byte("proxy content"), 0o644); err != nil {
 		t.Fatalf("write proxy file: %v", err)
 	}
+	masterPath := filepath.Join(resolvedTier3, "master.jpg")
+	if err := os.WriteFile(masterPath, []byte("master content"), 0o644); err != nil {
+		t.Fatalf("write master file: %v", err)
+	}
 	// Backdated well past any cacheTTLHours cutoff, then read back via
 	// Lstat (not just reused verbatim) so the DB record matches exactly
 	// what Execute's own file-freshness re-check will observe -- avoids
