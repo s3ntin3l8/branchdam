@@ -219,6 +219,48 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
   }
   ```
 
+#### E. Node Status Endpoint (`POST /api/v1/agent/node-status`)
+
+> **The first agent-reachable read endpoint.** Every other `/api/v1/agent/*` route is
+> write-oriented (submit an event, record a rebase, or -- for `handshake` -- report watermarks
+> about events the agent itself submitted). This one exists so an agent can ask the server what
+> it currently knows about a batch of `NodeUUID`s it already has locally, without resolving a
+> filesystem path and without touching `storage.Guard` at all -- it is a pure
+> `media_nodes`/`storage_locations` read. Added to let `branchdam-agent`'s own `prune` subcommand
+> decide whether it's safe to delete its local-edit mirror of a file it already durably archived:
+> only once the server reports the node `ACTIVE`/`HIDDEN` and hash-verified. See
+> `docs/workflow-coverage.md` item 12 for how this differs from (and doesn't solve) real Tier-1
+> scratch pruning (`branchdam#230`).
+
+- **Request (`AgentNodeStatusInput`)**, capped at 200 UUIDs per call:
+  ```json
+  {
+    "nodeUuids": ["018f2345-6789-7abc-def0-123456789abc", "018f2345-6789-7abc-def0-123456789abd"]
+  }
+  ```
+- **Response (`AgentNodeStatusOutput` - Status 200 OK):**
+  ```json
+  {
+    "statuses": [
+      {
+        "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
+        "found": true,
+        "lifecycleState": "ACTIVE",
+        "tier": "TIER3_MASTER_ARCHIVE",
+        "verified": true
+      },
+      {
+        "nodeUuid": "018f2345-6789-7abc-def0-123456789abd",
+        "found": false,
+        "verified": false
+      }
+    ]
+  }
+  ```
+  `verified` mirrors `ListPrunableNodes`' own eligibility predicate exactly: `full_hash` non-NULL
+  and 64 hex characters (BLAKE3-256). `found: false` is not an error -- it just means no
+  `media_nodes` row currently has that `node_uuid`.
+
 ---
 
 ### 3.2. Companion Protobuf 3 Specification (`agent_protocol.proto`)

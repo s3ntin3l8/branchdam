@@ -3986,3 +3986,170 @@ func TestAgentRebase_NonTier3ReadOnlyRefusedEvenWithFile(t *testing.T) {
 		t.Fatalf("verify node untouched: %v", err)
 	}
 }
+
+func TestAgentNodeStatus_MissingKey_Unauthorized(t *testing.T) {
+	srv, _, _, _, _, _ := serverWithGuard(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/node-status", bytesOfJSON(t, map[string]any{
+		"nodeUuids": []string{"018f0000-0000-7000-8000-000000000001"},
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 Unauthorized", rr.Code)
+	}
+}
+
+func TestAgentNodeStatus_EmptyAndOversizedBatch_BadRequest(t *testing.T) {
+	srv, _, _, _, _, _ := serverWithGuard(t)
+
+	// Empty batch -> 400
+	reqEmpty := httptest.NewRequest(http.MethodPost, "/api/v1/agent/node-status", bytesOfJSON(t, map[string]any{
+		"nodeUuids": []string{},
+	}))
+	reqEmpty.Header.Set("Content-Type", "application/json")
+	reqEmpty.Header.Set("X-API-Key", routeTestAgentKey)
+	rrEmpty := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrEmpty, reqEmpty)
+	if rrEmpty.Code != http.StatusBadRequest {
+		t.Fatalf("empty batch status = %d, want 400", rrEmpty.Code)
+	}
+
+	// Over the 200-item cap -> 400
+	uuids := make([]string, 201)
+	for i := range uuids {
+		uuids[i] = fmt.Sprintf("018f0000-0000-7000-8000-%012d", i)
+	}
+	reqBig := httptest.NewRequest(http.MethodPost, "/api/v1/agent/node-status", bytesOfJSON(t, map[string]any{
+		"nodeUuids": uuids,
+	}))
+	reqBig.Header.Set("Content-Type", "application/json")
+	reqBig.Header.Set("X-API-Key", routeTestAgentKey)
+	rrBig := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rrBig, reqBig)
+	if rrBig.Code != http.StatusBadRequest {
+		t.Fatalf("oversized batch status = %d, want 400", rrBig.Code)
+	}
+}
+
+// TestAgentNodeStatus_ReportsLifecycleAndVerification is the core contract
+// test for the new POST /api/v1/agent/node-status endpoint: it's the first
+// agent-reachable read endpoint (every other /api/v1/agent/* route is
+// POST-only and write-oriented), and it exists so an agent can decide
+// whether its own local-edit mirror of an already-archived file is safe to
+// delete. Four nodes, one call, covering every branch a caller needs to
+// distinguish.
+func TestAgentNodeStatus_ReportsLifecycleAndVerification(t *testing.T) {
+	srv, database, _, staging, _, archive := serverWithGuard(t)
+	ctx := context.Background()
+
+	verifiedUUID := "018f0000-0000-7000-8000-0000000000a1"
+	unverifiedUUID := "018f0000-0000-7000-8000-0000000000a2"
+	archivedLifecycleUUID := "018f0000-0000-7000-8000-0000000000a3"
+	unknownUUID := "018f0000-0000-7000-8000-0000000000a4"
+
+	fullHash := strings.Repeat("ab", 32) // 64 hex chars, matching the CHECK constraint
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// 1. Live, on the Tier-3 archive location, hash verified -> the
+		// exact predicate ListPrunableNodes uses to authorize a purge.
+		if _, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          verifiedUUID,
+			StorageLocationID: 3, // archive, see serverWithGuard
+			FilePath:          filepath.Join(archive, "verified.mov"),
+			FileName:          "verified.mov",
+			FullHash:          &fullHash,
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		}); err != nil {
+			return err
+		}
+
+		// 2. Live, on staging (not yet rebased to Tier 3), full_hash never
+		// populated -- must report Verified=false.
+		if _, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          unverifiedUUID,
+			StorageLocationID: 1, // staging
+			FilePath:          filepath.Join(staging, "unverified.mov"),
+			FileName:          "unverified.mov",
+			LifecycleState:    "ACTIVE",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		}); err != nil {
+			return err
+		}
+
+		// 3. Found, no full_hash at all (the schema's own length CHECK makes
+		// writing anything shorter than 64 hex chars structurally
+		// impossible -- see CLAUDE.md), lifecycle ARCHIVED (superseded) --
+		// must report Found=true, LifecycleState=ARCHIVED, Verified=false.
+		_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          archivedLifecycleUUID,
+			StorageLocationID: 3,
+			FilePath:          filepath.Join(archive, "superseded.mov"),
+			FileName:          "superseded.mov",
+			LifecycleState:    "ARCHIVED",
+			GraphStatus:       "UNLINKED",
+			IndexingStatus:    "INDEXED_SHALLOW",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/node-status", bytesOfJSON(t, map[string]any{
+		"nodeUuids": []string{verifiedUUID, unverifiedUUID, archivedLifecycleUUID, unknownUUID},
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var res struct {
+		Statuses []struct {
+			NodeUUID       string `json:"nodeUuid"`
+			Found          bool   `json:"found"`
+			LifecycleState string `json:"lifecycleState"`
+			Tier           string `json:"tier"`
+			Verified       bool   `json:"verified"`
+		} `json:"statuses"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(res.Statuses) != 4 {
+		t.Fatalf("got %d statuses, want 4", len(res.Statuses))
+	}
+
+	byUUID := make(map[string]struct {
+		NodeUUID       string `json:"nodeUuid"`
+		Found          bool   `json:"found"`
+		LifecycleState string `json:"lifecycleState"`
+		Tier           string `json:"tier"`
+		Verified       bool   `json:"verified"`
+	})
+	for _, s := range res.Statuses {
+		byUUID[s.NodeUUID] = s
+	}
+
+	if v := byUUID[verifiedUUID]; !v.Found || !v.Verified || v.LifecycleState != "ACTIVE" || v.Tier != "TIER3_MASTER_ARCHIVE" {
+		t.Errorf("verified node status = %+v, want found+verified ACTIVE on TIER3_MASTER_ARCHIVE", v)
+	}
+	if v := byUUID[unverifiedUUID]; !v.Found || v.Verified || v.LifecycleState != "ACTIVE" {
+		t.Errorf("unverified node status = %+v, want found, not verified, ACTIVE", v)
+	}
+	if v := byUUID[archivedLifecycleUUID]; !v.Found || v.Verified || v.LifecycleState != "ARCHIVED" {
+		t.Errorf("archived-lifecycle node status = %+v, want found, not verified (no hash), ARCHIVED", v)
+	}
+	if v := byUUID[unknownUUID]; v.Found {
+		t.Errorf("unknown node status = %+v, want Found=false", v)
+	}
+}
