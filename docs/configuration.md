@@ -74,7 +74,9 @@ project-file parsers (`.dam.json`, `.drp`, `.fcpxml`, `.edl`) need to resolve th
 reference (an editing workstation's `D:\Footage\...` or `/Volumes/Video/...`, not the container's
 `/storage/projects/...`). Full resolution strategy, ambiguity policy, and worked examples:
 [`project-paths.md`](project-paths.md). Without at least one matching rule, project-file references
-fall through to basename+size fallback matching only.
+fall through to basename-only fallback matching (the size half of that fallback is aspirational --
+see [`project-paths.md`](project-paths.md#1-primary-path-resolution-strategy) -- no parser
+currently supplies a file size for it to filter on).
 
 ```yaml
 pathRewrites:

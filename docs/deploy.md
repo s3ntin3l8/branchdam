@@ -146,12 +146,18 @@ curl -s https://dam.yourdomain.example/healthz
 curl -s https://dam.yourdomain.example/api/v1/me | jq
 # → {"kind":"user","name":"you","email":"...","groups":[...]}
 
-curl -s -o /dev/null -w '%{http_code}\n' https://dam.yourdomain.example/api/v1/agent/hello
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dam.yourdomain.example/api/v1/agent/hello
 # → 401 (no key presented)
 
-curl -s -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.yourdomain.example/api/v1/agent/hello | jq
+curl -s -X POST -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.yourdomain.example/api/v1/agent/hello | jq
 # → {"ok":true,"version":"..."}
 ```
+
+`hello` is registered `POST`-only (`internal/httpapi/routes.go`); `-X POST` above is required, not
+optional. Auth runs ahead of routing, so the no-key check above is correct with or without it. But
+a bare (`GET`) `curl` against this path is *not* an error at all -- the SPA's catch-all route
+(`GET /`) absorbs it and returns `200` with the HTML shell, not `405` and not JSON. Forgetting
+`-X POST` here looks like a pass (`200`) even though it never reached the agent handler.
 
 If `/api/v1/me` returns an empty `name`, or a write that should work returns `403 authentication
 required`, see [`forward-auth.md` §5](forward-auth.md#5-verifying-it-works) — almost always

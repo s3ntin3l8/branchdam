@@ -60,6 +60,14 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
   }
   ```
 
+  **Not a resume mechanism, despite the request fields' names.** `lastProcessedEventUuid` and
+  `clientVersion` are accepted and parsed but never read by the handler
+  (`internal/httpapi/routes.go`'s `handleAgentHandshake`) -- they have no effect on the response or
+  on server state. `pendingEventsCount` is a **server-global** PENDING count, not scoped to the
+  calling agent. `acknowledgedEventUuid` only ever names the agent's most recent `PROCESSED` row --
+  a `FAILED` row is silently skipped, so its presence does not mean "everything up to here
+  succeeded."
+
 #### B. Event Submission (`POST /api/v1/agent/events`)
 - **Request (`AgentEventInput`):**
   ```json
@@ -75,6 +83,19 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
     "eventId": "018f2346-789a-7bcd-ef01-23456789abcd"
   }
   ```
+
+  **Submission is not idempotent at the transport level, despite §3.2's proto sketch.** The proto
+  below shows an `AgentEventRequest.event_uuid` field commented "client-minted UUIDv7 for
+  idempotency" and a matching `event_queue.event_uuid` column comment in
+  `internal/db/migrations/00001_init.sql`. Neither is true of the real REST wire format:
+  `AgentEventInput` has no `eventUuid` field at all, and the server mints `eventId` itself
+  (`uuid.NewV7()` in `handleAgentEvent`, `internal/httpapi/routes.go`) on every call, including a
+  retry of an identical request. A timed-out request that actually succeeded server-side and is
+  retried therefore enqueues a **second**, distinct row -- there is no request-level dedup. The
+  only idempotency available today is entity-level: re-sending `EVENT_NODE_CREATED` for a
+  `nodeUuid` that already exists is a no-op in the drainer, but a retry that also *corrects* a
+  field is silently ignored, since the first write already won. A real `eventUuid` field closing
+  this gap is a possible follow-up, not implemented today.
 
 #### C. The Five Event Payloads (`payload` JSON)
 
@@ -96,7 +117,11 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
 > agent holding a stale `node_uuid` from before a version collision should treat either as
 > terminal, not retry.
 
-1. **`EVENT_NODE_CREATED`:**
+1. **`EVENT_NODE_CREATED`:** `internal/agent/types.go`'s `NodeCreatedPayload` is normative --
+   19 fields in total (excluding the deprecated, ignored `storageLocationId`). The example below
+   is the full set; every field past `fastHash` is optional (a normal scan-side probe failure or a
+   client that can't compute one simply omits it), but omitting all of them just means an
+   agent-ingested master carries none of the promoted metadata a scan would have given it.
    ```json
    {
      "nodeUuid": "018f...",
@@ -106,9 +131,18 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
      "sizeBytes": 48291040,
      "mtimeUnix": 1723985000,
      "fastHash": "0123456789abcdef",
+     "fullHash": "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a",
+     "phash": 1152921504606846975,
      "cameraModel": "ILCE-7RM5",
      "cameraSerial": "4401923",
-     "lensModel": "FE 24-70mm F2.8 GM II"
+     "lensModel": "FE 24-70mm F2.8 GM II",
+     "capturedAtUnix": 1723984900,
+     "originalDocumentId": "xmp.did:018f2345-original",
+     "documentId": "xmp.did:018f2345-current",
+     "derivedFromId": "xmp.did:018f2345-parent",
+     "filenameStem": "raw_001",
+     "gpsLatitude": 48.858222,
+     "gpsLongitude": 2.2945
    }
    ```
 2. **`EVENT_EDGE_ATTACHED`:** `confidence` is required, in `(0, 1]`, and must be `>=` the
@@ -189,7 +223,14 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
 
 ### 3.2. Companion Protobuf 3 Specification (`agent_protocol.proto`)
 
-For architectural comparison and future migration reference, the equivalent protobuf definitions are defined below:
+For architectural comparison and future migration reference, the equivalent protobuf definitions are defined below.
+
+**This proto was never implemented, and two of its fields describe behavior the real REST API
+doesn't have -- treat §3.1 above as normative, this section as a hypothetical sketch only:**
+`AgentEventRequest.event_uuid` ("Client-minted UUIDv7 for idempotency") has no counterpart on the
+real `AgentEventInput` -- see the idempotency note under §3.1.B. And `AgentEventResponse`'s
+`{event_uuid, accepted}` shape doesn't match the real `AgentEventOutput`, which is just
+`{"eventId": "..."}` with no `accepted` field (a 202 response is itself the acceptance signal).
 
 ```protobuf
 syntax = "proto3";

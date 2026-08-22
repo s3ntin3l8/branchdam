@@ -14,7 +14,8 @@ audit queue, multi-hop lineage, EXIF/XMP inheritance, thumbnails, the Immich sca
 pruning engine, and the full `/api/v1/agent/*` contract with its `event_queue` drainer are wired
 at boot (`cmd/branchdam/main.go`). What is missing is any client that talks to that contract —
 `cmd/` contains exactly one binary. There is no SD-card ingest tool, no offline queue, no DaVinci
-Resolve post-render hook, and no Luminar catalog reader (phase 10, tracked in #29/#62).
+Resolve post-render hook, and no Luminar catalog reader (phase 10, tracked in #29/#62 here and, for
+the actual implementation work, `s3ntin3l8/branchdam-agent`).
 
 Three things follow from that:
 
@@ -25,10 +26,11 @@ Three things follow from that:
    fast path the background sweeper uses for other tiers, so only new or changed files are
    opened and hashed. This is a meaningful cost reduction for a multi-terabyte archive, but it's
    still a manual step, not the automatic pickup an ingest client would give (see §4).
-2. **A DaVinci Resolve post-render hook is buildable now, independent of everything else in phase
-   10.** `.dam.json` manifest ingestion already exists and yields confidence-1.00 lineage edges;
-   the only missing piece is the small script that writes the manifest, which does not require a
-   workstation agent, a database, or a UI.
+2. **A DaVinci Resolve post-render hook needs no tray app, database, or UI to build.** `.dam.json`
+   manifest ingestion already exists and yields confidence-1.00 lineage edges; the only missing
+   piece is the small script that writes the manifest. It ships as its own issue in
+   `s3ntin3l8/branchdam-agent` (`branchdam-agent#5`) alongside the rest of phase 10, not
+   independently of that repo's decision as originally recorded — see §5.
 3. **Local editing does not break lineage, provided the local copy mirrors the archive's folder
    structure.** See §3.
 
@@ -36,10 +38,10 @@ Three things follow from that:
 
 | # | Step | Status | Detail |
 |---|---|---|---|
-| 1–2 | SD card → one copy to the NAS archive, one to local NVMe for editing | Not built | Phase 10 (#29/#62). A manual copy works in the meantime; the operator loses bit-for-bit verification, safe-eject signalling, and an automatic folder mirror between the two copies |
+| 1–2 | SD card → one copy to the NAS archive, one to local NVMe for editing | Not built | Phase 10 (#29/#62 here, `s3ntin3l8/branchdam-agent#2` for the actual work). A manual copy works in the meantime; the operator loses bit-for-bit verification, safe-eject signalling, and an automatic folder mirror between the two copies |
 | 3 | Server learns about the new master | Manual, cheaper since #226 | `POST /api/v1/scan` (full) or `{differential: true}` (touch-only fast path for unchanged files, Tier-3 only) — still operator-triggered, not automatic; see §4 |
 | 4 | Master indexed: fast/full hash, EXIF, pHash, promoted camera columns | Works | Requires `exiftool` and `ffprobe`; degrades gracefully (fast-hash only) if either is absent |
-| 5 | Luminar: edit local copy → export to Tier 2 | Works via heuristics | No confidence-1.00 path for stills — the Luminar `catalog.db` reader is phase 10. Falls back to Tier 2 (filename stem, `XMP:OriginalDocumentID`) and Tier 3 (camera serial + lens + ±2s + pHash Hamming ≤ 10) |
+| 5 | Luminar: edit local copy → export to Tier 2 | Works via heuristics | No confidence-1.00 path for stills — the Luminar `catalog.db` reader is phase 10 (`s3ntin3l8/branchdam-agent#6`). Falls back to Tier 2 (filename stem, `XMP:OriginalDocumentID`) and Tier 3 (camera serial + lens + ±2s + pHash Hamming ≤ 10) |
 | 6 | DaVinci Resolve: edit local copy → render + `.dam.json` to Tier 2 | Consumer built, producer not | The `.dam.json` parser is live and yields confidence-1.00 edges. The post-render hook that writes the manifest does not exist yet — see §5 |
 | 7 | Tier-2 export auto-detected | Works | `watch: true` (fsnotify, local disk) or `sweep: true` (differential mtime poll, for NFS/SMB) |
 | 8 | Export linked to its source master | Works | Tier 1 (`.dam.json`/`.drp`/`.fcpxml`/`.edl`), Tier 2 (filename stem, `XMP:OriginalDocumentID`), Tier 3 (heuristic spatial-temporal) |
@@ -108,9 +110,9 @@ motivating cost (re-hashing) is what #226 addresses directly.
 
 The only way to record a master without an operator-triggered scan at all — differential or
 not — is the agent contract's `EVENT_NODE_CREATED` event, posted to `/api/v1/agent/events`, but
-no client exists yet that posts it. See the workstation-agent decomposition in
-[`roadmap.md`](roadmap.md#phase-10--workstation-agent) for the ingest-engine issue that closes
-this gap (#234), and its notes on what an `EVENT_NODE_CREATED` payload can and cannot carry today
+no client exists yet that posts it. See the phase-10 row in [`roadmap.md`](roadmap.md#phases) for
+how that work is tracked, and `s3ntin3l8/branchdam-agent#2` for the ingest-engine issue that
+closes this gap, with its notes on what an `EVENT_NODE_CREATED` payload can and cannot carry today
 (no perceptual hash, no GPS, unless computed client-side and included explicitly).
 
 **A differential pass never backfills a missing or unverified `full_hash`.** `sweepUnchanged`
@@ -125,7 +127,7 @@ pruning for any node whose hash was never computed. A periodic full (non-differe
 still what verifies integrity and keeps Tier-1 pruning eligibility current — differential is a
 cost reduction for routine "did anything change" passes, not a full scan's replacement.
 
-## 5. The DaVinci Resolve hook is independently buildable
+## 5. The DaVinci Resolve hook needs no dedicated `PROJECTS` tier
 
 Because `ProjectSidecarResolver` selects its parser by file extension, not by the tier of the
 location the file lives in, and `indexer.Walk` applies no extension filter, a `.dam.json`
@@ -133,8 +135,11 @@ manifest written into a Tier-2 exports location is parsed exactly the same as on
 dedicated projects tier. Combined with local project files being otherwise unreachable (see §7),
 the practical consequence is that **no `PROJECTS` storage location is needed for this workflow at
 all** — a Resolve post-render hook that writes `render_name.dam.json` alongside its export into
-the already-scanned exports directory is sufficient on its own, with no dependency on the rest of
-the workstation-agent scope.
+the already-scanned exports directory is sufficient on its own. This was originally filed as
+independently buildable in *this* repo (#233), on the strength of that same
+no-`PROJECTS`-tier argument; the hook itself still needs nothing beyond what's described above, but
+the issue tracking it has since moved to `s3ntin3l8/branchdam-agent#5`, alongside the rest of
+phase 10 (see `docs/roadmap.md`).
 
 ## 6. Immich integration
 
