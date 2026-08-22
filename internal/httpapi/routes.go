@@ -1887,6 +1887,12 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 			}
 			entry.Found = true
 			entry.LifecycleState = node.LifecycleState
+			// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
+			// exactly rather than additionally validating hex charset (the schema's own
+			// full_hash CHECK also enforces length only, not charset) -- this endpoint's
+			// contract is to answer identically to that predicate, not a stricter one,
+			// so a caller can't observe a divergence between the two. Low residual risk:
+			// hashing.FullHash (the only writer) always emits lowercase hex.
 			entry.Verified = node.FullHash != nil && len(*node.FullHash) == 64
 			loc, err := q.GetStorageLocationByID(ctx, node.StorageLocationID)
 			if err != nil {
