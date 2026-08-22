@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0](https://github.com/s3ntin3l8/branchdam/compare/v0.4.0...v0.5.0) (2026-08-21)
+
+
+### Features
+
+* **agent,pipeline:** DJI .SRT single-point geotagging, plus GPS on the agent-ingest path ([#250](https://github.com/s3ntin3l8/branchdam/issues/250)) ([2967f5f](https://github.com/s3ntin3l8/branchdam/commit/2967f5f3edcd65da5485345c3be8e8dcd44d8c96))
+* **pipeline,httpapi:** differential re-index option for Tier-3 locations ([#254](https://github.com/s3ntin3l8/branchdam/issues/254)) ([09d8384](https://github.com/s3ntin3l8/branchdam/commit/09d8384429348737885fb192b7b061d91e3d80bd))
+* **probe:** merge sidecar .xmp metadata into RAW probe results ([#247](https://github.com/s3ntin3l8/branchdam/issues/247)) ([b9108a2](https://github.com/s3ntin3l8/branchdam/commit/b9108a2e0c913e5231628367f19ef14c6c7fc730))
+* **thumbs:** video poster thumbnails via ffmpeg ([#248](https://github.com/s3ntin3l8/branchdam/issues/248)) ([abdbc29](https://github.com/s3ntin3l8/branchdam/commit/abdbc2900d0a9898a26626e11916f0f7e566c238))
+
+
+### Bug Fixes
+
+* **graph,pipeline:** DJI-style .LRF proxies link with arbitrary direction and a meaningless label ([#244](https://github.com/s3ntin3l8/branchdam/issues/244)) ([e3abb92](https://github.com/s3ntin3l8/branchdam/commit/e3abb92f068e4df49093034603f2488b2eb3e03a))
+* **pipeline,httpapi:** cacheTtlHours/watch/sweep silently orphan on a rootPath edit ([#252](https://github.com/s3ntin3l8/branchdam/issues/252)) ([779278a](https://github.com/s3ntin3l8/branchdam/commit/779278a61bdbeede05083b8b434c39c092eb0d34))
+* **pipeline:** empty Tier-3 mount marks the entire archive MISSING ([#245](https://github.com/s3ntin3l8/branchdam/issues/245)) ([32b0514](https://github.com/s3ntin3l8/branchdam/commit/32b05145f9a4df6c286fc27664a0659a6acf9939))
+* **thumbs,httpapi:** restoring branchdam.db without /data/thumbs leaves every node stuck READY ([#241](https://github.com/s3ntin3l8/branchdam/issues/241)) ([f1a5585](https://github.com/s3ntin3l8/branchdam/commit/f1a5585765329c2e199a4cdeb0390c0f6e261805))
+* **thumbs:** ListPendingThumbnails has no tier filter ([#243](https://github.com/s3ntin3l8/branchdam/issues/243)) ([eea3909](https://github.com/s3ntin3l8/branchdam/commit/eea3909e851b770bc8e6af35c70a7e6a005ea833))
+
 ## [0.4.0](https://github.com/s3ntin3l8/branchdam/compare/v0.3.1...v0.4.0) (2026-08-21)
 
 
