@@ -93,10 +93,17 @@ One entry per mounted storage tier. `tier` must be one of `TIER0_LOCAL_STAGING`,
 every startup (`seedStorageLocations`, keyed on `rootPath`'s `UNIQUE` constraint) — no separate
 migration step needed when a mount is added, changed, or removed from config.
 
-A `TIER0_LOCAL_STAGING` location is scanned and indexed like any other tier, but its nodes never
-get a generated thumbnail (`ListPendingThumbnails` excludes this tier by design, #231) — bytes
-staged there aren't guaranteed to be the final synced copy the server should be spending
-generation work on. This is a permanent property of the tier, not a bug to work around.
+A `TIER0_LOCAL_STAGING` location serves as the server-side registration stub for
+`branchdam-agent`'s offline ingest queue drain (`EVENT_NODE_CREATED` posted as soon as a file lands
+on a workstation, before its bytes reach the Tier-3 archive). It needs no real media bytes on disk
+on the server host — an empty directory satisfies `storage.Guard`'s `EvalSymlinks` canonicalize
+step, allowing `storage.Guard.Resolve` to match the path and track the node metadata immediately.
+Per-machine subtree paths (`/storage/staging/<agentId>/...`) should be used to prevent path
+collisions across multiple workstations. A `TIER0_LOCAL_STAGING` location is scanned and indexed
+like any other tier, but its nodes never get a generated thumbnail (`ListPendingThumbnails`
+excludes this tier by design, #231) — the node rebases to Tier 3 shortly after, so generation work
+is skipped until the final synced master arrives. This is a permanent property of the tier, not a
+bug to work around.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|

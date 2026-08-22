@@ -55,7 +55,7 @@ immich:
   libraryId: ""
   exportPath: __REPO_ROOT__/data/storage/exports/immich
 
-# Four locations, one per tier that isn't Tier 3's read-only special case --
+# Five locations, one per tier that isn't Tier 3's read-only special case --
 # every rootPath under data/storage/, which `make dev-config` creates.
 # Deliberately no `watch`/`sweep`/`prunable` on any entry: continuous ingest
 # and cache pruning aren't needed to boot a dev server, and leaving them out
@@ -65,6 +65,10 @@ storageLocations:
     rootPath: __REPO_ROOT__/data/storage/archive
     tier: TIER3_MASTER_ARCHIVE
     readOnly: true
+
+  - name: staging
+    rootPath: __REPO_ROOT__/data/storage/staging
+    tier: TIER0_LOCAL_STAGING
 
   - name: exports
     rootPath: __REPO_ROOT__/data/storage/exports

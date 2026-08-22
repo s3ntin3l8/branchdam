@@ -33,7 +33,8 @@ for a multi-terabyte archive over NFS this is a multi-hour operation, not a rout
 |---|---|---|
 | `TIER3_MASTER_ARCHIVE` | Camera originals | NAS, over NFS, **read-only** at both the compose layer (`:ro`) and `config.yaml` (`readOnly: true`) |
 | `TIER2_EXPORTS` | Renders/exports, shared with Immich | Local disk on the server host, read-write |
-| `TIER0_LOCAL_STAGING` / `TIER1_LOCAL_SCRATCH` | Workstation NVMe | Not mounted into the server at all — see §5 |
+| `TIER0_LOCAL_STAGING` | Workstation ingest staging root | Server-local mount/directory (`/storage/staging`, `rw`) — empty stub satisfying `storage.Guard.Resolve` for agent offline queue drain; actual bytes remain on workstation NVMe until synced |
+| `TIER1_LOCAL_SCRATCH` | Workstation editing cache | Not mounted into the server at all — see §5 |
 | `PROJECTS` | — | Not configured — project files are workstation-local; see `workflow-coverage.md` §7 |
 
 ## 3. Constraints
@@ -71,14 +72,21 @@ satisfy; how that compose file gets rendered and applied is out of scope for thi
 own deployment target uses plain Docker Compose instead, [`deploy.md`](deploy.md) is the runbook
 to follow directly.
 
-## 5. Local editing tiers are intentionally not server-visible
+## 5. Local editing tiers: scratch vs. staging visibility
 
-`TIER0_LOCAL_STAGING` and `TIER1_LOCAL_SCRATCH` are not mounted into the server at all in this
-topology — they are workstation-local NVMe, and mounting them over the network to make them
-server-visible would trade away the local editing performance this topology is built to preserve.
-The practical consequence: cache pruning (`POST /api/v1/prune`, `cacheTtlHours`) has nothing to
-act on, since it requires a server-visible path to delete from. This is expected, not a
+`TIER1_LOCAL_SCRATCH` is not mounted into the server at all in this topology — it is
+workstation-local NVMe, and mounting it over the network to make it server-visible would trade
+away the local editing performance this topology is built to preserve. The practical
+consequence: cache pruning (`POST /api/v1/prune`, `cacheTtlHours`) has nothing to act on on the
+server host, since it requires a server-visible path to delete from. This is expected, not a
 misconfiguration — see `workflow-coverage.md`'s step 12.
+
+`TIER0_LOCAL_STAGING`, by contrast, is configured in the server's `config.yaml` (and mounted as an
+empty directory, e.g. `/storage/staging`) purely so `storage.Guard.Resolve` recognizes paths
+submitted during the agent's offline queue drain (`/storage/staging/<agentId>/...`) before files
+are synced and rebased to the Tier-3 archive. The actual media bytes do not need to be transferred
+or mounted into `/storage/staging` — an empty directory satisfies `storage.Guard`'s symlink
+canonicalization and lets the node metadata be tracked immediately.
 
 ## 6. Reaching this server when a workstation isn't on the LAN
 

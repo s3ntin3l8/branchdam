@@ -25,7 +25,7 @@ dev-config: ## Render config.dev.yaml -> $(CONFIG) if missing, and create data/s
 		sed "s|__REPO_ROOT__|$$esc_root|g" config.dev.yaml > $(CONFIG); \
 		echo "wrote $(CONFIG) from config.dev.yaml"; \
 	fi
-	@mkdir -p data/storage/archive data/storage/exports data/storage/projects data/storage/scratch
+	@mkdir -p data/storage/archive data/storage/staging data/storage/exports data/storage/projects data/storage/scratch
 
 dev: web-stub ## Run the server with live config, building web/dist first if missing
 	go run ./cmd/branchdam -config config.yaml
