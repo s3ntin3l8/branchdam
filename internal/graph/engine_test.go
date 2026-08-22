@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -765,6 +766,164 @@ func TestFilenameStemProxyExtNeverOverridesIndexAnchorInvariant(t *testing.T) {
 		}
 		if len(edges) != 0 {
 			t.Fatalf("got %d edges, want 0 -- without the fix, the proxy-ext swap seats the index-suffixed node (DJI_0001-2.MP4) as the parent, violating #132: %+v", len(edges), edges)
+		}
+	})
+}
+
+// TestFilenameStemDJISRTLinking tests issue #251: .srt flight-telemetry sidecars
+// are content-sniffed using djisrt.ParseFirstPoint before proposing PROXY_OF edges,
+// preventing ordinary movie subtitles from generating spurious graph links.
+func TestFilenameStemDJISRTLinking(t *testing.T) {
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+
+	t.Run("valid DJI telemetry srt links to video as PROXY_OF", func(t *testing.T) {
+		dir := t.TempDir()
+		srtPath := filepath.Join(dir, "DJI_0001.SRT")
+		srtContent := "1\n00:00:00,000 --> 00:00:01,000\n[iso: 100] [latitude: 30.123456] [longitude: -81.123456]\n"
+		if err := os.WriteFile(srtPath, []byte(srtContent), 0o644); err != nil {
+			t.Fatalf("write srt: %v", err)
+		}
+
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: filepath.Join(dir, "DJI_0001.MP4"), FileName: "DJI_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("1", 16),
+		})
+		srtNode := seedNode(t, database, locationID, nodeFixture{
+			Path: srtPath, FileName: "DJI_0001.SRT", FileExt: "srt",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("2", 16),
+		})
+
+		engine := newEngine(database)
+
+		// Resolving srt as child: video must be parent, srt must be child.
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(srtNode))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(srt): %v", err)
+		}
+		if len(edges) != 1 {
+			t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
+		}
+		if edges[0].SourceNodeID != video.ID || edges[0].TargetNodeID != srtNode.ID {
+			t.Errorf("edge = %d->%d, want video(%d)->srt(%d)", edges[0].SourceNodeID, edges[0].TargetNodeID, video.ID, srtNode.ID)
+		}
+		if edges[0].RelationshipType != "PROXY_OF" {
+			t.Errorf("relationship_type = %q, want PROXY_OF", edges[0].RelationshipType)
+		}
+
+		// Resolving video in sequence converges on the same edge without cycle error.
+		secondEdges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(video))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(video): %v", err)
+		}
+		if len(secondEdges) != 1 || secondEdges[0].ID != edges[0].ID {
+			t.Errorf("second resolve failed to converge on same edge: %+v", secondEdges)
+		}
+	})
+
+	t.Run("standard movie subtitle srt emits zero edges", func(t *testing.T) {
+		dir := t.TempDir()
+		srtPath := filepath.Join(dir, "movie.srt")
+		srtContent := "1\n00:00:01,000 --> 00:00:04,000\nHello, world!\n"
+		if err := os.WriteFile(srtPath, []byte(srtContent), 0o644); err != nil {
+			t.Fatalf("write srt: %v", err)
+		}
+
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: filepath.Join(dir, "movie.mp4"), FileName: "movie.mp4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("3", 16),
+		})
+		srtNode := seedNode(t, database, locationID, nodeFixture{
+			Path: srtPath, FileName: "movie.srt", FileExt: "srt",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("4", 16),
+		})
+
+		engine := newEngine(database)
+
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(srtNode))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(srt): %v", err)
+		}
+		if len(edges) != 0 {
+			t.Fatalf("got %d edges, want 0 for non-telemetry subtitle: %+v", len(edges), edges)
+		}
+
+		edges2, _, err := engine.ResolveAndCommit(ctx, asGraphNode(video))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit(video): %v", err)
+		}
+		if len(edges2) != 0 {
+			t.Fatalf("got %d edges, want 0 for non-telemetry subtitle: %+v", len(edges2), edges2)
+		}
+	})
+
+	t.Run("valid DJI telemetry srt in different directory emits zero edges", func(t *testing.T) {
+		dir1 := t.TempDir()
+		dir2 := t.TempDir()
+		srtPath := filepath.Join(dir1, "DJI_0001.SRT")
+		srtContent := "1\n00:00:00,000 --> 00:00:01,000\n[latitude: 30.123456] [longitude: -81.123456]\n"
+		if err := os.WriteFile(srtPath, []byte(srtContent), 0o644); err != nil {
+			t.Fatalf("write srt: %v", err)
+		}
+
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		seedNode(t, database, locationID, nodeFixture{
+			Path: filepath.Join(dir2, "DJI_0001.MP4"), FileName: "DJI_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("5", 16),
+		})
+		srtNode := seedNode(t, database, locationID, nodeFixture{
+			Path: srtPath, FileName: "DJI_0001.SRT", FileExt: "srt",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("6", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(srtNode))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit: %v", err)
+		}
+		if len(edges) != 0 {
+			t.Fatalf("got %d edges, want 0 for different directory: %+v", len(edges), edges)
+		}
+	})
+
+	t.Run("valid DJI telemetry srt next to non-video emits zero edges", func(t *testing.T) {
+		dir := t.TempDir()
+		srtPath := filepath.Join(dir, "DJI_0001.SRT")
+		srtContent := "1\n00:00:00,000 --> 00:00:01,000\n[latitude: 30.123456] [longitude: -81.123456]\n"
+		if err := os.WriteFile(srtPath, []byte(srtContent), 0o644); err != nil {
+			t.Fatalf("write srt: %v", err)
+		}
+
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		seedNode(t, database, locationID, nodeFixture{
+			Path: filepath.Join(dir, "DJI_0001.JPG"), FileName: "DJI_0001.JPG", FileExt: "jpg",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("7", 16),
+		})
+		srtNode := seedNode(t, database, locationID, nodeFixture{
+			Path: srtPath, FileName: "DJI_0001.SRT", FileExt: "srt",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("8", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(srtNode))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit: %v", err)
+		}
+		if len(edges) != 0 {
+			t.Fatalf("got %d edges, want 0 when paired with non-video: %+v", len(edges), edges)
 		}
 	})
 }

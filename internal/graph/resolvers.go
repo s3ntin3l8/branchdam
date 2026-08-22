@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
+	"github.com/s3ntin3l8/branchdam/internal/djisrt"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/naming"
 	"github.com/s3ntin3l8/branchdam/internal/projectfile"
@@ -44,26 +45,39 @@ var exportExts = map[string]bool{
 // FilenameStemResolver) specifically so extending it is a one-line change,
 // not a rewrite of the gating logic.
 //
-// ".srt" is deliberately NOT here, despite #229 adding a DJI flight-
-// telemetry .srt parser (internal/djisrt) in the same PR that first tried
-// this: unlike ".lrf" (DJI-proprietary, no collision risk), ".srt" is the
-// universal SubRip subtitle extension. internal/indexer.Walk has no
-// extension allowlist, so an ORDINARY movie.mp4/movie.srt pair (a
-// downloaded subtitle, nothing to do with DJI) reaches
-// FilenameStemResolver in any real catalog -- adding ".srt" here would
-// force every such pair into a spurious PROXY_OF edge (confidence 0.70,
-// clears the review floor), landing in the audit queue for every video +
-// subtitle pair in ANY catalog, not just drone footage. Reverted before
-// merge once this was caught in review. A content-sniff-based approach
-// (distinguishing a DJI telemetry .srt from a real subtitle by parsing its
-// content, not just its extension) is tracked in #251 -- do not re-add
-// ".srt" here without that.
+// ".srt" is deliberately NOT in proxyExts: unlike ".lrf" (DJI-proprietary, no
+// collision risk), ".srt" is the universal SubRip subtitle extension.
+// FilenameStemResolver gates ".srt" on content sniffing via internal/djisrt
+// (#251) so ordinary movie subtitles are never misclassified as proxies.
 var proxyExts = map[string]bool{
 	"lrf": true,
 }
 
 func isProxyExt(ext string) bool {
 	return proxyExts[strings.ToLower(strings.TrimPrefix(ext, "."))]
+}
+
+func isSrtExt(ext string) bool {
+	return strings.EqualFold(strings.TrimPrefix(ext, "."), "srt")
+}
+
+func isVideoExt(ext string) bool {
+	norm := strings.ToLower(strings.TrimPrefix(ext, "."))
+	return norm == "mp4" || norm == "mov"
+}
+
+func sniffDjiTelemetry(filePath string) (djisrt.Point, bool) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return djisrt.Point{}, false
+	}
+	defer func() { _ = f.Close() }()
+
+	pt, err := djisrt.ParseFirstPoint(f)
+	if err != nil {
+		return djisrt.Point{}, false
+	}
+	return pt, true
 }
 
 // inferRelationship picks the relationship_type both Tier-2 resolvers use,
@@ -219,6 +233,73 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 			// parent rather than the child. Emit nothing rather than a
 			// candidate that would otherwise be scored and possibly
 			// auto-accepted.
+			continue
+		}
+
+		// #251: an .srt companion file sharing a stem with a video is ONLY
+		// treated as a proxy candidate if both are in the same directory,
+		// and the .srt file sniffs as genuine DJI flight telemetry via
+		// djisrt.ParseFirstPoint. Ordinary subtitle files (.srt alongside movies)
+		// are ignored rather than spuriously proposing PROXY_OF edges.
+		hasSrt := isSrtExt(child.FileExt) || isSrtExt(parent.FileExt)
+		if hasSrt {
+			if isSrtExt(child.FileExt) && isSrtExt(parent.FileExt) {
+				continue
+			}
+			var srtNode, videoNode Node
+			if isSrtExt(child.FileExt) {
+				srtNode, videoNode = child, parent
+			} else {
+				srtNode, videoNode = parent, child
+			}
+			if !isVideoExt(videoNode.FileExt) || filepath.Dir(srtNode.FilePath) != filepath.Dir(videoNode.FilePath) {
+				continue
+			}
+
+			pt, ok := sniffDjiTelemetry(srtNode.FilePath)
+			if !ok {
+				continue
+			}
+
+			// Force direction: video is parent, .srt is child.
+			childNode, parentNode := srtNode, videoNode
+			proxySwapped := (child.ID != srtNode.ID)
+			if proxySwapped && indexGated {
+				continue
+			}
+
+			confidence := 0.70
+			evidence := map[string]any{
+				"filename_stem":  childNode.FilenameStem,
+				"dji_telemetry":  true,
+				"same_directory": true,
+				"gps_latitude":   pt.Latitude,
+				"gps_longitude":  pt.Longitude,
+			}
+			if sameCaptureDay(childNode.CapturedAt, parentNode.CapturedAt) {
+				confidence += 0.15
+				evidence["same_capture_day"] = true
+			}
+			if childNode.CameraModel != "" && childNode.CameraModel == parentNode.CameraModel {
+				confidence += 0.10
+				evidence["same_camera_model"] = true
+			}
+			if confidence > 0.90 {
+				confidence = 0.90
+			}
+			if indexGated && confidence > indexMatchConfidenceCap {
+				confidence = indexMatchConfidenceCap
+			}
+
+			candidates = append(candidates, Candidate{
+				ParentID:   parentNode.ID,
+				ChildID:    childNode.ID,
+				Rel:        "PROXY_OF",
+				Confidence: confidence,
+				Tier:       2,
+				Resolver:   "filename_stem",
+				Evidence:   evidence,
+			})
 			continue
 		}
 
