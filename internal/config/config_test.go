@@ -81,6 +81,9 @@ storageLocations:
     rootPath: /storage/archive
     tier: TIER3_MASTER_ARCHIVE
     readOnly: true
+  - name: staging
+    rootPath: /storage/staging
+    tier: TIER0_LOCAL_STAGING
   - name: scratch
     rootPath: /storage/scratch
     tier: TIER1_LOCAL_SCRATCH
@@ -90,14 +93,39 @@ storageLocations:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.StorageLocations) != 2 {
-		t.Fatalf("len(StorageLocations) = %d, want 2", len(cfg.StorageLocations))
+	if len(cfg.StorageLocations) != 3 {
+		t.Fatalf("len(StorageLocations) = %d, want 3", len(cfg.StorageLocations))
 	}
 	if !cfg.StorageLocations[0].ReadOnly || cfg.StorageLocations[0].Tier != "TIER3_MASTER_ARCHIVE" {
 		t.Errorf("StorageLocations[0] = %+v, want read-only TIER3_MASTER_ARCHIVE", cfg.StorageLocations[0])
 	}
-	if !cfg.StorageLocations[1].Prunable || cfg.StorageLocations[1].Tier != "TIER1_LOCAL_SCRATCH" {
-		t.Errorf("StorageLocations[1] = %+v, want prunable TIER1_LOCAL_SCRATCH", cfg.StorageLocations[1])
+	if cfg.StorageLocations[1].Tier != "TIER0_LOCAL_STAGING" || cfg.StorageLocations[1].RootPath != "/storage/staging" {
+		t.Errorf("StorageLocations[1] = %+v, want /storage/staging TIER0_LOCAL_STAGING", cfg.StorageLocations[1])
+	}
+	if !cfg.StorageLocations[2].Prunable || cfg.StorageLocations[2].Tier != "TIER1_LOCAL_SCRATCH" {
+		t.Errorf("StorageLocations[2] = %+v, want prunable TIER1_LOCAL_SCRATCH", cfg.StorageLocations[2])
+	}
+}
+
+func TestLoadExampleConfig(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("Load(config.example.yaml): %v", err)
+	}
+	var foundStaging bool
+	for _, loc := range cfg.StorageLocations {
+		if loc.Tier == "TIER0_LOCAL_STAGING" {
+			foundStaging = true
+			if loc.Name != "staging" {
+				t.Errorf("staging location name = %q, want %q", loc.Name, "staging")
+			}
+			if loc.RootPath != "/storage/staging" {
+				t.Errorf("staging location rootPath = %q, want %q", loc.RootPath, "/storage/staging")
+			}
+		}
+	}
+	if !foundStaging {
+		t.Error("config.example.yaml missing TIER0_LOCAL_STAGING storage location")
 	}
 }
 

@@ -82,6 +82,16 @@ storageLocations:
     # watch and sweep are never honored here: the Tier 3 master archive is
     # read-only, so nothing on it can ever be ingested
 
+  - name: staging
+    rootPath: /storage/staging
+    tier: TIER0_LOCAL_STAGING
+    # Staging container root for branchdam-agent's offline ingest queue drain
+    # (EVENT_NODE_CREATED before files rebase to Tier-3 archive). Needs no
+    # real content on disk — an empty directory satisfies storage.Guard's
+    # canonicalization; actual bytes reside on workstation local storage.
+    # Per-machine subtree convention: /storage/staging/<agentId>/... to avoid
+    # path collisions across multiple workstations.
+
   - name: exports
     rootPath: /storage/exports
     tier: TIER2_EXPORTS
