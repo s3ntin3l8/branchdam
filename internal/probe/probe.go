@@ -19,8 +19,8 @@
 // through the exact same fixed, never-writes argv as the RAW, so the
 // allowlist property holds for both invocations. Registering ".xmp" as its
 // own internal/projectfile extension so it stops surfacing as an orphan
-// media_nodes row (gap 2) is deliberately out of scope here -- tracked as a
-// separate follow-up issue.
+// media_nodes row is handled via internal/projectfile.XMPParser and
+// ProjectSidecarResolver (#249).
 //
 // ffmpeg (as opposed to ffprobe) was historically deliberately excluded --
 // see the Dockerfile's ffprobe stage comment, prior to #224. ExtractVideoPoster
@@ -368,14 +368,12 @@ func (p *Prober) Exif(ctx context.Context, path string) (*ExifResult, error) {
 // fail probing of the RAW it sits next to.
 //
 // Guards against two failure modes:
-//   - path itself already IS a ".xmp" (gap 2 -- registering ".xmp" as its
-//     own internal/projectfile extension so indexer.Walk stops handing it
-//     to Exif at all -- is explicitly out of scope for this PR, so a bare
-//     .xmp can still reach here today). sidecarPath("x.xmp") is a fixed
-//     point ("x.xmp" again), so without this check Exif would spawn a
-//     second exiftool against the same file and merge its own row into
-//     itself on every sidecar node, doubling the subprocess cost for no
-//     effect.
+//   - path itself already IS a ".xmp" (even with .xmp registered in
+//     internal/projectfile, a direct probe on an .xmp can still reach here).
+//     sidecarPath("x.xmp") is a fixed point ("x.xmp" again), so without this
+//     check Exif would spawn a second exiftool against the same file and merge
+//     its own row into itself on every sidecar node, doubling the subprocess
+//     cost for no effect.
 //   - os.Lstat, deliberately not os.Stat -- same non-following stat used by
 //     internal/prune.Execute's pre-delete check (see CLAUDE.md's key
 //     invariants): reject a symlink outright rather than following it, so

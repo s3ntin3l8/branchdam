@@ -1986,3 +1986,67 @@ func TestSidecarPartialResolutionRetriedWithoutDoubleCounting(t *testing.T) {
 		}
 	}
 }
+
+func TestRunScanResolvesXMPSidecar(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	rawPath := filepath.Join(resolvedRoot, "photo.arw")
+	if err := os.WriteFile(rawPath, []byte("raw image data"), 0o644); err != nil {
+		t.Fatalf("write raw: %v", err)
+	}
+
+	xmpPath := filepath.Join(resolvedRoot, "photo.xmp")
+	xmpContent := `<x:xmpmeta xmlns:x="adobe:ns:meta/">
+		<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+			<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"/>
+		</rdf:RDF>
+	</x:xmpmeta>`
+	if err := os.WriteFile(xmpPath, []byte(xmpContent), 0o644); err != nil {
+		t.Fatalf("write xmp: %v", err)
+	}
+
+	database := openTestDB(t)
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.Engine = graph.NewEngine(database, nil, graph.NewProjectSidecarResolver(nil))
+
+	location := storage.Location{
+		ID: locationID, Name: "test-xmp-scan", RootPath: resolvedRoot,
+		Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false,
+	}
+
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+
+	job := waitJobDone(t, database, jobID)
+	if job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q, want COMPLETED (last_error=%v)", job.State, job.LastError)
+	}
+
+	rawNode, err := database.Reader.GetLiveNodeByPath(ctx, rawPath)
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath raw: %v", err)
+	}
+	xmpNode, err := database.Reader.GetLiveNodeByPath(ctx, xmpPath)
+	if err != nil {
+		t.Fatalf("GetLiveNodeByPath xmp: %v", err)
+	}
+
+	edges, err := database.Reader.ListEdgesByTarget(ctx, xmpNode.ID)
+	if err != nil {
+		t.Fatalf("ListEdgesByTarget: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v, want exactly 1 edge pointing to xmp", edges)
+	}
+	if edges[0].SourceNodeID != rawNode.ID || edges[0].RelationshipType != "PROJECT_SIDECAR" || edges[0].Confidence != 1.00 {
+		t.Fatalf("unexpected edge: %+v", edges[0])
+	}
+}

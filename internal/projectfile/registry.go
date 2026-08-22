@@ -79,6 +79,12 @@ func normalizeFilenameOrExt(filename string) string {
 	if strings.HasSuffix(filename, ".edl") {
 		return "edl"
 	}
+	if strings.HasSuffix(filename, ".prproj") {
+		return "prproj"
+	}
+	if strings.HasSuffix(filename, ".xmp") {
+		return "xmp"
+	}
 	idx := strings.LastIndex(filename, ".")
 	if idx != -1 {
 		return filename[idx+1:]
