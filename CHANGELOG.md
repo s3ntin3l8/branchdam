@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/s3ntin3l8/branchdam/compare/v0.6.0...v0.7.0) (2026-08-22)
+
+
+### Features
+
+* **config:** add TIER0_LOCAL_STAGING storage location for agent offline ingest ([#260](https://github.com/s3ntin3l8/branchdam/issues/260)) ([#264](https://github.com/s3ntin3l8/branchdam/issues/264)) ([e8946df](https://github.com/s3ntin3l8/branchdam/commit/e8946dfc86d43a2285aaa53e5e64df6454e53810))
+* **httpapi:** add POST /api/v1/agent/node-status, the first agent read endpoint ([#265](https://github.com/s3ntin3l8/branchdam/issues/265)) ([0480ec9](https://github.com/s3ntin3l8/branchdam/commit/0480ec9c585b04f9dc66d9b0bf03d31eeff69ea3))
+
 ## [0.6.0](https://github.com/s3ntin3l8/branchdam/compare/v0.5.0...v0.6.0) (2026-08-22)
 
 
