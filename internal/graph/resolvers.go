@@ -540,6 +540,20 @@ func (r *ProjectSidecarResolver) Resolve(ctx context.Context, child Node, lookup
 				if filepath.Dir(n.FilePath) != childDir {
 					continue
 				}
+				// A sibling whose own filename carries an index suffix ("-2", "(1)")
+				// only matched this stem because naming.Stem stripped that suffix --
+				// e.g. "IMG_1234.xmp" stem-matching "IMG_1234-2.CR3". That suffix means
+				// "second copy", not "same asset", so unlike an exact non-suffixed
+				// sibling this pairing must not auto-accept (mirrors the
+				// indexMatchConfidenceCap safeguard in FilenameStemResolver, #132).
+				// Only admit it when the xmp's own name literally matches the
+				// sibling's base name including that suffix (no stripping involved).
+				if naming.Kind(n.FileName) == naming.SuffixIndex {
+					rawBase := strings.TrimSuffix(strings.ToLower(n.FileName), "."+strings.ToLower(n.FileExt))
+					if rawBase != nameWithoutXmp {
+						continue
+					}
+				}
 
 				seenParents[n.ID] = true
 				candidates = append(candidates, Candidate{

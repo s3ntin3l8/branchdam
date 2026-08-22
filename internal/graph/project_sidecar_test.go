@@ -203,4 +203,58 @@ func TestProjectSidecarResolver_ResolveXMP(t *testing.T) {
 			t.Fatalf("expected 0 candidates for different directory, got %d", len(candidates))
 		}
 	})
+
+	t.Run("index-suffixed sibling is not auto-linked to a bare-stem xmp (#132 safeguard)", func(t *testing.T) {
+		idxDir := t.TempDir()
+		idxXmpPath := filepath.Join(idxDir, "IMG_1234.xmp")
+		if err := os.WriteFile(idxXmpPath, []byte(xmpContent), 0644); err != nil {
+			t.Fatalf("failed to write xmp: %v", err)
+		}
+
+		// naming.Stem collapses "IMG_1234-2.CR3" to the same stem "img_1234"
+		// as the bare "IMG_1234.xmp" -- that must not yield an auto-accepted
+		// PROJECT_SIDECAR edge, since "-2" means "second copy", not "same asset".
+		idxRawNode := graph.Node{ID: 301, FilePath: filepath.Join(idxDir, "IMG_1234-2.CR3"), FileName: "IMG_1234-2.CR3", FileExt: "cr3", FilenameStem: "img_1234"}
+		idxLookup := &mockLookup{
+			nodesByFilenameStem: map[string][]graph.Node{
+				"img_1234": {idxRawNode},
+			},
+		}
+
+		childNode := graph.Node{ID: 302, FilePath: idxXmpPath, FileName: "IMG_1234.xmp", FileExt: "xmp", FilenameStem: "img_1234"}
+		candidates, err := resolver.Resolve(context.Background(), childNode, idxLookup)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(candidates) != 0 {
+			t.Fatalf("expected 0 candidates for index-suffixed sibling, got %d: %+v", len(candidates), candidates)
+		}
+	})
+
+	t.Run("index-suffixed xmp exactly matching an index-suffixed sibling still links", func(t *testing.T) {
+		idxDir := t.TempDir()
+		idxXmpPath := filepath.Join(idxDir, "IMG_1234-2.xmp")
+		if err := os.WriteFile(idxXmpPath, []byte(xmpContent), 0644); err != nil {
+			t.Fatalf("failed to write xmp: %v", err)
+		}
+
+		idxRawNode := graph.Node{ID: 303, FilePath: filepath.Join(idxDir, "IMG_1234-2.CR3"), FileName: "IMG_1234-2.CR3", FileExt: "cr3", FilenameStem: "img_1234"}
+		idxLookup := &mockLookup{
+			nodesByFilenameStem: map[string][]graph.Node{
+				"img_1234": {idxRawNode},
+			},
+		}
+
+		childNode := graph.Node{ID: 304, FilePath: idxXmpPath, FileName: "IMG_1234-2.xmp", FileExt: "xmp", FilenameStem: "img_1234"}
+		candidates, err := resolver.Resolve(context.Background(), childNode, idxLookup)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(candidates) != 1 {
+			t.Fatalf("expected 1 candidate for exact index-suffixed match, got %d", len(candidates))
+		}
+		if candidates[0].ParentID != idxRawNode.ID {
+			t.Errorf("expected ParentID %d, got %+v", idxRawNode.ID, candidates[0])
+		}
+	})
 }
