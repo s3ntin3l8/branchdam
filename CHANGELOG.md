@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/s3ntin3l8/branchdam/compare/v0.5.0...v0.6.0) (2026-08-22)
+
+
+### Features
+
+* **graph:** link DJI .srt telemetry sidecars via content-sniffing ([#251](https://github.com/s3ntin3l8/branchdam/issues/251)) ([08c2859](https://github.com/s3ntin3l8/branchdam/commit/08c2859636f684b5a8eb7c7b5434193491ed1b10))
+* **projectfile:** register .xmp sidecars and resolve same-stem siblings ([#249](https://github.com/s3ntin3l8/branchdam/issues/249)) ([aebf10a](https://github.com/s3ntin3l8/branchdam/commit/aebf10a654cea6dcffd527bcfc7543d1ab796662))
+
+
+### Bug Fixes
+
+* **pipeline:** drop storage_locations.name UNIQUE to allow rootPath edits ([#253](https://github.com/s3ntin3l8/branchdam/issues/253)) ([e554310](https://github.com/s3ntin3l8/branchdam/commit/e554310d72c1f00a4b8af9a443bbe55d08cbc76e))
+* **prune:** re-verify Tier-3 ancestor file on disk before delete ([#246](https://github.com/s3ntin3l8/branchdam/issues/246)) ([0c3c78d](https://github.com/s3ntin3l8/branchdam/commit/0c3c78d566b645e9e9b8f99467774e4ab5401918))
+
 ## [0.5.0](https://github.com/s3ntin3l8/branchdam/compare/v0.4.0...v0.5.0) (2026-08-21)
 
 
