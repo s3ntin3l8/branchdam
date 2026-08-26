@@ -62,3 +62,7 @@ Run at most one branchdam instance per database file. Startup reconciles any
 that this process is the only writer -- `make dev` pointed at a database a
 running Docker container already owns would mark that container's live jobs
 as failed.
+
+## License
+
+AGPL-3.0
