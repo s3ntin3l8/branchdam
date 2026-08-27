@@ -21,10 +21,15 @@ var ErrUnknownField = errors.New("settings: unknown field")
 
 // ErrNotEditable is returned by Apply when set names a Field whose
 // Editable is false (authz.groups, listenAddr, database.path, ...).
-// Unreachable in this PR -- every registered field (Immich) is editable;
-// this is exercised once the non-editable fields land alongside the
-// settings HTTP API.
 var ErrNotEditable = errors.New("settings: field is not editable")
+
+// ErrInvalidInput wraps every Apply failure that happens before any
+// database write is attempted -- unknown field, non-editable field, a
+// Validate failure, a type mismatch, or an encode/seal failure. A caller
+// (internal/httpapi) uses this single check to distinguish a client input
+// problem (-> 422) from a genuine backend failure during the write itself
+// (-> 500), without needing to enumerate every specific error above.
+var ErrInvalidInput = errors.New("settings: invalid input")
 
 // Store holds the resolved effective config.Config and mediates every
 // override read/write against app_settings. base is the config.yaml/.env
@@ -37,6 +42,14 @@ type Store struct {
 	base config.Config
 
 	effective atomic.Pointer[config.Config]
+
+	// overridden tracks which registered keys currently have a live,
+	// successfully-decoded-and-validated app_settings row -- this is what
+	// the settings API's "source: override" vs "source: config" field
+	// (docs/configuration.md) is derived from. A row that reload() dropped
+	// (bad decode, failed validation, unavailable secret key) is correctly
+	// absent here too, since its value never made it into overrides.
+	overridden atomic.Pointer[map[string]bool]
 
 	// bootEffective is the effective config computed once, at NewStore
 	// time -- the snapshot PendingRestart diffs the current effective
@@ -75,6 +88,16 @@ func NewStore(ctx context.Context, database *db.DB, base config.Config, box *sec
 // concurrent use; callers must treat the returned pointer as read-only.
 func (s *Store) Effective() *config.Config {
 	return s.effective.Load()
+}
+
+// SecretsAvailable reports whether a secret box is configured -- false
+// means BRANCHDAM_SECRET_KEY is unset, so any secret-typed field's Apply
+// will fail with secrets.ErrUnavailable and Effective() may be serving a
+// config/env fallback for one already stored encrypted. The settings API
+// surfaces this so the UI can explain why a secret field looks unset or
+// can't be changed, rather than the operator guessing.
+func (s *Store) SecretsAvailable() bool {
+	return s.box != nil
 }
 
 // Subscribe registers fn to be called, synchronously, with the new
@@ -148,8 +171,24 @@ func (s *Store) reload(ctx context.Context) error {
 		overrides[row.Key] = val
 	}
 
+	overridden := make(map[string]bool, len(overrides))
+	for key := range overrides {
+		overridden[key] = true
+	}
+	s.overridden.Store(&overridden)
 	s.effective.Store(Resolve(&s.base, overrides, s.log))
 	return nil
+}
+
+// IsOverridden reports whether key currently has a live app_settings
+// override in effect (as opposed to its value coming from config.yaml/.env
+// or a registered default).
+func (s *Store) IsOverridden(key string) bool {
+	m := s.overridden.Load()
+	if m == nil {
+		return false
+	}
+	return (*m)[key]
 }
 
 // decodeRow turns a stored row's JSON-encoded (and, for a secret field,
@@ -186,6 +225,10 @@ func (s *Store) decodeRow(field Field, row sqlcgen.AppSetting) (any, error) {
 		var v bool
 		err := json.Unmarshal([]byte(row.Value), &v)
 		return v, err
+	case KindStringList:
+		var v []string
+		err := json.Unmarshal([]byte(row.Value), &v)
+		return v, err
 	default:
 		return nil, fmt.Errorf("unknown field kind %v", field.Type)
 	}
@@ -217,14 +260,14 @@ func (s *Store) Apply(ctx context.Context, set map[string]any, unset []string, a
 	for key, value := range set {
 		field, ok := Lookup(key)
 		if !ok {
-			return fmt.Errorf("%w: %q", ErrUnknownField, key)
+			return fmt.Errorf("%w: %w: %q", ErrInvalidInput, ErrUnknownField, key)
 		}
 		if !field.Editable {
-			return fmt.Errorf("%w: %q (%s)", ErrNotEditable, key, field.ReadOnlyReason)
+			return fmt.Errorf("%w: %w: %q (%s)", ErrInvalidInput, ErrNotEditable, key, field.ReadOnlyReason)
 		}
 		if field.Validate != nil {
 			if err := field.Validate(value); err != nil {
-				return fmt.Errorf("settings: invalid value for %q: %w", key, err)
+				return fmt.Errorf("%w: invalid value for %q: %w", ErrInvalidInput, key, err)
 			}
 		}
 
@@ -232,21 +275,21 @@ func (s *Store) Apply(ctx context.Context, set map[string]any, unset []string, a
 		if field.Secret {
 			plain, ok := value.(string)
 			if !ok {
-				return fmt.Errorf("settings: secret field %q must be a string", key)
+				return fmt.Errorf("%w: secret field %q must be a string", ErrInvalidInput, key)
 			}
 			sealed, err := s.box.Seal(plain)
 			if err != nil {
-				return fmt.Errorf("settings: %q: %w", key, err)
+				return fmt.Errorf("%w: %q: %w", ErrInvalidInput, key, err)
 			}
 			b, err := json.Marshal(sealed)
 			if err != nil {
-				return fmt.Errorf("settings: encode %q: %w", key, err)
+				return fmt.Errorf("%w: encode %q: %w", ErrInvalidInput, key, err)
 			}
 			stored = string(b)
 		} else {
 			b, err := json.Marshal(value)
 			if err != nil {
-				return fmt.Errorf("settings: encode %q: %w", key, err)
+				return fmt.Errorf("%w: encode %q: %w", ErrInvalidInput, key, err)
 			}
 			stored = string(b)
 		}
@@ -256,7 +299,7 @@ func (s *Store) Apply(ctx context.Context, set map[string]any, unset []string, a
 
 	for _, key := range unset {
 		if _, ok := Lookup(key); !ok {
-			return fmt.Errorf("%w: %q", ErrUnknownField, key)
+			return fmt.Errorf("%w: %w: %q", ErrInvalidInput, ErrUnknownField, key)
 		}
 	}
 

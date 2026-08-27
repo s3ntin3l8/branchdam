@@ -69,21 +69,36 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 				return
 			}
 
-			// Empty allowedGroups permits all authenticated users.
-			if len(allowedGroups) == 0 {
+			if IsAdmin(p, allowedGroups) {
 				next.ServeHTTP(w, r)
 				return
-			}
-
-			// Check if user has at least one of the allowed admin groups.
-			for _, g := range p.Groups {
-				if slices.Contains(allowedGroups, g) {
-					next.ServeHTTP(w, r)
-					return
-				}
 			}
 
 			writeForbidden(w, "admin authorization required")
 		})
 	}
+}
+
+// IsAdmin reports whether p satisfies the same admin policy RequireAdmin
+// enforces on a mutating request: a user principal, authenticated, and
+// either allowedGroups is empty (the solo-homelab default: every
+// authenticated user is admin) or p is a member of at least one of them.
+//
+// This does NOT reproduce RequireAdmin's GET/HEAD/OPTIONS bypass or its
+// unconditional pass for KindMachine -- those are properties of *which
+// requests* RequireAdmin's middleware gates at all, not of what "admin"
+// means once a request is gated. A caller wanting a stricter policy (e.g.
+// internal/httpapi's settings routes, which must reject KindMachine and gate
+// GET too, unlike every other browser-routed read) calls this directly with
+// its own Kind/method checks around it, rather than reusing the middleware.
+func IsAdmin(p Principal, allowedGroups []string) bool {
+	if p.Kind != KindUser || !p.Authenticated {
+		return false
+	}
+	if len(allowedGroups) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(allowedGroups, func(g string) bool {
+		return slices.Contains(p.Groups, g)
+	})
 }

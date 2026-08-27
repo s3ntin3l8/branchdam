@@ -224,7 +224,7 @@ func main() {
 	}
 
 	srv := httpapi.New(httpapi.Deps{
-		Config: &cfg, Log: log, DB: database, Guard: guard, Prober: prober,
+		Config: &cfg, Settings: settingsStore, Log: log, DB: database, Guard: guard, Prober: prober,
 		Pool: pool, Engine: engine, Hub: hub, SPA: spa, Version: version,
 		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
 	})

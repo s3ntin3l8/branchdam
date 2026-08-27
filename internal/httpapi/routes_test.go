@@ -1706,7 +1706,7 @@ func TestScanJobOutlivesRequestContext(t *testing.T) {
 
 func TestMutatingRoutesAuthorization(t *testing.T) {
 	srv, _ := fullTestServer(t)
-	srv.cfg.Authz.Groups = []string{"dam-admins"}
+	srv.cfg().Authz.Groups = []string{"dam-admins"}
 
 	mutatingPaths := []string{
 		"/api/v1/scan",
@@ -1747,7 +1747,7 @@ func TestMutatingRoutesAuthorization(t *testing.T) {
 func TestOpenAPIEndpointExposure(t *testing.T) {
 	t.Run("disabled by default", func(t *testing.T) {
 		srv, _ := fullTestServer(t)
-		srv.cfg.HTTP.ExposeOpenAPI = false
+		srv.cfg().HTTP.ExposeOpenAPI = false
 
 		paths := []string{"/openapi.json", "/openapi.yaml", "/docs"}
 		for _, p := range paths {
@@ -1764,8 +1764,8 @@ func TestOpenAPIEndpointExposure(t *testing.T) {
 
 	t.Run("enabled and gated by admin check", func(t *testing.T) {
 		srv, _ := fullTestServer(t)
-		srv.cfg.HTTP.ExposeOpenAPI = true
-		srv.cfg.Authz.Groups = []string{"dam-admins"}
+		srv.cfg().HTTP.ExposeOpenAPI = true
+		srv.cfg().Authz.Groups = []string{"dam-admins"}
 
 		paths := []string{"/openapi.json", "/docs"}
 		for _, p := range paths {
@@ -1799,7 +1799,7 @@ func TestOpenAPIEndpointExposure(t *testing.T) {
 	// permits-all path, the same gap this issue closes for mutating routes.
 	t.Run("no identity headers denied even with empty allowedGroups", func(t *testing.T) {
 		srv, _ := fullTestServer(t)
-		srv.cfg.HTTP.ExposeOpenAPI = true
+		srv.cfg().HTTP.ExposeOpenAPI = true
 
 		paths := []string{"/openapi.json", "/docs"}
 		for _, p := range paths {
@@ -1816,7 +1816,7 @@ func TestOpenAPIEndpointExposure(t *testing.T) {
 
 func TestHandleListPathRewrites(t *testing.T) {
 	srv, _ := fullTestServer(t)
-	srv.cfg.PathRewrites = []config.PathRewrite{
+	srv.cfg().PathRewrites = []config.PathRewrite{
 		{From: "D:\\Footage", To: "/storage/footage"},
 		{From: "/Volumes/NAS", To: "/storage/nas"},
 	}
@@ -3715,7 +3715,7 @@ func TestSyncRetryNoRowsRequeuesZero(t *testing.T) {
 
 func TestSyncRetryRequiresAdmin(t *testing.T) {
 	srv, _ := fullTestServer(t)
-	srv.cfg.Authz.Groups = []string{"dam-admins"}
+	srv.cfg().Authz.Groups = []string{"dam-admins"}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/assets/1/sync/retry", bytes.NewBufferString("{}"))
 	req.Header.Set("Content-Type", "application/json")

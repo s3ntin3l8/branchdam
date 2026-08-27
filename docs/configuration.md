@@ -27,12 +27,26 @@ never-expanded `${VAR}` left over from an unset environment variable is treated 
 empty base value when there is no override. This does **not** apply to most fields: the general
 "fails loudly on a typo'd variable name" behavior described above is unchanged everywhere else.
 
-Fields are wired into the settings mechanism one domain at a time; `immich.*` is first (the UI
-itself lands in a follow-up). This document always describes `config.yaml`'s own bootstrap
-behavior regardless of what has an override applied on top. Secret-typed fields (e.g.
-`immich.apiKey`) are encrypted at rest with a key from `BRANCHDAM_SECRET_KEY` — see
-[`operations.md`](operations.md) for backup/restore implications and what happens if that key is
-absent or lost.
+`GET`/`PUT /api/v1/settings` (gated to an authenticated admin user, same `authz.groups`
+membership every other write route uses — never a machine/agent principal, on either method) is
+the API this drives; a UI page on top of it lands in a follow-up PR. It exposes every registered
+field's current value, whether it's overridden or coming from `config.yaml`/`.env`
+(`source: "override" | "config"`), and whether it takes effect immediately or needs a restart
+(`applyMode: "live" | "restart"`) — see `internal/settings/registry.go` for the authoritative list.
+Two domains are intentionally excluded from the registry, not just left for later:
+
+- **`authz.groups` is display-only** (`applyMode: "never"`, `editable: false`) — it gates the
+  settings route itself, so a UI edit that locked the operator out of every admin group would have
+  no recovery path. Change it only via `config.yaml`/`.env`.
+- **`pathRewrites` isn't in the registry at all.** It's a list of `{from, to}` objects, not a
+  scalar or a string list, and doesn't fit the registry's value model. `GET /api/v1/config/path-rewrites`
+  is unaffected; a typed registry entry for it is a candidate for a later PR, not a gap left by
+  this one.
+
+Secret-typed fields (e.g. `immich.apiKey`) are encrypted at rest with a key from
+`BRANCHDAM_SECRET_KEY`, never returned by `GET` (only `hasValue: true`), and a `PUT` fails with
+`422` if the key isn't configured — see [`operations.md`](operations.md) for backup/restore
+implications and what happens if that key is absent or lost.
 
 ## Top level
 
