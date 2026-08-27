@@ -655,51 +655,12 @@ func TestCloseDatabaseSkipsCloseWhenUnsafe(t *testing.T) {
 	}
 }
 
-func TestStartImmichWorkerDisabledWhenNotConfigured(t *testing.T) {
-	for name, apiURL := range map[string]string{
-		"empty":                  "",
-		"unresolved placeholder": "${IMMICH_API_URL}", // unset env left literal by expandEnv
-	} {
-		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			database := mainTestOpenDB(t)
-			w := startImmichWorker(ctx, &config.Config{Immich: config.Immich{APIURL: apiURL}}, database, slog.New(slog.DiscardHandler))
-			if w != nil {
-				t.Fatalf("startImmichWorker with apiUrl %q = %v, want nil", apiURL, w)
-			}
-		})
-	}
-}
-
-func TestStartImmichWorkerDisabledWhenLibraryIDMissing(t *testing.T) {
-	for name, libraryID := range map[string]string{
-		"empty":                  "",
-		"unresolved placeholder": "${IMMICH_LIBRARY_ID}",
-	} {
-		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			database := mainTestOpenDB(t)
-			cfg := &config.Config{Immich: config.Immich{APIURL: "http://immich:2283", APIKey: "k", LibraryID: libraryID, ExportPath: "/e"}}
-			w := startImmichWorker(ctx, cfg, database, slog.New(slog.DiscardHandler))
-			if w != nil {
-				t.Fatalf("startImmichWorker with libraryId %q = %v, want nil (an empty libraryId would 404 every push forever, see #182)", libraryID, w)
-			}
-		})
-	}
-}
-
-func TestStartImmichWorkerEnabledWhenConfigured(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	database := mainTestOpenDB(t)
-	cfg := &config.Config{Immich: config.Immich{APIURL: "http://immich:2283", APIKey: "k", LibraryID: "lib", ExportPath: "/e"}}
-	w := startImmichWorker(ctx, cfg, database, slog.New(slog.DiscardHandler))
-	if w == nil {
-		t.Fatal("startImmichWorker with APIURL set = nil, want a worker")
-	}
-}
+// The Immich enabled/disabled startup logic that used to live in main.go's
+// startImmichWorker (and be tested here directly) moved to
+// internal/sync.Supervisor.startLocked when the worker became
+// live-reloadable -- see TestSupervisorStartDisabledWhenAPIURLNotConfigured
+// / TestSupervisorStartDisabledWhenLibraryIDMissing /
+// TestSupervisorStartEnabledWhenConfigured in internal/sync/supervisor_test.go.
 
 func TestStartThumbWorkerDisabledWhenNotEnabled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
