@@ -25,6 +25,31 @@ export function useStorageLocations() {
   return useQuery({ queryKey: ["storage-locations"], queryFn: api.listStorageLocations });
 }
 
+export function useSettings() {
+  return useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+}
+
+// A settings write can change almost anything a request handler reads
+// (internal/httpapi's Server.cfg() resolves live), so a successful PUT
+// invalidates every query whose data could depend on it -- mirroring
+// invalidateEdgeReviewQueries's "the write's blast radius, not just the
+// resource that was written" shape below.
+export function invalidateSettingsQueries(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: ["settings"] });
+  void queryClient.invalidateQueries({ queryKey: ["config"] });
+  void queryClient.invalidateQueries({ queryKey: ["path-rewrites"] });
+  void queryClient.invalidateQueries({ queryKey: ["storage-locations"] });
+  void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+}
+
+export function usePutSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: import("../api/types").PutSettingsRequest) => api.putSettings(input),
+    onSuccess: () => invalidateSettingsQueries(queryClient),
+  });
+}
+
 export function useAssets(params: import("../api/types").AssetQueryParams = {}) {
   return useQuery({
     queryKey: ["assets", params],
