@@ -11,6 +11,29 @@ All string values may reference the environment as `${VAR}`, expanded at load ti
 emptied — a typo'd variable name fails loudly (as an invalid tier string, an empty-looking-but-not
 API URL, etc.) rather than silently producing an empty value.
 
+## Precedence: `.env`/`config.yaml` vs. the settings UI
+
+`.env`/`config.yaml` are the bootstrap: they are read once, at process start, by
+`config.Load`. On top of that, `internal/settings` resolves an `app_settings` database table of
+UI-configured overrides, keyed by field. **A field having a row in `app_settings` at all is what
+makes it an override — its stored value can be an explicit empty string**, which beats a populated
+`.env`/`config.yaml` value on purpose (e.g. disabling Immich from the UI even though
+`IMMICH_API_URL` is still set in `.env`). This is not a "non-empty wins" merge; a present row always
+wins, regardless of what it holds.
+
+For a handful of fields whose own "empty" value already means "not configured" — `immich.apiUrl`
+and `immich.libraryId`, where the sync worker already treats either as its off-switch — a literal,
+never-expanded `${VAR}` left over from an unset environment variable is treated identically to an
+empty base value when there is no override. This does **not** apply to most fields: the general
+"fails loudly on a typo'd variable name" behavior described above is unchanged everywhere else.
+
+Fields are wired into the settings mechanism one domain at a time; `immich.*` is first (the UI
+itself lands in a follow-up). This document always describes `config.yaml`'s own bootstrap
+behavior regardless of what has an override applied on top. Secret-typed fields (e.g.
+`immich.apiKey`) are encrypted at rest with a key from `BRANCHDAM_SECRET_KEY` — see
+[`operations.md`](operations.md) for backup/restore implications and what happens if that key is
+absent or lost.
+
 ## Top level
 
 | Key | Type | Default | Effect |

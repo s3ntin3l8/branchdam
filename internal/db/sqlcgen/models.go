@@ -8,6 +8,14 @@ import (
 	"database/sql"
 )
 
+type AppSetting struct {
+	Key       string
+	Value     string
+	IsSecret  int64
+	UpdatedAt int64
+	UpdatedBy string
+}
+
 type EventQueue struct {
 	ID          int64
 	EventUuid   string

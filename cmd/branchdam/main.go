@@ -28,6 +28,8 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/immich"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/secrets"
+	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/sync"
@@ -58,11 +60,6 @@ func main() {
 		os.Exit(runHealthcheck(cfg.ListenAddr))
 	}
 
-	if err := validatePruneConfig(cfg.StorageLocations); err != nil {
-		log.Error("invalid config", "err", err)
-		os.Exit(1)
-	}
-
 	log.Info("loaded config", "version", version, "listenAddr", cfg.ListenAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -71,6 +68,40 @@ func main() {
 	database, err := db.Open(ctx, cfg.Database.Path)
 	if err != nil {
 		log.Error("open database", "err", err)
+		os.Exit(1)
+	}
+
+	// BRANCHDAM_SECRET_KEY encrypts settings values that must not sit in
+	// app_settings as plaintext (immich.apiKey, agent.apiKey). Unset is a
+	// normal, supported state -- internal/settings falls back to the
+	// config/env base value for any secret field rather than failing to
+	// boot (see internal/secrets' package doc). A *set but invalid* key is
+	// instead an operator mistake worth failing loudly on.
+	secretBox, err := secrets.NewBox(os.Getenv("BRANCHDAM_SECRET_KEY"))
+	if err != nil {
+		log.Error("invalid BRANCHDAM_SECRET_KEY", "err", err)
+		os.Exit(1)
+	}
+	if secretBox == nil {
+		log.Warn("BRANCHDAM_SECRET_KEY not set -- UI-configured secrets (e.g. Immich API key) are unavailable until it is")
+	}
+
+	settingsStore, err := settings.NewStore(ctx, database, cfg, secretBox, log)
+	if err != nil {
+		log.Error("load settings overrides", "err", err)
+		os.Exit(1)
+	}
+	// From here on, cfg IS the resolved config: config.yaml/.env as loaded,
+	// with any app_settings override applied on top (settings.Resolve's
+	// precedence rule). Every existing cfg.X read below picks this up for
+	// free -- see docs/configuration.md's precedence section. This is a
+	// boot-time snapshot only; live reconfiguration of a running process
+	// (Immich, see internal/sync) is wired separately via
+	// settingsStore.Subscribe.
+	cfg = *settingsStore.Effective()
+
+	if err := validatePruneConfig(cfg.StorageLocations); err != nil {
+		log.Error("invalid config", "err", err)
 		os.Exit(1)
 	}
 	// dbUnsafeToClose is set by run() if a shutdown wait times out -- a
