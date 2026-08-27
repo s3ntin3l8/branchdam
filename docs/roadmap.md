@@ -5,9 +5,10 @@ pipeline, Tier-2 graph resolution, auth, SSE, the Huma REST API, the React SPA, 
 CI with branch protection. This document phases everything that's left — both what the spec
 still asks for, and a large slice of what increment 1 *built but never wired up*.
 
-**Current state:** phases 0–9 are landed. Phase 10 (the workstation agent) ships entirely in a new
-separate repo, `s3ntin3l8/branchdam-agent` (see #62 for the repo-location reasoning). This reverses
-an earlier record: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine) were
+**Current state:** phases 0–9 are landed in this repo, and phase 10 (the workstation agent) has
+shipped too — entirely in a new separate repo, `s3ntin3l8/branchdam-agent`, now at v1.0.1+ with
+all of milestones M0–M4 landed and zero open issues (see #62 for the repo-location reasoning).
+This reverses an earlier record: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine) were
 briefly split out to ship in *this* repo, independent of the agent's repo-location decision, but
 both moved into `branchdam-agent` once that repo existed — #233's scope is tracked there as
 `branchdam-agent#5`, #234's as `branchdam-agent#2` (with `#1`/`#3`/`#4` as the surrounding
@@ -70,7 +71,7 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
 | 7 | Delivery: EXIF/XMP inheritance, `remote_sync_state`, Immich push — landed (see below) | 3 | Landed |
 | 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 | Landed |
 | 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 | Landed |
-| 10 | Workstation agent — all of it ships in `s3ntin3l8/branchdam-agent` | 8 | Open (`branchdam-agent`#1–#6, this repo's #62) |
+| 10 | Workstation agent — all of it ships in `s3ntin3l8/branchdam-agent` | 8 | Landed (`branchdam-agent` v1.0.1+, `branchdam-agent`#1–#6 and this repo's #62 all closed) |
 
 Phase 2 has no dependencies and can land at any point — it closes a live authorization gap
 (`Principal.Groups` is parsed and echoed at `/api/v1/me` but nothing checks it today) rather than
