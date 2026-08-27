@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -232,9 +233,9 @@ func TestStoreDegradesOnUndecryptableSecret(t *testing.T) {
 }
 
 func TestStorePendingRestartEmptyForLiveFields(t *testing.T) {
-	// All registered fields in this PR are ApplyLive (Immich), so
-	// PendingRestart must always report empty -- there is nothing yet that
-	// requires a restart to take effect.
+	// immich.apiUrl is ApplyLive, so applying it must never show up in
+	// PendingRestart -- see TestStorePendingRestartReportsRestartFields for
+	// the ApplyRestart counterpart.
 	ctx := context.Background()
 	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
 	if err != nil {
@@ -265,5 +266,76 @@ func TestStoreSubscribeNotifiedOnApply(t *testing.T) {
 	}
 	if notified.Immich.APIURL != "http://x.example:2283" {
 		t.Errorf("subscriber saw Immich.APIURL = %q, want the new value", notified.Immich.APIURL)
+	}
+}
+
+func TestStorePendingRestartReportsRestartFields(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Apply(ctx, map[string]any{"workers.hashWorkers": 8}, nil, "tester"); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	pending := store.PendingRestart()
+	found := false
+	for _, k := range pending {
+		if k == "workers.hashWorkers" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("PendingRestart() = %v, want it to include workers.hashWorkers", pending)
+	}
+}
+
+func TestStoreApplyRejectsNonEditableField(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	err = store.Apply(ctx, map[string]any{"authz.groups": []string{"admins"}}, nil, "tester")
+	if !errors.Is(err, ErrNotEditable) {
+		t.Errorf("Apply(authz.groups) = %v, want ErrNotEditable", err)
+	}
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Apply(authz.groups) = %v, want it wrapped in ErrInvalidInput", err)
+	}
+}
+
+func TestStoreApplyRejectsInvalidValue(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	err = store.Apply(ctx, map[string]any{"logLevel": "verbose"}, nil, "tester")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Apply(logLevel=verbose) = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestStoreIsOverridden(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if store.IsOverridden("immich.apiUrl") {
+		t.Error("IsOverridden before any Apply = true, want false")
+	}
+	if err := store.Apply(ctx, map[string]any{"immich.apiUrl": "http://x.example:2283"}, nil, "tester"); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !store.IsOverridden("immich.apiUrl") {
+		t.Error("IsOverridden after Apply = false, want true")
+	}
+	if err := store.Apply(ctx, nil, []string{"immich.apiUrl"}, "tester"); err != nil {
+		t.Fatalf("Apply unset: %v", err)
+	}
+	if store.IsOverridden("immich.apiUrl") {
+		t.Error("IsOverridden after revert = true, want false")
 	}
 }

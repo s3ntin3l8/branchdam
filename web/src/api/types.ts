@@ -274,3 +274,39 @@ export interface AgentRebaseResponse {
   filePath: string;
   status: "REBASED" | "CREATED";
 }
+
+// Settings: a UI-set value takes precedence over config.yaml/.env, which
+// stays the bootstrap -- see docs/configuration.md's precedence section.
+// "value" is any because a field's runtime type varies with "type"
+// (string/int/bool/stringList); never present for a secret field, use
+// hasValue instead.
+export type SettingsFieldType = "string" | "int" | "bool" | "stringList";
+export type SettingsApplyMode = "live" | "restart" | "never";
+export type SettingsFieldSource = "override" | "config";
+
+export interface SettingsField {
+  key: string;
+  type: SettingsFieldType;
+  label: string;
+  group: string;
+  value?: unknown;
+  source: SettingsFieldSource;
+  applyMode: SettingsApplyMode;
+  secret: boolean;
+  hasValue?: boolean;
+  editable: boolean;
+  readOnlyReason?: string;
+  pendingRestart?: boolean;
+  doc?: string;
+}
+
+export interface SettingsResponse {
+  fields: SettingsField[];
+  pendingRestart: string[];
+  secretsAvailable: boolean;
+}
+
+export interface PutSettingsRequest {
+  set?: Record<string, unknown>;
+  unset?: string[];
+}

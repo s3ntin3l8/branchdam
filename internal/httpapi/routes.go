@@ -34,6 +34,9 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/config", s.handleConfig)
 	huma.Get(api, "/api/v1/config/path-rewrites", s.handleListPathRewrites)
 
+	huma.Get(api, "/api/v1/settings", s.handleGetSettings)
+	huma.Put(api, "/api/v1/settings", s.handlePutSettings)
+
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
 	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)
 	huma.Post(api, "/api/v1/prune", s.handlePrune)
@@ -134,8 +137,8 @@ func (s *Server) handleConfig(_ context.Context, _ *struct{}) (*ConfigOutput, er
 	out := &ConfigOutput{}
 	out.Body.Version = s.version
 	out.Body.PathRewrites = make([]PathRewriteDTO, 0)
-	if s.cfg != nil {
-		for _, rw := range s.cfg.PathRewrites {
+	if cfg := s.cfg(); cfg != nil {
+		for _, rw := range cfg.PathRewrites {
 			out.Body.PathRewrites = append(out.Body.PathRewrites, PathRewriteDTO{
 				From: rw.From,
 				To:   rw.To,
@@ -153,8 +156,8 @@ func (s *Server) handleListPathRewrites(_ context.Context, _ *struct{}) (*PathRe
 	out := &PathRewritesOutput{
 		Body: make([]PathRewriteDTO, 0),
 	}
-	if s.cfg != nil {
-		for _, rw := range s.cfg.PathRewrites {
+	if cfg := s.cfg(); cfg != nil {
+		for _, rw := range cfg.PathRewrites {
 			out.Body = append(out.Body, PathRewriteDTO{
 				From: rw.From,
 				To:   rw.To,
@@ -1385,9 +1388,9 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 
 	fullHashPolicy := "tier3_and_collision"
 	disablePHash := false
-	if s.cfg != nil {
-		fullHashPolicy = s.cfg.Workers.FullHashPolicy
-		disablePHash = !s.cfg.Workers.PerceptualHash
+	if cfg := s.cfg(); cfg != nil {
+		fullHashPolicy = cfg.Workers.FullHashPolicy
+		disablePHash = !cfg.Workers.PerceptualHash
 	}
 
 	deps := pipeline.ScanDeps{

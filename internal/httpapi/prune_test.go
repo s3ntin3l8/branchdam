@@ -199,7 +199,7 @@ func TestHandlePruneUsesPersistedCacheTTLNotConfigReJoin(t *testing.T) {
 	// mention this exact path anymore). The pre-fix re-join loop would
 	// find nothing here and silently treat the location as "never
 	// eligible" for pruning.
-	srv.cfg.StorageLocations = []config.StorageLocation{
+	srv.cfg().StorageLocations = []config.StorageLocation{
 		{Name: "unrelated", RootPath: "/nowhere/near/this/location", Tier: "TIER1_LOCAL_SCRATCH", Prunable: true, CacheTTLHours: 1},
 	}
 

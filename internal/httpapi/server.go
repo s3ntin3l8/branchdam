@@ -20,11 +20,28 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/thumbs"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
+
+// configProvider is the seam that lets the HTTP layer read either a fixed,
+// process-lifetime config.Config (every existing test and the Deps.Config
+// path) or a *settings.Store's live-resolved one, through the same
+// s.cfg() call. *settings.Store already satisfies this directly.
+type configProvider interface {
+	Effective() *config.Config
+}
+
+// staticConfigProvider adapts a bare *config.Config (Deps.Config, with no
+// Deps.Settings supplied) to configProvider -- this is what keeps every
+// existing Server-constructing test compiling unchanged: Deps.Config never
+// changed shape, only how it's wrapped internally.
+type staticConfigProvider struct{ cfg *config.Config }
+
+func (p staticConfigProvider) Effective() *config.Config { return p.cfg }
 
 // Deps bundles everything the HTTP layer needs. Built once at startup in
 // cmd/branchdam and handed to New.
@@ -39,6 +56,17 @@ type Deps struct {
 	Hub     *sse.Hub
 	SPA     fs.FS
 	Version string
+
+	// Settings, if set, is the live-resolved config source: s.cfg() reads
+	// through it (Store.Effective()) instead of Config directly, and the
+	// GET/PUT /api/v1/settings routes use it for everything Effective()
+	// alone can't answer (Apply, PendingRestart, IsOverridden). Config is
+	// still required either way -- Settings doesn't replace it, it's what
+	// cmd/branchdam builds Settings *from*. Nil (every existing test, and
+	// any server built without a *settings.Store) falls back to a fixed
+	// wrapper around Config, so s.cfg() never needs a nil check at the
+	// call site.
+	Settings *settings.Store
 
 	// ThumbCache serves GET /api/v1/assets/{id}/thumbnail. May be nil (a
 	// misconfigured/uncreatable cache dir at startup, or thumbnails not
@@ -59,20 +87,34 @@ type Deps struct {
 
 // Server bundles the dependencies handlers need.
 type Server struct {
-	cfg      *config.Config
-	log      *slog.Logger
-	db       *db.DB
-	guard    *storage.Guard
-	prober   *probe.Prober
-	pool     *workers.Pool[string]
-	engine   *graph.Engine
-	hub      *sse.Hub
-	sseSlot  *limiter
-	spa      fs.FS
-	version  string
-	tracker  *pipeline.ScanTracker
-	shutdown <-chan struct{}
-	thumbs   *thumbs.Cache
+	cfgProvider   configProvider
+	settingsStore *settings.Store // nil unless Deps.Settings was supplied
+	log           *slog.Logger
+	db            *db.DB
+	guard         *storage.Guard
+	prober        *probe.Prober
+	pool          *workers.Pool[string]
+	engine        *graph.Engine
+	hub           *sse.Hub
+	sseSlot       *limiter
+	spa           fs.FS
+	version       string
+	tracker       *pipeline.ScanTracker
+	shutdown      <-chan struct{}
+	thumbs        *thumbs.Cache
+}
+
+// cfg returns the current effective config -- config.yaml/.env as loaded,
+// with any settings override resolved on top when Deps.Settings was
+// supplied. Every handler reads config through this, never through a
+// stored *config.Config, so a settings change is visible on the very next
+// request without a restart (for whichever fields Store.Apply already
+// updated Effective() with).
+func (s *Server) cfg() *config.Config {
+	if s.cfgProvider == nil {
+		return nil
+	}
+	return s.cfgProvider.Effective()
 }
 
 // New builds the HTTP server handler set.
@@ -85,21 +127,26 @@ func New(d Deps) *Server {
 	if version == "" {
 		version = "dev"
 	}
+	var cfgProvider configProvider = staticConfigProvider{cfg: d.Config}
+	if d.Settings != nil {
+		cfgProvider = d.Settings
+	}
 	return &Server{
-		cfg:      d.Config,
-		log:      log,
-		db:       d.DB,
-		guard:    d.Guard,
-		prober:   d.Prober,
-		pool:     d.Pool,
-		engine:   d.Engine,
-		hub:      d.Hub,
-		sseSlot:  newLimiter(maxSSEClients),
-		spa:      d.SPA,
-		version:  version,
-		tracker:  d.Tracker,
-		shutdown: d.Shutdown,
-		thumbs:   d.ThumbCache,
+		cfgProvider:   cfgProvider,
+		settingsStore: d.Settings,
+		log:           log,
+		db:            d.DB,
+		guard:         d.Guard,
+		prober:        d.Prober,
+		pool:          d.Pool,
+		engine:        d.Engine,
+		hub:           d.Hub,
+		sseSlot:       newLimiter(maxSSEClients),
+		spa:           d.SPA,
+		version:       version,
+		tracker:       d.Tracker,
+		shutdown:      d.Shutdown,
+		thumbs:        d.ThumbCache,
 	}
 }
 
@@ -123,9 +170,9 @@ func (s *Server) Handler() http.Handler {
 
 	exposeOpenAPI := false
 	var allowedGroups []string
-	if s.cfg != nil {
-		exposeOpenAPI = s.cfg.HTTP.ExposeOpenAPI
-		allowedGroups = s.cfg.Authz.Groups
+	if cfg := s.cfg(); cfg != nil {
+		exposeOpenAPI = cfg.HTTP.ExposeOpenAPI
+		allowedGroups = cfg.Authz.Groups
 	}
 
 	humaConfig := huma.DefaultConfig("branchDAM", s.version)
@@ -148,8 +195,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /", s.spaHandler())
 
 	var apiKey string
-	if s.cfg != nil {
-		apiKey = s.cfg.Agent.APIKey
+	if cfg := s.cfg(); cfg != nil {
+		apiKey = cfg.Agent.APIKey
 	}
 
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
