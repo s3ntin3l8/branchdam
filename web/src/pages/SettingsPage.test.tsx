@@ -187,6 +187,54 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("clears the Save button after a successful save instead of leaving it stuck on", async () => {
+    // Regression test: dirty must not be write-only. Before the fix, dirty
+    // was only ever set to true on change and never reset on a successful
+    // Save, so the button stayed enabled forever and the draft never
+    // resynced to the newly-saved server value.
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    const updated = settingsResponse({
+      fields: settingsResponse().fields.map((f) =>
+        f.key === "immich.apiUrl" ? { ...f, value: "http://immich.example:2283" } : f
+      ),
+    });
+    vi.mocked(api.getSettings).mockResolvedValueOnce(settingsResponse()).mockResolvedValue(updated);
+    vi.mocked(api.putSettings).mockResolvedValue(updated);
+
+    renderWithClient(<SettingsPage />);
+
+    const input = await screen.findByDisplayValue("http://immich:2283");
+    await user.clear(input);
+    await user.type(input, "http://immich.example:2283");
+    await user.click(await screen.findByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    });
+    expect(await screen.findByDisplayValue("http://immich.example:2283")).toBeInTheDocument();
+  });
+
+  it("restores the Save button on a failed save so the edit can be retried without retyping", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+    vi.mocked(api.putSettings).mockRejectedValue(new ApiError(422, "field \"immich.apiUrl\": must be a string"));
+
+    renderWithClient(<SettingsPage />);
+
+    const input = await screen.findByDisplayValue("http://immich:2283");
+    await user.clear(input);
+    await user.type(input, "http://immich.example:2283");
+    await user.click(await screen.findByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText(/must be a string/)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("http://immich.example:2283")).toBeInTheDocument();
+  });
+
   it("reverts an overridden field via PUT {unset}", async () => {
     const user = userEvent.setup();
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });

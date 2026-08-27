@@ -66,8 +66,8 @@ function SettingsFieldEditor({
 }: {
   field: SettingsField;
   saving: boolean;
-  onSave: (key: string, value: unknown) => void;
-  onRevert: (key: string) => void;
+  onSave: (key: string, value: unknown, onError: () => void) => void;
+  onRevert: (key: string, onError: () => void) => void;
 }) {
   const baseline = field.secret ? "" : field.value;
   const [prevBaseline, setPrevBaseline] = useState(baseline);
@@ -75,15 +75,24 @@ function SettingsFieldEditor({
   const [dirty, setDirty] = useState(false);
 
   // A revert, another session's write, or the SSE-driven refetch can all
-  // move field.value out from under an untouched draft. Adjusted during
-  // render (React's documented alternative to an effect for "reset derived
-  // state when a prop changes") rather than in a useEffect, which would
-  // call setState after the initial render and trigger a second one. A
-  // dirty (in-progress, unsaved) draft is deliberately left alone so a
-  // concurrent nudge can't clobber what the operator is mid-typing.
+  // move field.value out from under a draft. Adjusted during render
+  // (React's documented alternative to an effect for "reset derived state
+  // when a prop changes") rather than in a useEffect, which would call
+  // setState after the initial render and trigger a second one.
+  //
+  // The Save/Revert button handlers below already clear `dirty` optimistically
+  // on click (and restore it on failure), so this is the fallback for the
+  // other ways a field's baseline can move: an untouched draft always
+  // resyncs, and a draft the operator abandoned mid-edit resyncs too, once
+  // the world catches up to whatever they'd typed. A dirty draft that still
+  // disagrees with a freshly changed baseline (a concurrent, unrelated
+  // external edit) is left alone, so a nudge can't clobber in-progress typing.
   if (baseline !== prevBaseline) {
     setPrevBaseline(baseline);
-    if (!dirty) setDraft(baseline);
+    if (!dirty || draft === baseline) {
+      setDraft(baseline);
+      setDirty(false);
+    }
   }
 
   const handleChange = (value: unknown) => {
@@ -109,7 +118,15 @@ function SettingsFieldEditor({
           {canSave && (
             <button
               type="button"
-              onClick={() => onSave(field.key, draft)}
+              onClick={() => {
+                // Clear dirty on click, not just once the refetch's new
+                // baseline lands -- otherwise Save stays visibly enabled
+                // for the full round-trip and, on a slow network, invites
+                // a double-click double-submit. Restored on failure so a
+                // retry doesn't require re-typing the value.
+                setDirty(false);
+                onSave(field.key, draft, () => setDirty(true));
+              }}
               disabled={saving}
               className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
             >
@@ -119,7 +136,10 @@ function SettingsFieldEditor({
           {field.source === "override" && field.editable && (
             <button
               type="button"
-              onClick={() => onRevert(field.key)}
+              onClick={() => {
+                setDirty(false);
+                onRevert(field.key, () => setDirty(true));
+              }}
               disabled={saving}
               className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
             >
@@ -150,19 +170,29 @@ export default function SettingsPage() {
     return Array.from(byGroup.entries());
   }, [settings]);
 
-  const handleSave = (key: string, value: unknown) => {
+  const handleSave = (key: string, value: unknown, onError: () => void) => {
     setFieldError(null);
     putSettings.mutate(
       { set: { [key]: value } },
-      { onError: (err: unknown) => setFieldError((err as { message?: string }).message || `Failed to save ${key}`) }
+      {
+        onError: (err: unknown) => {
+          setFieldError((err as { message?: string }).message || `Failed to save ${key}`);
+          onError();
+        },
+      }
     );
   };
 
-  const handleRevert = (key: string) => {
+  const handleRevert = (key: string, onError: () => void) => {
     setFieldError(null);
     putSettings.mutate(
       { unset: [key] },
-      { onError: (err: unknown) => setFieldError((err as { message?: string }).message || `Failed to revert ${key}`) }
+      {
+        onError: (err: unknown) => {
+          setFieldError((err as { message?: string }).message || `Failed to revert ${key}`);
+          onError();
+        },
+      }
     );
   };
 
