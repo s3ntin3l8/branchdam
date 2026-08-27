@@ -76,6 +76,20 @@ To restore, stop the container, extract the archive back into the volume, and st
 
 There is no automated backup scheduler — this is a manual, deliberate step, not a background job.
 
+**`branchdam.db` can hold encrypted secrets once the settings UI is used.** UI-configured
+secret fields (e.g. an Immich API key set through the settings page, see
+[`configuration.md`](configuration.md)'s precedence section) are stored in the `app_settings`
+table encrypted with `BRANCHDAM_SECRET_KEY` (AES-256-GCM). Two consequences:
+
+- **Back up `BRANCHDAM_SECRET_KEY` (in `.env`) with the same care as the database itself.** Losing
+  it while secret overrides exist doesn't corrupt anything — the server still starts, logs an
+  error, and falls back to the `.env`/`config.yaml` value for that field — but the encrypted
+  override itself is unrecoverable; you'll need to re-enter it through the UI.
+- **A `branchdam.db` backup pairs with the `BRANCHDAM_SECRET_KEY` that was active when it was
+  taken.** Restoring the database onto a host with a *different* key produces the same graceful
+  degradation as a lost key, not a restore failure — but any secret set through the UI has to be
+  re-entered.
+
 ## One instance per database file
 
 Startup (`reconcileOrphanedScanJobs`) marks every `scan_jobs` row still `RUNNING` as `FAILED`,

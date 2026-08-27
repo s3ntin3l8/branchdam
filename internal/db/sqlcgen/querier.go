@@ -16,6 +16,20 @@ type Querier interface {
 	// row can never share file_path even for an instant within the
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
+	// "Revert to config" deletes the row -- this is what makes provenance
+	// recoverable rather than merely resettable to some other stored value.
+	DeleteAppSetting(ctx context.Context, key string) error
+	// The resolver (internal/settings) loads the whole table once at startup
+	// and on every PUT; the table is expected to stay small (one row per
+	// overridden field, never one row per node), so no pagination.
+	ListAppSettings(ctx context.Context) ([]AppSetting, error)
+	// The row's mere existence is the override -- callers pass "" for value
+	// exactly when the operator wants "explicitly empty", never as a signal to
+	// skip the write. See internal/settings/resolver.go for why an empty
+	// override still beats a populated config/env base value. updated_at is
+	// set via unixepoch() here, not passed from Go, matching every other
+	// UPDATE/upsert in this package (docs/schema.md fix #5).
+	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
 	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
