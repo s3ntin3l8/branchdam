@@ -34,9 +34,9 @@ and CI-verified. See [`CLAUDE.md`](CLAUDE.md) for the architecture and package
 map, [`docs/schema.md`](docs/schema.md) for the schema decisions and deviation
 ledger, and [`docs/roadmap.md`](docs/roadmap.md) for phase-by-phase detail.
 
-The one open roadmap item is phase 10, the workstation agent (Tauri/Rust) —
-filed as a placeholder tracking issue (#62), its repo location still an open
-decision. Everything else the original spec asked for either shipped or was
+Phase 10, the workstation agent, has shipped too — as a separate Go binary in
+[`s3ntin3l8/branchdam-agent`](https://github.com/s3ntin3l8/branchdam-agent) (v1.0.1+), not in
+this repo. Everything else the original spec asked for either shipped or was
 resolved as a deliberate no-go (Google Photos push, see
 [`docs/google-photos.md`](docs/google-photos.md)).
 

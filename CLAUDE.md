@@ -459,7 +459,8 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
 - [`docs/roadmap.md`](docs/roadmap.md) -- the phased plan for everything after increment 1: the
   spec's remaining pillars plus the built-but-unwired surface increment 1 left connected to
   nothing. Filed as GitHub issues per phase, worked through mullion task master. Phases 0-9 are
-  landed; only phase 10 (workstation agent) remains open.
+  landed in this repo; phase 10 (workstation agent) shipped as a separate repo,
+  [`s3ntin3l8/branchdam-agent`](https://github.com/s3ntin3l8/branchdam-agent) (v1.0.1+).
 - [`docs/agent-protocol.md`](docs/agent-protocol.md) -- ADR: REST vs. gRPC for the phase-8 agent
   event stream.
 - [`docs/project-paths.md`](docs/project-paths.md) -- Tier-1 project-file path resolution

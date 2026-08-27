@@ -12,25 +12,27 @@ a coverage audit, not a tutorial; see [`deploy.md`](deploy.md) for bring-up step
 The server half of this workflow is complete: scanning, hashing, all three resolver tiers, the
 audit queue, multi-hop lineage, EXIF/XMP inheritance, thumbnails, the Immich scan trigger, the
 pruning engine, and the full `/api/v1/agent/*` contract with its `event_queue` drainer are wired
-at boot (`cmd/branchdam/main.go`). What is missing is any client that talks to that contract —
-`cmd/` contains exactly one binary. There is no SD-card ingest tool, no offline queue, no DaVinci
-Resolve post-render hook, and no Luminar catalog reader (phase 10, tracked in #29/#62 here and, for
-the actual implementation work, `s3ntin3l8/branchdam-agent`).
+at boot (`cmd/branchdam/main.go`). **This repo's own `cmd/` still contains exactly one binary** —
+but the client that talks to that contract now exists, shipped as phase 10 in the separate
+`s3ntin3l8/branchdam-agent` repo (v1.0.1+): SD-card ingest, an offline queue, a DaVinci Resolve
+post-render hook, and a Luminar catalog reader are all landed there. What follows describes what
+this repo's own build does end-to-end when the agent isn't in the picture, and what the agent
+adds when it is.
 
 Three things follow from that:
 
-1. **Getting a new master into the graph still means an operator-triggered scan** — Tier 3 is
-   deliberately excluded from the always-on background sweeper (§4), so there is no automatic
-   pickup. As of #226, that manual scan no longer has to be a full BLAKE3 re-hash of every file
-   already on the archive: `POST /api/v1/scan {differential: true}` reuses the same touch-only
-   fast path the background sweeper uses for other tiers, so only new or changed files are
-   opened and hashed. This is a meaningful cost reduction for a multi-terabyte archive, but it's
-   still a manual step, not the automatic pickup an ingest client would give (see §4).
-2. **A DaVinci Resolve post-render hook needs no tray app, database, or UI to build.** `.dam.json`
-   manifest ingestion already exists and yields confidence-1.00 lineage edges; the only missing
-   piece is the small script that writes the manifest. It ships as its own issue in
-   `s3ntin3l8/branchdam-agent` (`branchdam-agent#5`) alongside the rest of phase 10, not
-   independently of that repo's decision as originally recorded — see §5.
+1. **Without the agent, getting a new master into the graph still means an operator-triggered
+   scan** — Tier 3 is deliberately excluded from the always-on background sweeper (§4), so there
+   is no automatic pickup absent an ingest client. As of #226, that manual scan no longer has to
+   be a full BLAKE3 re-hash of every file already on the archive: `POST /api/v1/scan
+   {differential: true}` reuses the same touch-only fast path the background sweeper uses for
+   other tiers, so only new or changed files are opened and hashed. This is a meaningful cost
+   reduction for a multi-terabyte archive, but it's still a manual step unless the agent's
+   `ingest` subcommand is doing the work instead (see §4).
+2. **A DaVinci Resolve post-render hook needed no tray app, database, or UI to build.** `.dam.json`
+   manifest ingestion already existed server-side and yields confidence-1.00 lineage edges; the
+   only missing piece was the small script that writes the manifest — that shipped as
+   `branchdam-agent`'s `hooks/resolve/` alongside the rest of phase 10.
 3. **Local editing does not break lineage, provided the local copy mirrors the archive's folder
    structure.** See §3.
 
@@ -38,11 +40,11 @@ Three things follow from that:
 
 | # | Step | Status | Detail |
 |---|---|---|---|
-| 1–2 | SD card → one copy to the NAS archive, one to local NVMe for editing | Not built | Phase 10 (#29/#62 here, `s3ntin3l8/branchdam-agent#2` for the actual work). A manual copy works in the meantime; the operator loses bit-for-bit verification, safe-eject signalling, and an automatic folder mirror between the two copies |
+| 1–2 | SD card → one copy to the NAS archive, one to local NVMe for editing | Built, in `branchdam-agent` | Not in this repo — `branchdam-agent`'s `ingest` subcommand (dual-copy write, bit-for-bit verification, safe-eject signalling). A manual copy still works without the agent, but loses that verification and the automatic folder mirror between the two copies |
 | 3 | Server learns about the new master | Manual, cheaper since #226 | `POST /api/v1/scan` (full) or `{differential: true}` (touch-only fast path for unchanged files, Tier-3 only) — still operator-triggered, not automatic; see §4 |
 | 4 | Master indexed: fast/full hash, EXIF, pHash, promoted camera columns | Works | Requires `exiftool` and `ffprobe`; degrades gracefully (fast-hash only) if either is absent |
-| 5 | Luminar: edit local copy → export to Tier 2 | Works via heuristics | No confidence-1.00 path for stills — the Luminar `catalog.db` reader is phase 10 (`s3ntin3l8/branchdam-agent#6`). Falls back to Tier 2 (filename stem, `XMP:OriginalDocumentID`) and Tier 3 (camera serial + lens + ±2s + pHash Hamming ≤ 10) |
-| 6 | DaVinci Resolve: edit local copy → render + `.dam.json` to Tier 2 | Consumer built, producer not | The `.dam.json` parser is live and yields confidence-1.00 edges. The post-render hook that writes the manifest does not exist yet — see §5 |
+| 5 | Luminar: edit local copy → export to Tier 2 | Works via heuristics by default; confidence-1.00 available via `branchdam-agent` | Without the agent, falls back to Tier 2 (filename stem, `XMP:OriginalDocumentID`) and Tier 3 (camera serial + lens + ±2s + pHash Hamming ≤ 10). `branchdam-agent`'s `luminar-sync` reads Luminar's `catalog.db` directly, though its schema mapping is unverified against a real catalog — see that repo's `docs/luminar-catalog.md` |
+| 6 | DaVinci Resolve: edit local copy → render + `.dam.json` to Tier 2 | Built, both sides | The `.dam.json` parser is live server-side and yields confidence-1.00 edges; the post-render hook that writes the manifest ships as `branchdam-agent`'s `hooks/resolve/` — see §5 |
 | 7 | Tier-2 export auto-detected | Works | `watch: true` (fsnotify, local disk) or `sweep: true` (differential mtime poll, for NFS/SMB) |
 | 8 | Export linked to its source master | Works | Tier 1 (`.dam.json`/`.drp`/`.fcpxml`/`.edl`), Tier 2 (filename stem, `XMP:OriginalDocumentID`), Tier 3 (heuristic spatial-temporal) |
 | 9 | Low-confidence matches routed to the audit queue | Works | `GET /api/v1/edges/audit`; a human `CONFIRMED`/`REJECTED` decision is permanent and is never overridden by a later resolver run |
