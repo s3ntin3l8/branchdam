@@ -155,6 +155,12 @@ export interface LineageResponse {
   edges: Edge[];
 }
 
+// name/watch/sweep/sweepIntervalSecs/cacheTtlHours/enabled are the six
+// safe fields a storageLocation.<rootPath>.* override can set (see
+// internal/settings/storagelocation.go's storageLocationFields). rootPath,
+// tier, and readOnly stay config-only.
+export type StorageLocationSafeField = "name" | "watch" | "sweep" | "sweepIntervalSecs" | "cacheTtlHours" | "enabled";
+
 export interface StorageLocationHealth {
   id: number;
   name: string;
@@ -163,12 +169,35 @@ export interface StorageLocationHealth {
   readOnly: boolean;
   prunable: boolean;
   isActive: boolean;
+  // watch/sweep/sweepIntervalSecs/cacheTtlHours are the effective (config,
+  // with any override applied) values -- all restart-required, so this can
+  // legitimately differ from what's actually running until the next
+  // restart.
+  watch: boolean;
+  sweep: boolean;
+  sweepIntervalSecs: number;
+  cacheTtlHours: number;
+  // disabled is sourced from an "enabled": false override, distinct from
+  // isActive (which reflects whether the mount resolved at startup) -- an
+  // operator who disabled a location sees this immediately, isActive only
+  // catches up on the next restart's seed.
+  disabled: boolean;
+  // overriddenFields lists which safe fields currently have a live
+  // override -- the only way to know whether "Reset to config" would do
+  // anything, since every field above already reports the merged value
+  // with no per-field provenance.
+  overriddenFields: StorageLocationSafeField[];
   nodeCount: number;
   totalBytes: number;
   usedBytes: number;
   freeBytes: number;
   isDegraded: boolean;
   degradedMessage?: string;
+}
+
+export interface PutStorageLocationRequest {
+  set?: Partial<Record<StorageLocationSafeField, unknown>>;
+  unset?: StorageLocationSafeField[];
 }
 
 export interface StorageQueueHealth {

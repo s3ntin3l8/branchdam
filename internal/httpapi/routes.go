@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -25,6 +26,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/projectfile"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
+	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	syncpkg "github.com/s3ntin3l8/branchdam/internal/sync"
 )
@@ -39,6 +41,7 @@ func (s *Server) registerRoutes(api huma.API) {
 
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
 	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)
+	huma.Put(api, "/api/v1/storage-locations/{id}", s.handlePutStorageLocation)
 	huma.Post(api, "/api/v1/prune", s.handlePrune)
 
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
@@ -1922,19 +1925,40 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 // --- /api/v1/storage-health ---
 
 type storageLocationHealthDTO struct {
-	ID              int64   `json:"id"`
-	Name            string  `json:"name"`
-	RootPath        string  `json:"rootPath"`
-	Tier            string  `json:"tier"`
-	ReadOnly        bool    `json:"readOnly"`
-	Prunable        bool    `json:"prunable"`
-	IsActive        bool    `json:"isActive"`
-	NodeCount       int64   `json:"nodeCount"`
-	TotalBytes      uint64  `json:"totalBytes"`
-	UsedBytes       uint64  `json:"usedBytes"`
-	FreeBytes       uint64  `json:"freeBytes"`
-	IsDegraded      bool    `json:"isDegraded"`
-	DegradedMessage *string `json:"degradedMessage,omitempty"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	RootPath string `json:"rootPath"`
+	Tier     string `json:"tier"`
+	ReadOnly bool   `json:"readOnly"`
+	Prunable bool   `json:"prunable"`
+	IsActive bool   `json:"isActive"`
+	// Watch, Sweep, SweepIntervalSecs, and CacheTtlHours are the effective
+	// (config.yaml, with any storageLocation.* app_settings override
+	// applied) values -- all four are restart-required, see
+	// docs/configuration.md's precedence section, so this can legitimately
+	// differ from what's actually running until the next restart.
+	Watch             bool `json:"watch"`
+	Sweep             bool `json:"sweep"`
+	SweepIntervalSecs int  `json:"sweepIntervalSecs"`
+	CacheTtlHours     int  `json:"cacheTtlHours"`
+	// Disabled is sourced from an "enabled": false override row, distinct
+	// from IsActive (which reflects whether storage.LoadGuard could
+	// resolve the mount at startup) -- see the plan's "is_active is now
+	// overloaded" note. An operator who disabled a location sees Disabled
+	// immediately; IsActive only catches up on the next restart's seed.
+	Disabled bool `json:"disabled"`
+	// OverriddenFields lists which of name/watch/sweep/sweepIntervalSecs/
+	// cacheTtlHours/enabled currently have a live storageLocation.* override
+	// row -- the UI's only way to know whether a "Reset to config" action on
+	// this location would do anything, since every other field above already
+	// reports the merged effective value with no per-field provenance.
+	OverriddenFields []string `json:"overriddenFields"`
+	NodeCount        int64    `json:"nodeCount"`
+	TotalBytes       uint64   `json:"totalBytes"`
+	UsedBytes        uint64   `json:"usedBytes"`
+	FreeBytes        uint64   `json:"freeBytes"`
+	IsDegraded       bool     `json:"isDegraded"`
+	DegradedMessage  *string  `json:"degradedMessage,omitempty"`
 }
 
 type storageQueueHealthDTO struct {
@@ -2071,17 +2095,90 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 		countMap[c.StorageLocationID] = c.NodeCount
 	}
 
+	overrides, err := settings.LoadStorageLocationOverrides(ctx, s.db.Reader)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("load storage location overrides", err)
+	}
+	// Watch/Sweep/SweepIntervalSecs are never persisted to storage_locations
+	// (see config.StorageLocation's doc comment) -- their config.yaml value
+	// only exists in the live resolved config, keyed here by rootPath so it
+	// can be merged with each DB row below the same way
+	// settings.ResolveStorageLocations merges it at boot.
+	baseByRootPath := make(map[string]config.StorageLocation)
+	if cfg := s.cfg(); cfg != nil {
+		for _, loc := range cfg.StorageLocations {
+			baseByRootPath[loc.RootPath] = loc
+		}
+	}
+
 	dtos := make([]storageLocationHealthDTO, len(locations))
 	for i, loc := range locations {
+		base := baseByRootPath[loc.RootPath] // zero value if config.yaml no longer lists it
+		watch, sweep, sweepIntervalSecs, cacheTTLHours := base.Watch, base.Sweep, base.SweepIntervalSecs, base.CacheTTLHours
+		var disabled bool
+		if ov, ok := overrides[loc.RootPath]; ok {
+			if ov.Watch != nil {
+				watch = *ov.Watch
+			}
+			if ov.Sweep != nil {
+				sweep = *ov.Sweep
+			}
+			if ov.SweepIntervalSecs != nil {
+				sweepIntervalSecs = *ov.SweepIntervalSecs
+			}
+			// Same validity rule as ResolveStorageLocations: a positive
+			// cacheTtlHours on a non-prunable location, or a negative one,
+			// is invalid and must display the base value rather than the
+			// raw override -- e.g. an override set while prunable, later
+			// invalidated by a config.yaml edit flipping prunable to false.
+			if ov.CacheTTLHours != nil && *ov.CacheTTLHours >= 0 && (*ov.CacheTTLHours == 0 || loc.Prunable == 1) {
+				cacheTTLHours = *ov.CacheTTLHours
+			}
+			disabled = ov.Enabled != nil && !*ov.Enabled
+		}
+		// name falls back to the DB row (last-seeded value), not base.Name --
+		// unlike ResolveStorageLocations (which feeds the seeder and rightly
+		// drops a rootPath config.yaml no longer lists), display should still
+		// show something sensible for a location whose row survives after
+		// its config.yaml entry was removed.
+		name := loc.Name
+		overriddenFields := make([]string, 0)
+		if ov, ok := overrides[loc.RootPath]; ok {
+			if ov.Name != nil {
+				name = *ov.Name
+				overriddenFields = append(overriddenFields, "name")
+			}
+			if ov.Watch != nil {
+				overriddenFields = append(overriddenFields, "watch")
+			}
+			if ov.Sweep != nil {
+				overriddenFields = append(overriddenFields, "sweep")
+			}
+			if ov.SweepIntervalSecs != nil {
+				overriddenFields = append(overriddenFields, "sweepIntervalSecs")
+			}
+			if ov.CacheTTLHours != nil {
+				overriddenFields = append(overriddenFields, "cacheTtlHours")
+			}
+			if ov.Enabled != nil {
+				overriddenFields = append(overriddenFields, "enabled")
+			}
+		}
 		dtos[i] = storageLocationHealthDTO{
-			ID:        loc.ID,
-			Name:      loc.Name,
-			RootPath:  loc.RootPath,
-			Tier:      loc.Tier,
-			ReadOnly:  loc.ReadOnly == 1,
-			Prunable:  loc.Prunable == 1,
-			IsActive:  loc.IsActive == 1,
-			NodeCount: countMap[loc.ID],
+			ID:                loc.ID,
+			Name:              name,
+			RootPath:          loc.RootPath,
+			Tier:              loc.Tier,
+			ReadOnly:          loc.ReadOnly == 1,
+			Prunable:          loc.Prunable == 1,
+			IsActive:          loc.IsActive == 1,
+			Watch:             watch,
+			Sweep:             sweep,
+			SweepIntervalSecs: sweepIntervalSecs,
+			CacheTtlHours:     cacheTTLHours,
+			Disabled:          disabled,
+			OverriddenFields:  overriddenFields,
+			NodeCount:         countMap[loc.ID],
 		}
 	}
 	// Probe every location's root path concurrently (see

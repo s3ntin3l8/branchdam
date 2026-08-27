@@ -1,6 +1,10 @@
 import { useState } from "react";
-import { usePruneCache, useStorageHealth } from "../hooks/queries";
-import type { PruneCandidate, StorageLocationHealth } from "../api/types";
+import { usePruneCache, usePutStorageLocation, useStorageHealth } from "../hooks/queries";
+import type { PruneCandidate, StorageLocationHealth, StorageLocationSafeField } from "../api/types";
+import { FieldRow } from "../components/form/FieldRow";
+import { NumberField } from "../components/form/NumberField";
+import { TextField } from "../components/form/TextField";
+import { ToggleField } from "../components/form/ToggleField";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -126,8 +130,203 @@ function PruneControl({ locationId }: { locationId: number }) {
   );
 }
 
+// StorageLocationDraft holds the five non-enabled safe fields as one unit --
+// unlike SettingsFieldEditor (one field, one Save), this form batches an
+// edit across several fields into a single PUT, so "dirty" and the
+// baseline-resync check operate on the whole object rather than per-field.
+interface StorageLocationDraft {
+  name: string;
+  watch: boolean;
+  sweep: boolean;
+  sweepIntervalSecs: number;
+  cacheTtlHours: number;
+}
+
+function draftFromLoc(loc: StorageLocationHealth): StorageLocationDraft {
+  return {
+    name: loc.name,
+    watch: loc.watch,
+    sweep: loc.sweep,
+    sweepIntervalSecs: loc.sweepIntervalSecs,
+    cacheTtlHours: loc.cacheTtlHours,
+  };
+}
+
+function isOverridden(loc: StorageLocationHealth, field: StorageLocationSafeField): boolean {
+  return loc.overriddenFields.includes(field);
+}
+
+// StorageLocationEditForm edits the six safe fields inline on
+// LocationGaugeCard. useStorageHealth polls every 10s and useEventStream
+// invalidates it on every SSE nudge, so the draft must survive a background
+// refetch while the form is open -- same baseline-resync-during-render
+// pattern as SettingsFieldEditor (SettingsPage.tsx), applied to the whole
+// draft object at once via a JSON key rather than per field.
+function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth; onClose: () => void }) {
+  const putLocation = usePutStorageLocation();
+  const baseline = draftFromLoc(loc);
+  const baselineKey = JSON.stringify(baseline);
+  const [prevBaselineKey, setPrevBaselineKey] = useState(baselineKey);
+  const [draft, setDraft] = useState<StorageLocationDraft>(baseline);
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (baselineKey !== prevBaselineKey) {
+    setPrevBaselineKey(baselineKey);
+    if (!dirty) {
+      setDraft(baseline);
+    }
+  }
+
+  const update = <K extends keyof StorageLocationDraft>(key: K, value: StorageLocationDraft[K]) => {
+    setDraft((d) => ({ ...d, [key]: value }));
+    setDirty(true);
+    setError(null);
+  };
+
+  const nameInvalid = draft.name.trim() === "";
+  const sweepSecsInvalid = Number.isNaN(draft.sweepIntervalSecs) || draft.sweepIntervalSecs < 0;
+  const cacheTtlInvalid = Number.isNaN(draft.cacheTtlHours) || draft.cacheTtlHours < 0;
+  const canSave = dirty && !nameInvalid && !sweepSecsInvalid && !cacheTtlInvalid;
+
+  const handleSave = () => {
+    const set: Partial<Record<StorageLocationSafeField, unknown>> = {};
+    if (draft.name !== baseline.name) set.name = draft.name;
+    if (draft.watch !== baseline.watch) set.watch = draft.watch;
+    if (draft.sweep !== baseline.sweep) set.sweep = draft.sweep;
+    if (draft.sweepIntervalSecs !== baseline.sweepIntervalSecs) set.sweepIntervalSecs = draft.sweepIntervalSecs;
+    if (loc.prunable && draft.cacheTtlHours !== baseline.cacheTtlHours) set.cacheTtlHours = draft.cacheTtlHours;
+    if (Object.keys(set).length === 0) {
+      setDirty(false);
+      return;
+    }
+    setError(null);
+    putLocation.mutate(
+      { id: loc.id, input: { set } },
+      {
+        onSuccess: () => setDirty(false),
+        onError: (err: unknown) => setError((err as { message?: string }).message || "Failed to save"),
+      }
+    );
+  };
+
+  const handleResetToConfig = () => {
+    setError(null);
+    putLocation.mutate(
+      { id: loc.id, input: { unset: loc.overriddenFields } },
+      {
+        onSuccess: () => setDirty(false),
+        onError: (err: unknown) => setError((err as { message?: string }).message || "Failed to reset to config"),
+      }
+    );
+  };
+
+  const handleToggleEnabled = () => {
+    setError(null);
+    putLocation.mutate(
+      { id: loc.id, input: { set: { enabled: loc.disabled } } },
+      {
+        onError: (err: unknown) =>
+          setError((err as { message?: string }).message || "Failed to change enabled state"),
+      }
+    );
+  };
+
+  return (
+    <div className="rounded border border-neutral-700 bg-neutral-950/40 p-3">
+      {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
+
+      <FieldRow label="Name" source={isOverridden(loc, "name") ? "override" : "config"} pendingRestart>
+        <TextField value={draft.name} onChange={(v) => update("name", v)} />
+      </FieldRow>
+
+      <FieldRow label="Watch for changes" source={isOverridden(loc, "watch") ? "override" : "config"} pendingRestart>
+        <ToggleField checked={draft.watch} onChange={(v) => update("watch", v)} />
+      </FieldRow>
+
+      <FieldRow label="Periodic sweep" source={isOverridden(loc, "sweep") ? "override" : "config"} pendingRestart>
+        <ToggleField checked={draft.sweep} onChange={(v) => update("sweep", v)} />
+      </FieldRow>
+
+      <FieldRow
+        label="Sweep interval (seconds)"
+        source={isOverridden(loc, "sweepIntervalSecs") ? "override" : "config"}
+        pendingRestart
+      >
+        <NumberField value={draft.sweepIntervalSecs} onChange={(v) => update("sweepIntervalSecs", v)} />
+      </FieldRow>
+
+      {loc.prunable && (
+        <FieldRow
+          label="Cache TTL (hours)"
+          source={isOverridden(loc, "cacheTtlHours") ? "override" : "config"}
+          pendingRestart
+        >
+          <NumberField value={draft.cacheTtlHours} onChange={(v) => update("cacheTtlHours", v)} />
+        </FieldRow>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!canSave || putLocation.isPending}
+            className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {putLocation.isPending ? "Saving…" : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500"
+          >
+            Close
+          </button>
+          {loc.overriddenFields.length > 0 && (
+            <button
+              type="button"
+              onClick={handleResetToConfig}
+              disabled={putLocation.isPending}
+              className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
+            >
+              Reset to config
+            </button>
+          )}
+        </div>
+        {/* Enable/disable is deliberately its own immediate action, not part
+            of the batched Save above -- the server rejects disabling the
+            last enabled location with a 422. Disabled while dirty: it fires
+            its own PUT with only {enabled}, which would silently drop any
+            unsaved edits to the other five fields sitting in the form. */}
+        <div className="flex flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={handleToggleEnabled}
+            disabled={putLocation.isPending || dirty}
+            title={dirty ? "Save or discard your other edits first" : undefined}
+            className={`rounded border px-2 py-1 text-xs disabled:opacity-50 ${
+              loc.disabled
+                ? "border-emerald-800 text-emerald-300 hover:border-emerald-600"
+                : "border-red-900 text-red-300 hover:border-red-700"
+            }`}
+          >
+            {loc.disabled ? "Enable location" : "Disable location"}
+          </button>
+          <p className="max-w-[16rem] text-right text-[10px] text-neutral-500">
+            {dirty
+              ? "Save or discard your other edits above first."
+              : "Takes effect on next restart: no watch/sweep/manual-scan-target. Reads and Tier-3 prune authorization are unaffected either way."}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
   const percentUsed = loc.totalBytes > 0 ? Math.min(100, Math.round((loc.usedBytes / loc.totalBytes) * 100)) : 0;
+  const [editing, setEditing] = useState(false);
 
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-5 shadow-sm space-y-4">
@@ -140,6 +339,35 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
           <p className="mt-1 text-xs font-mono text-neutral-400 break-all">{loc.rootPath}</p>
         </div>
         <div className="flex flex-wrap gap-1.5 justify-end">
+          <button
+            type="button"
+            onClick={() => setEditing((e) => !e)}
+            className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300 border border-neutral-700 hover:bg-neutral-700"
+          >
+            {editing ? "Close" : "Edit"}
+          </button>
+          {/* Disabled (an override the operator set) is deliberately a
+              distinct badge from Inactive (the mount failed to resolve at
+              startup, self-healing) -- conflating them would make "I turned
+              this off" indistinguishable from "the NAS fell off the
+              network". */}
+          {loc.disabled && (
+            <span className="rounded bg-red-950 px-2 py-0.5 text-xs font-medium text-red-300 border border-red-800">
+              DISABLED
+            </span>
+          )}
+          {/* watch/sweep/sweepIntervalSecs/cacheTtlHours/enabled overrides
+              are all restart-required (main.go's seedStorageLocations only
+              runs at boot), so the merged values above the fold can
+              legitimately disagree with what's actually running right now
+              -- this chip is the only always-visible signal of that, since
+              the per-field "Applies on restart" badges are inside the
+              collapsed Edit form. */}
+          {loc.overriddenFields.length > 0 && (
+            <span className="rounded bg-amber-950 px-2 py-0.5 text-xs font-medium text-amber-300 border border-amber-800">
+              PENDING RESTART
+            </span>
+          )}
           {!loc.isActive && (
             <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs font-medium text-neutral-400 border border-neutral-700">
               INACTIVE
@@ -166,6 +394,8 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
           )}
         </div>
       </div>
+
+      {editing && <StorageLocationEditForm loc={loc} onClose={() => setEditing(false)} />}
 
       {loc.isDegraded ? (
         <div className="rounded bg-red-950/50 p-3 text-xs text-red-300 border border-red-900/50">
