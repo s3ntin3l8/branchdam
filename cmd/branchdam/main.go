@@ -99,6 +99,22 @@ func main() {
 	// settingsStore.Subscribe.
 	cfg = *settingsStore.Effective()
 
+	// StorageLocations is not a registered Field (it's a dynamic list
+	// keyed by rootPath, not the registry's fixed-key model), so
+	// Effective() above left it as the raw config.yaml list -- resolve its
+	// own storageLocation.* overrides on top separately, still before
+	// validatePruneConfig/seedStorageLocations/watchedFromConfig/
+	// sweptFromConfig below, all of which must see the same effective
+	// list. This is why ResolveStorageLocations validates cacheTtlHours
+	// itself rather than leaving a since-invalid override for
+	// validatePruneConfig to fatal on -- see its doc comment.
+	storageLocationOverrides, err := settings.LoadStorageLocationOverrides(ctx, database)
+	if err != nil {
+		log.Error("load storage location overrides", "err", err)
+		os.Exit(1)
+	}
+	cfg.StorageLocations = settings.ResolveStorageLocations(cfg.StorageLocations, storageLocationOverrides, log)
+
 	if err := validatePruneConfig(cfg.StorageLocations); err != nil {
 		log.Error("invalid config", "err", err)
 		os.Exit(1)

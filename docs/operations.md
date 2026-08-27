@@ -120,6 +120,36 @@ scan observed it (aborts `ErrFileChangedSincePlan`, checked via an immediate `Ls
 `(mtime, size)` `Plan` recorded). Purged nodes are marked `MISSING`, never deleted from the
 database — matching the "rows are never deleted" invariant everywhere else in the schema.
 
+## Storage location safe-field overrides
+
+The Storage Health page's inline **Edit** control lets an operator override six fields per
+location from the UI: `name`, `watch`, `sweep`, `sweepIntervalSecs`, `cacheTtlHours`, and
+`enabled`. `rootPath`, `tier`, and `readOnly` stay config-only -- they gate `storage.Guard`'s
+Tier-3 write refusal and the Tier-1 prune authorization, and a UI edit to any of them could
+silently invalidate those guarantees. Like every other UI-configurable setting, all six take
+effect on the **next restart** -- the seeder (`seedStorageLocations`) is what applies them, and it
+only runs at startup. The one exception is display: the Storage Health page's **DISABLED** badge
+and the six fields' merged values in the API response reflect an override immediately, since
+those are read straight from the override row -- it's only the actual watch/sweep/scan-target
+*behavior* that waits for the next restart.
+
+**`enabled: false` is narrower than it looks.** It means: no watch, no sweep, not offered as a
+manual scan target, and rendered as disabled in the UI. It does **not** mean the location stops
+being read or stops authorizing prunes:
+
+- `storage.Guard` still resolves the location, so thumbnails and `inherit-metadata` on already-
+  indexed nodes under it keep working.
+- If the location is a `TIER3_MASTER_ARCHIVE`, disabling it does **not** revoke its authorization
+  of Tier-1 cache purges -- `ListPrunableNodes` doesn't filter on `is_active`.
+
+The Storage Health page shows a distinct **DISABLED** badge (sourced from the override) separate
+from **INACTIVE** (sourced from `is_active`, which only means the mount failed to resolve at
+startup and self-heals on the next successful scan) -- don't conflate the two when reading them:
+"I turned this off" and "the NAS fell off the network" look different on purpose. The server
+refuses to disable the last enabled storage location (`422`), and refuses a positive
+`cacheTtlHours` override on a non-prunable location (`422`, mirroring `validatePruneConfig`'s
+startup check).
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

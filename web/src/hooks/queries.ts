@@ -231,6 +231,22 @@ export function usePruneCache() {
   });
 }
 
+// usePutStorageLocation backs LocationGaugeCard's inline edit form. Success
+// invalidates storage-health (the page reads it directly) and
+// storage-locations (used elsewhere for the manual-scan target picker,
+// which enabled:false ought to exclude a location from as soon as it's set).
+export function usePutStorageLocation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: import("../api/types").PutStorageLocationRequest }) =>
+      api.putStorageLocation(id, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+      void queryClient.invalidateQueries({ queryKey: ["storage-locations"] });
+    },
+  });
+}
+
 export function useJobs(params: import("../api/types").JobsQueryParams = {}) {
   return useQuery({
     queryKey: ["jobs", params],

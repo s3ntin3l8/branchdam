@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -149,6 +150,12 @@ func (s *Store) reload(ctx context.Context) error {
 
 	overrides := make(map[string]any, len(rows))
 	for _, row := range rows {
+		if strings.HasPrefix(row.Key, StorageLocationKeyPrefix) {
+			// A different, dynamically-keyed namespace this package also
+			// owns (see storagelocation.go) -- not a registry field, but
+			// not a mistake either, so skip silently rather than warn.
+			continue
+		}
 		field, ok := Lookup(row.Key)
 		if !ok {
 			s.log.Warn("settings: ignoring app_settings row for unregistered key", "key", row.Key)

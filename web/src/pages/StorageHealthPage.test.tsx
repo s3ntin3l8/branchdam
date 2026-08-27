@@ -10,18 +10,44 @@ vi.mock("../api/client", () => ({
   api: {
     getStorageHealth: vi.fn(),
     pruneCache: vi.fn(),
+    putStorageLocation: vi.fn(),
   },
 }));
+
+function baseLocation(overrides: Partial<import("../api/types").StorageLocationHealth> = {}) {
+  return {
+    id: 1,
+    name: "Scratch Mount",
+    rootPath: "/mnt/scratch",
+    tier: "TIER1_LOCAL_SCRATCH" as const,
+    readOnly: false,
+    prunable: true,
+    isActive: true,
+    watch: true,
+    sweep: false,
+    sweepIntervalSecs: 300,
+    cacheTtlHours: 24,
+    disabled: false,
+    overriddenFields: [],
+    nodeCount: 1500,
+    totalBytes: 1000000000000,
+    usedBytes: 400000000000,
+    freeBytes: 600000000000,
+    isDegraded: false,
+    ...overrides,
+  };
+}
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>{ui}</MemoryRouter>
     </QueryClientProvider>
   );
+  return { ...result, queryClient };
 }
 
 describe("StorageHealthPage", () => {
@@ -36,6 +62,12 @@ describe("StorageHealthPage", () => {
           readOnly: false,
           prunable: true,
           isActive: true,
+          watch: true,
+          sweep: false,
+          sweepIntervalSecs: 300,
+          cacheTtlHours: 24,
+          disabled: false,
+          overriddenFields: [],
           nodeCount: 1500,
           totalBytes: 1000000000000,
           usedBytes: 400000000000,
@@ -50,6 +82,12 @@ describe("StorageHealthPage", () => {
           readOnly: true,
           prunable: false,
           isActive: true,
+          watch: false,
+          sweep: false,
+          sweepIntervalSecs: 0,
+          cacheTtlHours: 0,
+          disabled: false,
+          overriddenFields: [],
           nodeCount: 0,
           totalBytes: 0,
           usedBytes: 0,
@@ -93,12 +131,14 @@ describe("StorageHealthPage", () => {
       locations: [
         {
           id: 1, name: "Scratch Mount", rootPath: "/mnt/scratch", tier: "TIER1_LOCAL_SCRATCH",
-          readOnly: false, prunable: true, isActive: true, nodeCount: 1, totalBytes: 100, usedBytes: 50,
+          readOnly: false, prunable: true, isActive: true, watch: true, sweep: false, sweepIntervalSecs: 300,
+          cacheTtlHours: 24, disabled: false, overriddenFields: [], nodeCount: 1, totalBytes: 100, usedBytes: 50,
           freeBytes: 50, isDegraded: false,
         },
         {
           id: 2, name: "Master Archive", rootPath: "/mnt/archive", tier: "TIER3_MASTER_ARCHIVE",
-          readOnly: true, prunable: false, isActive: true, nodeCount: 0, totalBytes: 0, usedBytes: 0,
+          readOnly: true, prunable: false, isActive: true, watch: false, sweep: false, sweepIntervalSecs: 0,
+          cacheTtlHours: 0, disabled: false, overriddenFields: [], nodeCount: 0, totalBytes: 0, usedBytes: 0,
           freeBytes: 0, isDegraded: false,
         },
       ],
@@ -120,7 +160,8 @@ describe("StorageHealthPage", () => {
       locations: [
         {
           id: 1, name: "Scratch Mount", rootPath: "/mnt/scratch", tier: "TIER1_LOCAL_SCRATCH",
-          readOnly: false, prunable: true, isActive: true, nodeCount: 1, totalBytes: 100, usedBytes: 50,
+          readOnly: false, prunable: true, isActive: true, watch: true, sweep: false, sweepIntervalSecs: 300,
+          cacheTtlHours: 24, disabled: false, overriddenFields: [], nodeCount: 1, totalBytes: 100, usedBytes: 50,
           freeBytes: 50, isDegraded: false,
         },
       ],
@@ -147,5 +188,118 @@ describe("StorageHealthPage", () => {
       expect(api.pruneCache).toHaveBeenCalledWith({ storageLocationId: 1, execute: true }),
     );
     await waitFor(() => expect(screen.getByText("Purged 1 file.")).toBeInTheDocument());
+  });
+
+  it("shows a DISABLED badge independently of INACTIVE", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ disabled: true, isActive: true })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+
+    expect(screen.getByText("DISABLED")).toBeInTheDocument();
+    expect(screen.queryByText("INACTIVE")).not.toBeInTheDocument();
+  });
+
+  it("opens an inline edit form and saves only the fields that changed", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    vi.mocked(api.putStorageLocation).mockResolvedValueOnce({ ok: true });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const nameInput = screen.getByDisplayValue("Scratch Mount");
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, "Renamed");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(api.putStorageLocation).toHaveBeenCalledWith(1, { set: { name: "Renamed" } }),
+    );
+  });
+
+  it("only offers Reset to config when the location has a live override", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ overriddenFields: ["sweep"] })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    vi.mocked(api.putStorageLocation).mockResolvedValueOnce({ ok: true });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Reset to config" }));
+    await waitFor(() =>
+      expect(api.putStorageLocation).toHaveBeenCalledWith(1, { unset: ["sweep"] }),
+    );
+  });
+
+  it("does not show Reset to config on a location with no override", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(screen.queryByRole("button", { name: "Reset to config" })).not.toBeInTheDocument();
+  });
+
+  it("disabling a location is a separate, immediate action from Save", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ disabled: false })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    vi.mocked(api.putStorageLocation).mockResolvedValueOnce({ ok: true });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Disable location" }));
+    await waitFor(() =>
+      expect(api.putStorageLocation).toHaveBeenCalledWith(1, { set: { enabled: false } }),
+    );
+  });
+
+  // useStorageHealth polls every 10s and useEventStream invalidates it on
+  // every SSE nudge, so a background refetch landing while the edit form is
+  // open must not clobber an in-progress edit -- the same
+  // baseline-resync-during-render hazard Hermes filed CHANGES_REQUESTED on
+  // for SettingsFieldEditor in PR3, pinned here for StorageLocationEditForm.
+  it("keeps an in-progress draft when a background refetch returns unchanged data", async () => {
+    // No clearMocks/resetMocks config for this suite, so call counts
+    // otherwise accumulate across every test in this file.
+    vi.mocked(api.getStorageHealth).mockClear();
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+
+    const { queryClient } = renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const nameInput = screen.getByDisplayValue("Scratch Mount");
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, "Draft In Progress");
+
+    // Simulate the 10s poll / SSE-nudge refetch landing mid-edit with
+    // identical server data -- invalidateQueries awaits the refetch of any
+    // active query by default, so no extra waitFor is needed here.
+    await queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+    expect(api.getStorageHealth).toHaveBeenCalledTimes(2);
+
+    expect(screen.getByDisplayValue("Draft In Progress")).toBeInTheDocument();
   });
 });

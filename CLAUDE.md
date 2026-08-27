@@ -380,6 +380,28 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   `worker.Start`, the same "bounded, not eliminated" posture as `prune.Execute`'s own TOCTOU
   checks above, not a full fix. `TestSupervisorReloadRefusesToStartAfterShutdown`
   (`internal/sync/supervisor_test.go`) is the regression test.
+- **`storageLocation.<rootPath>.<field>` app_settings rows live outside the `internal/settings`
+  `Field` registry, on purpose.** The registry (`registry.go`) assumes a fixed, enumerable set of
+  keys; storage locations are a dynamic, rootPath-keyed list, so `internal/settings/storagelocation.go`
+  owns a separate small surface (`IsStorageLocationField`, `LoadStorageLocationOverrides`,
+  `ResolveStorageLocations`, `ApplyStorageLocationOverride`) for the six safe fields (`name`,
+  `watch`, `sweep`, `sweepIntervalSecs`, `cacheTtlHours`, `enabled`) instead of registering them as
+  `Field`s. `Store.reload` has an explicit skip branch for the `storageLocation.` prefix so these
+  rows don't trip the "unregistered key" WARN log meant for genuinely unrecognized keys.
+  `ResolveStorageLocations` feeds `cmd/branchdam`'s `validatePruneConfig` (fatal on violation), so
+  it defensively re-validates a stored `cacheTtlHours` override against the location's *current*
+  `prunable` flag rather than trusting a value that was valid when written -- an invalid override
+  falls back to the base config value with a WARN, never fatally. `enabled: false` is modeled as
+  removal from the resolved list fed to the seeder, deliberately reusing the existing
+  `DeactivateStorageLocationsNotIn` self-heal rather than new deactivation logic -- see
+  `docs/operations.md`'s note on exactly what `enabled: false` does and doesn't affect (Guard
+  resolution and Tier-3 prune authorization are untouched; only watch/sweep/scan-target are).
+  `httpapi.handlePutStorageLocation`'s last-enabled-location guard counts against
+  `s.cfg().StorageLocations` (the config.yaml-effective list), not the `storage_locations` table
+  directly -- a DB row can outlive its rootPath being removed from config.yaml (deactivated, never
+  deleted), and such an orphaned row has no override either, so counting table rows would let it
+  stand in as "still enabled" and wrongly permit disabling the only location config.yaml actually
+  lists (`TestPutStorageLocationLastEnabledGuardIgnoresOrphanedDBRow`).
 
 ## CI
 
