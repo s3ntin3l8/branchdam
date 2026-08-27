@@ -365,6 +365,21 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   migration is needed for this, unlike #132's `00006` -- a stale or `NULL` `captured_at_unix` is
   repaired by the node's own next Touched pass, whereas an edge already written
   `AUTO_ACCEPTED` never self-corrects via rescan.
+- **The Immich sync worker is the only live-reloadable subsystem, and its Supervisor refuses to
+  start a replacement once process shutdown has begun.** `internal/sync.Supervisor.Reload` is
+  registered as a `settings.Store.Subscribe` callback, which runs synchronously inside
+  `Store.Apply` -- i.e. inside an HTTP handler for `PUT /api/v1/settings`. `cmd/branchdam`'s
+  `run()` shutdown sequence can have `httpServer.Shutdown`'s deadline fire while such a request
+  is still being handled (see `run()`'s own comment on that failure mode), so `Reload` can be
+  called after the join sequence has already `Wait()`ed the supervisor and moved on to
+  `pool.Drain()`/`db.Close()`. Starting a fresh worker at that point -- including the
+  `RecoverStalePushing` write it performs -- would be exactly the writer-after-close hazard
+  `dbUnsafeToClose` exists to guard against. `Supervisor.startLocked` checks
+  `sv.rootCtx.Err() != nil` and refuses to start if the process's shutdown-bound context is
+  already cancelled; this narrows the race window to the gap between that check and
+  `worker.Start`, the same "bounded, not eliminated" posture as `prune.Execute`'s own TOCTOU
+  checks above, not a full fix. `TestSupervisorReloadRefusesToStartAfterShutdown`
+  (`internal/sync/supervisor_test.go`) is the regression test.
 
 ## CI
 

@@ -95,11 +95,19 @@ Configures the external-library scan-trigger client (`internal/immich`) and its 
 (`internal/sync`). All four fields matter together — the worker is either fully configured or off,
 there's no partial mode.
 
+All four are `applyMode: "live"` in the settings registry — the only fields that are. A
+`PUT /api/v1/settings` changing any of them runs synchronously inside `internal/sync.Supervisor`'s
+`Reload` (registered via `settingsStore.Subscribe` in `cmd/branchdam/main.go`), which stops the
+currently running worker, waits for it to fully exit, and starts a replacement built from the new
+client config — or leaves it stopped, per the off-switch rules below. `Reload` no-ops when a
+settings write changed something unrelated (e.g. `logLevel`), so unrelated writes don't bounce the
+worker. No restart of the branchDAM process itself is needed for an Immich change to take effect.
+
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `apiUrl` | string | — | **Empty, or containing an unresolved `${VAR}`, disables the sync worker entirely** (`startImmichWorker` in `cmd/branchdam/main.go`). This is a deliberate off-switch, not a misconfiguration — no Immich instance is required to run branchDAM. |
+| `apiUrl` | string | — | **Empty, or containing an unresolved `${VAR}`, disables the sync worker entirely** (`internal/sync.Supervisor`). This is a deliberate off-switch, not a misconfiguration — no Immich instance is required to run branchDAM. |
 | `apiKey` | string | — | Immich API key. |
-| `libraryId` | string | — | Immich external-library ID to trigger scans against. **Also disables the worker if empty or unresolved** — an empty library ID would otherwise call `POST /api/libraries//scan` and 404 forever, retrying until the per-row retry bound trips and the row is stuck `PUSH_FAILED` with no recovery short of a config fix and a restart. branchDAM refuses to start the worker rather than run one that can only fail. |
+| `libraryId` | string | — | Immich external-library ID to trigger scans against. **Also disables the worker if empty or unresolved** — an empty library ID would otherwise call `POST /api/libraries//scan` and 404 forever, retrying until the per-row retry bound trips and the row is stuck `PUSH_FAILED` with no recovery short of a config fix. branchDAM refuses to start the worker rather than run one that can only fail. |
 | `exportPath` | string | `/storage/exports/immich` | Container path where Immich's external-library mount indexes; the worker enqueues live nodes under this path. |
 
 ## `pathRewrites`

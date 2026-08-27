@@ -25,7 +25,6 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/httpapi"
-	"github.com/s3ntin3l8/branchdam/internal/immich"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
@@ -168,7 +167,14 @@ func main() {
 	hub := sse.New()
 	scanTracker := &pipeline.ScanTracker{}
 
-	immichWorker := startImmichWorker(ctx, &cfg, database, log)
+	// Supervisor starts the worker once here and again on every subsequent
+	// settings.Store.Apply that changes an Immich field, via Subscribe --
+	// see internal/sync.Supervisor's doc comment. Registered before any
+	// scan/watch/sweep goroutine starts so a settings write racing early
+	// startup can't be missed.
+	immichSupervisor := sync.NewSupervisor(database, log)
+	immichSupervisor.Start(ctx, &cfg)
+	settingsStore.Subscribe(immichSupervisor.Reload)
 
 	watched := watchedFromConfig(cfg.StorageLocations)
 	swept := sweptFromConfig(cfg.StorageLocations)
@@ -236,7 +242,7 @@ func main() {
 		WriteTimeout:      time.Duration(cfg.HTTP.WriteTimeoutSecs) * time.Second,
 	}
 
-	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichWorker, drainer, thumbWorker, pool, &dbUnsafeToClose)
+	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichSupervisor, drainer, thumbWorker, pool, &dbUnsafeToClose)
 	closeDatabase(log, database, dbUnsafeToClose)
 	if runErr != nil {
 		log.Error("run", "err", runErr)
@@ -255,7 +261,7 @@ func main() {
 // though it never successfully started serving (#123).
 func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpServer *http.Server,
 	supervisor *pipeline.WatcherSupervisor, sweeper *pipeline.SweeperSupervisor, scanTracker *pipeline.ScanTracker,
-	immichWorker *sync.Worker, drainer *agent.Drainer, thumbWorker *thumbs.Worker, pool *workers.Pool[string], dbUnsafeToClose *bool,
+	immichSupervisor *sync.Supervisor, drainer *agent.Drainer, thumbWorker *thumbs.Worker, pool *workers.Pool[string], dbUnsafeToClose *bool,
 ) error {
 	// Buffered so the goroutine never blocks sending its result, whether or
 	// not run() is still around to receive it by the time it does.
@@ -322,10 +328,13 @@ func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpSer
 	if !waitBounded(joinCtx, log, "scanTracker.Wait()", scanTracker.Wait) {
 		*dbUnsafeToClose = true
 	}
-	if immichWorker != nil {
-		// The Immich worker is ctx-bound (Run returns on ctx.Done); Wait joins
-		// it before the database closes, matching the supervisor/scan paths.
-		if !waitBounded(joinCtx, log, "syncWorker.Wait()", immichWorker.Wait) {
+	if immichSupervisor != nil {
+		// The worker immichSupervisor currently owns, if any, is ctx-bound
+		// (Start's derived context is cancelled by ctx.Done()); Wait joins
+		// it before the database closes, matching the supervisor/scan
+		// paths. Wait() itself is also a safe no-op when Immich was never
+		// configured or Reload last left it stopped.
+		if !waitBounded(joinCtx, log, "immichSupervisor.Wait()", immichSupervisor.Wait) {
 			*dbUnsafeToClose = true
 		}
 	}
@@ -395,47 +404,6 @@ func closeDatabase(log *slog.Logger, database *db.DB, unsafe bool) {
 	if err := database.Close(); err != nil {
 		log.Error("close database", "err", err)
 	}
-}
-
-// startImmichWorker wires the Immich sync worker and returns it, or nil when
-// Immich is not configured. Runs RecoverStalePushing at startup so a crashed
-// mid-push doesn't strand nodes in PUSHING forever.
-func startImmichWorker(ctx context.Context, cfg *config.Config, database *db.DB, log *slog.Logger) *sync.Worker {
-	// Empty apiUrl is the documented off switch; an unresolved ${VAR} left as
-	// literal text by config's expandEnv (unset environment variable) is also
-	// treated as disabled rather than pointed at a bogus host.
-	if cfg.Immich.APIURL == "" || strings.Contains(cfg.Immich.APIURL, "${") {
-		return nil
-	}
-	// An empty libraryId would call POST /api/libraries//scan, which 404s
-	// forever -- every push failing, retried until the retry_count bound
-	// kicks in, then permanently stuck PUSH_FAILED with no way to recover
-	// short of a config fix and a restart (#182). Refuse to start rather
-	// than run a worker that can never succeed.
-	if cfg.Immich.LibraryID == "" || strings.Contains(cfg.Immich.LibraryID, "${") {
-		log.Warn("sync: immich.libraryId is empty or unresolved, not starting the sync worker", "libraryID", cfg.Immich.LibraryID)
-		return nil
-	}
-	immichClient := immich.New(immich.Config{
-		APIURL: cfg.Immich.APIURL, APIKey: cfg.Immich.APIKey, LibraryID: cfg.Immich.LibraryID,
-	})
-	syncManager := sync.NewManager(database, log)
-	if n, err := syncManager.RecoverStalePushing(ctx, sync.RemoteImmich, 5*time.Minute); err != nil {
-		log.Warn("sync: recover stale pushing", "err", err)
-	} else if n > 0 {
-		log.Warn("sync: recovered stale PUSHING rows", "count", n)
-	}
-	exportPath := strings.TrimRight(cfg.Immich.ExportPath, "/")
-	if exportPath == "" {
-		exportPath = "/storage/exports/immich"
-	}
-	worker := sync.NewWorker(syncManager, sync.RemoteImmich, exportPath, 16, 10*time.Second,
-		func(ctx context.Context, nodes []sync.Node) error {
-			return immichClient.TriggerScan(ctx)
-		}, log)
-	worker.Start(ctx)
-	log.Info("sync: immich worker started", "libraryID", cfg.Immich.LibraryID, "exportPath", exportPath)
-	return worker
 }
 
 // startThumbWorker builds the thumbnail cache and, if thumbnails.enabled,
