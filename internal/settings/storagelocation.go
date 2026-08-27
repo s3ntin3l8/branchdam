@@ -12,6 +12,16 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
+// appSettingsLister is the subset of sqlcgen.Querier LoadStorageLocationOverrides
+// needs -- satisfied by both *db.DB.Reader (the multi-conn read pool, used
+// standalone e.g. by handleStorageHealth) and a *sqlcgen.Queries bound to an
+// in-progress writer transaction (used by internal/httpapi's
+// handlePutStorageLocation so the last-enabled-location count and the
+// override write it guards happen atomically -- see ApplyStorageLocationOverrideTx).
+type appSettingsLister interface {
+	ListAppSettings(ctx context.Context) ([]sqlcgen.AppSetting, error)
+}
+
 // StorageLocationKeyPrefix namespaces app_settings rows holding per-location
 // safe-field overrides: storageLocation.<rootPath>.<field>, e.g.
 // "storageLocation./data/tier1.watch". These rows are deliberately outside
@@ -64,8 +74,8 @@ func storageLocationOverrideKey(rootPath, field string) string {
 // low-level read used both at boot and on every storage-health request, so
 // it stays quiet by design and lets ResolveStorageLocations/callers decide
 // what "no override" versus "a bad one" should look like to an operator).
-func LoadStorageLocationOverrides(ctx context.Context, database *db.DB) (map[string]StorageLocationOverride, error) {
-	rows, err := database.Reader.ListAppSettings(ctx)
+func LoadStorageLocationOverrides(ctx context.Context, lister appSettingsLister) (map[string]StorageLocationOverride, error) {
+	rows, err := lister.ListAppSettings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list app_settings: %w", err)
 	}
@@ -197,22 +207,32 @@ func ResolveStorageLocations(base []config.StorageLocation, overrides map[string
 // division of responsibility as Store.Apply/handlePutSettings.
 func ApplyStorageLocationOverride(ctx context.Context, database *db.DB, rootPath string, set map[string]any, unset []string, actor string) error {
 	return database.InTx(ctx, func(q *sqlcgen.Queries) error {
-		for _, field := range unset {
-			if err := q.DeleteAppSetting(ctx, storageLocationOverrideKey(rootPath, field)); err != nil {
-				return fmt.Errorf("delete %q: %w", field, err)
-			}
-		}
-		for field, value := range set {
-			encoded, err := json.Marshal(value)
-			if err != nil {
-				return fmt.Errorf("encode %q: %w", field, err)
-			}
-			if _, err := q.UpsertAppSetting(ctx, sqlcgen.UpsertAppSettingParams{
-				Key: storageLocationOverrideKey(rootPath, field), Value: string(encoded), IsSecret: 0, UpdatedBy: actor,
-			}); err != nil {
-				return fmt.Errorf("upsert %q: %w", field, err)
-			}
-		}
-		return nil
+		return ApplyStorageLocationOverrideTx(ctx, q, rootPath, set, unset, actor)
 	})
+}
+
+// ApplyStorageLocationOverrideTx is ApplyStorageLocationOverride's write
+// logic against an already-open transaction, exposed so a caller that must
+// read-then-write atomically (internal/httpapi's handlePutStorageLocation,
+// whose last-enabled-location guard would otherwise TOCTOU-race a second
+// concurrent disable request -- see that function's doc comment) can run
+// the guard's count and this write inside one db.InTx block instead of two.
+func ApplyStorageLocationOverrideTx(ctx context.Context, q *sqlcgen.Queries, rootPath string, set map[string]any, unset []string, actor string) error {
+	for _, field := range unset {
+		if err := q.DeleteAppSetting(ctx, storageLocationOverrideKey(rootPath, field)); err != nil {
+			return fmt.Errorf("delete %q: %w", field, err)
+		}
+	}
+	for field, value := range set {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("encode %q: %w", field, err)
+		}
+		if _, err := q.UpsertAppSetting(ctx, sqlcgen.UpsertAppSettingParams{
+			Key: storageLocationOverrideKey(rootPath, field), Value: string(encoded), IsSecret: 0, UpdatedBy: actor,
+		}); err != nil {
+			return fmt.Errorf("upsert %q: %w", field, err)
+		}
+	}
+	return nil
 }

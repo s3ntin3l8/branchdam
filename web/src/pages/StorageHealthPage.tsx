@@ -296,12 +296,15 @@ function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth;
         </div>
         {/* Enable/disable is deliberately its own immediate action, not part
             of the batched Save above -- the server rejects disabling the
-            last enabled location with a 422. */}
+            last enabled location with a 422. Disabled while dirty: it fires
+            its own PUT with only {enabled}, which would silently drop any
+            unsaved edits to the other five fields sitting in the form. */}
         <div className="flex flex-col items-end gap-1">
           <button
             type="button"
             onClick={handleToggleEnabled}
-            disabled={putLocation.isPending}
+            disabled={putLocation.isPending || dirty}
+            title={dirty ? "Save or discard your other edits first" : undefined}
             className={`rounded border px-2 py-1 text-xs disabled:opacity-50 ${
               loc.disabled
                 ? "border-emerald-800 text-emerald-300 hover:border-emerald-600"
@@ -311,8 +314,9 @@ function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth;
             {loc.disabled ? "Enable location" : "Disable location"}
           </button>
           <p className="max-w-[16rem] text-right text-[10px] text-neutral-500">
-            Takes effect on next restart: no watch/sweep/manual-scan-target. Reads and Tier-3 prune
-            authorization are unaffected either way.
+            {dirty
+              ? "Save or discard your other edits above first."
+              : "Takes effect on next restart: no watch/sweep/manual-scan-target. Reads and Tier-3 prune authorization are unaffected either way."}
           </p>
         </div>
       </div>

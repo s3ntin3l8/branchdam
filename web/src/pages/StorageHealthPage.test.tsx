@@ -272,6 +272,31 @@ describe("StorageHealthPage", () => {
     );
   });
 
+  // Hermes review finding on PR #282: Enable/Disable fires its own PUT with
+  // only {enabled}, which would silently drop an unsaved edit to one of the
+  // other five fields sitting in the same form.
+  it("disables the Enable/Disable action while the batched form has unsaved edits", async () => {
+    // No clearMocks/resetMocks config for this suite; putStorageLocation's
+    // call count otherwise accumulates across every test in this file.
+    vi.mocked(api.putStorageLocation).mockClear();
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ disabled: false })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    const nameInput = screen.getByDisplayValue("Scratch Mount");
+    await userEvent.type(nameInput, " Renamed");
+
+    expect(screen.getByRole("button", { name: "Disable location" })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Disable location" }));
+    expect(api.putStorageLocation).not.toHaveBeenCalled();
+  });
+
   // useStorageHealth polls every 10s and useEventStream invalidates it on
   // every SSE nudge, so a background refetch landing while the edit form is
   // open must not clobber an in-progress edit -- the same

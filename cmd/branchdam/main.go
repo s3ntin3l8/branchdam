@@ -108,7 +108,7 @@ func main() {
 	// list. This is why ResolveStorageLocations validates cacheTtlHours
 	// itself rather than leaving a since-invalid override for
 	// validatePruneConfig to fatal on -- see its doc comment.
-	storageLocationOverrides, err := settings.LoadStorageLocationOverrides(ctx, database)
+	storageLocationOverrides, err := settings.LoadStorageLocationOverrides(ctx, database.Reader)
 	if err != nil {
 		log.Error("load storage location overrides", "err", err)
 		os.Exit(1)

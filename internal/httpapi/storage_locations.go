@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 )
 
@@ -56,7 +58,13 @@ func normalizeStorageLocationValue(field string, v any) (any, error) {
 	}
 }
 
-// countEnabledStorageLocations reports how many rootPaths currently in
+// errLastEnabledStorageLocation is handlePutStorageLocation's sentinel for
+// the last-enabled guard tripping inside its transaction -- distinguished
+// from a genuine write failure so the caller can map it to a 422 instead of
+// a 500.
+var errLastEnabledStorageLocation = errors.New("cannot disable the last enabled storage location")
+
+// countEnabledStorageLocationsTx reports how many rootPaths currently in
 // config.yaml's effective storage location list (excluding excludeRootPath,
 // the location being edited) have no "enabled": false override -- the
 // last-enabled guard's data source. Deliberately walks s.cfg().StorageLocations,
@@ -66,8 +74,16 @@ func normalizeStorageLocationValue(field string, v any) (any, error) {
 // and such an orphaned row has no override either, so counting DB rows would
 // let it silently stand in as "still enabled" and permit disabling the only
 // location config.yaml actually still lists.
-func (s *Server) countEnabledStorageLocations(ctx context.Context, excludeRootPath string) (int, error) {
-	overrides, err := settings.LoadStorageLocationOverrides(ctx, s.db)
+//
+// Takes q, not s.db.Reader: handlePutStorageLocation runs this count and its
+// own write inside the same db.InTx block specifically so two concurrent
+// "disable a different location" requests can't both observe n>=1 against
+// the read pool and both proceed, leaving zero enabled locations -- the
+// writer's single connection (db.DB's SetMaxOpenConns(1), see CLAUDE.md)
+// serializes InTx bodies, so reading via the transaction's own q closes that
+// TOCTOU window instead of merely narrowing it.
+func (s *Server) countEnabledStorageLocationsTx(ctx context.Context, q *sqlcgen.Queries, excludeRootPath string) (int, error) {
+	overrides, err := settings.LoadStorageLocationOverrides(ctx, q)
 	if err != nil {
 		return 0, err
 	}
@@ -130,18 +146,28 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 	// return closes the json_each('[]') hazard upstream of this) -- but a
 	// config where nothing is watched, nothing is swept, and nothing
 	// self-heals is a coherence trap worth refusing outright rather than
-	// letting an operator paint themselves into it from the UI.
-	if v, ok := set["enabled"]; ok && !v.(bool) {
-		n, err := s.countEnabledStorageLocations(ctx, loc.RootPath)
-		if err != nil {
-			return nil, huma.Error500InternalServerError("count enabled storage locations", err)
+	// letting an operator paint themselves into it from the UI. The count
+	// and the write below run inside one transaction (not two separate
+	// calls) so two concurrent disable requests for different locations
+	// can't both pass the guard before either commits -- see
+	// countEnabledStorageLocationsTx's doc comment.
+	actor := principalName(ctx)
+	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if v, ok := set["enabled"]; ok && !v.(bool) {
+			n, err := s.countEnabledStorageLocationsTx(ctx, q, loc.RootPath)
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return errLastEnabledStorageLocation
+			}
 		}
-		if n == 0 {
-			return nil, huma.Error422UnprocessableEntity("cannot disable the last enabled storage location")
-		}
+		return settings.ApplyStorageLocationOverrideTx(ctx, q, loc.RootPath, set, in.Body.Unset, actor)
+	})
+	if errors.Is(err, errLastEnabledStorageLocation) {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
-
-	if err := settings.ApplyStorageLocationOverride(ctx, s.db, loc.RootPath, set, in.Body.Unset, principalName(ctx)); err != nil {
+	if err != nil {
 		return nil, huma.Error500InternalServerError("apply storage location override", err)
 	}
 

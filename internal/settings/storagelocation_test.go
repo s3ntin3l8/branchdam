@@ -44,7 +44,7 @@ func TestLoadStorageLocationOverrides(t *testing.T) {
 	writeRawAppSetting(t, database, "storageLocation./data/tier1.sweepIntervalSecs", `120`)
 	writeRawAppSetting(t, database, "storageLocation./data/tier2.enabled", `false`)
 
-	overrides, err := LoadStorageLocationOverrides(ctx, database)
+	overrides, err := LoadStorageLocationOverrides(ctx, database.Reader)
 	if err != nil {
 		t.Fatalf("LoadStorageLocationOverrides: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestLoadStorageLocationOverridesIgnoresUnrelatedKeys(t *testing.T) {
 	database := testDB(t)
 	writeRawAppSetting(t, database, "immich.apiUrl", `"http://immich:2283"`)
 
-	overrides, err := LoadStorageLocationOverrides(ctx, database)
+	overrides, err := LoadStorageLocationOverrides(ctx, database.Reader)
 	if err != nil {
 		t.Fatalf("LoadStorageLocationOverrides: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestApplyStorageLocationOverrideSetAndUnset(t *testing.T) {
 		t.Fatalf("ApplyStorageLocationOverride (set): %v", err)
 	}
 
-	overrides, err := LoadStorageLocationOverrides(ctx, database)
+	overrides, err := LoadStorageLocationOverrides(ctx, database.Reader)
 	if err != nil {
 		t.Fatalf("LoadStorageLocationOverrides: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestApplyStorageLocationOverrideSetAndUnset(t *testing.T) {
 		t.Fatalf("ApplyStorageLocationOverride (unset): %v", err)
 	}
 
-	overrides, err = LoadStorageLocationOverrides(ctx, database)
+	overrides, err = LoadStorageLocationOverrides(ctx, database.Reader)
 	if err != nil {
 		t.Fatalf("LoadStorageLocationOverrides: %v", err)
 	}

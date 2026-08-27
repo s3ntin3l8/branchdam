@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -122,7 +123,7 @@ func TestPutStorageLocationSetThenGetReflectsOverride(t *testing.T) {
 		t.Fatal("PUT response ok = false")
 	}
 
-	overrides, err := settings.LoadStorageLocationOverrides(context.Background(), srv.db)
+	overrides, err := settings.LoadStorageLocationOverrides(context.Background(), srv.db.Reader)
 	if err != nil {
 		t.Fatalf("LoadStorageLocationOverrides: %v", err)
 	}
@@ -158,7 +159,7 @@ func TestPutStorageLocationUnsetRemovesOverride(t *testing.T) {
 		t.Fatalf("PUT (unset) status = %d, body=%s", rr2.Code, rr2.Body.String())
 	}
 
-	overrides, err := settings.LoadStorageLocationOverrides(context.Background(), srv.db)
+	overrides, err := settings.LoadStorageLocationOverrides(context.Background(), srv.db.Reader)
 	if err != nil {
 		t.Fatalf("LoadStorageLocationOverrides: %v", err)
 	}
@@ -281,6 +282,54 @@ func TestPutStorageLocationLastEnabledGuardIgnoresOrphanedDBRow(t *testing.T) {
 	})))
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Errorf("status = %d, want %d, body=%s -- an orphaned DB row must not count as \"still enabled\"", rr.Code, http.StatusUnprocessableEntity, rr.Body.String())
+	}
+}
+
+// TestPutStorageLocationConcurrentDisablesLeaveOneEnabled pins the fix for
+// the TOCTOU Hermes flagged on PR #282: with exactly two enabled locations,
+// two concurrent "disable" requests (one per location) must not both pass
+// the last-enabled guard. Before the fix, countEnabledStorageLocations read
+// via the multi-conn reader pool outside any transaction, so both requests
+// could observe n=1 and both proceed, leaving zero enabled. The guard now
+// runs its count and its write inside one db.InTx block, and the writer's
+// single connection (SetMaxOpenConns(1)) serializes those transactions, so
+// exactly one request must see the other's write and be refused.
+func TestPutStorageLocationConcurrentDisablesLeaveOneEnabled(t *testing.T) {
+	srv := settingsTestServerWithLocations(t, []string{"dam-admins"}, []config.StorageLocation{
+		{Name: "Location 1", RootPath: "/data/one", Tier: "TIER1_LOCAL_SCRATCH"},
+		{Name: "Location 2", RootPath: "/data/two", Tier: "TIER1_LOCAL_SCRATCH"},
+	})
+	id1 := seedTestStorageLocation(t, srv, "Location 1", "/data/one", "TIER1_LOCAL_SCRATCH", false)
+	id2 := seedTestStorageLocation(t, srv, "Location 2", "/data/two", "TIER1_LOCAL_SCRATCH", false)
+
+	disable := func(id int64) int {
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, adminReq(http.MethodPut, "/api/v1/storage-locations/"+itoa(id), settingsGetJSON(map[string]any{
+			"set": map[string]any{"enabled": false},
+		})))
+		return rr.Code
+	}
+
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); codes[0] = disable(id1) }()
+	go func() { defer wg.Done(); codes[1] = disable(id2) }()
+	wg.Wait()
+
+	oks, unprocessable := 0, 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusOK:
+			oks++
+		case http.StatusUnprocessableEntity:
+			unprocessable++
+		default:
+			t.Fatalf("unexpected status %d, want 200 or 422", c)
+		}
+	}
+	if oks != 1 || unprocessable != 1 {
+		t.Fatalf("codes = %v, want exactly one 200 and one 422 -- both requests must not be allowed to disable their location", codes)
 	}
 }
 
@@ -437,5 +486,64 @@ func TestStorageHealthReflectsStorageLocationOverrides(t *testing.T) {
 	}
 	if len(tier2.OverriddenFields) != 1 || tier2.OverriddenFields[0] != "enabled" {
 		t.Errorf("tier2.OverriddenFields = %v, want [\"enabled\"]", tier2.OverriddenFields)
+	}
+}
+
+// TestStorageHealthCacheTtlHoursFallsBackWhenOverrideBecomesInvalid pins the
+// fix for a Hermes review finding on PR #282: handleStorageHealth's
+// cacheTtlHours must default to base.CacheTTLHours (config) like every
+// sibling field, and apply the same validity rule ResolveStorageLocations
+// uses, rather than showing a raw override that's since become invalid
+// purely from a config.yaml edit flipping prunable to false with no PUT
+// involved.
+func TestStorageHealthCacheTtlHoursFallsBackWhenOverrideBecomesInvalid(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "storage-health-cachettl.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	base := config.Config{
+		StorageLocations: []config.StorageLocation{
+			// Prunable: false in the live config, but an override set while
+			// it *was* prunable (never re-validated by ApplyStorageLocationOverride
+			// itself -- only ResolveStorageLocations and this display path
+			// re-check it) still has cacheTtlHours: 24 on file.
+			{Name: "Tier 1", RootPath: "/data/tier1", Tier: "TIER1_LOCAL_SCRATCH", Prunable: false, CacheTTLHours: 0},
+		},
+	}
+	store, err := settings.NewStore(context.Background(), database, base, settingsTestKey(t), nil)
+	if err != nil {
+		t.Fatalf("settings.NewStore: %v", err)
+	}
+	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test"})
+	seedTestStorageLocation(t, srv, "Tier 1", "/data/tier1", "TIER1_LOCAL_SCRATCH", false)
+
+	if err := settings.ApplyStorageLocationOverride(context.Background(), database, "/data/tier1",
+		map[string]any{"cacheTtlHours": 24}, nil, "tester"); err != nil {
+		t.Fatalf("ApplyStorageLocationOverride: %v", err)
+	}
+
+	rr := httptest.NewRequest(http.MethodGet, "/api/v1/storage-health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, rr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/storage-health status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Locations []struct {
+			RootPath      string `json:"rootPath"`
+			CacheTtlHours int    `json:"cacheTtlHours"`
+		} `json:"locations"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response body: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(body.Locations) != 1 {
+		t.Fatalf("len(Locations) = %d, want 1", len(body.Locations))
+	}
+	if body.Locations[0].CacheTtlHours != 0 {
+		t.Errorf("CacheTtlHours = %d, want 0 (base value -- the stored override is invalid on a non-prunable location)", body.Locations[0].CacheTtlHours)
 	}
 }

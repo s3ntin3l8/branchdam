@@ -2095,7 +2095,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 		countMap[c.StorageLocationID] = c.NodeCount
 	}
 
-	overrides, err := settings.LoadStorageLocationOverrides(ctx, s.db)
+	overrides, err := settings.LoadStorageLocationOverrides(ctx, s.db.Reader)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("load storage location overrides", err)
 	}
@@ -2114,7 +2114,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 	dtos := make([]storageLocationHealthDTO, len(locations))
 	for i, loc := range locations {
 		base := baseByRootPath[loc.RootPath] // zero value if config.yaml no longer lists it
-		watch, sweep, sweepIntervalSecs, cacheTTLHours := base.Watch, base.Sweep, base.SweepIntervalSecs, int(loc.CacheTtlHours)
+		watch, sweep, sweepIntervalSecs, cacheTTLHours := base.Watch, base.Sweep, base.SweepIntervalSecs, base.CacheTTLHours
 		var disabled bool
 		if ov, ok := overrides[loc.RootPath]; ok {
 			if ov.Watch != nil {
@@ -2126,7 +2126,12 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 			if ov.SweepIntervalSecs != nil {
 				sweepIntervalSecs = *ov.SweepIntervalSecs
 			}
-			if ov.CacheTTLHours != nil {
+			// Same validity rule as ResolveStorageLocations: a positive
+			// cacheTtlHours on a non-prunable location, or a negative one,
+			// is invalid and must display the base value rather than the
+			// raw override -- e.g. an override set while prunable, later
+			// invalidated by a config.yaml edit flipping prunable to false.
+			if ov.CacheTTLHours != nil && *ov.CacheTTLHours >= 0 && (*ov.CacheTTLHours == 0 || loc.Prunable == 1) {
 				cacheTTLHours = *ov.CacheTTLHours
 			}
 			disabled = ov.Enabled != nil && !*ov.Enabled
