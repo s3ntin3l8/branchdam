@@ -87,6 +87,33 @@ func TestSupervisorReloadNoopWhenImmichFieldsUnchanged(t *testing.T) {
 	sv.Wait()
 }
 
+// TestSupervisorReloadNoopWhenExportPathOnlyTrailingSlashDiffers pins a
+// Hermes review fix on PR #280: immichParamsFrom must normalize exportPath
+// the same way startLocked does (TrimRight "/"), or a purely cosmetic edit
+// (adding/removing a trailing slash) reads as a real change and bounces
+// the worker for no behavioral difference.
+func TestSupervisorReloadNoopWhenExportPathOnlyTrailingSlashDiffers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sv := NewSupervisor(openTestDB(t), slog.New(slog.DiscardHandler))
+	cfg := &config.Config{Immich: config.Immich{APIURL: "http://immich:2283", APIKey: "k", LibraryID: "lib", ExportPath: "/e"}}
+	sv.Start(ctx, cfg)
+	original := sv.worker
+	if original == nil {
+		t.Fatal("Start with APIURL set started no worker")
+	}
+
+	changed := *cfg
+	changed.Immich.ExportPath = "/e/"
+	sv.Reload(&changed)
+
+	if sv.worker != original {
+		t.Fatal("Reload restarted the worker over a trailing-slash-only exportPath edit, want a no-op")
+	}
+
+	cancel()
+	sv.Wait()
+}
+
 func TestSupervisorReloadRestartsWorkerWhenImmichFieldsChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sv := NewSupervisor(openTestDB(t), slog.New(slog.DiscardHandler))

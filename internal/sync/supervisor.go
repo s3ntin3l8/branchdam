@@ -23,10 +23,14 @@ type immichParams struct {
 
 func immichParamsFrom(cfg *config.Config) immichParams {
 	return immichParams{
-		apiURL:     cfg.Immich.APIURL,
-		apiKey:     cfg.Immich.APIKey,
-		libraryID:  cfg.Immich.LibraryID,
-		exportPath: cfg.Immich.ExportPath,
+		apiURL:    cfg.Immich.APIURL,
+		apiKey:    cfg.Immich.APIKey,
+		libraryID: cfg.Immich.LibraryID,
+		// TrimRight to match startLocked's own normalization below -- an
+		// operator edit that only adds/removes a trailing slash must not
+		// register as a change and restart the worker, since the effective
+		// exportPath (and thus the worker's actual behavior) is identical.
+		exportPath: strings.TrimRight(cfg.Immich.ExportPath, "/"),
 	}
 }
 
@@ -144,7 +148,8 @@ func (sv *Supervisor) startLocked(cfg *config.Config) {
 	} else if n > 0 {
 		sv.log.Warn("sync: recovered stale PUSHING rows", "count", n)
 	}
-	exportPath := strings.TrimRight(params.exportPath, "/")
+	// Already TrimRight'd by immichParamsFrom above.
+	exportPath := params.exportPath
 	if exportPath == "" {
 		exportPath = "/storage/exports/immich"
 	}
