@@ -7,7 +7,8 @@ still asks for, and a large slice of what increment 1 *built but never wired up*
 
 **Current state:** phases 0–9 are landed in this repo, and phase 10 (the workstation agent) has
 shipped too — entirely in a new separate repo, `s3ntin3l8/branchdam-agent`, now at v1.0.1+ with
-all of milestones M0–M4 landed and zero open issues (see #62 for the repo-location reasoning).
+all of milestones M0–M4 landed and every milestone-tracking issue (`#1`–`#6`) closed (see #62 for
+the repo-location reasoning).
 This reverses an earlier record: #233 (DaVinci Resolve `.dam.json` hook) and #234 (SD-card ingest engine) were
 briefly split out to ship in *this* repo, independent of the agent's repo-location decision, but
 both moved into `branchdam-agent` once that repo existed — #233's scope is tracked there as
