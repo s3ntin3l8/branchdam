@@ -235,6 +235,38 @@ describe("SettingsPage", () => {
     expect(screen.getByDisplayValue("http://immich.example:2283")).toBeInTheDocument();
   });
 
+  it("clears a secret's draft after a successful save instead of leaving the plaintext in the input", async () => {
+    // A secret field's baseline is always "" (GET never returns the real
+    // value), so the generic render-time resync never fires for it -- this
+    // pins the explicit clear-on-save-click path added for that case.
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+    vi.mocked(api.putSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    const secretInput = await screen.findByPlaceholderText("Set -- enter a new value to replace");
+    await user.type(secretInput, "new-secret-value");
+    await user.click(await screen.findByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(secretInput).toHaveValue("");
+    });
+  });
+
+  it("disables secret editing when secrets storage is unavailable", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse({ secretsAvailable: false }));
+
+    renderWithClient(<SettingsPage />);
+
+    const secretInput = await screen.findByPlaceholderText("Set -- enter a new value to replace");
+    expect(secretInput).toBeDisabled();
+  });
+
   it("reverts an overridden field via PUT {unset}", async () => {
     const user = userEvent.setup();
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });

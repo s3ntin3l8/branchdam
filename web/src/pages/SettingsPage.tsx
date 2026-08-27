@@ -34,7 +34,7 @@ function ReadOnlyValue({ field }: { field: SettingsField }) {
   return <p className="rounded border border-neutral-800/60 bg-neutral-950/40 px-3 py-2 text-sm text-neutral-400">{display}</p>;
 }
 
-function renderInput(field: SettingsField, draft: unknown, onChange: (value: unknown) => void) {
+function renderInput(field: SettingsField, draft: unknown, onChange: (value: unknown) => void, secretsAvailable: boolean) {
   if (!field.editable || field.type === "stringList") {
     // No editable stringList field exists today -- authz.groups is the only
     // one and it's display-only -- so there's nothing to build an editor
@@ -42,7 +42,11 @@ function renderInput(field: SettingsField, draft: unknown, onChange: (value: unk
     return <ReadOnlyValue field={field} />;
   }
   if (field.secret) {
-    return <SecretField hasValue={!!field.hasValue} value={draft as string} onChange={onChange} />;
+    // A PUT of a secret field returns 422 when BRANCHDAM_SECRET_KEY isn't
+    // set (Store.Apply's seal-failure branch) -- disable the input rather
+    // than let the operator type a value into a save that's guaranteed to
+    // fail, on top of the page-level banner already saying so.
+    return <SecretField hasValue={!!field.hasValue} value={draft as string} onChange={onChange} disabled={!secretsAvailable} />;
   }
   const options = SELECT_OPTIONS[field.key];
   if (options) {
@@ -61,11 +65,13 @@ function renderInput(field: SettingsField, draft: unknown, onChange: (value: unk
 function SettingsFieldEditor({
   field,
   saving,
+  secretsAvailable,
   onSave,
   onRevert,
 }: {
   field: SettingsField;
   saving: boolean;
+  secretsAvailable: boolean;
   onSave: (key: string, value: unknown, onError: () => void) => void;
   onRevert: (key: string, onError: () => void) => void;
 }) {
@@ -101,8 +107,9 @@ function SettingsFieldEditor({
   };
 
   const secretEmpty = field.secret && draft === "";
+  const secretBlocked = field.secret && !secretsAvailable;
   const numberInvalid = field.type === "int" && typeof draft === "number" && Number.isNaN(draft);
-  const canSave = field.editable && dirty && !secretEmpty && !numberInvalid;
+  const canSave = field.editable && dirty && !secretEmpty && !secretBlocked && !numberInvalid;
 
   return (
     <FieldRow
@@ -113,7 +120,7 @@ function SettingsFieldEditor({
       readOnlyReason={field.readOnlyReason}
     >
       <div className="flex items-start gap-2">
-        <div className="flex-1">{renderInput(field, draft, handleChange)}</div>
+        <div className="flex-1">{renderInput(field, draft, handleChange, secretsAvailable)}</div>
         <div className="flex shrink-0 gap-1 pt-0.5">
           {canSave && (
             <button
@@ -124,8 +131,18 @@ function SettingsFieldEditor({
                 // for the full round-trip and, on a slow network, invites
                 // a double-click double-submit. Restored on failure so a
                 // retry doesn't require re-typing the value.
+                const submitted = draft;
                 setDirty(false);
-                onSave(field.key, draft, () => setDirty(true));
+                // A secret's baseline is always "" (never the real stored
+                // value, see `baseline` above), so the render-time resync
+                // never fires for it -- clear the typed value explicitly
+                // so a successful save doesn't leave the plaintext sitting
+                // in the input. Restored on failure like any other field.
+                if (field.secret) setDraft("");
+                onSave(field.key, submitted, () => {
+                  setDirty(true);
+                  if (field.secret) setDraft(submitted);
+                });
               }}
               disabled={saving}
               className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
@@ -238,7 +255,14 @@ export default function SettingsPage() {
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h2>
             <div>
               {fields.map((f) => (
-                <SettingsFieldEditor key={f.key} field={f} saving={putSettings.isPending} onSave={handleSave} onRevert={handleRevert} />
+                <SettingsFieldEditor
+                  key={f.key}
+                  field={f}
+                  saving={putSettings.isPending}
+                  secretsAvailable={settings?.secretsAvailable ?? true}
+                  onSave={handleSave}
+                  onRevert={handleRevert}
+                />
               ))}
             </div>
           </div>
