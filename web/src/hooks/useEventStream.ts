@@ -27,6 +27,12 @@ export function useEventStream() {
       // else here.
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+      // A settings write from a second browser session broadcasts the same
+      // coarse nudge as a scan progress tick (the hub has no per-topic
+      // channel) -- this session's SettingsPage, if mounted, must still
+      // pick up the change within the nudge's latency rather than waiting
+      // out its own staleTime.
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
       // A background scan or graph-resolver pass changing a node's
       // graph_status -- not a manual confirm/reject/create action -- must
       // still refresh a mounted AssetDetailPage (its detail query, lineage,

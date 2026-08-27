@@ -62,6 +62,10 @@ describe("useEventStream", () => {
   // namespace from "assets" (plural) and prefix matching doesn't bridge them
   // (see the same note in queries.ts's invalidateEdgeReviewQueries), so the
   // detail query, lineage, and graph need their own entries here.
+  //
+  // "settings" was added once the Settings page (SettingsPage.tsx) started
+  // consuming useSettings() -- a second browser session's PUT broadcasts
+  // this same coarse nudge, since the hub has no per-topic channel.
   it("invalidates the graph_status-dependent asset queries on a progress nudge, alongside every other key", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const spy = vi.spyOn(queryClient, "invalidateQueries");
@@ -82,6 +86,7 @@ describe("useEventStream", () => {
       ["audit-queue"],
       ["jobs"],
       ["storage-health"],
+      ["settings"],
       ["asset"],
       ["asset-lineage"],
       ["asset-graph"],
