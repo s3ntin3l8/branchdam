@@ -157,10 +157,8 @@ override above) only take effect on the next process restart -- the registry fie
 a supervisor at startup, or the seeder that applies a storage-location override only runs at
 startup. Rather than requiring an operator to SSH to the Docker host and run
 `docker compose restart`, the Settings page has a **Restart server** card, and the Storage Health
-page shows its own **Restart to apply** button whenever any location has a pending override
-(Settings' pending-restart banner only tracks the registered `Field`s, not the rootPath-keyed
-storage-location overrides -- see this doc's own note above and `CLAUDE.md`'s invariant on the
-same split). Both call the same admin-gated `POST /api/v1/restart` and require an inline confirm
+page shows its own **Restart to apply** button whenever any location has a pending override.
+Both call the same admin-gated `POST /api/v1/restart` and require an inline confirm
 step before firing.
 
 **What it actually does.** The handler responds success first, then -- after a short delay so the

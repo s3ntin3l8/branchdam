@@ -145,18 +145,10 @@ Every migration after `00001_init.sql`, in order:
   candidate at all, and caps an index-suffix-derived match (`-N`/`(N)`, e.g. `trip-1.jpg`) at
   `0.89` — strictly below Tier 2's `0.90` auto-accept threshold — so it always lands in the audit
   queue unless corroborated by a non-`filename_stem` resolver. Role suffixes (`_edit`, `_proxy`,
-  `_vN`, `` copy``) are unaffected; collapsing those siblings to a shared stem remains the
-  resolver's intended case. See `CLAUDE.md`'s Key invariants for the full rationale.
-- This is a code fix, not a schema change, but `UpsertMediaEdge`'s confidence-only-increases rule
-  (`ON CONFLICT ... DO UPDATE ... confidence = MAX(excluded, stored)`) means it only governs
-  *future* resolves — an edge already written `AUTO_ACCEPTED` under the old, unbounded logic would
-  never self-correct on a rescan. Migration `00006_downgrade_index_suffix_stem_edges.sql` is the
-  matching one-time data correction: it downgrades exactly the rows the new logic wouldn't have
-  written (`resolver = 'filename_stem'`, `review_state = 'AUTO_ACCEPTED'`, and a character-adjacency
-  test that identifies the index-suffix case without `GLOB` or `LIKE` — see the migration's own
-  comment for the documented, deliberately conservative miss on multi-marker filenames), and
-  recomputes `graph_status` for the narrow `LINKED → NEEDS_REVIEW` transition that downgrade can
-  cause. `CONFIRMED`/`REJECTED` rows are never touched, migrations included.
+  `_vN`, ` copy`) are unaffected; collapsing those siblings to a shared stem remains the
+  resolver's intended case.
+- Migration `00006_downgrade_index_suffix_stem_edges.sql` is the matching one-time data correction
+  for historical edges. `CONFIRMED`/`REJECTED` rows are never touched, migrations included.
 
 ### Phase 7 (#53): `remote_sync_state`'s first write path
 - `remote_sync_state` is no longer DDL-only. Phase 7 landed its first write path (#53): the query surface + `internal/sync` push state machine — idempotent on the `(node_id, remote)` PK, per-remote-scoped, with an atomic claim.
@@ -180,10 +172,8 @@ Every migration after `00001_init.sql`, in order:
   `MISSING`, never deleted, matching the "rows are never deleted" invariant.
 - Added `POST /api/v1/prune` — admin-gated automatically (`auth.RequireAdmin` gates by HTTP
   method, not per-route), dry-run by default (`execute` must be set explicitly to purge).
-- **Follow-up (late Hermes finding on #177):** `Execute` re-verifies eligibility inside the
-  delete's own transaction (`ErrNoLongerEligible` if the DB-side Tier-3 ancestor lost its verified
-  hash since `Plan`), but that alone doesn't cover a stale `mtime_unix` — the DB row is only as
-  fresh as the last scan/sweep. `Execute` now also `os.Lstat`s the file immediately before
-  `guard.Remove` and aborts with `ErrFileChangedSincePlan` on an `(mtime, size)` mismatch against
-  what `Plan` recorded; a file already gone on its own is treated as success (nothing left to
-  remove, node still lands `MISSING`). See `CLAUDE.md`'s Key invariants for the full rationale.
+- **Follow-up (TOCTOU Safety):** `Execute` re-verifies eligibility inside the delete's own transaction
+  (`ErrNoLongerEligible` if the DB-side Tier-3 ancestor lost its verified hash since `Plan`), and
+  additionally `os.Lstat`s the candidate file immediately before `guard.Remove`, aborting with
+  `ErrFileChangedSincePlan` on an `(mtime, size)` mismatch against what `Plan` recorded. A file
+  already gone on its own is treated as success (nothing left to remove; node still lands in `MISSING`).

@@ -30,11 +30,11 @@ branchDAM connects across cameras, workstations, editing suites, and home server
 
 | Integration / Tool | Layer | Mechanism | Lineage Confidence | Reference & Guides |
 |---|---|---|---|---|
-| **DaVinci Resolve** | Workstation Hook | Python render hook generating `<render>.dam.json` | Tier 1 (1.00) | [`hooks/resolve`](https://github.com/s3ntin3l8/branchdam-agent/tree/main/hooks/resolve), [`docs/dam-manifest.md`](docs/dam-manifest.md) |
-| **Skylum Luminar Neo** | Workstation Agent | Read-only SQLite `catalog.db` inspection (`luminar-sync`) | Tier 2 (0.89) | [`branchdam-agent` Luminar Docs](https://github.com/s3ntin3l8/branchdam-agent/blob/main/docs/luminar-catalog.md) |
-| **Immich** | Server Push | HTTP external-library scan trigger (`POST /api/libraries/{id}/scan`) | Sync State | [`docs/workflow-coverage.md` §6](docs/workflow-coverage.md#6-immich-integration), [`docs/configuration.md`](docs/configuration.md#immich) |
-| **Workstation Agent** | Desktop (Win/macOS/Linux) | SD card ingest, dual-copy verified write, offline queue (`queue.db`) | REST Events | [`s3ntin3l8/branchdam-agent`](https://github.com/s3ntin3l8/branchdam-agent) |
-| **NLE Timelines** | Server Parser | Native `.drp`, `.fcpxml`, `.edl` project file introspection | Tier 1 (1.00) | [`docs/project-paths.md`](docs/project-paths.md) |
+| **DaVinci Resolve** | Workstation Hook | Python render hook generating `<render>.dam.json` | Tier 1 (1.00) | [`hooks/resolve`](https://github.com/s3ntin3l8/branchdam-agent/tree/main/hooks/resolve), [`docs/integrations.md`](docs/integrations.md) |
+| **Skylum Luminar Neo** | Workstation Agent | Read-only SQLite `catalog.db` inspection (`luminar-sync`) | Tier 2 (0.89) | [`docs/integrations.md` §3](docs/integrations.md#3-skylum-luminar-neo) |
+| **Immich** | Server Push | HTTP external-library scan trigger (`POST /api/libraries/{id}/scan`) | Sync State | [`docs/integrations.md` §4](docs/integrations.md#4-immich-external-library-push), [`docs/configuration.md`](docs/configuration.md#immich) |
+| **Workstation Agent** | Desktop (Win/macOS/Linux) | SD card ingest, dual-copy verified write, offline queue (`queue.db`) | REST Events | [`s3ntin3l8/branchdam-agent`](https://github.com/s3ntin3l8/branchdam-agent), [`docs/integrations.md` §5](docs/integrations.md#5-workstation-companion-agent) |
+| **NLE Timelines** | Server Parser | Native `.drp`, `.fcpxml`, `.edl` project file introspection | Tier 1 (1.00) | [`docs/integrations.md` §2](docs/integrations.md#2-nle-timelines--path-rewrites) |
 
 ---
 
@@ -74,9 +74,8 @@ For detailed bring-up instructions and reverse proxy configurations, see [`docs/
 - [`docs/deploy-topology.md`](docs/deploy-topology.md) — Multi-machine deployment topology (NAS archive + workstation editing).
 
 ### Workflows & Lineage
+- [`docs/integrations.md`](docs/integrations.md) — Comprehensive guide to DaVinci Resolve, Luminar Neo, Immich, NLE timelines, and manifests.
 - [`docs/workflow-coverage.md`](docs/workflow-coverage.md) — Step-by-step SD card to Immich workflow audit.
-- [`docs/dam-manifest.md`](docs/dam-manifest.md) — `.dam.json` project manifest specification.
-- [`docs/project-paths.md`](docs/project-paths.md) — Tier-1 project-file path resolution rules.
 
 ### Operations & Architecture
 - [`docs/operations.md`](docs/operations.md) — Upgrades, database backups, cache pruning, and troubleshooting.

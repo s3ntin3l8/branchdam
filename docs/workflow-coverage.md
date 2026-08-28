@@ -57,16 +57,9 @@ Three things follow from that:
 
 `ProjectSidecarResolver` resolves a project-file reference in three steps: exact container-path
 match, an operator-declared prefix rewrite (`pathRewrites`), then a basename fallback (see
-[`project-paths.md`](project-paths.md)). There is no relative-path resolution against the
-manifest's own directory — every reference must resolve as an absolute path via one of those
+[`integrations.md` §2](integrations.md#2-nle-timelines--path-rewrites)). There is no relative-path resolution against the
+manifest or project file's own location, and there is no automatic path discovery beyond those
 three steps.
-
-If a workstation's local scratch directory **flattens** the archive's structure (e.g. every file
-copied into one folder regardless of its archive-relative path), no single `pathRewrites` prefix
-can recover the missing subdirectory, and resolution falls through to basename matching. Two
-files sharing a name across different shoots or cameras then produce an ambiguous match, which
-the resolver drops silently (a `slog.Warn`, no edge) — by design, since Tier-1 edges carry
-confidence 1.00 and are never downgraded later.
 
 If local scratch instead **mirrors** the archive's relative subtree, one `pathRewrites` rule per
 workstation resolves every reference exactly:
@@ -110,12 +103,8 @@ deliberately excluded from the always-on background `SweeperSupervisor`
 (`cmd/branchdam/main.go`'s `sweptFromConfig`), since branchDAM never writes to it and the
 motivating cost (re-hashing) is what #226 addresses directly.
 
-The only way to record a master without an operator-triggered scan at all — differential or
-not — is the agent contract's `EVENT_NODE_CREATED` event, posted to `/api/v1/agent/events`, but
-no client exists yet that posts it. See the phase-10 row in [`roadmap.md`](roadmap.md#phases) for
-how that work is tracked, and `s3ntin3l8/branchdam-agent#2` for the ingest-engine issue that
-closes this gap, with its notes on what an `EVENT_NODE_CREATED` payload can and cannot carry today
-(no perceptual hash, no GPS, unless computed client-side and included explicitly).
+The recommended way to record a master without an operator-triggered scan is the workstation agent
+(`branchdam-agent ingest -card <path>`), which posts `EVENT_NODE_CREATED` directly over REST.
 
 **A differential pass never backfills a missing or unverified `full_hash`.** `sweepUnchanged`
 gates purely on `lifecycle_state = 'ACTIVE'` plus a matching `(mtime, size)` — it never looks at
@@ -123,7 +112,7 @@ gates purely on `lifecycle_state = 'ACTIVE'` plus a matching `(mtime, size)` —
 that way forever under a differential-only maintenance routine; only a full scan's
 `needsFullHash(policy, tierReadOnly=true, ...)` computes it. This matters beyond integrity
 verification: `ListPrunableNodes` requires a non-NULL, 64-length `full_hash` on the live Tier-3
-ancestor before a Tier-1 cache copy is purge-eligible (see `CLAUDE.md`'s pruning invariant), so
+ancestor before a Tier-1 cache copy is purge-eligible (see [`operations.md#cache-pruning-runbook`](operations.md#cache-pruning-runbook)), so
 an archive maintained exclusively via `differential: true` passes can silently block Tier-1
 pruning for any node whose hash was never computed. A periodic full (non-differential) scan is
 still what verifies integrity and keeps Tier-1 pruning eligibility current — differential is a

@@ -154,7 +154,7 @@ not by the archive.
 ## Collisions with branchDAM's invariants
 
 1. **`full_hash` cannot round-trip.** BLAKE3-256 (`full_hash`) is this repo's stated integrity
-   oracle (see the root [`CLAUDE.md`](../CLAUDE.md)). The only way to read bytes back from
+   oracle (see [`docs/schema.md`](docs/schema.md)). The only way to read bytes back from
    Google Photos is a `baseUrl` fetch with the `=d` download parameter, and [Access media
    items](https://developers.google.com/photos/library/guides/access-media-items) states that
    returns the image *"retaining all the Exif metadata except the location metadata."* GPS is
