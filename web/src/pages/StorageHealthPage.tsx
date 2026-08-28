@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { usePruneCache, usePutStorageLocation, useStorageHealth } from "../hooks/queries";
-import type { PruneCandidate, StorageLocationHealth, StorageLocationSafeField } from "../api/types";
+import { useDeleteAgentTelemetry, usePruneCache, usePutStorageLocation, useStorageHealth } from "../hooks/queries";
+import type { AgentScratchHealth, PruneCandidate, StorageLocationHealth, StorageLocationSafeField } from "../api/types";
 import { FieldRow } from "../components/form/FieldRow";
 import { NumberField } from "../components/form/NumberField";
 import { TextField } from "../components/form/TextField";
@@ -13,6 +13,24 @@ function formatBytes(bytes: number): string {
   const sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+function formatRelativeTime(unixSecs: number): string {
+  if (unixSecs <= 0) return "never";
+  const deltaSecs = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+  if (deltaSecs < 60) return `${deltaSecs}s ago`;
+  const deltaMins = Math.floor(deltaSecs / 60);
+  if (deltaMins < 60) return `${deltaMins}m ago`;
+  const deltaHours = Math.floor(deltaMins / 60);
+  if (deltaHours < 24) return `${deltaHours}h ago`;
+  const deltaDays = Math.floor(deltaHours / 24);
+  return `${deltaDays}d ago`;
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs <= 0) return "0ms";
+  if (durationMs < 1000) return `${durationMs}ms`;
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 // PruneControl is a two-step flow: "Purge Cache" runs a dry-run plan and
@@ -448,6 +466,177 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
   );
 }
 
+function AgentScratchGaugeCard({ agent }: { agent: AgentScratchHealth }) {
+  const percentUsed =
+    agent.totalBytes > 0 ? Math.min(100, Math.round((agent.usedBytes / agent.totalBytes) * 100)) : 0;
+  const deleteAgent = useDeleteAgentTelemetry();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const handleDelete = () => {
+    deleteAgent.mutate(agent.agentId, {
+      onSuccess: () => setConfirmDelete(false),
+    });
+  };
+
+  const itemCounts = Object.entries(agent.prunedItemCounts || {});
+
+  return (
+    <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-5 shadow-sm space-y-4">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+            <h3 className="text-base font-semibold text-neutral-100">{agent.agentId}</h3>
+            {agent.clientVersion && (
+              <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs font-mono text-neutral-300">
+                v{agent.clientVersion}
+              </span>
+            )}
+            <span className="rounded bg-indigo-950/80 px-2 py-0.5 text-xs font-mono text-indigo-300 border border-indigo-800/60">
+              TIER1_SCRATCH
+            </span>
+          </div>
+          {agent.mountPath && (
+            <p className="mt-1 text-xs font-mono text-neutral-400 break-all">{agent.mountPath}</p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1.5 justify-end items-center">
+          {confirmDelete ? (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleteAgent.isPending}
+                className="rounded bg-red-900 px-2 py-0.5 text-xs text-red-200 hover:bg-red-800 disabled:opacity-50"
+              >
+                {deleteAgent.isPending ? "Removing…" : "Confirm"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-700"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400 border border-neutral-700 hover:text-neutral-200 hover:bg-neutral-700"
+              title="Remove agent from dashboard"
+            >
+              Dismiss
+            </button>
+          )}
+          {agent.isStale && (
+            <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs font-medium text-neutral-400 border border-neutral-700">
+              STALE
+            </span>
+          )}
+          {agent.isCriticalSpace ? (
+            <span className="rounded bg-red-950 px-2 py-0.5 text-xs font-medium text-red-300 border border-red-800">
+              CRITICAL SPACE
+            </span>
+          ) : agent.isLowSpace ? (
+            <span className="rounded bg-amber-950 px-2 py-0.5 text-xs font-medium text-amber-300 border border-amber-800">
+              LOW SPACE
+            </span>
+          ) : (
+            <span className="rounded bg-emerald-950 px-2 py-0.5 text-xs font-medium text-emerald-300 border border-emerald-800">
+              HEALTHY
+            </span>
+          )}
+        </div>
+      </div>
+
+      {agent.isCriticalSpace && (
+        <div className="rounded bg-red-950/50 p-2.5 text-xs text-red-300 border border-red-900/50">
+          ⚠️ Critical low scratch storage space: less than 5% or 5 GB remaining on workstation.
+        </div>
+      )}
+
+      {/* Capacity gauge */}
+      <div>
+        <div className="flex justify-between text-xs text-neutral-400 mb-1.5">
+          <span>Capacity Used: {percentUsed}%</span>
+          <span>
+            {formatBytes(agent.usedBytes)} / {formatBytes(agent.totalBytes)}
+          </span>
+        </div>
+        <div className="h-2.5 w-full rounded-full bg-neutral-800 overflow-hidden">
+          <div
+            className={`h-full transition-all duration-300 ${
+              agent.isCriticalSpace
+                ? "bg-red-500"
+                : agent.isLowSpace || percentUsed > 75
+                ? "bg-amber-500"
+                : "bg-indigo-500"
+            }`}
+            style={{ width: `${percentUsed}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Storage Breakdown Grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-neutral-800 text-center text-xs">
+        <div>
+          <span className="block text-neutral-400">Render Cache</span>
+          <span className="font-semibold text-neutral-200">{formatBytes(agent.renderCacheSizeBytes)}</span>
+        </div>
+        <div>
+          <span className="block text-neutral-400">Ingest Mirrors</span>
+          <span className="font-semibold text-neutral-200">{formatBytes(agent.mirrorsSizeBytes)}</span>
+        </div>
+        <div>
+          <span className="block text-neutral-400">Proxies</span>
+          <span className="font-semibold text-neutral-200">{formatBytes(agent.proxiesSizeBytes)}</span>
+        </div>
+        <div>
+          <span className="block text-neutral-400">Prunable</span>
+          <span className="font-semibold text-neutral-200">{formatBytes(agent.prunableBytes)}</span>
+        </div>
+      </div>
+
+      {/* Pruning Stats */}
+      <div className="rounded bg-neutral-950/40 p-3 border border-neutral-800 text-xs space-y-1.5">
+        <div className="flex items-center justify-between text-neutral-300">
+          <span className="font-semibold text-neutral-200">Pruning Run Statistics</span>
+          <span className="text-neutral-400">
+            {agent.lastPruneTimestampUnix > 0
+              ? `Last pruned ${formatRelativeTime(agent.lastPruneTimestampUnix)}`
+              : "No prune runs recorded"}
+          </span>
+        </div>
+        {agent.lastPruneTimestampUnix > 0 && (
+          <>
+            <div className="text-neutral-300">
+              Reclaimed{" "}
+              <span className="font-semibold text-emerald-400">{formatBytes(agent.lastReclaimedBytes)}</span> in{" "}
+              <span className="font-semibold text-neutral-200">{formatDuration(agent.lastPruneDurationMs)}</span>.
+            </div>
+            {itemCounts.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {itemCounts.map(([key, count]) => (
+                  <span
+                    key={key}
+                    className="rounded bg-neutral-800/80 px-2 py-0.5 text-[11px] font-mono text-neutral-300 border border-neutral-700/60"
+                  >
+                    {count} {key}
+                  </span>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="text-right text-[11px] text-neutral-500">
+        Last reported {formatRelativeTime(agent.timestampUnix)}
+      </div>
+    </div>
+  );
+}
+
 export default function StorageHealthPage() {
   const { data: health, isLoading, isError } = useStorageHealth();
 
@@ -459,7 +648,7 @@ export default function StorageHealthPage() {
     return <div className="p-6 text-red-400">Failed to load storage health metrics.</div>;
   }
 
-  const { locations, queues } = health;
+  const { locations, queues, agents = [] } = health;
   // Store.PendingRestart() (SettingsPage's banner) never covers
   // storage-location overrides -- they live outside the settings Field
   // registry by design (see CLAUDE.md's storageLocation.<rootPath>.*
@@ -473,7 +662,7 @@ export default function StorageHealthPage() {
         <div>
           <h1 className="text-2xl font-bold text-neutral-100">Storage Health</h1>
           <p className="mt-1 text-sm text-neutral-400">
-            Real-time storage capacity across Tiers 1–3 and background processing queue depths.
+            Real-time storage capacity across Tiers 1–3, connected workstation scratch disks, and background processing queue depths.
           </p>
         </div>
         {hasPendingLocationOverride && <RestartToApplyButton />}
@@ -489,6 +678,34 @@ export default function StorageHealthPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {locations.map((loc) => (
               <LocationGaugeCard key={loc.id} loc={loc} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Workstation Scratch Storage (Tier 1) Section */}
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-neutral-200">Workstation Scratch Storage (Tier 1)</h2>
+            <p className="text-xs text-neutral-400">
+              Workstation-local scratch NVMe capacity, render caches, proxies, and automated prune run statistics.
+            </p>
+          </div>
+          {agents.length > 0 && (
+            <span className="text-xs font-mono text-neutral-400">
+              {agents.length} workstation{agents.length === 1 ? "" : "s"} reporting
+            </span>
+          )}
+        </div>
+        {agents.length === 0 ? (
+          <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 text-center text-neutral-400">
+            No workstation agents reporting scratch telemetry yet.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {agents.map((agent) => (
+              <AgentScratchGaugeCard key={agent.agentId} agent={agent} />
             ))}
           </div>
         )}

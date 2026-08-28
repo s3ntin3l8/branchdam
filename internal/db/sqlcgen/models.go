@@ -8,6 +8,25 @@ import (
 	"database/sql"
 )
 
+type AgentScratchTelemetry struct {
+	AgentID                string
+	ClientVersion          string
+	TimestampUnix          int64
+	MountPath              string
+	TotalBytes             int64
+	FreeBytes              int64
+	UsedBytes              int64
+	MirrorsSizeBytes       int64
+	RenderCacheSizeBytes   int64
+	ProxiesSizeBytes       int64
+	PrunableBytes          int64
+	LastPruneTimestampUnix int64
+	LastReclaimedBytes     int64
+	LastPruneDurationMs    int64
+	PrunedItemCounts       string
+	UpdatedAt              int64
+}
+
 type AppSetting struct {
 	Key       string
 	Value     string

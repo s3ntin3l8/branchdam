@@ -484,6 +484,14 @@ type Querier interface {
 	// via SetStorageLocationActive, which is what makes a location that
 	// vanished and came back self-heal on the next successful startup.
 	UpsertStorageLocation(ctx context.Context, arg UpsertStorageLocationParams) (StorageLocation, error)
+	// DeleteAgentScratchTelemetry removes an agent's telemetry row by agent_id.
+	DeleteAgentScratchTelemetry(ctx context.Context, agentID string) error
+	// GetAgentScratchTelemetry retrieves an agent's scratch telemetry by agent_id.
+	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
+	// ListAgentScratchTelemetry returns all reported workstation scratch telemetry rows.
+	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
+	// UpsertAgentScratchTelemetry inserts or updates a workstation scratch telemetry record.
+	UpsertAgentScratchTelemetry(ctx context.Context, arg UpsertAgentScratchTelemetryParams) (AgentScratchTelemetry, error)
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used
 	// by internal/graph (PR 7) inside the same write transaction as the edge
