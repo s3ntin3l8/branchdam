@@ -18,6 +18,7 @@ func TestRouteSelectsChainByPathPrefix(t *testing.T) {
 	}{
 		{"/api/v1/agent/hello", KindMachine},
 		{"/api/v1/agent/events", KindMachine},
+		{"/api/v1/agent/telemetry", KindMachine},
 		{"/api/v1/assets", KindUser},
 		{"/api/v1/edges/audit", KindUser},
 		{"/", KindUser},

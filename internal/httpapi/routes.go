@@ -1967,17 +1967,13 @@ type AgentTelemetryOutput struct {
 	}
 }
 
-// handleAgentTelemetry receives and records workstation scratch storage telemetry
+// handleAgentTelemetry receives, validates, and acknowledges workstation scratch storage telemetry
 // (capacity, used/free space, render caches, ingest mirrors, proxies, and reclaimed space).
+// In Stage 1, telemetry is validated, logged with structured fields, and acknowledged;
+// persistent time-series retention and dashboard aggregation will follow in subsequent iterations.
 func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInput) (*AgentTelemetryOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
-	}
-	if in.Body.AgentID == "" {
-		return nil, huma.Error400BadRequest("agentId must not be empty", nil)
-	}
-	if in.Body.TimestampUnix <= 0 {
-		return nil, huma.Error400BadRequest("timestampUnix must be a valid positive Unix timestamp", nil)
 	}
 
 	s.log.Info("received agent scratch telemetry",
@@ -2333,6 +2329,9 @@ type PruneOutput struct {
 // before ever calling this endpoint) report "not eligible" uniformly
 // instead of surfacing a location-tier implementation detail as an error.
 func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput, error) {
+	if !s.cfg().Pruning.Enabled {
+		return nil, huma.Error409Conflict("pruning is disabled by server configuration", nil)
+	}
 	loc, err := s.db.Reader.GetStorageLocationByID(ctx, in.Body.StorageLocationID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, huma.Error404NotFound("storage location not found")
@@ -2342,7 +2341,7 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 	}
 	out := &PruneOutput{}
 	out.Body.Candidates = []pruneCandidateDTO{}
-	if !s.cfg().Pruning.Enabled || loc.Prunable == 0 {
+	if loc.Prunable == 0 {
 		return out, nil
 	}
 

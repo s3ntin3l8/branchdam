@@ -1,11 +1,17 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 )
 
 func TestAgentTelemetry_MissingKey_Unauthorized(t *testing.T) {
@@ -108,5 +114,25 @@ func TestAgentTelemetry_ValidPayload(t *testing.T) {
 	}
 	if res.AcknowledgedAtUnix <= 0 {
 		t.Errorf("res.AcknowledgedAtUnix = %d, want > 0", res.AcknowledgedAtUnix)
+	}
+}
+
+func TestAgentTelemetry_ForbiddenNonMachinePrincipal(t *testing.T) {
+	srv, _, _, _, _, _ := serverWithGuard(t)
+	ctx := auth.WithPrincipal(context.Background(), auth.Principal{Kind: auth.KindUser})
+
+	in := &AgentTelemetryInput{}
+	in.Body.AgentID = "agent-1"
+	in.Body.TimestampUnix = time.Now().Unix()
+
+	_, err := srv.handleAgentTelemetry(ctx, in)
+	if err == nil {
+		t.Fatal("handleAgentTelemetry with KindUser: expected error, got nil")
+	}
+	var humaErr huma.StatusError
+	if errors.As(err, &humaErr) {
+		if humaErr.GetStatus() != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 Forbidden", humaErr.GetStatus())
+		}
 	}
 }

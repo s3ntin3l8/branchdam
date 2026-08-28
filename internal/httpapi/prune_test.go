@@ -366,7 +366,7 @@ func TestHandlePruneNodeIDsFiltersCandidates(t *testing.T) {
 }
 
 // TestHandlePrune_DisabledByConfig proves that when Pruning.Enabled is false,
-// /api/v1/prune returns 200 with zero candidates.
+// /api/v1/prune returns 409 Conflict so callers and UIs get a distinct signal.
 func TestHandlePrune_DisabledByConfig(t *testing.T) {
 	srv, _, tier1ID, _ := pruneTestServer(t, 1)
 	srv.cfgProvider = staticConfigProvider{cfg: &config.Config{
@@ -377,16 +377,7 @@ func TestHandlePrune_DisabledByConfig(t *testing.T) {
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/prune", map[string]any{
 		"storageLocationId": tier1ID,
 	})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
-	}
-	var out struct {
-		Candidates []any `json:"candidates"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(out.Candidates) != 0 {
-		t.Errorf("candidates = %+v, want none when Pruning.Enabled is false", out.Candidates)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 Conflict, body = %s", rr.Code, rr.Body.String())
 	}
 }

@@ -304,6 +304,10 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
   }
   ```
 
+  *Stage 1 Scope:* The endpoint ingests, validates against the schema, logs structured telemetry
+  metrics, and returns the acknowledgement timestamp. Persistent time-series storage and dashboard
+  telemetry aggregation will follow in subsequent iterations.
+
 ---
 
 ### 3.2. Companion Protobuf 3 Specification (`agent_protocol.proto`)
