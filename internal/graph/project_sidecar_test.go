@@ -258,3 +258,64 @@ func TestProjectSidecarResolver_ResolveXMP(t *testing.T) {
 		}
 	})
 }
+
+func TestProjectSidecarResolver_SetRewrites(t *testing.T) {
+	tmpDir := t.TempDir()
+	edlPath := filepath.Join(tmpDir, "timeline.edl")
+	edlContent := `TITLE: TEST
+001  AX       V     C        00:00:00:00 00:00:05:00 01:00:00:00 01:00:05:00
+* FROM CLIP NAME: D:\Footage\Scene1\clip01.mov
+`
+	if err := os.WriteFile(edlPath, []byte(edlContent), 0644); err != nil {
+		t.Fatalf("failed to write edl: %v", err)
+	}
+
+	targetNode := graph.Node{
+		ID:           401,
+		FilePath:     "/storage/footage/Scene1/clip01.mov",
+		FileName:     "clip01.mov",
+		FileExt:      "mov",
+		FilenameStem: "clip01",
+	}
+
+	lookup := &mockLookup{
+		nodesByPath: map[string]graph.Node{
+			"/storage/footage/Scene1/clip01.mov": targetNode,
+		},
+	}
+
+	childNode := graph.Node{
+		ID:           402,
+		FilePath:     edlPath,
+		FileName:     "timeline.edl",
+		FileExt:      "edl",
+		FilenameStem: "timeline",
+	}
+
+	resolver := graph.NewProjectSidecarResolver(nil)
+
+	// Without rewrites, no path match
+	candidates, err := resolver.Resolve(context.Background(), childNode, lookup)
+	if err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("expected 0 candidates before SetRewrites, got %d", len(candidates))
+	}
+
+	// Dynamically update rewrites
+	resolver.SetRewrites([]config.PathRewrite{
+		{From: "D:\\Footage\\", To: "/storage/footage/"},
+	})
+
+	candidates, err = resolver.Resolve(context.Background(), childNode, lookup)
+	if err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate after SetRewrites, got %d", len(candidates))
+	}
+	if candidates[0].ParentID != targetNode.ID {
+		t.Errorf("ParentID = %d, want %d", candidates[0].ParentID, targetNode.ID)
+	}
+}

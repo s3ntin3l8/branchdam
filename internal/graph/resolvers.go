@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -533,12 +534,20 @@ func sameDirectory(a, b string) bool {
 // ProjectSidecarResolver parses project sidecar files (.dam.json, .drp, .fcpxml, .edl)
 // and emits Tier-1 PROJECT_SIDECAR edges at confidence 1.00.
 type ProjectSidecarResolver struct {
+	mu       sync.RWMutex
 	rewrites []config.PathRewrite
 }
 
 // NewProjectSidecarResolver creates a new Tier-1 ProjectSidecarResolver.
 func NewProjectSidecarResolver(rewrites []config.PathRewrite) *ProjectSidecarResolver {
 	return &ProjectSidecarResolver{rewrites: rewrites}
+}
+
+// SetRewrites dynamically updates the operator prefix rewrites used for resolving paths.
+func (r *ProjectSidecarResolver) SetRewrites(rewrites []config.PathRewrite) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rewrites = rewrites
 }
 
 func (r *ProjectSidecarResolver) Name() string { return "project_sidecar" }
@@ -665,7 +674,11 @@ func (r *ProjectSidecarResolver) resolveReference(ctx context.Context, rawPath, 
 	}
 
 	// 2. Try operator prefix rewrites
-	rewritten := applyPathRewrite(rawPath, r.rewrites)
+	r.mu.RLock()
+	rewrites := r.rewrites
+	r.mu.RUnlock()
+
+	rewritten := applyPathRewrite(rawPath, rewrites)
 	if rewritten != rawPath {
 		if node, err := lookup.ByPath(ctx, rewritten); err == nil && node != nil {
 			return node

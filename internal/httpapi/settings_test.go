@@ -422,3 +422,51 @@ func TestSettingsConcurrentGetAndPut(t *testing.T) {
 	}
 	<-done
 }
+
+func TestSettingsPutPathRewrites(t *testing.T) {
+	srv := settingsTestServer(t, settingsTestKey(t), []string{"dam-admins"})
+	handler := srv.Handler()
+
+	// 1. PUT valid path rewrites
+	putBody := map[string]any{
+		"set": map[string]any{
+			"pathRewrites": []map[string]string{
+				{"from": "Z:\\Footage", "to": "/storage/footage"},
+				{"from": "/Volumes/Studio", "to": "/storage/studio"},
+			},
+		},
+	}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, adminReq(http.MethodPut, "/api/v1/settings", settingsGetJSON(putBody)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/settings with pathRewrites status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Check GET /api/v1/config/path-rewrites reflects new rules
+	rrGet := httptest.NewRecorder()
+	handler.ServeHTTP(rrGet, adminReq(http.MethodGet, "/api/v1/config/path-rewrites", nil))
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/config/path-rewrites status = %d", rrGet.Code)
+	}
+	var rewrites []PathRewriteDTO
+	if err := json.NewDecoder(rrGet.Body).Decode(&rewrites); err != nil {
+		t.Fatalf("decode path rewrites: %v", err)
+	}
+	if len(rewrites) != 2 || rewrites[0].From != "Z:\\Footage" || rewrites[1].To != "/storage/studio" {
+		t.Errorf("unexpected path rewrites DTO: %+v", rewrites)
+	}
+
+	// 3. PUT invalid path rewrites (empty 'to')
+	badPutBody := map[string]any{
+		"set": map[string]any{
+			"pathRewrites": []map[string]string{
+				{"from": "Z:\\Footage", "to": ""},
+			},
+		},
+	}
+	rrBad := httptest.NewRecorder()
+	handler.ServeHTTP(rrBad, adminReq(http.MethodPut, "/api/v1/settings", settingsGetJSON(badPutBody)))
+	if rrBad.Code != http.StatusUnprocessableEntity {
+		t.Errorf("PUT invalid pathRewrites status = %d, want %d", rrBad.Code, http.StatusUnprocessableEntity)
+	}
+}

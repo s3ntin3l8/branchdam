@@ -39,6 +39,8 @@ func TestFieldsWellFormed(t *testing.T) {
 			sample = true
 		case KindStringList:
 			sample = []string{"x"}
+		case KindPathRewriteList:
+			sample = []config.PathRewrite{{From: "x", To: "y"}}
 		default:
 			t.Fatalf("field %q has unhandled Kind %v", f.Key, f.Type)
 		}
@@ -64,6 +66,19 @@ func equalAny(a, b any) bool {
 		}
 		for i := range as {
 			if as[i] != bs[i] {
+				return false
+			}
+		}
+		return true
+	}
+	ar, arok := a.([]config.PathRewrite)
+	br, brok := b.([]config.PathRewrite)
+	if arok || brok {
+		if !arok || !brok || len(ar) != len(br) {
+			return false
+		}
+		for i := range ar {
+			if ar[i] != br[i] {
 				return false
 			}
 		}

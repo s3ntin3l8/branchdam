@@ -194,7 +194,11 @@ func main() {
 	pool := workers.New[string](hashWorkers, 1024)
 	pool.Run(ctx)
 
-	engine := graph.NewEngine(database, log, graph.NewProjectSidecarResolver(cfg.PathRewrites), graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{}, graph.HeuristicSpatialTemporalResolver{})
+	sidecarResolver := graph.NewProjectSidecarResolver(cfg.PathRewrites)
+	settingsStore.Subscribe(func(newCfg *config.Config) {
+		sidecarResolver.SetRewrites(newCfg.PathRewrites)
+	})
+	engine := graph.NewEngine(database, log, sidecarResolver, graph.XMPOriginalDocumentIDResolver{}, graph.FilenameStemResolver{}, graph.HeuristicSpatialTemporalResolver{})
 	hub := sse.New()
 	scanTracker := &pipeline.ScanTracker{}
 

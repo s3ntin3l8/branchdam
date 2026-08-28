@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 )
@@ -189,6 +190,33 @@ func normalizeSettingValue(f settings.Field, v any) (any, error) {
 				return nil, fmt.Errorf("item %d must be a string", i)
 			}
 			out[i] = str
+		}
+		return out, nil
+	case settings.KindPathRewriteList:
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("must be a list of path rewrites")
+		}
+		out := make([]config.PathRewrite, len(arr))
+		for i, item := range arr {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("item %d must be an object with 'from' and 'to'", i)
+			}
+			fromVal, ok := m["from"]
+			if !ok {
+				fromVal = m["From"]
+			}
+			toVal, ok := m["to"]
+			if !ok {
+				toVal = m["To"]
+			}
+			fromStr, _ := fromVal.(string)
+			toStr, _ := toVal.(string)
+			out[i] = config.PathRewrite{
+				From: fromStr,
+				To:   toStr,
+			}
 		}
 		return out, nil
 	default:

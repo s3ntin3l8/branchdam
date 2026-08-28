@@ -8,7 +8,7 @@ import { SelectField } from "../components/form/SelectField";
 import { TextField } from "../components/form/TextField";
 import { ToggleField } from "../components/form/ToggleField";
 import { RestartServerCard } from "../components/RestartServerButton";
-import { useConfig, usePathRewrites, usePutSettings, useSettings } from "../hooks/queries";
+import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
 // aren't part of the wire DTO -- there's no generated client here (see
@@ -177,17 +177,202 @@ function SettingsFieldEditor({
   );
 }
 
+function PathRewritesEditor({
+  field,
+  saving,
+  onSave,
+  onRevert,
+}: {
+  field?: SettingsField;
+  saving: boolean;
+  onSave: (key: string, value: unknown, onError: () => void) => void;
+  onRevert: (key: string, onError: () => void) => void;
+}) {
+  const currentRules = useMemo(() => {
+    if (!field || !Array.isArray(field.value)) return [] as Array<{ from: string; to: string }>;
+    return field.value as Array<{ from: string; to: string }>;
+  }, [field]);
+
+  const [rules, setRules] = useState<Array<{ from: string; to: string }>>(currentRules);
+  const [prevRules, setPrevRules] = useState(currentRules);
+  const [dirty, setDirty] = useState(false);
+  const [newFrom, setNewFrom] = useState("");
+  const [newTo, setNewTo] = useState("");
+
+  if (currentRules !== prevRules) {
+    setPrevRules(currentRules);
+    if (!dirty) {
+      setRules(currentRules);
+    }
+  }
+
+  const handleAdd = () => {
+    if (!newFrom.trim() || !newTo.trim()) return;
+    setRules((prev) => [...prev, { from: newFrom.trim(), to: newTo.trim() }]);
+    setNewFrom("");
+    setNewTo("");
+    setDirty(true);
+  };
+
+  const handleDelete = (index: number) => {
+    setRules((prev) => prev.filter((_, i) => i !== index));
+    setDirty(true);
+  };
+
+  const handleUpdate = (index: number, key: "from" | "to", val: string) => {
+    setRules((prev) => {
+      const copy = [...prev];
+      copy[index] = { ...copy[index], [key]: val };
+      return copy;
+    });
+    setDirty(true);
+  };
+
+  const canSave = field?.editable && dirty;
+
+  return (
+    <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-400">
+            Operator Path Rewrites (Tier-1 Resolution)
+          </h2>
+          {field && (
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase ${
+                field.source === "override"
+                  ? "bg-amber-950/80 text-amber-300 border border-amber-800/60"
+                  : "bg-neutral-800/80 text-neutral-400 border border-neutral-700/60"
+              }`}
+            >
+              {field.source}
+            </span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          {canSave && (
+            <button
+              type="button"
+              onClick={() => {
+                const submitted = rules;
+                setDirty(false);
+                onSave("pathRewrites", submitted, () => setDirty(true));
+              }}
+              disabled={saving}
+              className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            >
+              Save Rewrites
+            </button>
+          )}
+          {field?.source === "override" && field.editable && (
+            <button
+              type="button"
+              onClick={() => {
+                setDirty(false);
+                onRevert("pathRewrites", () => setDirty(true));
+              }}
+              disabled={saving}
+              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
+            >
+              Revert to config
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="mb-4 text-xs text-neutral-500">
+        Host-to-container path transformation rules used when resolving project-file references.
+      </p>
+
+      {rules.length === 0 ? (
+        <p className="mb-4 text-sm text-neutral-500">No operator path rewrites configured.</p>
+      ) : (
+        <div className="overflow-x-auto mb-4">
+          <table className="w-full text-left text-sm text-neutral-300">
+            <thead className="border-b border-neutral-800 text-xs font-semibold text-neutral-400">
+              <tr>
+                <th className="pb-2">Original Host Prefix</th>
+                <th className="pb-2">Target Container Prefix</th>
+                <th className="pb-2 w-16 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-800/60 font-mono text-xs">
+              {rules.map((rw, i) => (
+                <tr key={i} className="hover:bg-neutral-800/30">
+                  <td className="py-2 pr-4 text-amber-300">
+                    <input
+                      type="text"
+                      value={rw.from}
+                      onChange={(e) => handleUpdate(i, "from", e.target.value)}
+                      className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-amber-300 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="py-2 pr-4 text-emerald-300">
+                    <input
+                      type="text"
+                      value={rw.to}
+                      onChange={(e) => handleUpdate(i, "to", e.target.value)}
+                      className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-emerald-300 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(i)}
+                      className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-950/40 hover:text-red-300"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-neutral-800 pt-3">
+        <input
+          type="text"
+          placeholder="Original host prefix (e.g. D:\Footage\)"
+          value={newFrom}
+          onChange={(e) => setNewFrom(e.target.value)}
+          className="flex-1 min-w-[200px] rounded border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 font-mono text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-indigo-500 focus:outline-none"
+        />
+        <input
+          type="text"
+          placeholder="Target container prefix (e.g. /storage/projects/Footage/)"
+          value={newTo}
+          onChange={(e) => setNewTo(e.target.value)}
+          className="flex-1 min-w-[200px] rounded border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 font-mono text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-indigo-500 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={handleAdd}
+          disabled={!newFrom.trim() || !newTo.trim()}
+          className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
+        >
+          Add Rule
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { data: config, isLoading: configLoading } = useConfig();
-  const { data: pathRewrites, isLoading: rewritesLoading } = usePathRewrites();
   const { data: settings, isLoading: settingsLoading, error: settingsError } = useSettings();
   const putSettings = usePutSettings();
   const [fieldError, setFieldError] = useState<string | null>(null);
+
+  const pathRewritesField = useMemo(() => {
+    return settings?.fields.find((f) => f.key === "pathRewrites");
+  }, [settings]);
 
   const grouped = useMemo(() => {
     if (!settings) return [] as Array<[string, SettingsField[]]>;
     const byGroup = new Map<string, SettingsField[]>();
     for (const f of settings.fields) {
+      if (f.key === "pathRewrites") continue; // Rendered in dedicated PathRewritesEditor
       const list = byGroup.get(f.group) ?? [];
       list.push(f);
       byGroup.set(f.group, list);
@@ -279,39 +464,12 @@ export default function SettingsPage() {
         ))
       )}
 
-      <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">
-          Operator Path Rewrites (Tier-1 Resolution)
-        </h2>
-        <p className="mb-4 text-xs text-neutral-500">
-          Host-to-container path transformation rules used when resolving project-file references.
-        </p>
-
-        {rewritesLoading ? (
-          <p className="text-sm text-neutral-400">Loading path rewrites…</p>
-        ) : !pathRewrites || pathRewrites.length === 0 ? (
-          <p className="text-sm text-neutral-500">No operator path rewrites configured.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-neutral-300">
-              <thead className="border-b border-neutral-800 text-xs font-semibold text-neutral-400">
-                <tr>
-                  <th className="pb-2">Original Host Prefix</th>
-                  <th className="pb-2">Target Container Prefix</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-800/60 font-mono text-xs">
-                {pathRewrites.map((rw, i) => (
-                  <tr key={i} className="hover:bg-neutral-800/30">
-                    <td className="py-2.5 pr-4 text-amber-300">{rw.from}</td>
-                    <td className="py-2.5 text-emerald-300">{rw.to}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      <PathRewritesEditor
+        field={pathRewritesField}
+        saving={putSettings.isPending}
+        onSave={handleSave}
+        onRevert={handleRevert}
+      />
     </div>
   );
 }
