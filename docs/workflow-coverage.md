@@ -50,7 +50,7 @@ Three things follow from that:
 | 9 | Low-confidence matches routed to the audit queue | Works | `GET /api/v1/edges/audit`; a human `CONFIRMED`/`REJECTED` decision is permanent and is never overridden by a later resolver run |
 | 10 | Child export inherits parent EXIF/GPS | Works | `POST /api/v1/assets/{id}/inherit-metadata` — a manual call, not triggered automatically when an export is detected |
 | 11 | Immich indexes the export | Works, with prerequisites | Requires a new **external** library in Immich; see §6 |
-| 12 | Local scratch pruned once the master is verified | Unreachable in this topology | `prune.Execute` needs a server-visible path; workstation-local scratch (Resolve caches/proxies) is not one. Tracked in `branchdam#230`, not acted on for now. **Not the same thing** as `branchdam-agent`'s own `prune` subcommand, which deletes its own `LocalEditRoot` edit-copy mirror of an already-archived, hash-verified file (via `POST /api/v1/agent/node-status`) -- a narrower, agent-local capability that doesn't require the server to see the file at all |
+| 12 | Local scratch pruned once the master is verified | Built, agent-orchestrated (Option 3 / #266) | Ephemeral NLE render caches (`CacheClip/`) and proxies are pruned client-side by `branchdam-agent` once `POST /api/v1/agent/node-status` confirms Tier-3 masters are live and hash-verified. Camera originals on `LocalEditRoot` remain user-governed. Storage metrics are reported via `POST /api/v1/agent/telemetry` |
 | 13 | Google Photos push | No-go by decision | See [`google-photos.md`](google-photos.md) — the sync layer carries no file path, so no byte transfer is possible without reshaping it |
 
 ## 3. The folder-mirror requirement

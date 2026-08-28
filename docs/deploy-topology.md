@@ -76,10 +76,18 @@ to follow directly.
 
 `TIER1_LOCAL_SCRATCH` is not mounted into the server at all in this topology — it is
 workstation-local NVMe, and mounting it over the network to make it server-visible would trade
-away the local editing performance this topology is built to preserve. The practical
-consequence: cache pruning (`POST /api/v1/prune`, `cacheTtlHours`) has nothing to act on on the
-server host, since it requires a server-visible path to delete from. This is expected, not a
-misconfiguration — see `workflow-coverage.md`'s step 12.
+away the local editing performance this topology is built to preserve.
+
+In this architecture (Option 3 / #266), ephemeral render caches (e.g. DaVinci Resolve `CacheClip/`)
+and proxy media are managed client-side by `branchdam-agent`:
+- The agent discovers local render caches and queries `POST /api/v1/agent/node-status` on the server
+  to confirm all referenced source masters are live and hash-verified on `TIER3_MASTER_ARCHIVE`.
+- Stale render caches are automatically evicted based on inactivity TTL and scratch disk watermarks,
+  leaving camera originals on `LocalEditRoot` protected from automated deletion.
+- Workstation scratch storage usage and reclaimed bytes are reported back to the server via
+  `POST /api/v1/agent/telemetry`.
+- Server-side cache pruning (`POST /api/v1/prune`, `pruning.enabled`, `cacheTtlHours`) remains
+  available for any server-visible scratch locations.
 
 `TIER0_LOCAL_STAGING`, by contrast, is configured in the server's `config.yaml` (and mounted as an
 empty directory, e.g. `/storage/staging`) purely so `storage.Guard.Resolve` recognizes paths

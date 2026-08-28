@@ -126,7 +126,8 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	})
 
 	cfg := &config.Config{
-		Agent: config.Agent{APIKey: routeTestAgentKey},
+		Agent:   config.Agent{APIKey: routeTestAgentKey},
+		Pruning: config.Pruning{Enabled: true},
 		StorageLocations: []config.StorageLocation{
 			{Name: "t1", RootPath: resolvedTier1, Tier: "TIER1_LOCAL_SCRATCH", Prunable: true, CacheTTLHours: cacheTTLHours},
 			{Name: "t3", RootPath: resolvedTier3, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
@@ -361,5 +362,31 @@ func TestHandlePruneNodeIDsFiltersCandidates(t *testing.T) {
 	}
 	if len(out.Candidates) != 0 {
 		t.Errorf("candidates = %+v, want none (nodeIds filter excludes the only eligible node)", out.Candidates)
+	}
+}
+
+// TestHandlePrune_DisabledByConfig proves that when Pruning.Enabled is false,
+// /api/v1/prune returns 200 with zero candidates.
+func TestHandlePrune_DisabledByConfig(t *testing.T) {
+	srv, _, tier1ID, _ := pruneTestServer(t, 1)
+	srv.cfgProvider = staticConfigProvider{cfg: &config.Config{
+		Agent:   config.Agent{APIKey: routeTestAgentKey},
+		Pruning: config.Pruning{Enabled: false},
+	}}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/prune", map[string]any{
+		"storageLocationId": tier1ID,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Candidates []any `json:"candidates"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Candidates) != 0 {
+		t.Errorf("candidates = %+v, want none when Pruning.Enabled is false", out.Candidates)
 	}
 }

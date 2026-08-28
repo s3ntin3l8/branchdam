@@ -329,6 +329,20 @@ var thumbnailsFields = []Field{
 	},
 }
 
+var pruningFields = []Field{
+	{
+		Key:      "pruning.enabled",
+		Type:     KindBool,
+		Label:    "Pruning Enabled",
+		Group:    "Pruning",
+		Apply:    ApplyLive,
+		Get:      func(cfg *config.Config) any { return cfg.Pruning.Enabled },
+		Set:      func(cfg *config.Config, v any) error { cfg.Pruning.Enabled = v.(bool); return nil },
+		Editable: true,
+		Doc:      "Global kill-switch for server-side cache pruning operations (POST /api/v1/prune).",
+	},
+}
+
 var httpFields = []Field{
 	{
 		Key:      "http.readTimeoutSecs",
@@ -449,7 +463,7 @@ var pathRewriteFields = []Field{
 
 // Fields returns every registered field, in registration order.
 func Fields() []Field {
-	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, httpFields, agentFields, authzFields, pathRewriteFields}
+	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, httpFields, agentFields, authzFields, pathRewriteFields}
 	n := 0
 	for _, g := range groups {
 		n += len(g)
