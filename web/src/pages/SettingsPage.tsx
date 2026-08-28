@@ -25,8 +25,9 @@ function ReadOnlyValue({ field }: { field: SettingsField }) {
   let display: string;
   if (field.secret) {
     display = field.hasValue ? "Set (hidden)" : "Not set";
-  } else if (Array.isArray(field.value)) {
-    display = field.value.length > 0 ? field.value.join(", ") : "(empty -- every authenticated user is admin)";
+  } else if (field.type === "stringList" || Array.isArray(field.value)) {
+    const list = Array.isArray(field.value) ? field.value : [];
+    display = list.length > 0 ? list.join(", ") : "(empty -- every authenticated user is admin)";
   } else if (field.value === undefined || field.value === null || field.value === "") {
     display = "(empty)";
   } else {
@@ -218,7 +219,7 @@ export default function SettingsPage() {
     <div className="p-6">
       <h1 className="mb-6 text-2xl font-bold text-white">System Settings</h1>
 
-      {settings && settings.pendingRestart.length > 0 && (
+      {settings && (settings.pendingRestart?.length ?? 0) > 0 && (
         <div className="mb-6 rounded-lg border border-amber-800/60 bg-amber-950/30 p-4 text-sm text-amber-300">
           <span className="font-semibold">Restart required</span> to apply: {settings.pendingRestart.join(", ")}
         </div>
