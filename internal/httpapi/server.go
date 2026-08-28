@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"bytes"
+	"html"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -363,16 +364,23 @@ func (s *Server) spaHandler() http.Handler {
 // fixed public domain, so the Open Graph/Twitter card image and url tags
 // can only be made absolute -- as the OG/Twitter spec requires -- from the
 // incoming request's Host/X-Forwarded-* headers.
+//
+// requestOrigin's output is attacker-influenceable (Host/X-Forwarded-* are
+// request headers, not validated hostnames) and lands inside HTML attribute
+// values below, so it's HTML-escaped before substitution -- without this, a
+// crafted header (e.g. `X-Forwarded-Host: x"><script>...`) would be a
+// reflected-XSS vector.
 func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
 	data, err := fs.ReadFile(s.spa, "index.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	html := bytes.ReplaceAll(data, []byte("__BRANCHDAM_ORIGIN__"), []byte(requestOrigin(r)))
+	origin := html.EscapeString(requestOrigin(r))
+	page := bytes.ReplaceAll(data, []byte("__BRANCHDAM_ORIGIN__"), []byte(origin))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(html)))
-	_, _ = w.Write(html)
+	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
+	_, _ = w.Write(page)
 }
 
 // requestOrigin reconstructs the scheme+host the client used to reach this

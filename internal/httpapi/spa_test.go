@@ -90,6 +90,28 @@ func TestServeIndexHTMLHonorsForwardedHeaders(t *testing.T) {
 	}
 }
 
+func TestServeIndexHTMLEscapesHostileHeaders(t *testing.T) {
+	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
+	srv := testServerWithSPA(t, spa)
+
+	req := httptest.NewRequest(http.MethodGet, "http://branchdam.example/", nil)
+	req.Header.Set("X-Forwarded-Host", `evil.example"><script>alert(1)</script>`)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	body, _ := io.ReadAll(rr.Body)
+	// CodeQL flagged the pre-fix version of this handler as reflected XSS:
+	// requestOrigin() builds its return value straight from request headers,
+	// which are attacker-controlled, and that value lands inside an HTML
+	// attribute. The unescaped payload must never appear verbatim.
+	if bytes.Contains(body, []byte(`"><script>`)) {
+		t.Fatalf("body = %q, contains an unescaped attribute breakout -- reflected XSS", body)
+	}
+	if !bytes.Contains(body, []byte("&lt;script&gt;")) {
+		t.Errorf("body = %q, want the header's <script> HTML-escaped, not stripped or passed through", body)
+	}
+}
+
 func TestServeIndexHTMLOnDeepLinkFallback(t *testing.T) {
 	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
 	srv := testServerWithSPA(t, spa)
