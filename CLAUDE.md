@@ -470,7 +470,14 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   `review / dependency-review`, `golangci-lint`), no required reviews (solo repo),
   `enforce_admins: false`, force-push and branch deletion both blocked. `strict` is `false`
   (branches need not be up to date with `main` before merging) so Dependabot PRs don't need a
-  rebase on every `main` advance to merge.
+  rebase on every `main` advance to merge. Also set: **`required_conversation_resolution: true`**
+  -- every review thread (Hermes's or a human's) must be replied to and resolved before the merge
+  button unblocks, matching mullion's (`s3ntin3l8/mullion-session-manager`) actually-enforced
+  posture. This gates on inline threads, not on the review's overall verdict -- a
+  `CHANGES_REQUESTED` review whose findings live only in the summary body, with no inline
+  comments, still doesn't block. See the `hermes.yml` bullet below for why that doesn't
+  contradict "a review bot going down shouldn't block every merge": thread resolution is
+  human-clearable, so a dead bot never wedges a merge.
 - **`codecov.yml`**: both `codecov/patch` and `codecov/project` are `informational` (no agreed
   coverage floor yet), with `go`/`node` flags scoped by path matching what the shared
   `ci-go.yml`/`ci-node.yml` workflows already upload coverage under. Codecov reads this file from

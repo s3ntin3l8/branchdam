@@ -91,6 +91,11 @@ button reads as blocked/"Expected" forever, not just slow -- that's expected, no
 it via the "merge without waiting for requirements" path, which `enforce_admins: false` makes
 available to the repo owner.
 
+`required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
+be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
+[`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for the exact commands (thread
+resolution is a GraphQL-only concept, not a `gh pr` verb).
+
 ## Automated review
 
 Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` GitHub App,
@@ -99,6 +104,13 @@ another look at any point -- including after addressing feedback -- by commentin
 `@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). See
 [`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for replying to and resolving
 Hermes's inline comments.
+
+Because `required_conversation_resolution` is on, any inline comment Hermes (or a human
+reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
+This does *not* gate on the review's overall verdict (`APPROVED`/`CHANGES_REQUESTED`) -- a
+`CHANGES_REQUESTED` review whose findings live only in the summary body, with no inline
+comments, does not block. That's the deliberate trade-off: it keeps a Hermes outage from ever
+wedging a merge, since a human can resolve threads without the bot.
 
 Auto-review only runs for PRs from this repo, not forks -- `hermes.yml`'s `auto-review` job is
 gated on `head.repo.full_name == github.repository`, since a `pull_request` event otherwise runs
