@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/s3ntin3l8/branchdam/compare/v0.7.0...v0.8.0) (2026-08-28)
+
+
+### Features
+
+* **settings:** add app_settings precedence resolver + encrypted secrets (Immich only) ([#273](https://github.com/s3ntin3l8/branchdam/issues/273)) ([9c86a4f](https://github.com/s3ntin3l8/branchdam/commit/9c86a4fe616b51face2f1527607a97aab8142cee))
+* **settings:** add GET/PUT /api/v1/settings API ([#276](https://github.com/s3ntin3l8/branchdam/issues/276)) ([0de0ed5](https://github.com/s3ntin3l8/branchdam/commit/0de0ed5fa79ea86791e81be9fca6b0d3359eb58e))
+* **settings:** editable storage-location safe fields via UI overrides ([#282](https://github.com/s3ntin3l8/branchdam/issues/282)) ([b86505f](https://github.com/s3ntin3l8/branchdam/commit/b86505f3f6e98ef1e1b5c3ae696b2a4d9d1afddb))
+* **sync:** live-reload the Immich sync worker on settings changes ([#280](https://github.com/s3ntin3l8/branchdam/issues/280)) ([90e2088](https://github.com/s3ntin3l8/branchdam/commit/90e2088c2fe9172b6d19958fd74f321b0d766ff0))
+* **web:** add Settings UI for GET/PUT /api/v1/settings ([#278](https://github.com/s3ntin3l8/branchdam/issues/278)) ([7e785c9](https://github.com/s3ntin3l8/branchdam/commit/7e785c9b97d712393e2387508a482c01db446ad2))
+
 ## [0.7.0](https://github.com/s3ntin3l8/branchdam/compare/v0.6.0...v0.7.0) (2026-08-22)
 
 
