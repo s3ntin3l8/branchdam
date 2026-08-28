@@ -339,3 +339,7 @@ export interface PutSettingsRequest {
   set?: Record<string, unknown>;
   unset?: string[];
 }
+
+export interface PostRestartResponse {
+  ok: boolean;
+}

@@ -15,6 +15,7 @@ vi.mock("../api/client", async (importOriginal) => {
       listPathRewrites: vi.fn(),
       getSettings: vi.fn(),
       putSettings: vi.fn(),
+      postRestart: vi.fn(),
     },
   };
 });
@@ -292,5 +293,43 @@ describe("SettingsPage", () => {
     renderWithClient(<SettingsPage />);
 
     expect(await screen.findByText("Admin access is required to view settings.")).toBeInTheDocument();
+  });
+
+  it("requires a confirm step before firing the restart request", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+    vi.mocked(api.postRestart).mockClear();
+    vi.mocked(api.postRestart).mockResolvedValue({ ok: true });
+
+    renderWithClient(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Restart server" }));
+    expect(screen.getByText("Restart now?")).toBeInTheDocument();
+    expect(api.postRestart).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText("Restart now?")).not.toBeInTheDocument();
+    expect(api.postRestart).not.toHaveBeenCalled();
+  });
+
+  it("fires the restart request and shows a restarting note after confirming", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+    vi.mocked(api.postRestart).mockClear();
+    vi.mocked(api.postRestart).mockResolvedValue({ ok: true });
+
+    renderWithClient(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Restart server" }));
+    await user.click(await screen.findByRole("button", { name: "Restart" }));
+
+    await waitFor(() => {
+      expect(api.postRestart).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText(/Restarting…/)).toBeInTheDocument();
   });
 });

@@ -7,6 +7,7 @@ import { SecretField } from "../components/form/SecretField";
 import { SelectField } from "../components/form/SelectField";
 import { TextField } from "../components/form/TextField";
 import { ToggleField } from "../components/form/ToggleField";
+import { RestartServerCard } from "../components/RestartServerButton";
 import { useConfig, usePathRewrites, usePutSettings, useSettings } from "../hooks/queries";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
@@ -240,6 +241,8 @@ export default function SettingsPage() {
           Version: <span className="font-mono text-emerald-400">{configLoading ? "Loading…" : config?.version || "unknown"}</span>
         </p>
       </div>
+
+      <RestartServerCard className="mb-8" />
 
       {settingsLoading ? (
         <p className="mb-8 text-sm text-neutral-400">Loading settings…</p>
