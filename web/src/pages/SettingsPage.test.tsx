@@ -332,4 +332,33 @@ describe("SettingsPage", () => {
     });
     expect(await screen.findByText(/Restarting…/)).toBeInTheDocument();
   });
+
+  it("renders safely when pendingRestart is null and authz.groups is empty or null", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue(null as unknown as []);
+    const responseWithNulls: SettingsResponse = {
+      fields: [
+        field({
+          key: "authz.groups",
+          type: "stringList",
+          label: "Admin Groups",
+          group: "Authorization",
+          value: null as unknown as string[],
+          source: "config",
+          applyMode: "never",
+          editable: false,
+          readOnlyReason: "editable only via config.yaml/.env",
+        }),
+      ],
+      pendingRestart: null as unknown as string[],
+      secretsAvailable: true,
+    };
+    vi.mocked(api.getSettings).mockResolvedValue(responseWithNulls);
+
+    renderWithClient(<SettingsPage />);
+
+    expect(await screen.findByText("Admin Groups")).toBeInTheDocument();
+    expect(screen.getByText("(empty -- every authenticated user is admin)")).toBeInTheDocument();
+    expect(screen.getByText("No operator path rewrites configured.")).toBeInTheDocument();
+  });
 });

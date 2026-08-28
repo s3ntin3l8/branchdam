@@ -198,6 +198,10 @@ func TestSettingsGetListsRegisteredFields(t *testing.T) {
 		t.Error("authz.groups.ReadOnlyReason is empty, want an explanation")
 	}
 
+	if body.PendingRestart == nil || len(body.PendingRestart) != 0 {
+		t.Errorf("PendingRestart = %v, want non-nil empty slice []", body.PendingRestart)
+	}
+
 	if !body.SecretsAvailable {
 		t.Error("SecretsAvailable = false, want true (test server has a key configured)")
 	}

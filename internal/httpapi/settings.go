@@ -130,6 +130,9 @@ func (s *Server) buildSettingsOutput(ctx context.Context) (*GetSettingsOutput, e
 		}
 		out.Body.Fields = append(out.Body.Fields, dto)
 	}
+	if pending == nil {
+		pending = make([]string, 0)
+	}
 	out.Body.PendingRestart = pending
 	out.Body.SecretsAvailable = s.settingsStore.SecretsAvailable()
 	return out, nil
