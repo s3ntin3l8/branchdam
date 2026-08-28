@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/s3ntin3l8/branchdam/compare/v0.9.0...v0.9.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **settings:** handle nil pendingRestart and guard stringList field rendering ([#288](https://github.com/s3ntin3l8/branchdam/issues/288)) ([11396c0](https://github.com/s3ntin3l8/branchdam/commit/11396c03bd9cb19b718e9b1310fef7add0026c39))
+
 ## [0.9.0](https://github.com/s3ntin3l8/branchdam/compare/v0.8.0...v0.9.0) (2026-08-28)
 
 
