@@ -33,15 +33,13 @@ the API this drives; a UI page on top of it lands in a follow-up PR. It exposes 
 field's current value, whether it's overridden or coming from `config.yaml`/`.env`
 (`source: "override" | "config"`), and whether it takes effect immediately or needs a restart
 (`applyMode: "live" | "restart"`) — see `internal/settings/registry.go` for the authoritative list.
-Two domains are intentionally excluded from the registry, not just left for later:
+One domain is intentionally excluded from the registry, not just left for later:
 
 - **`authz.groups` is display-only** (`applyMode: "never"`, `editable: false`) — it gates the
   settings route itself, so a UI edit that locked the operator out of every admin group would have
   no recovery path. Change it only via `config.yaml`/`.env`.
-- **`pathRewrites` isn't in the registry at all.** It's a list of `{from, to}` objects, not a
-  scalar or a string list, and doesn't fit the registry's value model. `GET /api/v1/config/path-rewrites`
-  is unaffected; a typed registry entry for it is a candidate for a later PR, not a gap left by
-  this one.
+
+Operator Path Rewrites (`pathRewrites`) are registered with `applyMode: "live"` and `editable: true` — UI overrides take effect immediately for subsequent project file introspection. Reverting the override restores the rules from `config.yaml`.
 
 Secret-typed fields (e.g. `immich.apiKey`) are encrypted at rest with a key from
 `BRANCHDAM_SECRET_KEY`, never returned by `GET` (only `hasValue: true`), and a `PUT` fails with
@@ -130,6 +128,8 @@ pathRewrites:
   - from: "/Volumes/Video/Projects/"
     to: "/storage/projects/Video/"
 ```
+
+`pathRewrites` can also be configured and updated live via the Settings UI / Settings API (`PUT /api/v1/settings`), taking effect immediately for all subsequent project file parses without requiring a server restart. Reverting the UI override restores the base rules from `config.yaml`.
 
 ## `storageLocations`
 

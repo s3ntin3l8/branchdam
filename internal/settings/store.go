@@ -236,6 +236,13 @@ func (s *Store) decodeRow(field Field, row sqlcgen.AppSetting) (any, error) {
 		var v []string
 		err := json.Unmarshal([]byte(row.Value), &v)
 		return v, err
+	case KindPathRewriteList:
+		var v []config.PathRewrite
+		err := json.Unmarshal([]byte(row.Value), &v)
+		if v == nil {
+			v = []config.PathRewrite{}
+		}
+		return v, err
 	default:
 		return nil, fmt.Errorf("unknown field kind %v", field.Type)
 	}

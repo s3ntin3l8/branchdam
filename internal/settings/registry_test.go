@@ -39,6 +39,8 @@ func TestFieldsWellFormed(t *testing.T) {
 			sample = true
 		case KindStringList:
 			sample = []string{"x"}
+		case KindPathRewriteList:
+			sample = []config.PathRewrite{{From: "x", To: "y"}}
 		default:
 			t.Fatalf("field %q has unhandled Kind %v", f.Key, f.Type)
 		}
@@ -69,6 +71,19 @@ func equalAny(a, b any) bool {
 		}
 		return true
 	}
+	ar, arok := a.([]config.PathRewrite)
+	br, brok := b.([]config.PathRewrite)
+	if arok || brok {
+		if !arok || !brok || len(ar) != len(br) {
+			return false
+		}
+		for i := range ar {
+			if ar[i] != br[i] {
+				return false
+			}
+		}
+		return true
+	}
 	return a == b
 }
 
@@ -85,5 +100,39 @@ func TestLookupFindsEveryRegisteredField(t *testing.T) {
 	}
 	if _, ok := Lookup("not.a.real.field"); ok {
 		t.Error("Lookup(unregistered) = ok, want not found")
+	}
+}
+
+func TestKindAndApplyModeString(t *testing.T) {
+	kinds := []struct {
+		k    Kind
+		want string
+	}{
+		{KindString, "string"},
+		{KindInt, "int"},
+		{KindBool, "bool"},
+		{KindStringList, "stringList"},
+		{KindPathRewriteList, "pathRewriteList"},
+		{Kind(999), "unknown"},
+	}
+	for _, tc := range kinds {
+		if got := tc.k.String(); got != tc.want {
+			t.Errorf("Kind(%d).String() = %q, want %q", tc.k, got, tc.want)
+		}
+	}
+
+	modes := []struct {
+		m    ApplyMode
+		want string
+	}{
+		{ApplyLive, "live"},
+		{ApplyRestart, "restart"},
+		{ApplyNever, "never"},
+		{ApplyMode(999), "unknown"},
+	}
+	for _, tc := range modes {
+		if got := tc.m.String(); got != tc.want {
+			t.Errorf("ApplyMode(%d).String() = %q, want %q", tc.m, got, tc.want)
+		}
 	}
 }

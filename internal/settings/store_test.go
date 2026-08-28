@@ -339,3 +339,87 @@ func TestStoreIsOverridden(t *testing.T) {
 		t.Error("IsOverridden after revert = true, want false")
 	}
 }
+
+func TestStoreApplyPathRewrites(t *testing.T) {
+	ctx := context.Background()
+	base := config.Config{
+		PathRewrites: []config.PathRewrite{
+			{From: "D:\\Base", To: "/storage/base"},
+		},
+	}
+	store, err := NewStore(ctx, testDB(t), base, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if len(store.Effective().PathRewrites) != 1 || store.Effective().PathRewrites[0].From != "D:\\Base" {
+		t.Fatalf("unexpected base PathRewrites: %+v", store.Effective().PathRewrites)
+	}
+
+	// Apply invalid (empty prefix)
+	err = store.Apply(ctx, map[string]any{
+		"pathRewrites": []config.PathRewrite{{From: "", To: "/storage/dest"}},
+	}, nil, "tester")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Apply empty 'from' prefix = %v, want ErrInvalidInput", err)
+	}
+
+	// Apply valid override
+	newRewrites := []config.PathRewrite{
+		{From: "E:\\Project", To: "/storage/project"},
+		{From: "/Volumes/Media", To: "/storage/media"},
+	}
+	if err := store.Apply(ctx, map[string]any{"pathRewrites": newRewrites}, nil, "tester"); err != nil {
+		t.Fatalf("Apply pathRewrites: %v", err)
+	}
+
+	eff := store.Effective().PathRewrites
+	if len(eff) != 2 || eff[0].From != "E:\\Project" || eff[1].From != "/Volumes/Media" {
+		t.Errorf("Effective PathRewrites mismatch: %+v", eff)
+	}
+	if !store.IsOverridden("pathRewrites") {
+		t.Error("IsOverridden(pathRewrites) = false, want true")
+	}
+
+	// Revert override
+	if err := store.Apply(ctx, nil, []string{"pathRewrites"}, "tester"); err != nil {
+		t.Fatalf("Apply unset pathRewrites: %v", err)
+	}
+	eff = store.Effective().PathRewrites
+	if len(eff) != 1 || eff[0].From != "D:\\Base" {
+		t.Errorf("after revert, Effective PathRewrites mismatch: %+v", eff)
+	}
+	if store.IsOverridden("pathRewrites") {
+		t.Error("IsOverridden(pathRewrites) after revert = true, want false")
+	}
+
+	// Apply empty list override
+	if err := store.Apply(ctx, map[string]any{"pathRewrites": []config.PathRewrite{}}, nil, "tester"); err != nil {
+		t.Fatalf("Apply empty pathRewrites list: %v", err)
+	}
+	if len(store.Effective().PathRewrites) != 0 {
+		t.Errorf("Effective PathRewrites after empty override = %+v, want empty", store.Effective().PathRewrites)
+	}
+	if !store.IsOverridden("pathRewrites") {
+		t.Error("IsOverridden(pathRewrites) for empty list override = false, want true")
+	}
+}
+
+func TestStoreSecretsAvailable(t *testing.T) {
+	ctx := context.Background()
+	storeWithBox, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if !storeWithBox.SecretsAvailable() {
+		t.Error("SecretsAvailable with box = false, want true")
+	}
+
+	storeWithoutBox, err := NewStore(ctx, testDB(t), config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewStore without box: %v", err)
+	}
+	if storeWithoutBox.SecretsAvailable() {
+		t.Error("SecretsAvailable without box = true, want false")
+	}
+}

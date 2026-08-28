@@ -11,6 +11,7 @@ package settings
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 )
@@ -23,6 +24,7 @@ const (
 	KindInt
 	KindBool
 	KindStringList
+	KindPathRewriteList
 )
 
 func (k Kind) String() string {
@@ -35,6 +37,8 @@ func (k Kind) String() string {
 		return "bool"
 	case KindStringList:
 		return "stringList"
+	case KindPathRewriteList:
+		return "pathRewriteList"
 	default:
 		return "unknown"
 	}
@@ -402,9 +406,50 @@ var authzFields = []Field{
 	},
 }
 
+var pathRewriteFields = []Field{
+	{
+		Key:   "pathRewrites",
+		Type:  KindPathRewriteList,
+		Label: "Operator Path Rewrites",
+		Group: "Path Resolution",
+		Apply: ApplyLive,
+		Get: func(cfg *config.Config) any {
+			if cfg.PathRewrites == nil {
+				return []config.PathRewrite{}
+			}
+			return cfg.PathRewrites
+		},
+		Set: func(cfg *config.Config, v any) error {
+			list, ok := v.([]config.PathRewrite)
+			if !ok {
+				return fmt.Errorf("must be a list of path rewrites")
+			}
+			cfg.PathRewrites = list
+			return nil
+		},
+		Validate: func(v any) error {
+			list, ok := v.([]config.PathRewrite)
+			if !ok {
+				return fmt.Errorf("must be a list of path rewrites")
+			}
+			for i, rw := range list {
+				if strings.TrimSpace(rw.From) == "" {
+					return fmt.Errorf("item %d: 'from' prefix cannot be empty", i)
+				}
+				if strings.TrimSpace(rw.To) == "" {
+					return fmt.Errorf("item %d: 'to' prefix cannot be empty", i)
+				}
+			}
+			return nil
+		},
+		Editable: true,
+		Doc:      "Host-to-container path transformation rules used when resolving project-file references (Tier-1).",
+	},
+}
+
 // Fields returns every registered field, in registration order.
 func Fields() []Field {
-	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, httpFields, agentFields, authzFields}
+	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, httpFields, agentFields, authzFields, pathRewriteFields}
 	n := 0
 	for _, g := range groups {
 		n += len(g)

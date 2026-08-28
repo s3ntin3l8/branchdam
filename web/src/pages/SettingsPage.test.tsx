@@ -79,6 +79,19 @@ function settingsResponse(overrides: Partial<SettingsResponse> = {}): SettingsRe
         editable: false,
         readOnlyReason: "editable only via config.yaml/.env",
       }),
+      field({
+        key: "pathRewrites",
+        type: "pathRewriteList",
+        label: "Operator Path Rewrites",
+        group: "Path Resolution",
+        value: [
+          { from: "D:\\Footage", to: "/storage/footage" },
+          { from: "/Volumes/NAS", to: "/storage/nas" },
+        ],
+        source: "config",
+        applyMode: "live",
+        editable: true,
+      }),
     ],
     pendingRestart: [],
     secretsAvailable: true,
@@ -94,19 +107,16 @@ function renderWithClient(ui: React.ReactElement) {
 describe("SettingsPage", () => {
   it("renders server version and path rewrites table", async () => {
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
-    vi.mocked(api.listPathRewrites).mockResolvedValue([
-      { from: "D:\\Footage", to: "/storage/footage" },
-      { from: "/Volumes/NAS", to: "/storage/nas" },
-    ]);
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
     vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
 
     renderWithClient(<SettingsPage />);
 
     expect(await screen.findByText("v1.2.3")).toBeInTheDocument();
-    expect(screen.getByText("D:\\Footage")).toBeInTheDocument();
-    expect(screen.getByText("/storage/footage")).toBeInTheDocument();
-    expect(screen.getByText("/Volumes/NAS")).toBeInTheDocument();
-    expect(screen.getByText("/storage/nas")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("D:\\Footage")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/storage/footage")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/Volumes/NAS")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/storage/nas")).toBeInTheDocument();
   });
 
   it("groups fields and shows provenance chips", async () => {
@@ -360,5 +370,70 @@ describe("SettingsPage", () => {
     expect(await screen.findByText("Admin Groups")).toBeInTheDocument();
     expect(screen.getByText("(empty -- every authenticated user is admin)")).toBeInTheDocument();
     expect(screen.getByText("No operator path rewrites configured.")).toBeInTheDocument();
+  });
+
+  it("supports adding, editing, deleting, saving, and reverting path rewrites", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.putSettings).mockResolvedValue({ fields: [], pendingRestart: [], secretsAvailable: true });
+    vi.mocked(api.getSettings).mockResolvedValue(
+      settingsResponse({
+        fields: [
+          field({
+            key: "pathRewrites",
+            type: "pathRewriteList",
+            label: "Operator Path Rewrites",
+            group: "Path Resolution",
+            value: [{ from: "D:\\Footage", to: "/storage/footage" }],
+            source: "override",
+            applyMode: "live",
+            editable: true,
+          }),
+        ],
+      })
+    );
+
+    renderWithClient(<SettingsPage />);
+
+    expect(await screen.findByDisplayValue("D:\\Footage")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/storage/footage")).toBeInTheDocument();
+
+    // Add a new rule
+    const fromInput = screen.getByPlaceholderText(/Original host prefix/);
+    const toInput = screen.getByPlaceholderText(/Target container prefix/);
+    const addBtn = screen.getByRole("button", { name: "Add Rule" });
+
+    await user.type(fromInput, "E:\\Raw");
+    await user.type(toInput, "/storage/raw");
+    await user.click(addBtn);
+
+    expect(screen.getByDisplayValue("E:\\Raw")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/storage/raw")).toBeInTheDocument();
+
+    // Save rewrites
+    const saveBtn = screen.getByRole("button", { name: "Save Rewrites" });
+    await user.click(saveBtn);
+
+    await waitFor(() => {
+      expect(api.putSettings).toHaveBeenCalledWith({
+        set: {
+          pathRewrites: [
+            { from: "D:\\Footage", to: "/storage/footage" },
+            { from: "E:\\Raw", to: "/storage/raw" },
+          ],
+        },
+      });
+    });
+
+    // Revert to config
+    const revertBtn = screen.getByRole("button", { name: "Revert to config" });
+    await user.click(revertBtn);
+
+    await waitFor(() => {
+      expect(api.putSettings).toHaveBeenCalledWith({
+        unset: ["pathRewrites"],
+      });
+    });
   });
 });
