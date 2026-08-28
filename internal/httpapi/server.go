@@ -6,6 +6,7 @@ package httpapi
 import (
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"slices"
 	"strings"
@@ -317,6 +318,14 @@ func logMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func init() {
+	// Go's builtin extension->MIME table has no entry for .webmanifest, so
+	// http.FileServer would otherwise sniff web/dist/site.webmanifest as
+	// text/plain. Browsers are lenient about this, but Lighthouse's PWA
+	// installability check looks at it.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 }
 
 // spaHandler serves embedded assets, falling back to index.html for client
