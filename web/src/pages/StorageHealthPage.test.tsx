@@ -9,11 +9,36 @@ import { api } from "../api/client";
 vi.mock("../api/client", () => ({
   api: {
     getStorageHealth: vi.fn(),
+    deleteAgentTelemetry: vi.fn(),
     pruneCache: vi.fn(),
     putStorageLocation: vi.fn(),
     postRestart: vi.fn(),
   },
 }));
+
+function baseAgent(overrides: Partial<import("../api/types").AgentScratchHealth> = {}): import("../api/types").AgentScratchHealth {
+  return {
+    agentId: "workstation-macbook",
+    clientVersion: "1.2.0",
+    timestampUnix: Math.floor(Date.now() / 1000) - 120,
+    mountPath: "/Volumes/ResolveScratch",
+    totalBytes: 2000000000000,
+    usedBytes: 1200000000000,
+    freeBytes: 800000000000,
+    mirrorsSizeBytes: 200000000000,
+    renderCacheSizeBytes: 600000000000,
+    proxiesSizeBytes: 300000000000,
+    prunableBytes: 400000000000,
+    lastPruneTimestampUnix: Math.floor(Date.now() / 1000) - 3600,
+    lastReclaimedBytes: 150000000000,
+    lastPruneDurationMs: 2400,
+    prunedItemCounts: { mirrors: 12, renderCacheProjects: 4, proxies: 6 },
+    isLowSpace: false,
+    isCriticalSpace: false,
+    isStale: false,
+    ...overrides,
+  };
+}
 
 function baseLocation(overrides: Partial<import("../api/types").StorageLocationHealth> = {}) {
   return {
@@ -363,6 +388,102 @@ describe("StorageHealthPage", () => {
 
     await waitFor(() => {
       expect(api.postRestart).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("renders empty state when no workstation agents are reporting", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Workstation Scratch Storage (Tier 1)")).toBeInTheDocument());
+
+    expect(screen.getByText("No workstation agents reporting scratch telemetry yet.")).toBeInTheDocument();
+  });
+
+  it("renders connected workstation scratch storage card with capacity, breakdown, and prune statistics", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [baseAgent()],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("workstation-macbook")).toBeInTheDocument());
+
+    expect(screen.getByText("v1.2.0")).toBeInTheDocument();
+    expect(screen.getByText("TIER1_SCRATCH")).toBeInTheDocument();
+    expect(screen.getByText("/Volumes/ResolveScratch")).toBeInTheDocument();
+    expect(screen.getAllByText("HEALTHY").length).toBe(2);
+
+    // Storage breakdown
+    expect(screen.getByText("Render Cache")).toBeInTheDocument();
+    expect(screen.getByText("Ingest Mirrors")).toBeInTheDocument();
+    expect(screen.getByText("Proxies")).toBeInTheDocument();
+    expect(screen.getByText("Prunable")).toBeInTheDocument();
+
+    // Prune statistics
+    expect(screen.getByText("Pruning Run Statistics")).toBeInTheDocument();
+    expect(screen.getByText("12 mirrors")).toBeInTheDocument();
+    expect(screen.getByText("4 renderCacheProjects")).toBeInTheDocument();
+    expect(screen.getByText("6 proxies")).toBeInTheDocument();
+  });
+
+  it("renders low space and critical space warnings on workstation cards", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [
+        baseAgent({ agentId: "agent-low", isLowSpace: true, isCriticalSpace: false }),
+        baseAgent({ agentId: "agent-critical", isLowSpace: true, isCriticalSpace: true }),
+      ],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("agent-low")).toBeInTheDocument());
+
+    expect(screen.getByText("LOW SPACE")).toBeInTheDocument();
+    expect(screen.getByText("CRITICAL SPACE")).toBeInTheDocument();
+    expect(screen.getByText(/Critical low scratch storage space/)).toBeInTheDocument();
+  });
+
+  it("renders stale badge on offline workstation agents", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [baseAgent({ agentId: "agent-stale", isStale: true })],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("agent-stale")).toBeInTheDocument());
+
+    expect(screen.getByText("STALE")).toBeInTheDocument();
+  });
+
+  it("allows dismissing a workstation agent from the dashboard", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.deleteAgentTelemetry).mockClear();
+    vi.mocked(api.deleteAgentTelemetry).mockResolvedValue({ ok: true });
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [baseAgent({ agentId: "agent-to-dismiss" })],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("agent-to-dismiss")).toBeInTheDocument());
+
+    const dismissBtn = screen.getByRole("button", { name: "Dismiss" });
+    await user.click(dismissBtn);
+
+    const confirmBtn = await screen.findByRole("button", { name: "Confirm" });
+    await user.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(api.deleteAgentTelemetry).toHaveBeenCalledWith("agent-to-dismiss");
     });
   });
 });

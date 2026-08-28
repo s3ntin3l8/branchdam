@@ -208,9 +208,31 @@ export interface StorageQueueHealth {
   runningScanJobs: number;
 }
 
+export interface AgentScratchHealth {
+  agentId: string;
+  clientVersion: string;
+  timestampUnix: number;
+  mountPath: string;
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+  mirrorsSizeBytes: number;
+  renderCacheSizeBytes: number;
+  proxiesSizeBytes: number;
+  prunableBytes: number;
+  lastPruneTimestampUnix: number;
+  lastReclaimedBytes: number;
+  lastPruneDurationMs: number;
+  prunedItemCounts: Record<string, number>;
+  isLowSpace: boolean;
+  isCriticalSpace: boolean;
+  isStale: boolean;
+}
+
 export interface StorageHealth {
   locations: StorageLocationHealth[];
   queues: StorageQueueHealth;
+  agents?: AgentScratchHealth[];
 }
 
 export interface PruneRequest {

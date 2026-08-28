@@ -92,6 +92,10 @@ export const api = {
   },
 
   getStorageHealth: () => request<StorageHealth>("/api/v1/storage-health"),
+  deleteAgentTelemetry: (agentId: string) =>
+    request<{ ok: boolean }>(`/api/v1/storage-health/agents/${encodeURIComponent(agentId)}`, {
+      method: "DELETE",
+    }),
   putStorageLocation: (id: number, input: PutStorageLocationRequest) =>
     request<{ ok: boolean }>(`/api/v1/storage-locations/${id}`, {
       method: "PUT",

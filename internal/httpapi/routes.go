@@ -42,6 +42,8 @@ func (s *Server) registerRoutes(api huma.API) {
 
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
 	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)
+	huma.Get(api, "/api/v1/storage-health/agents", s.handleListAgentTelemetry)
+	huma.Delete(api, "/api/v1/storage-health/agents/{agentId}", s.handleDeleteAgentTelemetry)
 	huma.Put(api, "/api/v1/storage-locations/{id}", s.handlePutStorageLocation)
 	huma.Post(api, "/api/v1/prune", s.handlePrune)
 
@@ -1967,13 +1969,54 @@ type AgentTelemetryOutput struct {
 	}
 }
 
-// handleAgentTelemetry receives, validates, and acknowledges workstation scratch storage telemetry
+// handleAgentTelemetry receives, validates, persists, and acknowledges workstation scratch storage telemetry
 // (capacity, used/free space, render caches, ingest mirrors, proxies, and reclaimed space).
-// In Stage 1, telemetry is validated, logged with structured fields, and acknowledged;
-// persistent time-series retention and dashboard aggregation will follow in subsequent iterations.
+// It updates the agent's latest snapshot in agent_scratch_telemetry and broadcasts an SSE nudge
+// so connected web dashboards refresh real-time storage metrics immediately.
 func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInput) (*AgentTelemetryOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	prunedCountsJSON := "{}"
+	var lastPruneTimestampUnix, lastReclaimedBytes, lastPruneDurationMs int64
+	if in.Body.PruneStats != nil {
+		lastPruneTimestampUnix = in.Body.PruneStats.LastPruneTimestampUnix
+		lastReclaimedBytes = in.Body.PruneStats.LastReclaimedBytes
+		lastPruneDurationMs = in.Body.PruneStats.LastPruneDurationMs
+		if in.Body.PruneStats.PrunedItemCounts != nil {
+			if data, err := json.Marshal(in.Body.PruneStats.PrunedItemCounts); err == nil {
+				prunedCountsJSON = string(data)
+			}
+		}
+	}
+
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertAgentScratchTelemetry(ctx, sqlcgen.UpsertAgentScratchTelemetryParams{
+			AgentID:                in.Body.AgentID,
+			ClientVersion:          in.Body.ClientVersion,
+			TimestampUnix:          in.Body.TimestampUnix,
+			MountPath:              in.Body.ScratchStorage.MountPath,
+			TotalBytes:             in.Body.ScratchStorage.TotalBytes,
+			FreeBytes:              in.Body.ScratchStorage.FreeBytes,
+			UsedBytes:              in.Body.ScratchStorage.UsedBytes,
+			MirrorsSizeBytes:       in.Body.ScratchStorage.MirrorsSizeBytes,
+			RenderCacheSizeBytes:   in.Body.ScratchStorage.RenderCacheSizeBytes,
+			ProxiesSizeBytes:       in.Body.ScratchStorage.ProxiesSizeBytes,
+			PrunableBytes:          in.Body.ScratchStorage.PrunableBytes,
+			LastPruneTimestampUnix: lastPruneTimestampUnix,
+			LastReclaimedBytes:     lastReclaimedBytes,
+			LastPruneDurationMs:    lastPruneDurationMs,
+			PrunedItemCounts:       prunedCountsJSON,
+		})
+		return err
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("persist agent telemetry", err)
+	}
+
+	if s.hub != nil {
+		s.hub.Broadcast()
 	}
 
 	s.log.Info("received agent scratch telemetry",
@@ -1990,6 +2033,113 @@ func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInp
 	out := &AgentTelemetryOutput{}
 	out.Body.OK = true
 	out.Body.AcknowledgedAtUnix = time.Now().Unix()
+	return out, nil
+}
+
+type agentScratchHealthDTO struct {
+	AgentID                string         `json:"agentId"`
+	ClientVersion          string         `json:"clientVersion"`
+	TimestampUnix          int64          `json:"timestampUnix"`
+	MountPath              string         `json:"mountPath"`
+	TotalBytes             int64          `json:"totalBytes"`
+	FreeBytes              int64          `json:"freeBytes"`
+	UsedBytes              int64          `json:"usedBytes"`
+	MirrorsSizeBytes       int64          `json:"mirrorsSizeBytes"`
+	RenderCacheSizeBytes   int64          `json:"renderCacheSizeBytes"`
+	ProxiesSizeBytes       int64          `json:"proxiesSizeBytes"`
+	PrunableBytes          int64          `json:"prunableBytes"`
+	LastPruneTimestampUnix int64          `json:"lastPruneTimestampUnix"`
+	LastReclaimedBytes     int64          `json:"lastReclaimedBytes"`
+	LastPruneDurationMs    int64          `json:"lastPruneDurationMs"`
+	PrunedItemCounts       map[string]int `json:"prunedItemCounts"`
+	IsLowSpace             bool           `json:"isLowSpace"`
+	IsCriticalSpace        bool           `json:"isCriticalSpace"`
+	IsStale                bool           `json:"isStale"`
+}
+
+func toAgentScratchHealthDTO(t sqlcgen.AgentScratchTelemetry, nowUnix int64) agentScratchHealthDTO {
+	counts := make(map[string]int)
+	if t.PrunedItemCounts != "" && t.PrunedItemCounts != "{}" {
+		_ = json.Unmarshal([]byte(t.PrunedItemCounts), &counts)
+	}
+
+	var isCritical, isLow bool
+	if t.TotalBytes > 0 {
+		freeRatio := float64(t.FreeBytes) / float64(t.TotalBytes)
+		if freeRatio < 0.05 || t.FreeBytes < 5*1024*1024*1024 {
+			isCritical = true
+			isLow = true
+		} else if freeRatio < 0.10 || t.FreeBytes < 20*1024*1024*1024 {
+			isLow = true
+		}
+	}
+
+	isStale := (nowUnix - t.TimestampUnix) > 86400
+
+	return agentScratchHealthDTO{
+		AgentID:                t.AgentID,
+		ClientVersion:          t.ClientVersion,
+		TimestampUnix:          t.TimestampUnix,
+		MountPath:              t.MountPath,
+		TotalBytes:             t.TotalBytes,
+		FreeBytes:              t.FreeBytes,
+		UsedBytes:              t.UsedBytes,
+		MirrorsSizeBytes:       t.MirrorsSizeBytes,
+		RenderCacheSizeBytes:   t.RenderCacheSizeBytes,
+		ProxiesSizeBytes:       t.ProxiesSizeBytes,
+		PrunableBytes:          t.PrunableBytes,
+		LastPruneTimestampUnix: t.LastPruneTimestampUnix,
+		LastReclaimedBytes:     t.LastReclaimedBytes,
+		LastPruneDurationMs:    t.LastPruneDurationMs,
+		PrunedItemCounts:       counts,
+		IsLowSpace:             isLow,
+		IsCriticalSpace:        isCritical,
+		IsStale:                isStale,
+	}
+}
+
+type ListAgentTelemetryOutput struct {
+	Body struct {
+		Agents []agentScratchHealthDTO `json:"agents"`
+	}
+}
+
+func (s *Server) handleListAgentTelemetry(ctx context.Context, _ *struct{}) (*ListAgentTelemetryOutput, error) {
+	rows, err := s.db.Reader.ListAgentScratchTelemetry(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list agent telemetry", err)
+	}
+	nowUnix := time.Now().Unix()
+	out := &ListAgentTelemetryOutput{}
+	out.Body.Agents = make([]agentScratchHealthDTO, len(rows))
+	for i, r := range rows {
+		out.Body.Agents[i] = toAgentScratchHealthDTO(r, nowUnix)
+	}
+	return out, nil
+}
+
+type DeleteAgentTelemetryInput struct {
+	AgentID string `path:"agentId"`
+}
+
+type DeleteAgentTelemetryOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+func (s *Server) handleDeleteAgentTelemetry(ctx context.Context, in *DeleteAgentTelemetryInput) (*DeleteAgentTelemetryOutput, error) {
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.DeleteAgentScratchTelemetry(ctx, in.AgentID)
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("delete agent telemetry", err)
+	}
+	if s.hub != nil {
+		s.hub.Broadcast()
+	}
+	out := &DeleteAgentTelemetryOutput{}
+	out.Body.OK = true
 	return out, nil
 }
 
@@ -2043,6 +2193,7 @@ type storageQueueHealthDTO struct {
 type storageHealthDTO struct {
 	Locations []storageLocationHealthDTO `json:"locations"`
 	Queues    storageQueueHealthDTO      `json:"queues"`
+	Agents    []agentScratchHealthDTO    `json:"agents"`
 }
 
 type storageHealthOutput struct {
@@ -2142,6 +2293,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 
 	var locations []sqlcgen.StorageLocation
 	var counts []sqlcgen.ListNodeCountsByLocationRow
+	var rawAgents []sqlcgen.AgentScratchTelemetry
 	var runningJobs int64
 
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -2151,6 +2303,10 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 			return err
 		}
 		counts, err = q.ListNodeCountsByLocation(ctx)
+		if err != nil {
+			return err
+		}
+		rawAgents, err = q.ListAgentScratchTelemetry(ctx)
 		if err != nil {
 			return err
 		}
@@ -2259,6 +2415,12 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 		return statfsWithTimeout(path, statfsTimeout)
 	})
 	out.Body.Locations = dtos
+
+	nowUnix := time.Now().Unix()
+	out.Body.Agents = make([]agentScratchHealthDTO, len(rawAgents))
+	for i, a := range rawAgents {
+		out.Body.Agents[i] = toAgentScratchHealthDTO(a, nowUnix)
+	}
 
 	if s.pool != nil {
 		out.Body.Queues = storageQueueHealthDTO{

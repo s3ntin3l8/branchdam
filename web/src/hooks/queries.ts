@@ -264,6 +264,16 @@ export function usePutStorageLocation() {
   });
 }
 
+export function useDeleteAgentTelemetry() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) => api.deleteAgentTelemetry(agentId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+    },
+  });
+}
+
 export function useJobs(params: import("../api/types").JobsQueryParams = {}) {
   return useQuery({
     queryKey: ["jobs", params],

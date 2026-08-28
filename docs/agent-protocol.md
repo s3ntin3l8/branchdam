@@ -304,9 +304,12 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
   }
   ```
 
-  *Stage 1 Scope:* The endpoint ingests, validates against the schema, logs structured telemetry
-  metrics, and returns the acknowledgement timestamp. Persistent time-series storage and dashboard
-  telemetry aggregation will follow in subsequent iterations.
+  *Persistence & Dashboard Integration:* The endpoint persists the latest agent telemetry snapshot into
+  the `agent_scratch_telemetry` table (upsert keyed on `agent_id`) and broadcasts an SSE nudge to connected
+  web dashboard clients. Telemetry is queried via `GET /api/v1/storage-health` (augmented `agents` array) or
+  `GET /api/v1/storage-health/agents`, surfaced on the Storage Health dashboard with real-time capacity gauges,
+  render cache/mirror breakdown, prune run metrics, and low space / critical space / stale status alerts, and
+  can be dismissed via `DELETE /api/v1/storage-health/agents/{agentId}`.
 
 ---
 
