@@ -211,8 +211,14 @@ func normalizeSettingValue(f settings.Field, v any) (any, error) {
 			if !ok {
 				toVal = m["To"]
 			}
-			fromStr, _ := fromVal.(string)
-			toStr, _ := toVal.(string)
+			fromStr, ok := fromVal.(string)
+			if !ok {
+				return nil, fmt.Errorf("item %d: 'from' must be a string", i)
+			}
+			toStr, ok := toVal.(string)
+			if !ok {
+				return nil, fmt.Errorf("item %d: 'to' must be a string", i)
+			}
 			out[i] = config.PathRewrite{
 				From: fromStr,
 				To:   toStr,

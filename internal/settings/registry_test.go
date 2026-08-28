@@ -102,3 +102,37 @@ func TestLookupFindsEveryRegisteredField(t *testing.T) {
 		t.Error("Lookup(unregistered) = ok, want not found")
 	}
 }
+
+func TestKindAndApplyModeString(t *testing.T) {
+	kinds := []struct {
+		k    Kind
+		want string
+	}{
+		{KindString, "string"},
+		{KindInt, "int"},
+		{KindBool, "bool"},
+		{KindStringList, "stringList"},
+		{KindPathRewriteList, "pathRewriteList"},
+		{Kind(999), "unknown"},
+	}
+	for _, tc := range kinds {
+		if got := tc.k.String(); got != tc.want {
+			t.Errorf("Kind(%d).String() = %q, want %q", tc.k, got, tc.want)
+		}
+	}
+
+	modes := []struct {
+		m    ApplyMode
+		want string
+	}{
+		{ApplyLive, "live"},
+		{ApplyRestart, "restart"},
+		{ApplyNever, "never"},
+		{ApplyMode(999), "unknown"},
+	}
+	for _, tc := range modes {
+		if got := tc.m.String(); got != tc.want {
+			t.Errorf("ApplyMode(%d).String() = %q, want %q", tc.m, got, tc.want)
+		}
+	}
+}

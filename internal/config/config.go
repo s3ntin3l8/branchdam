@@ -36,6 +36,13 @@ type Config struct {
 	PathRewrites []PathRewrite `yaml:"pathRewrites"`
 
 	Thumbnails Thumbnails `yaml:"thumbnails"`
+	Pruning    Pruning    `yaml:"pruning"`
+}
+
+// Pruning configures the cache pruning engine (internal/prune).
+type Pruning struct {
+	// Enabled turns the pruning engine on or off (default true).
+	Enabled bool `yaml:"enabled"`
 }
 
 // Thumbnails configures the JPEG thumbnail cache (internal/thumbs). The
@@ -62,8 +69,8 @@ type Thumbnails struct {
 
 // PathRewrite maps host path prefixes to container path prefixes.
 type PathRewrite struct {
-	From string `yaml:"from"`
-	To   string `yaml:"to"`
+	From string `json:"from" yaml:"from"`
+	To   string `json:"to" yaml:"to"`
 }
 
 // Authz configures group-based authorization (internal/auth, PR 2 / issue 37).
@@ -178,6 +185,9 @@ func defaultConfig() Config {
 			MaxEdgePx:    0,
 			Workers:      0,
 			IntervalSecs: 0,
+		},
+		Pruning: Pruning{
+			Enabled: true,
 		},
 	}
 }

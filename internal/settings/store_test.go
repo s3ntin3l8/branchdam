@@ -392,4 +392,34 @@ func TestStoreApplyPathRewrites(t *testing.T) {
 	if store.IsOverridden("pathRewrites") {
 		t.Error("IsOverridden(pathRewrites) after revert = true, want false")
 	}
+
+	// Apply empty list override
+	if err := store.Apply(ctx, map[string]any{"pathRewrites": []config.PathRewrite{}}, nil, "tester"); err != nil {
+		t.Fatalf("Apply empty pathRewrites list: %v", err)
+	}
+	if len(store.Effective().PathRewrites) != 0 {
+		t.Errorf("Effective PathRewrites after empty override = %+v, want empty", store.Effective().PathRewrites)
+	}
+	if !store.IsOverridden("pathRewrites") {
+		t.Error("IsOverridden(pathRewrites) for empty list override = false, want true")
+	}
+}
+
+func TestStoreSecretsAvailable(t *testing.T) {
+	ctx := context.Background()
+	storeWithBox, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if !storeWithBox.SecretsAvailable() {
+		t.Error("SecretsAvailable with box = false, want true")
+	}
+
+	storeWithoutBox, err := NewStore(ctx, testDB(t), config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewStore without box: %v", err)
+	}
+	if storeWithoutBox.SecretsAvailable() {
+		t.Error("SecretsAvailable without box = true, want false")
+	}
 }

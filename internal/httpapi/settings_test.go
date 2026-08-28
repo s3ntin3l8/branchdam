@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -442,7 +443,38 @@ func TestSettingsPutPathRewrites(t *testing.T) {
 		t.Fatalf("PUT /api/v1/settings with pathRewrites status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	// 2. Check GET /api/v1/config/path-rewrites reflects new rules
+	// 2. Check GET /api/v1/settings returns correct wire JSON shape (lowercase "from" / "to")
+	rrSettings := httptest.NewRecorder()
+	handler.ServeHTTP(rrSettings, adminReq(http.MethodGet, "/api/v1/settings", nil))
+	if rrSettings.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/settings status = %d", rrSettings.Code)
+	}
+	var settingsOut struct {
+		Fields []struct {
+			Key   string `json:"key"`
+			Value any    `json:"value"`
+		} `json:"fields"`
+	}
+	if err := json.NewDecoder(rrSettings.Body).Decode(&settingsOut); err != nil {
+		t.Fatalf("decode settings output: %v", err)
+	}
+	var foundPathRewrites any
+	for _, f := range settingsOut.Fields {
+		if f.Key == "pathRewrites" {
+			foundPathRewrites = f.Value
+			break
+		}
+	}
+	if foundPathRewrites == nil {
+		t.Fatal("pathRewrites field not found in GET /api/v1/settings response")
+	}
+	// Re-marshal and verify exact keys
+	b, _ := json.Marshal(foundPathRewrites)
+	if !strings.Contains(string(b), `"from":"Z:\\Footage"`) || !strings.Contains(string(b), `"to":"/storage/footage"`) {
+		t.Errorf("GET /api/v1/settings pathRewrites value wire format mismatch: %s", string(b))
+	}
+
+	// 3. Check GET /api/v1/config/path-rewrites reflects new rules
 	rrGet := httptest.NewRecorder()
 	handler.ServeHTTP(rrGet, adminReq(http.MethodGet, "/api/v1/config/path-rewrites", nil))
 	if rrGet.Code != http.StatusOK {
@@ -456,7 +488,7 @@ func TestSettingsPutPathRewrites(t *testing.T) {
 		t.Errorf("unexpected path rewrites DTO: %+v", rewrites)
 	}
 
-	// 3. PUT invalid path rewrites (empty 'to')
+	// 4. PUT invalid path rewrites (empty 'to')
 	badPutBody := map[string]any{
 		"set": map[string]any{
 			"pathRewrites": []map[string]string{
@@ -468,5 +500,43 @@ func TestSettingsPutPathRewrites(t *testing.T) {
 	handler.ServeHTTP(rrBad, adminReq(http.MethodPut, "/api/v1/settings", settingsGetJSON(badPutBody)))
 	if rrBad.Code != http.StatusUnprocessableEntity {
 		t.Errorf("PUT invalid pathRewrites status = %d, want %d", rrBad.Code, http.StatusUnprocessableEntity)
+	}
+
+	// 5. PUT non-array pathRewrites
+	badShapeBody := map[string]any{
+		"set": map[string]any{
+			"pathRewrites": "not-an-array",
+		},
+	}
+	rrShape := httptest.NewRecorder()
+	handler.ServeHTTP(rrShape, adminReq(http.MethodPut, "/api/v1/settings", settingsGetJSON(badShapeBody)))
+	if rrShape.Code != http.StatusUnprocessableEntity {
+		t.Errorf("PUT non-array pathRewrites status = %d, want %d", rrShape.Code, http.StatusUnprocessableEntity)
+	}
+
+	// 6. PUT array with non-object item
+	badItemBody := map[string]any{
+		"set": map[string]any{
+			"pathRewrites": []any{"not-an-object"},
+		},
+	}
+	rrItem := httptest.NewRecorder()
+	handler.ServeHTTP(rrItem, adminReq(http.MethodPut, "/api/v1/settings", settingsGetJSON(badItemBody)))
+	if rrItem.Code != http.StatusUnprocessableEntity {
+		t.Errorf("PUT pathRewrites with non-object item status = %d, want %d", rrItem.Code, http.StatusUnprocessableEntity)
+	}
+
+	// 7. PUT array with non-string 'from'
+	badTypeBody := map[string]any{
+		"set": map[string]any{
+			"pathRewrites": []map[string]any{
+				{"from": 12345, "to": "/storage/footage"},
+			},
+		},
+	}
+	rrType := httptest.NewRecorder()
+	handler.ServeHTTP(rrType, adminReq(http.MethodPut, "/api/v1/settings", settingsGetJSON(badTypeBody)))
+	if rrType.Code != http.StatusUnprocessableEntity {
+		t.Errorf("PUT pathRewrites with non-string 'from' status = %d, want %d", rrType.Code, http.StatusUnprocessableEntity)
 	}
 }

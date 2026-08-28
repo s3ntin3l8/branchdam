@@ -318,4 +318,11 @@ func TestProjectSidecarResolver_SetRewrites(t *testing.T) {
 	if candidates[0].ParentID != targetNode.ID {
 		t.Errorf("ParentID = %d, want %d", candidates[0].ParentID, targetNode.ID)
 	}
+
+	if resolver.Name() != "project_sidecar" {
+		t.Errorf("resolver.Name() = %q, want project_sidecar", resolver.Name())
+	}
+	if resolver.Tier() != 1 {
+		t.Errorf("resolver.Tier() = %d, want 1", resolver.Tier())
+	}
 }
