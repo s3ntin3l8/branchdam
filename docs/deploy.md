@@ -118,6 +118,22 @@ and set `BRANCHDAM_AGENT_API_KEY` to the result. Under 32 characters and every `
 route fails closed with `503` (logged once at startup) — not silently open, but also not what you
 want if you're trying to test the agent handshake/rebase endpoints.
 
+Generate the secret encryption key (for UI-configured secrets such as Immich API keys):
+
+```sh
+openssl rand -base64 32
+```
+
+and set `BRANCHDAM_SECRET_KEY` to the result. If left unset, UI-configured secrets are unavailable
+until set, but the server starts normally. If set, it must be valid base64-encoded 32 bytes or the
+server refuses to start.
+
+If using the Immich external library integration directly via environment variables, set
+`IMMICH_API_URL`, `IMMICH_API_KEY`, and `IMMICH_LIBRARY_ID` as well. Note that `IMMICH_API_KEY` set in
+`.env`/`config.yaml` serves as the initial base value, which can later be overridden from the Settings
+UI (encrypted with `BRANCHDAM_SECRET_KEY` into `app_settings`; see [`configuration.md`](configuration.md)'s
+precedence section).
+
 ## 6. `authz.groups`
 
 In `config.yaml`, set `authz.groups` to the exact Authentik group name from step 1 (case-sensitive,

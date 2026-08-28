@@ -3,11 +3,11 @@
 #
 # Edit this file for your deployment: set your real Host rule in the labels
 # below (replace dam.example.com), point the volumes at your real storage
-# tiers, and put BRANCHDAM_AGENT_API_KEY in a gitignored .env. For local
-# development with live reload, use compose-dev.yaml instead. For real
-# per-host overrides (real hostnames, ports, image tags) without editing this
-# file directly, create a gitignored compose.override.yaml -- `docker compose`
-# merges it automatically.
+# tiers, and put secrets (BRANCHDAM_AGENT_API_KEY, BRANCHDAM_SECRET_KEY, etc.)
+# in a gitignored .env. For local development with live reload, use
+# compose-dev.yaml instead. For real per-host overrides (real hostnames,
+# ports, image tags) without editing this file directly, create a gitignored
+# compose.override.yaml -- `docker compose` merges it automatically.
 services:
   branchdam:
     image: ghcr.io/s3ntin3l8/branchdam:latest
