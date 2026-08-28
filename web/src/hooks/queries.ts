@@ -50,6 +50,23 @@ export function usePutSettings() {
   });
 }
 
+// useRestartServer backs both the Settings page's "Restart server" card and
+// the Storage Health page's conditional "Restart to apply" button -- same
+// mutation, same POST /api/v1/restart. The server is briefly unreachable
+// immediately after this resolves (see internal/httpapi/restart.go's
+// restartGraceDelay and cmd/branchdam's re-exec), so onSuccess deliberately
+// just invalidates the same broad set usePutSettings does rather than
+// polling: useStorageHealth's existing 10s refetchInterval and the default
+// retry/refetch-on-focus behavior are what actually bring the pages back
+// once the process is listening again.
+export function useRestartServer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.postRestart(),
+    onSuccess: () => invalidateSettingsQueries(queryClient),
+  });
+}
+
 export function useAssets(params: import("../api/types").AssetQueryParams = {}) {
   return useQuery({
     queryKey: ["assets", params],

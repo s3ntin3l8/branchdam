@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -137,6 +138,20 @@ func main() {
 	// rely on process exit for cleanup, same as before.
 	var dbUnsafeToClose bool
 
+	// restartRequested is set by the POST /api/v1/restart handler's
+	// RequestRestart hook (via requestRestart below) before it calls stop()
+	// -- the same cancellation SIGTERM/SIGINT trigger, so the shutdown
+	// sequence run() runs is identical either way. Only the post-run()
+	// branch at the bottom of main differs: a restart re-execs the process
+	// in place instead of letting it exit. atomic because the hook runs on
+	// an HTTP handler's goroutine, read from main's goroutine after run()
+	// returns.
+	var restartRequested atomic.Bool
+	requestRestart := func() {
+		restartRequested.Store(true)
+		stop()
+	}
+
 	if _, err := reconcileOrphanedScanJobs(ctx, database, log); err != nil {
 		log.Error("reconcile orphaned scan jobs", "err", err)
 		os.Exit(1)
@@ -249,6 +264,7 @@ func main() {
 		Config: &cfg, Settings: settingsStore, Log: log, DB: database, Guard: guard, Prober: prober,
 		Pool: pool, Engine: engine, Hub: hub, SPA: spa, Version: version,
 		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
+		RequestRestart: requestRestart,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -262,6 +278,33 @@ func main() {
 	closeDatabase(log, database, dbUnsafeToClose)
 	if runErr != nil {
 		log.Error("run", "err", runErr)
+		os.Exit(1)
+	}
+
+	// A restart request (POST /api/v1/restart) reached here via the exact
+	// same shutdown path as SIGTERM -- run() has already returned cleanly
+	// and the database is closed. Re-exec in place rather than falling off
+	// the end of main: unlike relying on a supervisor to restart an exited
+	// process (compose.yaml's restart: unless-stopped), this works
+	// identically under Docker, systemd, and a bare `go run`/`make dev-api`
+	// with no supervisor at all. execve replaces the whole process image
+	// (all threads, not just this goroutine), so a goroutine leaked by a
+	// timed-out waitBounded join inside run() cannot survive into the new
+	// process -- strictly safer than the plain-exit path, which merely
+	// races the OS reaping the same leak. os.Executable(), not os.Args[0],
+	// which can be a relative path that a changed working directory would
+	// resolve wrong. Inherits the current environment: config.yaml IS
+	// re-read from disk, but .env is NOT (Compose injects it only at
+	// container start) -- see docs/operations.md.
+	if restartRequested.Load() {
+		log.Info("restarting")
+		exe, err := os.Executable()
+		if err == nil {
+			err = syscall.Exec(exe, os.Args, os.Environ())
+			// syscall.Exec only returns on failure -- success replaces this
+			// process entirely and nothing below ever runs.
+		}
+		log.Error("restart: exec failed, exiting for a supervisor to restart instead", "err", err)
 		os.Exit(1)
 	}
 }

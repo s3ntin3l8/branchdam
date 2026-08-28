@@ -38,6 +38,7 @@ func (s *Server) registerRoutes(api huma.API) {
 
 	huma.Get(api, "/api/v1/settings", s.handleGetSettings)
 	huma.Put(api, "/api/v1/settings", s.handlePutSettings)
+	huma.Post(api, "/api/v1/restart", s.handlePostRestart)
 
 	huma.Get(api, "/api/v1/storage-locations", s.handleListStorageLocations)
 	huma.Get(api, "/api/v1/storage-health", s.handleStorageHealth)

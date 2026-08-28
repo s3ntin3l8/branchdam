@@ -5,6 +5,7 @@ import { FieldRow } from "../components/form/FieldRow";
 import { NumberField } from "../components/form/NumberField";
 import { TextField } from "../components/form/TextField";
 import { ToggleField } from "../components/form/ToggleField";
+import { RestartToApplyButton } from "../components/RestartServerButton";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -459,14 +460,23 @@ export default function StorageHealthPage() {
   }
 
   const { locations, queues } = health;
+  // Store.PendingRestart() (SettingsPage's banner) never covers
+  // storage-location overrides -- they live outside the settings Field
+  // registry by design (see CLAUDE.md's storageLocation.<rootPath>.*
+  // invariant) -- so this page needs its own restart affordance rather than
+  // relying on that banner to ever appear for a location-only edit.
+  const hasPendingLocationOverride = locations.some((loc) => loc.overriddenFields.length > 0);
 
   return (
     <div className="p-6 space-y-8 max-w-6xl">
-      <div>
-        <h1 className="text-2xl font-bold text-neutral-100">Storage Health</h1>
-        <p className="mt-1 text-sm text-neutral-400">
-          Real-time storage capacity across Tiers 1–3 and background processing queue depths.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-neutral-100">Storage Health</h1>
+          <p className="mt-1 text-sm text-neutral-400">
+            Real-time storage capacity across Tiers 1–3 and background processing queue depths.
+          </p>
+        </div>
+        {hasPendingLocationOverride && <RestartToApplyButton />}
       </div>
 
       <section className="space-y-4">

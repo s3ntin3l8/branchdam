@@ -83,25 +83,35 @@ type Deps struct {
 	// request context: a scan must survive the HTTP request that started it,
 	// same reasoning as Tracker.
 	Shutdown <-chan struct{}
+
+	// RequestRestart, if set, is POST /api/v1/restart's mechanism for
+	// triggering a graceful process restart -- cmd/branchdam wires this to
+	// the same stop() SIGTERM/SIGINT already cancel (signal.NotifyContext),
+	// so the shutdown sequence that follows is identical either way, plus a
+	// flag telling main to re-exec afterward instead of exiting. Nil (every
+	// existing test, and any Server built without it) makes the route
+	// return 503 rather than silently doing nothing -- see restart.go.
+	RequestRestart func()
 }
 
 // Server bundles the dependencies handlers need.
 type Server struct {
-	cfgProvider   configProvider
-	settingsStore *settings.Store // nil unless Deps.Settings was supplied
-	log           *slog.Logger
-	db            *db.DB
-	guard         *storage.Guard
-	prober        *probe.Prober
-	pool          *workers.Pool[string]
-	engine        *graph.Engine
-	hub           *sse.Hub
-	sseSlot       *limiter
-	spa           fs.FS
-	version       string
-	tracker       *pipeline.ScanTracker
-	shutdown      <-chan struct{}
-	thumbs        *thumbs.Cache
+	cfgProvider    configProvider
+	settingsStore  *settings.Store // nil unless Deps.Settings was supplied
+	log            *slog.Logger
+	db             *db.DB
+	guard          *storage.Guard
+	prober         *probe.Prober
+	pool           *workers.Pool[string]
+	engine         *graph.Engine
+	hub            *sse.Hub
+	sseSlot        *limiter
+	spa            fs.FS
+	version        string
+	tracker        *pipeline.ScanTracker
+	shutdown       <-chan struct{}
+	thumbs         *thumbs.Cache
+	requestRestart func()
 }
 
 // cfg returns the current effective config -- config.yaml/.env as loaded,
@@ -132,21 +142,22 @@ func New(d Deps) *Server {
 		cfgProvider = d.Settings
 	}
 	return &Server{
-		cfgProvider:   cfgProvider,
-		settingsStore: d.Settings,
-		log:           log,
-		db:            d.DB,
-		guard:         d.Guard,
-		prober:        d.Prober,
-		pool:          d.Pool,
-		engine:        d.Engine,
-		hub:           d.Hub,
-		sseSlot:       newLimiter(maxSSEClients),
-		spa:           d.SPA,
-		version:       version,
-		tracker:       d.Tracker,
-		shutdown:      d.Shutdown,
-		thumbs:        d.ThumbCache,
+		cfgProvider:    cfgProvider,
+		settingsStore:  d.Settings,
+		log:            log,
+		db:             d.DB,
+		guard:          d.Guard,
+		prober:         d.Prober,
+		pool:           d.Pool,
+		engine:         d.Engine,
+		hub:            d.Hub,
+		sseSlot:        newLimiter(maxSSEClients),
+		spa:            d.SPA,
+		version:        version,
+		tracker:        d.Tracker,
+		shutdown:       d.Shutdown,
+		thumbs:         d.ThumbCache,
+		requestRestart: d.RequestRestart,
 	}
 }
 

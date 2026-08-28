@@ -402,6 +402,25 @@ sse.Hub.Broadcast()  -- coalescing nudge; the SPA re-fetches via TanStack Query,
   deleted), and such an orphaned row has no override either, so counting table rows would let it
   stand in as "still enabled" and wrongly permit disabling the only location config.yaml actually
   lists (`TestPutStorageLocationLastEnabledGuardIgnoresOrphanedDBRow`).
+- **`POST /api/v1/restart` re-execs the process rather than exiting, and must respond before
+  triggering shutdown.** `cmd/branchdam/main.go`'s `signal.NotifyContext` already gives `run()` a
+  `stop()` that SIGTERM/SIGINT call to begin the exact same graceful-shutdown sequence (HTTP drain,
+  then joining every background goroutine, then closing the database); the restart hook
+  (`Deps.RequestRestart`, wired to `Server.requestRestart`) calls that same `stop()`, with an
+  `atomic.Bool` telling `main` to `syscall.Exec(os.Executable(), os.Args, os.Environ())` once
+  `run()` returns cleanly, instead of falling off the end of `main`. This is deliberately not
+  "exit and rely on `restart: unless-stopped`" (`compose.yaml`) -- `compose-dev.yaml` and
+  `make dev-api` have no restart policy or supervisor at all, so exiting there would just kill the
+  process. `execve` replacing the whole process image is also strictly safer than a plain exit: a
+  goroutine leaked by a timed-out `waitBounded` join cannot survive into the new process, whereas
+  exiting merely races the OS reaping the same leak. Re-exec inherits the environment, so
+  `config.yaml` is re-read from disk but `.env` is not (Compose injects it only at container
+  start) -- see `docs/operations.md`'s "Restarting from the UI" section. `handlePostRestart`
+  (`internal/httpapi/restart.go`) fires the hook from a goroutine after `restartGraceDelay`, not
+  synchronously: `httpServer.Shutdown` blocks on in-flight requests, so calling the hook inline
+  would make Shutdown wait on the very request that triggered it. The route runs the same
+  `requireSettingsAdmin` gate as GET/PUT `/api/v1/settings`, refusing `KindMachine` unconditionally
+  -- an agent holding only its API key must never be able to bounce the process.
 
 ## CI
 

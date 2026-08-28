@@ -11,6 +11,7 @@ vi.mock("../api/client", () => ({
     getStorageHealth: vi.fn(),
     pruneCache: vi.fn(),
     putStorageLocation: vi.fn(),
+    postRestart: vi.fn(),
   },
 }));
 
@@ -326,5 +327,42 @@ describe("StorageHealthPage", () => {
     expect(api.getStorageHealth).toHaveBeenCalledTimes(2);
 
     expect(screen.getByDisplayValue("Draft In Progress")).toBeInTheDocument();
+  });
+
+  // Store.PendingRestart() (SettingsPage's banner) never sees
+  // storage-location overrides -- see CLAUDE.md's storageLocation.<rootPath>.*
+  // invariant -- so this page's own restart button is the only affordance
+  // an operator gets after a location-only edit. It must therefore be
+  // gated on overriddenFields, not always shown.
+  it("shows a restart-to-apply button only when a location has a pending override", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ overriddenFields: [] })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
+  });
+
+  it("fires the restart request after confirming the restart-to-apply button", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.postRestart).mockClear();
+    vi.mocked(api.postRestart).mockResolvedValue({ ok: true });
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ overriddenFields: ["watch"] })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+
+    renderWithClient(<StorageHealthPage />);
+
+    const restartButton = await screen.findByRole("button", { name: "Restart to apply" });
+    await user.click(restartButton);
+    await user.click(await screen.findByRole("button", { name: "Restart" }));
+
+    await waitFor(() => {
+      expect(api.postRestart).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -110,4 +110,5 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  postRestart: () => request<PostRestartResponse>("/api/v1/restart", { method: "POST" }),
 };

@@ -150,6 +150,42 @@ refuses to disable the last enabled storage location (`422`), and refuses a posi
 `cacheTtlHours` override on a non-prunable location (`422`, mirroring `validatePruneConfig`'s
 startup check).
 
+## Restarting from the UI
+
+Most settings changes (`GET`/`PUT /api/v1/settings`, and every storage-location safe-field
+override above) only take effect on the next process restart -- the registry field is frozen into
+a supervisor at startup, or the seeder that applies a storage-location override only runs at
+startup. Rather than requiring an operator to SSH to the Docker host and run
+`docker compose restart`, the Settings page has a **Restart server** card, and the Storage Health
+page shows its own **Restart to apply** button whenever any location has a pending override
+(Settings' pending-restart banner only tracks the registered `Field`s, not the rootPath-keyed
+storage-location overrides -- see this doc's own note above and `CLAUDE.md`'s invariant on the
+same split). Both call the same admin-gated `POST /api/v1/restart` and require an inline confirm
+step before firing.
+
+**What it actually does.** The handler responds success first, then -- after a short delay so the
+response isn't blocked by the shutdown it triggers -- cancels the process's shutdown context. This
+runs the exact same graceful-shutdown sequence a `SIGTERM`/`docker compose restart` would (HTTP
+server drain, then joining every background scan/watch/sweep/sync goroutine, then closing the
+database), and once that finishes, the process **re-execs itself in place**
+(`syscall.Exec(os.Executable(), os.Args, os.Environ())`) instead of exiting. This is why it works
+identically under Docker, systemd, or a bare `make dev-api` with no restart-policy or supervisor
+of any kind required -- there's nothing to "come back," the same process image just starts over.
+
+**Two limits worth knowing before you click it:**
+
+- **`config.yaml` is re-read from disk; `.env` is not.** Re-exec inherits the current process
+  environment rather than reloading it, and Compose only injects `.env` at *container* start. If
+  you edited `.env` on the host, this button won't pick it up -- you still need
+  `docker compose up -d` (or a full container restart) for that.
+- **It restarts the same binary, not a new image.** Deploying an updated container image is still
+  a `docker compose pull && docker compose up -d`, not this button.
+
+A scan in flight is stopped, not blocked on -- the shutdown sequence's join has a bounded timeout,
+and any interrupted scan's `scan_jobs` row is reconciled as orphaned on the next startup (the same
+self-heal that already covers an ungraceful crash), so restarting mid-scan is disruptive but never
+unsafe.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
