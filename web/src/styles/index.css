@@ -1,12 +1,12 @@
 @import "tailwindcss";
 
 @theme {
-  /* Brand marks. --color-brand mirrors the indigo already used ad hoc
-     throughout the app (e.g. inputStyles.ts's focus ring, and the root-asset
-     node in AssetGraphCanvas.tsx) and --color-agent mirrors the teal already
-     declared in branchdam-agent's internal/tray/icon.go. */
+  /* The single indigo used for the brand mark, the root-asset node border
+     in AssetGraphCanvas.tsx, and the focus ring in inputStyles.ts -- one
+     token instead of three copies of the same hex. (branchdam-agent's teal
+     is a color in that separate repo's own Go source, not something this
+     app renders, so it has no CSS token here.) */
   --color-brand: #6366f1;
-  --color-agent: #2ba69a;
 }
 
 body {

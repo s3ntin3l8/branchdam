@@ -37,7 +37,7 @@ export default function App() {
     <div className="flex h-screen">
       <nav className="w-56 shrink-0 border-r border-neutral-800 p-4">
         <div className="mb-6 flex items-center gap-2">
-          <BrandMark className="h-5 w-5 text-indigo-500" />
+          <BrandMark className="h-5 w-5 text-brand" />
           <span className="text-lg font-semibold">
             <span className="font-normal">branch</span>DAM
           </span>

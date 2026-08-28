@@ -175,7 +175,7 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
       style: {
         background: isRoot ? "#1e1b4b" : colors.bg,
         color: "#f8fafc",
-        border: isRoot ? "3px solid #6366f1" : `2px solid ${colors.border}`,
+        border: isRoot ? "3px solid var(--color-brand)" : `2px solid ${colors.border}`,
         borderRadius: "6px",
         padding: "8px 12px",
         cursor: "pointer",
@@ -205,7 +205,7 @@ function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[
       id: String(assetId),
       position: { x: 0, y: 0 },
       data: { label: "This asset" },
-      style: { background: "#1e1b4b", color: "#fff", border: "3px solid #6366f1", borderRadius: "6px", cursor: "pointer" },
+      style: { background: "#1e1b4b", color: "#fff", border: "3px solid var(--color-brand)", borderRadius: "6px", cursor: "pointer" },
     },
   ];
   const edges: FlowEdge[] = [];
