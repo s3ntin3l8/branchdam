@@ -3,6 +3,7 @@ import { NavLink, Route, Routes } from "react-router";
 import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import BrandMark from "./components/BrandMark";
 
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
@@ -35,7 +36,12 @@ export default function App() {
   return (
     <div className="flex h-screen">
       <nav className="w-56 shrink-0 border-r border-neutral-800 p-4">
-        <div className="mb-6 text-lg font-semibold">branchDAM</div>
+        <div className="mb-6 flex items-center gap-2">
+          <BrandMark className="h-5 w-5 text-brand" />
+          <span className="text-lg font-semibold">
+            <span className="font-normal">branch</span>DAM
+          </span>
+        </div>
         <div className="space-y-1">
           <NavItem to="/assets">
             <span>Assets</span>

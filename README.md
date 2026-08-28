@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/public/favicon.svg" alt="branchDAM logo" width="64" height="64">
+</p>
+
 # branchDAM
 
 A self-hosted Digital Asset Management server that models media as a

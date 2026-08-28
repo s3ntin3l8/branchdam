@@ -4,10 +4,14 @@
 package httpapi
 
 import (
+	"bytes"
+	"html"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -319,10 +323,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func init() {
+	// Go's builtin extension->MIME table has no entry for .webmanifest, so
+	// http.FileServer would otherwise sniff web/dist/site.webmanifest as
+	// text/plain. Browsers are lenient about this, but Lighthouse's PWA
+	// installability check looks at it.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
+
 // spaHandler serves embedded assets, falling back to index.html for client
 // routes (so deep links work). web.Dist() provides the embedded FS
 // (web/embed.go); a nil s.spa (tests that don't build an SPA) yields a 404,
-// not the SPA shell.
+// not the SPA shell. index.html itself is never handed to fileServer
+// unmodified -- see serveIndexHTML.
 func (s *Server) spaHandler() http.Handler {
 	if s.spa == nil {
 		return http.NotFoundHandler()
@@ -334,11 +347,56 @@ func (s *Server) spaHandler() http.Handler {
 			p = "index.html"
 		}
 		if _, err := fs.Stat(s.spa, p); err != nil {
-			r2 := r.Clone(r.Context())
-			r2.URL.Path = "/"
-			fileServer.ServeHTTP(w, r2)
+			p = "index.html"
+		}
+		if p == "index.html" {
+			s.serveIndexHTML(w, r)
 			return
 		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// serveIndexHTML serves the SPA shell with __BRANCHDAM_ORIGIN__ substituted
+// for the request's own scheme+host, computed per request rather than baked
+// in at build time: branchDAM is self-hosted behind an operator-chosen
+// reverse proxy (CLAUDE.md: Traefik v3 + Authentik ForwardAuth) with no
+// fixed public domain, so the Open Graph/Twitter card image and url tags
+// can only be made absolute -- as the OG/Twitter spec requires -- from the
+// incoming request's Host/X-Forwarded-* headers.
+//
+// requestOrigin's output is attacker-influenceable (Host/X-Forwarded-* are
+// request headers, not validated hostnames) and lands inside HTML attribute
+// values below, so it's HTML-escaped before substitution -- without this, a
+// crafted header (e.g. `X-Forwarded-Host: x"><script>...`) would be a
+// reflected-XSS vector.
+func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
+	data, err := fs.ReadFile(s.spa, "index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	origin := html.EscapeString(requestOrigin(r))
+	page := bytes.ReplaceAll(data, []byte("__BRANCHDAM_ORIGIN__"), []byte(origin))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
+	_, _ = w.Write(page)
+}
+
+// requestOrigin reconstructs the scheme+host the client used to reach this
+// request, honoring the X-Forwarded-* headers Traefik sets when proxying,
+// and falling back to the direct connection's own Host/TLS state (e.g. for
+// `make dev-api`, which has no proxy in front).
+func requestOrigin(r *http.Request) string {
+	scheme := "http"
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return scheme + "://" + host
 }

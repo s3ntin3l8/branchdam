@@ -4,6 +4,31 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>branchDAM</title>
+    <meta name="description" content="Self-hosted digital asset management with version lineage graphs" />
+    <meta name="theme-color" content="#6366f1" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="branchDAM" />
+    <meta property="og:description" content="Self-hosted digital asset management with version lineage graphs" />
+    <meta property="og:url" content="__BRANCHDAM_ORIGIN__/" />
+    <meta property="og:image" content="__BRANCHDAM_ORIGIN__/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="branchDAM" />
+    <meta name="twitter:description" content="Self-hosted digital asset management with version lineage graphs" />
+    <meta name="twitter:image" content="__BRANCHDAM_ORIGIN__/og-image.png" />
+    <!--
+      __BRANCHDAM_ORIGIN__ is substituted at request time by
+      internal/httpapi's spaHandler, not at build time: branchDAM is
+      self-hosted behind an operator-chosen domain (see CLAUDE.md --
+      Traefik v3 + Authentik ForwardAuth), so there is no fixed public
+      origin a build step could bake in. The OG/Twitter spec requires
+      absolute image/url values, which is why this can't stay relative.
+    -->
   </head>
   <body>
     <div id="root"></div>
