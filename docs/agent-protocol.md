@@ -454,6 +454,37 @@ message RebaseResponse {
   string file_path = 4;
   string status = 5; // "REBASED" or "CREATED"
 }
+
+message AgentScratchStorage {
+  string mount_path = 1;
+  int64 total_bytes = 2;
+  int64 free_bytes = 3;
+  int64 used_bytes = 4;
+  int64 mirrors_size_bytes = 5;
+  int64 render_cache_size_bytes = 6;
+  int64 proxies_size_bytes = 7;
+  int64 prunable_bytes = 8;
+}
+
+message AgentPruneStats {
+  int64 last_prune_timestamp_unix = 1;
+  int64 last_reclaimed_bytes = 2;
+  int64 last_prune_duration_ms = 3;
+  map<string, int32> pruned_item_counts = 4;
+}
+
+message AgentTelemetryRequest {
+  string agent_id = 1;
+  string client_version = 2;
+  int64 timestamp_unix = 3;
+  AgentScratchStorage scratch_storage = 4;
+  optional AgentPruneStats prune_stats = 5;
+}
+
+message AgentTelemetryResponse {
+  bool ok = 1;
+  int64 acknowledged_at_unix = 2;
+}
 ```
 
 ---
