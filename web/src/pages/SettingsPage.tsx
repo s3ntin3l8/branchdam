@@ -27,7 +27,13 @@ function ReadOnlyValue({ field }: { field: SettingsField }) {
     display = field.hasValue ? "Set (hidden)" : "Not set";
   } else if (field.type === "stringList" || Array.isArray(field.value)) {
     const list = Array.isArray(field.value) ? field.value : [];
-    display = list.length > 0 ? list.join(", ") : "(empty -- every authenticated user is admin)";
+    if (list.length > 0) {
+      display = list.join(", ");
+    } else if (field.key === "authz.groups") {
+      display = "(empty -- every authenticated user is admin)";
+    } else {
+      display = "(empty)";
+    }
   } else if (field.value === undefined || field.value === null || field.value === "") {
     display = "(empty)";
   } else {
