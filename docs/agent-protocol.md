@@ -261,6 +261,53 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
   and 64 hex characters (BLAKE3-256). `found: false` is not an error -- it just means no
   `media_nodes` row currently has that `node_uuid`.
 
+#### F. Telemetry Endpoint (`POST /api/v1/agent/telemetry`)
+
+> **Workstation Scratch & Cache Telemetry.** Allows connected workstation agents to periodically
+> report scratch storage health, capacity metrics (breakdown across render caches, ingest mirrors,
+> proxies, and free space), and prune run statistics back to the server without exposing
+> filesystem paths or mounting drives.
+
+- **Request (`AgentTelemetryInput`):**
+  ```json
+  {
+    "agentId": "workstation-macbook-01",
+    "clientVersion": "1.1.0",
+    "timestampUnix": 1724846400,
+    "scratchStorage": {
+      "mountPath": "D:\\ResolveScratch",
+      "totalBytes": 2000398934016,
+      "freeBytes": 450398934016,
+      "usedBytes": 1550000000000,
+      "mirrorsSizeBytes": 320000000000,
+      "renderCacheSizeBytes": 850000000000,
+      "proxiesSizeBytes": 280000000000,
+      "prunableBytes": 410000000000
+    },
+    "pruneStats": {
+      "lastPruneTimestampUnix": 1724842800,
+      "lastReclaimedBytes": 125000000000,
+      "lastPruneDurationMs": 3420,
+      "prunedItemCounts": {
+        "mirrors": 14,
+        "renderCacheProjects": 3,
+        "proxies": 8
+      }
+    }
+  }
+  ```
+- **Response (`AgentTelemetryOutput` - Status 200 OK):**
+  ```json
+  {
+    "ok": true,
+    "acknowledgedAtUnix": 1724846401
+  }
+  ```
+
+  *Stage 1 Scope:* The endpoint ingests, validates against the schema, logs structured telemetry
+  metrics, and returns the acknowledgement timestamp. Persistent time-series storage and dashboard
+  telemetry aggregation will follow in subsequent iterations.
+
 ---
 
 ### 3.2. Companion Protobuf 3 Specification (`agent_protocol.proto`)

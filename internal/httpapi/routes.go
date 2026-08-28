@@ -99,6 +99,13 @@ func (s *Server) registerRoutes(api huma.API) {
 		Summary:       "Look up lifecycle/verification status for a batch of node UUIDs",
 		DefaultStatus: http.StatusOK,
 	}, s.handleAgentNodeStatus)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
+		Path:          "/api/v1/agent/telemetry",
+		OperationID:   "agentTelemetry",
+		Summary:       "Submit workstation agent scratch telemetry and prune stats",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentTelemetry)
 }
 
 // --- /api/v1/me ---
@@ -1923,6 +1930,69 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 	return out, nil
 }
 
+// --- /api/v1/agent/telemetry ---
+
+type AgentScratchStorageDTO struct {
+	MountPath            string `json:"mountPath"`
+	TotalBytes           int64  `json:"totalBytes"`
+	FreeBytes            int64  `json:"freeBytes"`
+	UsedBytes            int64  `json:"usedBytes"`
+	MirrorsSizeBytes     int64  `json:"mirrorsSizeBytes"`
+	RenderCacheSizeBytes int64  `json:"renderCacheSizeBytes"`
+	ProxiesSizeBytes     int64  `json:"proxiesSizeBytes"`
+	PrunableBytes        int64  `json:"prunableBytes"`
+}
+
+type AgentPruneStatsDTO struct {
+	LastPruneTimestampUnix int64          `json:"lastPruneTimestampUnix"`
+	LastReclaimedBytes     int64          `json:"lastReclaimedBytes"`
+	LastPruneDurationMs    int64          `json:"lastPruneDurationMs"`
+	PrunedItemCounts       map[string]int `json:"prunedItemCounts,omitempty"`
+}
+
+type AgentTelemetryInput struct {
+	Body struct {
+		AgentID        string                 `json:"agentId" required:"true"`
+		ClientVersion  string                 `json:"clientVersion,omitempty"`
+		TimestampUnix  int64                  `json:"timestampUnix" required:"true"`
+		ScratchStorage AgentScratchStorageDTO `json:"scratchStorage"`
+		PruneStats     *AgentPruneStatsDTO    `json:"pruneStats,omitempty"`
+	}
+}
+
+type AgentTelemetryOutput struct {
+	Body struct {
+		OK                 bool  `json:"ok"`
+		AcknowledgedAtUnix int64 `json:"acknowledgedAtUnix"`
+	}
+}
+
+// handleAgentTelemetry receives, validates, and acknowledges workstation scratch storage telemetry
+// (capacity, used/free space, render caches, ingest mirrors, proxies, and reclaimed space).
+// In Stage 1, telemetry is validated, logged with structured fields, and acknowledged;
+// persistent time-series retention and dashboard aggregation will follow in subsequent iterations.
+func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInput) (*AgentTelemetryOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	s.log.Info("received agent scratch telemetry",
+		"agent_id", in.Body.AgentID,
+		"client_version", in.Body.ClientVersion,
+		"scratch_total_bytes", in.Body.ScratchStorage.TotalBytes,
+		"scratch_free_bytes", in.Body.ScratchStorage.FreeBytes,
+		"render_cache_bytes", in.Body.ScratchStorage.RenderCacheSizeBytes,
+		"mirrors_bytes", in.Body.ScratchStorage.MirrorsSizeBytes,
+		"proxies_bytes", in.Body.ScratchStorage.ProxiesSizeBytes,
+		"prunable_bytes", in.Body.ScratchStorage.PrunableBytes,
+	)
+
+	out := &AgentTelemetryOutput{}
+	out.Body.OK = true
+	out.Body.AcknowledgedAtUnix = time.Now().Unix()
+	return out, nil
+}
+
 // --- /api/v1/storage-health ---
 
 type storageLocationHealthDTO struct {
@@ -2259,6 +2329,9 @@ type PruneOutput struct {
 // before ever calling this endpoint) report "not eligible" uniformly
 // instead of surfacing a location-tier implementation detail as an error.
 func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput, error) {
+	if !s.cfg().Pruning.Enabled {
+		return nil, huma.Error409Conflict("pruning is disabled by server configuration", nil)
+	}
 	loc, err := s.db.Reader.GetStorageLocationByID(ctx, in.Body.StorageLocationID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, huma.Error404NotFound("storage location not found")

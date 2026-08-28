@@ -56,6 +56,11 @@ func From(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
-func withPrincipal(ctx context.Context, p Principal) context.Context {
+// WithPrincipal attaches a Principal to ctx (primarily used by BrowserChain, AgentChain, and tests).
+func WithPrincipal(ctx context.Context, p Principal) context.Context {
 	return context.WithValue(ctx, principalContextKey{}, p)
+}
+
+func withPrincipal(ctx context.Context, p Principal) context.Context {
+	return WithPrincipal(ctx, p)
 }

@@ -34,6 +34,11 @@ thumbnails:
   workers: 0                      # 0 = auto, same meaning as workers.hashWorkers
   intervalSecs: 0                 # 0 = worker's built-in default poll interval
 
+pruning:
+  # Global kill-switch for server-side cache pruning operations (POST /api/v1/prune).
+  # Default is true.
+  enabled: true
+
 agent:
   # Machine-principal key for /api/v1/agent/* routes, which bypass Authentik
   # ForwardAuth at the Traefik layer (see docs/forward-auth.md). Must be at
