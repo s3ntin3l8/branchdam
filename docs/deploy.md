@@ -129,7 +129,10 @@ until set, but the server starts normally. If set, it must be valid base64-encod
 server refuses to start.
 
 If using the Immich external library integration directly via environment variables, set
-`IMMICH_API_URL`, `IMMICH_API_KEY`, and `IMMICH_LIBRARY_ID` as well (or configure them later via the Settings UI).
+`IMMICH_API_URL`, `IMMICH_API_KEY`, and `IMMICH_LIBRARY_ID` as well. Note that `IMMICH_API_KEY` set in
+`.env`/`config.yaml` serves as the initial base value, which can later be overridden from the Settings
+UI (encrypted with `BRANCHDAM_SECRET_KEY` into `app_settings`; see [`configuration.md`](configuration.md)'s
+precedence section).
 
 ## 6. `authz.groups`
 
