@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.0](https://github.com/s3ntin3l8/branchdam/compare/v0.9.1...v0.10.0) (2026-08-28)
+
+
+### Features
+
+* **brand:** add visual identity -- logo, favicon, and full brand surface ([#297](https://github.com/s3ntin3l8/branchdam/issues/297)) ([337670b](https://github.com/s3ntin3l8/branchdam/commit/337670b45fd9b39930f628b0e51d5b502c6c4120))
+* **pruning:** Tier-1 scratch architecture & agent telemetry ([#266](https://github.com/s3ntin3l8/branchdam/issues/266)) ([#293](https://github.com/s3ntin3l8/branchdam/issues/293)) ([66f9d3c](https://github.com/s3ntin3l8/branchdam/commit/66f9d3cee2cc63b0fb421d9f1640e99ab15514a7))
+* **settings:** make operator path rewrites configurable in UI ([#291](https://github.com/s3ntin3l8/branchdam/issues/291)) ([5ba8492](https://github.com/s3ntin3l8/branchdam/commit/5ba8492b18e8ea216017a29065b393504b8228b7))
+* **telemetry:** persist agent telemetry, query endpoint, and web UI dashboard ([#294](https://github.com/s3ntin3l8/branchdam/issues/294)) ([#295](https://github.com/s3ntin3l8/branchdam/issues/295)) ([52f674e](https://github.com/s3ntin3l8/branchdam/commit/52f674e8ebaa57143169380f6be1d5f0b07368d0))
+
 ## [0.9.1](https://github.com/s3ntin3l8/branchdam/compare/v0.9.0...v0.9.1) (2026-08-28)
 
 
