@@ -500,19 +500,16 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 		}
 
 		var nextLevel []int64
+		// REJECTED edges are already excluded by the batch queries
+		// (AND review_state <> 'REJECTED'), matching ListEdgesForNodes
+		// -- no Go-side filter needed.
 		for _, p := range parents {
-			if p.ReviewState == "REJECTED" {
-				continue
-			}
 			if !nodeIDs[p.SourceNodeID] {
 				nodeIDs[p.SourceNodeID] = true
 				nextLevel = append(nextLevel, p.SourceNodeID)
 			}
 		}
 		for _, c := range children {
-			if c.ReviewState == "REJECTED" {
-				continue
-			}
 			if !nodeIDs[c.TargetNodeID] {
 				nodeIDs[c.TargetNodeID] = true
 				nextLevel = append(nextLevel, c.TargetNodeID)

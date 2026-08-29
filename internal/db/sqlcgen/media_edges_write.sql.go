@@ -247,6 +247,7 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        created_at, updated_at
 FROM media_edges
 WHERE target_node_id IN (SELECT value FROM json_each(?1))
+  AND review_state <> 'REJECTED'
 `
 
 func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, jsonEach string) ([]MediaEdge, error) {
@@ -292,6 +293,7 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        created_at, updated_at
 FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(?1))
+  AND review_state <> 'REJECTED'
 `
 
 func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, jsonEach string) ([]MediaEdge, error) {

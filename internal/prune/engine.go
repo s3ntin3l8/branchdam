@@ -153,19 +153,16 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 	// candidates from those locations are appended to results with the
 	// real error and skipped in the loop below, so the InTx path never
 	// runs for them and doesn't overwrite the wrapped error.
-	failedLocations := make(map[int64]bool, len(locations))
-	results := make([]Result, 0, len(candidates))
+	failedLocations := make(map[int64]struct{}, len(locations))
+	// errByLocation is a pre-computed error per failed location. Built
+	// in the pre-compute loop (order doesn't matter) and read in the
+	// candidate loop to assemble results in input order.
+	errByLocation := make(map[int64]error, len(locations))
 	for locID := range locations {
 		planned, err := Plan(ctx, database.Reader, locID, cutoffUnix)
 		if err != nil {
-			for _, c := range locations[locID] {
-				results = append(results, Result{
-					Candidate: c,
-					Purged:    false,
-					Err:       fmt.Errorf("plan eligibility for location %d: %w", locID, err),
-				})
-			}
-			failedLocations[locID] = true
+			failedLocations[locID] = struct{}{}
+			errByLocation[locID] = fmt.Errorf("plan eligibility for location %d: %w", locID, err)
 			continue
 		}
 		for _, p := range planned {
@@ -173,8 +170,16 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 		}
 	}
 
+	// Iterate candidates in input order so Result slice ordering
+	// matches the request. Previously a per-location grouping loop
+	// (map iteration over locations) could reorder Results vs.
+	// input candidates, which the caller (handlePrune) reports
+	// independently so nothing was misattributed, but the contract
+	// was lossy for no reason.
+	results := make([]Result, 0, len(candidates))
 	for _, c := range candidates {
-		if failedLocations[c.StorageLocationID] {
+		if err, ok := errByLocation[c.StorageLocationID]; ok {
+			results = append(results, Result{Candidate: c, Purged: false, Err: err})
 			continue
 		}
 		err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
