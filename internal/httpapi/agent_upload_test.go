@@ -219,7 +219,7 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, resp2.RelativePath, "IMG_2026_2.JPG")
 
-	// Test RAW file upload (should NOT be hardlinked to exports/immich/)
+	// Test RAW file upload (should NOT be linked to exports/immich/)
 	rawData := []byte("RAW sensor payload")
 	reqRaw := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(rawData))
 	reqRaw.Header.Set("X-API-Key", routeTestAgentKey)
@@ -235,5 +235,5 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	assert.Contains(t, respRaw.RelativePath, "DSC_9999.ARW")
 	rawExportFile := filepath.Join(exportsDir, "immich", respRaw.RelativePath)
 	_, statErr := os.Stat(rawExportFile)
-	assert.True(t, os.IsNotExist(statErr), "RAW files should not be hardlinked to Immich exports")
+	assert.True(t, os.IsNotExist(statErr), "RAW files should not be linked to Immich exports")
 }

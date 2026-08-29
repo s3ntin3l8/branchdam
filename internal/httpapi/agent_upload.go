@@ -211,13 +211,11 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 
 		// Hardlink non-RAW standalone photos into Tier 2 Immich exports for zero-storage duplication
 		if exportLoc != nil && isStandaloneDisplayable(ext) {
-			exportDest := filepath.Join(exportLoc.RootPath, "immich", relPath)
-			if strings.HasPrefix(filepath.Clean(exportDest), filepath.Clean(exportLoc.RootPath)) {
+			exportRel := filepath.Clean(filepath.Join("immich", relPath))
+			if !strings.HasPrefix(exportRel, "..") && !filepath.IsAbs(exportRel) {
+				exportDest := filepath.Join(exportLoc.RootPath, exportRel)
 				_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
-				if linkErr := os.Link(targetPath, exportDest); linkErr != nil {
-					// Fallback to copy if on different physical filesystem (EXDEV)
-					_ = copyFileContents(targetPath, exportDest)
-				}
+				_ = os.Link(targetPath, exportDest)
 			}
 		}
 
@@ -255,24 +253,4 @@ func isStandaloneDisplayable(ext string) bool {
 	default:
 		return false
 	}
-}
-
-func copyFileContents(src, dst string) error {
-	cleanSrc := filepath.Clean(src)
-	cleanDst := filepath.Clean(dst)
-
-	in, err := os.Open(cleanSrc)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.Create(cleanDst)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-
-	_, err = io.Copy(out, in)
-	return err
 }
