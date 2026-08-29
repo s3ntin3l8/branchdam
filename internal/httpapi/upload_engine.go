@@ -96,28 +96,6 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 	return targetLoc, exportLoc, nil
 }
 
-// resolveContainedPath verifies that the joined path stays strictly within baseDir,
-// preventing path traversal attacks.
-func resolveContainedPath(baseDir, relPath string) (string, error) {
-	absBase, err := filepath.Abs(filepath.Clean(baseDir))
-	if err != nil {
-		return "", fmt.Errorf("resolve base dir: %w", err)
-	}
-
-	cleanRel := filepath.Clean(relPath)
-	cleanRel = strings.TrimPrefix(cleanRel, string(filepath.Separator))
-	cleanRel = strings.TrimPrefix(cleanRel, "/")
-	cleanRel = strings.TrimPrefix(cleanRel, "\\")
-
-	target := filepath.Join(absBase, cleanRel)
-	rel, err := filepath.Rel(absBase, target)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return "", errors.New("path escapes storage location")
-	}
-
-	return filepath.Join(absBase, rel), nil
-}
-
 // processUploadedStream streams a file to disk, calculates hashes, probes metadata,
 // inserts the media node and metadata in DB, links lineage, and broadcasts SSE.
 func (s *Server) processUploadedStream(ctx context.Context, params UploadParams) (*UploadResult, error) {
@@ -176,14 +154,22 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		relPath = cleanFilename
 	}
 
-	relPath = filepath.Clean(relPath)
-	if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+	cleanRel := filepath.Clean(relPath)
+	if strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
 		return nil, errors.New("invalid rendered path")
 	}
 
-	targetPath, err := resolveContainedPath(targetLoc.RootPath, relPath)
+	safeArchiveDir, err := filepath.Abs(targetLoc.RootPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to resolve archive root: %w", err)
+	}
+	if !strings.HasSuffix(safeArchiveDir, string(filepath.Separator)) {
+		safeArchiveDir += string(filepath.Separator)
+	}
+
+	targetPath, err := filepath.Abs(filepath.Join(safeArchiveDir, cleanRel))
+	if err != nil || !strings.HasPrefix(targetPath, safeArchiveDir) {
+		return nil, errors.New("path escapes storage location")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
@@ -207,10 +193,13 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		}
 		collisionCount++
 		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
-		relPath = filepath.Join(filepath.Dir(relPath), suffixedName)
-		targetPath, err = resolveContainedPath(targetLoc.RootPath, relPath)
-		if err != nil {
-			return nil, err
+		cleanRel = filepath.Clean(filepath.Join(filepath.Dir(cleanRel), suffixedName))
+		if strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
+			return nil, errors.New("path escapes storage location")
+		}
+		targetPath, err = filepath.Abs(filepath.Join(safeArchiveDir, cleanRel))
+		if err != nil || !strings.HasPrefix(targetPath, safeArchiveDir) {
+			return nil, errors.New("path escapes storage location")
 		}
 		targetFileName = suffixedName
 	}
@@ -317,14 +306,21 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		exportUUIDStr string
 	)
 	if exportLoc != nil && isStandaloneDisplayable(ext) {
-		if dest, err := resolveContainedPath(exportLoc.RootPath, filepath.Join("immich", relPath)); err == nil {
-			exportDest = dest
-			exportDir := filepath.Dir(exportDest)
-			if err := os.MkdirAll(exportDir, 0o755); err == nil {
-				if err := linkOrCopyFile(targetPath, exportDest); err == nil {
-					exportCreated = true
-					if expID, err := uuid.NewV7(); err == nil {
-						exportUUIDStr = expID.String()
+		safeExportDir, err := filepath.Abs(exportLoc.RootPath)
+		if err == nil {
+			if !strings.HasSuffix(safeExportDir, string(filepath.Separator)) {
+				safeExportDir += string(filepath.Separator)
+			}
+			dest, err := filepath.Abs(filepath.Join(safeExportDir, "immich", cleanRel))
+			if err == nil && strings.HasPrefix(dest, safeExportDir) {
+				exportDest = dest
+				exportDir := filepath.Dir(exportDest)
+				if err := os.MkdirAll(exportDir, 0o755); err == nil {
+					if err := linkOrCopyFile(targetPath, exportDest); err == nil {
+						exportCreated = true
+						if expID, err := uuid.NewV7(); err == nil {
+							exportUUIDStr = expID.String()
+						}
 					}
 				}
 			}
@@ -452,7 +448,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		FastHash:     nullFast,
 		FullHash:     &computedBlake3,
 		Blake3Hash:   computedBlake3,
-		RelativePath: relPath,
+		RelativePath: cleanRel,
 		Asset:        toAssetDTO(insertedNode),
 	}, nil
 }
@@ -467,19 +463,22 @@ func isStandaloneDisplayable(ext string) bool {
 }
 
 func linkOrCopyFile(src, dst string) error {
-	linkErr := os.Link(src, dst)
+	cleanSrc := filepath.Clean(src)
+	cleanDst := filepath.Clean(dst)
+
+	linkErr := os.Link(cleanSrc, cleanDst)
 	if linkErr == nil || errors.Is(linkErr, os.ErrExist) {
 		return nil
 	}
 
 	// Fallback to safe non-truncating copy on cross-device link failure
-	srcFile, err := os.Open(src)
+	srcFile, err := os.Open(cleanSrc)
 	if err != nil {
 		return fmt.Errorf("link error: %w, open src error: %v", linkErr, err)
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	dstFile, err := os.OpenFile(cleanDst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil
@@ -489,7 +488,7 @@ func linkOrCopyFile(src, dst string) error {
 	defer func() { _ = dstFile.Close() }()
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		_ = os.Remove(dst)
+		_ = os.Remove(cleanDst)
 		return fmt.Errorf("link error: %w, copy error: %v", linkErr, err)
 	}
 	return nil
