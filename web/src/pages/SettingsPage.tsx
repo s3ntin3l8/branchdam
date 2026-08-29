@@ -366,6 +366,7 @@ export default function SettingsPage() {
   const [fieldError, setFieldError] = useState<string | null>(null);
   const { dirtyCount, register } = useDirtyFormProvider();
   const blocker = useDirtyGuard(dirtyCount);
+  const dirtyContextValue = useMemo(() => ({ dirtyCount, register }), [dirtyCount, register]);
 
   const pathRewritesField = useMemo(() => {
     return settings?.fields.find((f) => f.key === "pathRewrites");
@@ -410,7 +411,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <DirtyFormContext.Provider value={{ dirtyCount, register }}>
+    <DirtyFormContext.Provider value={dirtyContextValue}>
     <div className="p-6">
       <h1 className="mb-6 text-2xl font-bold text-white">System Settings</h1>
 

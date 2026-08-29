@@ -352,6 +352,15 @@ export default function AuditQueuePage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const clampedPage = Math.min(page, totalPages);
+  const displayOffset = (clampedPage - 1) * PAGE_SIZE;
+
+  useEffect(() => {
+    if (total > 0 && page > totalPages) {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set("page", String(totalPages));
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [total, page, totalPages, searchParams, setSearchParams]);
 
   const handlePageChange = (newPage: number) => {
     const nextParams = new URLSearchParams(searchParams);
@@ -390,7 +399,7 @@ export default function AuditQueuePage() {
 
           <div className="flex items-center justify-between pt-4 border-t border-neutral-800 text-xs text-neutral-400 mt-4">
             <div>
-              Showing {Math.min(offset + 1, total)} to {Math.min(offset + entries.length, total)} of {total} items
+              Showing {Math.min(displayOffset + 1, total)} to {Math.min(displayOffset + entries.length, total)} of {total} items
             </div>
             <div className="flex items-center space-x-2">
               <button

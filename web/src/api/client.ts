@@ -30,6 +30,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
+  window.dispatchEvent(new CustomEvent("api-auth-success"));
   return (await res.json()) as T;
 }
 

@@ -6,10 +6,20 @@ export function AuthErrorBanner() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { status: number; message: string };
-      setError(detail);
+      setError((prev) => {
+        if (prev && prev.status === detail.status && prev.message === detail.message) {
+          return prev;
+        }
+        return detail;
+      });
     };
+    const clearHandler = () => setError(null);
     window.addEventListener("api-auth-error", handler);
-    return () => window.removeEventListener("api-auth-error", handler);
+    window.addEventListener("api-auth-success", clearHandler);
+    return () => {
+      window.removeEventListener("api-auth-error", handler);
+      window.removeEventListener("api-auth-success", clearHandler);
+    };
   }, []);
 
   if (!error) return null;
