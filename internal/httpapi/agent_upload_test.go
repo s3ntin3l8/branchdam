@@ -18,7 +18,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
-func TestStagingUploadStreaming(t *testing.T) {
+func TestAgentUploadStreaming(t *testing.T) {
 	srv, database, _, _, _, _ := serverWithGuard(t)
 
 	tmpDir := t.TempDir()
@@ -39,13 +39,13 @@ func TestStagingUploadStreaming(t *testing.T) {
 
 	handler := srv.Handler()
 
-	data := []byte("Hello, branchDAM streaming staging upload test bytes!")
+	data := []byte("Hello, branchDAM streaming agent upload test bytes!")
 	hasher := blake3.New()
 	_, err = hasher.Write(data)
 	require.NoError(t, err)
 	expectedHash := hex.EncodeToString(hasher.Sum(nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/staging/upload", bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
 	req.Header.Set("X-API-Key", routeTestAgentKey)
 	req.Header.Set("X-Filename", "PXL_20260829_001.dng")
 	req.Header.Set("X-Blake3-Hash", expectedHash)
@@ -55,10 +55,10 @@ func TestStagingUploadStreaming(t *testing.T) {
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
-	var resp StagingUploadResponse
+	var resp AgentUploadResponse
 	err = json.Unmarshal(rec.Body.Bytes(), &resp)
 	require.NoError(t, err)
-	assert.Equal(t, "STAGED", resp.Status)
+	assert.Equal(t, "UPLOADED", resp.Status)
 	assert.Equal(t, int64(len(data)), resp.BytesWritten)
 	assert.Equal(t, expectedHash, resp.Blake3Hash)
 	assert.NotEmpty(t, resp.NodeUUID)
@@ -70,13 +70,13 @@ func TestStagingUploadStreaming(t *testing.T) {
 	assert.Equal(t, expectedHash, *node.FullHash)
 }
 
-func TestStagingUploadNoWritableLocation(t *testing.T) {
+func TestAgentUploadNoWritableLocation(t *testing.T) {
 	srv, _ := fullTestServer(t)
 
 	handler := srv.Handler()
 
 	data := []byte("sample payload")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/staging/upload", bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
 	req.Header.Set("X-API-Key", routeTestAgentKey)
 	req.Header.Set("X-Filename", "test.jpg")
 
@@ -86,7 +86,7 @@ func TestStagingUploadNoWritableLocation(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
-func TestStagingUploadChecksumMismatch(t *testing.T) {
+func TestAgentUploadChecksumMismatch(t *testing.T) {
 	srv, database, _, _, _, _ := serverWithGuard(t)
 
 	tmpDir := t.TempDir()
@@ -108,7 +108,7 @@ func TestStagingUploadChecksumMismatch(t *testing.T) {
 	handler := srv.Handler()
 
 	data := []byte("sample payload")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/staging/upload", bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
 	req.Header.Set("X-API-Key", routeTestAgentKey)
 	req.Header.Set("X-Filename", "test.jpg")
 	req.Header.Set("X-Blake3-Hash", "0000000000000000000000000000000000000000000000000000000000000000")
@@ -119,12 +119,12 @@ func TestStagingUploadChecksumMismatch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestStagingUploadAuthForbidden(t *testing.T) {
+func TestAgentUploadAuthForbidden(t *testing.T) {
 	srv, _, _, _, _, _ := serverWithGuard(t)
 
 	handler := srv.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/staging/upload", bytes.NewReader([]byte("unauthed")))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader([]byte("unauthed")))
 	req.Header.Set("X-API-Key", "wrong-key")
 
 	rec := httptest.NewRecorder()
