@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useContext, useMemo, useState } from "react";
 import { ApiError } from "../api/client";
 import type { SettingsField } from "../api/types";
+import { DirtyFormContext, useDirtyFormProvider, useDirtyGuard } from "../hooks/useDirtyFormGuard";
 import { FieldRow } from "../components/form/FieldRow";
 import { NumberField } from "../components/form/NumberField";
 import { SecretField } from "../components/form/SecretField";
@@ -83,6 +84,8 @@ function SettingsFieldEditor({
   onSave: (key: string, value: unknown, onError: () => void) => void;
   onRevert: (key: string, onError: () => void) => void;
 }) {
+  const { register } = useContext(DirtyFormContext);
+  const { markDirty, markClean } = register();
   const baseline = field.secret ? "" : field.value;
   const [prevBaseline, setPrevBaseline] = useState(baseline);
   const [draft, setDraft] = useState<unknown>(baseline);
@@ -112,6 +115,7 @@ function SettingsFieldEditor({
   const handleChange = (value: unknown) => {
     setDraft(value);
     setDirty(true);
+    markDirty();
   };
 
   const secretEmpty = field.secret && draft === "";
@@ -134,21 +138,13 @@ function SettingsFieldEditor({
             <button
               type="button"
               onClick={() => {
-                // Clear dirty on click, not just once the refetch's new
-                // baseline lands -- otherwise Save stays visibly enabled
-                // for the full round-trip and, on a slow network, invites
-                // a double-click double-submit. Restored on failure so a
-                // retry doesn't require re-typing the value.
                 const submitted = draft;
                 setDirty(false);
-                // A secret's baseline is always "" (never the real stored
-                // value, see `baseline` above), so the render-time resync
-                // never fires for it -- clear the typed value explicitly
-                // so a successful save doesn't leave the plaintext sitting
-                // in the input. Restored on failure like any other field.
+                markClean();
                 if (field.secret) setDraft("");
                 onSave(field.key, submitted, () => {
                   setDirty(true);
+                  markDirty();
                   if (field.secret) setDraft(submitted);
                 });
               }}
@@ -163,7 +159,8 @@ function SettingsFieldEditor({
               type="button"
               onClick={() => {
                 setDirty(false);
-                onRevert(field.key, () => setDirty(true));
+                markClean();
+                onRevert(field.key, () => { setDirty(true); markDirty(); });
               }}
               disabled={saving}
               className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
@@ -188,6 +185,8 @@ function PathRewritesEditor({
   onSave: (key: string, value: unknown, onError: () => void) => void;
   onRevert: (key: string, onError: () => void) => void;
 }) {
+  const { register } = useContext(DirtyFormContext);
+  const { markDirty, markClean } = register();
   const currentRules = useMemo(() => {
     if (!field || !Array.isArray(field.value)) return [] as Array<{ from: string; to: string }>;
     return field.value as Array<{ from: string; to: string }>;
@@ -256,7 +255,8 @@ function PathRewritesEditor({
               onClick={() => {
                 const submitted = rules;
                 setDirty(false);
-                onSave("pathRewrites", submitted, () => setDirty(true));
+                markClean();
+                onSave("pathRewrites", submitted, () => { setDirty(true); markDirty(); });
               }}
               disabled={saving}
               className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
@@ -269,7 +269,8 @@ function PathRewritesEditor({
               type="button"
               onClick={() => {
                 setDirty(false);
-                onRevert("pathRewrites", () => setDirty(true));
+                markClean();
+                onRevert("pathRewrites", () => { setDirty(true); markDirty(); });
               }}
               disabled={saving}
               className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
@@ -363,6 +364,8 @@ export default function SettingsPage() {
   const { data: settings, isLoading: settingsLoading, error: settingsError } = useSettings();
   const putSettings = usePutSettings();
   const [fieldError, setFieldError] = useState<string | null>(null);
+  const { dirtyCount, register } = useDirtyFormProvider();
+  const blocker = useDirtyGuard(dirtyCount);
 
   const pathRewritesField = useMemo(() => {
     return settings?.fields.find((f) => f.key === "pathRewrites");
@@ -407,6 +410,7 @@ export default function SettingsPage() {
   };
 
   return (
+    <DirtyFormContext.Provider value={{ dirtyCount, register }}>
     <div className="p-6">
       <h1 className="mb-6 text-2xl font-bold text-white">System Settings</h1>
 
@@ -471,5 +475,22 @@ export default function SettingsPage() {
         onRevert={handleRevert}
       />
     </div>
+    {blocker.state === "blocked" && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-w-sm">
+          <h2 className="text-lg font-semibold text-white mb-2">Unsaved Changes</h2>
+          <p className="text-sm text-neutral-400 mb-4">
+            You have unsaved settings changes. Leave without saving?
+          </p>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => blocker.reset()}
+              className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700">Stay</button>
+            <button type="button" onClick={() => blocker.proceed()}
+              className="rounded bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600">Leave</button>
+          </div>
+        </div>
+      </div>
+    )}
+    </DirtyFormContext.Provider>
   );
 }

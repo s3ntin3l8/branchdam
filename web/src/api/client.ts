@@ -22,6 +22,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // response body wasn't JSON -- fall back to statusText
     }
+    if (res.status === 401 || res.status === 403) {
+      window.dispatchEvent(
+        new CustomEvent("api-auth-error", { detail: { status: res.status, message: detail } })
+      );
+    }
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
@@ -63,7 +68,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
-    return request<{ entries: AuditEntry[] }>(`/api/v1/edges/audit?${qs}`);
+    return request<{ entries: AuditEntry[]; total: number }>(`/api/v1/edges/audit?${qs}`);
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),
   rejectEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/reject`, { method: "POST" }),

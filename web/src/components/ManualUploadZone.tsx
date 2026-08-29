@@ -477,6 +477,7 @@ export default function ManualUploadZone() {
                       onClick={() => removeItem(item.id)}
                       className="text-neutral-500 hover:text-red-400 p-1"
                       title="Remove from queue"
+                      aria-label={`Remove ${item.file.name} from upload queue`}
                     >
                       ✕
                     </button>

@@ -361,7 +361,10 @@ func (s *Server) handleListAssetFacets(ctx context.Context, _ *struct{}) (*Asset
 		return nil, huma.Error500InternalServerError("list camera model facets", err)
 	}
 	out := &AssetFacetsOutput{}
-	out.Body.CameraModels = models
+	out.Body.CameraModels = make([]string, len(models))
+	for i, m := range models {
+		out.Body.CameraModels[i] = m.String
+	}
 	return out, nil
 }
 
@@ -1193,6 +1196,7 @@ type auditEntryDTO struct {
 type AuditQueueOutput struct {
 	Body struct {
 		Entries []auditEntryDTO `json:"entries"`
+		Total   int64           `json:"total"`
 	}
 }
 
@@ -1201,7 +1205,12 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list audit queue", err)
 	}
+	total, err := s.db.Reader.CountAuditQueue(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("count audit queue", err)
+	}
 	out := &AuditQueueOutput{}
+	out.Body.Total = total
 	out.Body.Entries = make([]auditEntryDTO, len(rows))
 	for i, r := range rows {
 		sn := auditNodeDTO{
