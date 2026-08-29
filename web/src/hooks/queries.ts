@@ -150,7 +150,7 @@ export function useUnlinkedCount() {
   });
 }
 
-export function useAuditQueue(params: { limit?: number; offset?: number } = {}) {
+export function useAuditQueue(params: { limit?: number; beforeId?: number } = {}) {
   return useQuery({
     queryKey: ["audit-queue", params],
     queryFn: () => api.listAuditQueue(params),

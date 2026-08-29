@@ -48,7 +48,6 @@ type Querier interface {
 	// graph_status from -- see routes.go's recomputeGraphStatus.
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
-	CountAuditQueue(ctx context.Context) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
 	// Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
 	// for this remote have a retry_count at or past the bound, so

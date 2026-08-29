@@ -175,18 +175,20 @@ SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confiden
        sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
        tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
        tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
-       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state
+       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state,
+       COUNT(*) OVER() AS total
 FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
+  AND (?2 = 0 OR (e.confidence, e.id) < (SELECT confidence, id FROM media_edges WHERE id = ?2))
 ORDER BY e.confidence DESC, e.id ASC
-LIMIT ?1 OFFSET ?2
+LIMIT ?1
 `
 
 type ListAuditQueueDetailedParams struct {
-	Limit  int64
-	Offset int64
+	Limit    int64
+	BeforeID interface{}
 }
 
 type ListAuditQueueDetailedRow struct {
@@ -214,10 +216,11 @@ type ListAuditQueueDetailedRow struct {
 	TargetCameraModel    sql.NullString
 	TargetPhash          sql.NullInt64
 	TargetThumbState     string
+	Total                int64
 }
 
 func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error) {
-	rows, err := q.db.QueryContext(ctx, listAuditQueueDetailed, arg.Limit, arg.Offset)
+	rows, err := q.db.QueryContext(ctx, listAuditQueueDetailed, arg.Limit, arg.BeforeID)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +253,7 @@ func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueue
 			&i.TargetCameraModel,
 			&i.TargetPhash,
 			&i.TargetThumbState,
+			&i.Total,
 		); err != nil {
 			return nil, err
 		}
@@ -448,16 +452,4 @@ func (q *Queries) WouldCreateCycle(ctx context.Context, arg WouldCreateCyclePara
 	var would_cycle bool
 	err := row.Scan(&would_cycle)
 	return would_cycle, err
-}
-
-const countAuditQueue = `-- name: CountAuditQueue :one
-SELECT COUNT(*) FROM v_media_edges_resolved
-WHERE review_state = 'NEEDS_REVIEW'
-`
-
-func (q *Queries) CountAuditQueue(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countAuditQueue)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
 }

@@ -28,11 +28,30 @@ WHERE review_state = 'NEEDS_REVIEW'
 ORDER BY confidence DESC, id ASC
 LIMIT ?1 OFFSET ?2;
 
--- name: CountAuditQueue :one
-SELECT COUNT(*) FROM v_media_edges_resolved
-WHERE review_state = 'NEEDS_REVIEW';
-
 -- name: ListAuditQueueDetailed :many
+-- Keyset (cursor) pagination: when `before_id` is non-zero, only rows
+-- ordered BEFORE the (confidence, id) cursor are returned. Ordering is
+-- (confidence DESC, id ASC); "before" means strictly less in the
+-- lexicographic order. When `before_id` is 0, the first page is returned
+-- (no cursor constraint).
+--
+-- Keyset over offset: a confirm/reject while the user is on page N
+-- shifts the offset window in the offset-based query, so page N+1 may
+-- duplicate or skip rows. Keyset pagination is stable across mutations
+-- because the cursor is a row identity, not a position.
+--
+-- `total` is returned as a column on every row via COUNT(*) OVER() in
+-- the same scan, avoiding a second COUNT(*) query per page turn and the
+-- race where a confirmation between the list and the count makes total
+-- disagree with what the list shows.
+--
+-- The cursor (confidence, id) is resolved in a CTE first, then the main
+-- query references it -- sqlc v1.31.1 mis-counts placeholders when a
+-- subquery in the WHERE clause references the same ?N as the outer
+-- query, so a single-pass subquery would generate one too few args.
+WITH cursor(cd, id) AS (
+  SELECT confidence, id FROM media_edges WHERE id = ?2
+)
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
        sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
@@ -40,13 +59,15 @@ SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confiden
        sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
        tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
        tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
-       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state
+       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state,
+       COUNT(*) OVER() AS total
 FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
+  AND (?2 = 0 OR (e.confidence, e.id) < (SELECT cd, id FROM cursor))
 ORDER BY e.confidence DESC, e.id ASC
-LIMIT ?1 OFFSET ?2;
+LIMIT ?1;
 
 
 -- name: ListAncestors :many

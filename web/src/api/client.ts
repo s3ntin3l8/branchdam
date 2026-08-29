@@ -65,10 +65,10 @@ export const api = {
   // auth, same as any other same-origin image request.
   thumbnailUrl: (id: number) => `/api/v1/assets/${id}/thumbnail`,
 
-  listAuditQueue: (params: { limit?: number; offset?: number } = {}) => {
+  listAuditQueue: (params: { limit?: number; beforeId?: number } = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
-    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.beforeId) qs.set("beforeId", String(params.beforeId));
     return request<{ entries: AuditEntry[]; total: number }>(`/api/v1/edges/audit?${qs}`);
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),

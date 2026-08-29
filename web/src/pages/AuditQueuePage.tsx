@@ -342,30 +342,33 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
 
 export default function AuditQueuePage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const rawPage = Number(searchParams.get("page") || "1");
-  const page = Math.max(1, Number.isNaN(rawPage) ? 1 : rawPage);
-  const offset = (page - 1) * PAGE_SIZE;
-  const { data, isLoading, isError } = useAuditQueue({ limit: PAGE_SIZE, offset });
+  // beforeId=0 means "first page". We store it in the URL so a deep
+  // link shares the right cursor; offset is intentionally not in the URL
+  // because offset drifts across mutations (confirm/reject on page N
+  // shifts the offset window).
+  const beforeId = Number(searchParams.get("beforeId") || "0") || 0;
+  const { data, isLoading, isError } = useAuditQueue({ limit: PAGE_SIZE, beforeId });
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const entries = data?.entries ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const clampedPage = Math.min(page, totalPages);
-  const displayOffset = (clampedPage - 1) * PAGE_SIZE;
+  // hasMore: server returns total consistently with the page (single
+  // query with COUNT(*) OVER()). If the page is full, there may be more.
+  const hasMore = entries.length === PAGE_SIZE;
 
-  useEffect(() => {
-    if (total > 0 && page > totalPages) {
-      const nextParams = new URLSearchParams(searchParams);
-      nextParams.set("page", String(totalPages));
-      setSearchParams(nextParams, { replace: true });
-    }
-  }, [total, page, totalPages, searchParams, setSearchParams]);
-
-  const handlePageChange = (newPage: number) => {
+  const handleFirst = () => {
     const nextParams = new URLSearchParams(searchParams);
-    nextParams.set("page", String(newPage));
+    nextParams.delete("beforeId");
     setSearchParams(nextParams);
+  };
+
+  const handleNext = () => {
+    if (entries.length === 0) return;
+    const lastId = entries[entries.length - 1].id;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("beforeId", String(lastId));
+    setSearchParams(nextParams);
+    window.scrollTo(0, 0);
   };
 
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
@@ -398,23 +401,18 @@ export default function AuditQueuePage() {
           </div>
 
           <div className="flex items-center justify-between pt-4 border-t border-neutral-800 text-xs text-neutral-400 mt-4">
-            <div>
-              Showing {Math.min(displayOffset + 1, total)} to {Math.min(displayOffset + entries.length, total)} of {total} items
-            </div>
+            <div>{total} item{total === 1 ? "" : "s"} awaiting review</div>
             <div className="flex items-center space-x-2">
               <button
-                disabled={clampedPage <= 1}
-                onClick={() => handlePageChange(clampedPage - 1)}
+                disabled={beforeId === 0}
+                onClick={handleFirst}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
-                Previous
+                First
               </button>
-              <span className="px-2 font-mono">
-                Page {clampedPage} of {totalPages}
-              </span>
               <button
-                disabled={clampedPage >= totalPages}
-                onClick={() => handlePageChange(clampedPage + 1)}
+                disabled={!hasMore}
+                onClick={handleNext}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
                 Next
