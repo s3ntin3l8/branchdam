@@ -73,7 +73,7 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
 | 8 | Agent-server contract: `event_queue` drain, handshake, path rebase | 1 | Landed |
 | 9 | Cache pruning engine and the differential mtime sweeper | 1, 7 | Landed |
 | 10 | Workstation agent — all of it ships in `s3ntin3l8/branchdam-agent` | 8 | Landed (`branchdam-agent` v1.0.1+, `branchdam-agent`#1–#6 and this repo's #62 all closed) |
-| 11 | Centralized archive ingest, naming templates, 30-day trash buffer & mobile companion companion protocol | 8, 9, 10 | Landed (Epic #310) |
+| 11 | Centralized archive ingest, naming templates, 30-day trash buffer & mobile companion protocol | 8, 9, 10 | Landed (Epic #310) |
 
 Phase 2 has no dependencies and can land at any point — it closes a live authorization gap
 (`Principal.Groups` is parsed and echoed at `/api/v1/me` but nothing checks it today) rather than

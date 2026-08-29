@@ -80,6 +80,6 @@ When a user deletes a photo or video:
 
 ## 4. Pairing & Authentication
 
-1. In the branchDAM web UI, navigate to **Settings** $\rightarrow$ **Machine API Keys** (or generate via CLI).
+1. In the branchDAM web UI, navigate to **Settings** → **Machine API Keys** (or generate via CLI).
 2. Open the mobile companion app and scan the QR code or enter the server URL and API key.
 3. The app authenticates as `KindMachine` via `X-API-Key` or `Authorization: Bearer <key>`.

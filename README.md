@@ -20,7 +20,7 @@ ForwardAuth, on SQLite in WAL mode.
   - **Tier 2 (Identifiers & Stems)**: XMP `OriginalDocumentID` tracking and normalized filename stem matching.
   - **Tier 3 (Spatial-Temporal Heuristics)**: Links derived exports back to camera masters via camera serial numbers, lens models, capture timestamps (±2s window), and perceptual hash (pHash Hamming distance ≤ 10).
 - **Human-in-the-Loop Audit Queue**: Low-confidence candidate links (< 0.85/0.90 thresholds) route directly to an interactive Audit Queue where human confirmations/rejections permanently override automated algorithms.
-- **Storage Safety by Design**: The Tier-3 master archive is mounted strictly read-only (`:ro`) and write-guarded at the application level. branchDAM will never modify, rename, or delete your camera RAW masters.
+- **Storage Safety & Lifecycle Governance**: Ingested camera masters are stored safely in the Master Archive. Deletion events trigger soft-delete buffer isolation under `.trash/` with a 30-day safety retention window before automated pruning, preventing accidental loss while keeping active archives tidy.
 - **Storage Architecture & Ingest**:
   - Direct streaming ingest (`POST /api/v1/agent/upload`) for mobile companion apps and workstation agents.
   - Server-evaluated folder and naming templates (e.g. `{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}`).
