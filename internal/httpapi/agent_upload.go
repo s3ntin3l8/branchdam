@@ -154,7 +154,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 
 	var outFile *os.File
 	for {
-		f, createErr := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, createErr := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
 		if createErr == nil {
 			outFile = f
 			break

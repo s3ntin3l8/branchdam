@@ -285,8 +285,9 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 	data := []byte("concurrent upload payload bytes")
 
 	type result struct {
-		path string
-		code int
+		nodeUUID string
+		path     string
+		code     int
 	}
 
 	results := make(chan result, 2)
@@ -301,7 +302,7 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 			handler.ServeHTTP(rec, req)
 			var resp AgentUploadResponse
 			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-			results <- result{path: resp.RelativePath, code: rec.Code}
+			results <- result{nodeUUID: resp.NodeUUID, path: resp.RelativePath, code: rec.Code}
 		}(i)
 	}
 
@@ -315,4 +316,14 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 	_, err2 := os.Stat(filepath.Join(archiveDir, r2.path))
 	assert.NoError(t, err1, "first upload's file must exist on disk")
 	assert.NoError(t, err2, "second upload's file must exist on disk")
+
+	// Verify fast_hash is populated (non-nil) in both DB nodes. This catches
+	// any regression where O_WRONLY prevents ReadAt inside hashing.FastHash.
+	node1, err := database.Reader.GetMediaNodeByUUID(context.Background(), r1.nodeUUID)
+	require.NoError(t, err)
+	assert.NotNil(t, node1.FastHash, "fast_hash must be populated for first upload node")
+
+	node2, err := database.Reader.GetMediaNodeByUUID(context.Background(), r2.nodeUUID)
+	require.NoError(t, err)
+	assert.NotNil(t, node2.FastHash, "fast_hash must be populated for second upload node")
 }
