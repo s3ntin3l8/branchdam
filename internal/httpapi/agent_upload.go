@@ -108,8 +108,18 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		CameraModel:  cameraModel,
 		OriginalName: filename,
 	})
+	relPath = filepath.Clean(relPath)
+	if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+		s.writeJSONError(w, http.StatusBadRequest, "invalid rendered path")
+		return
+	}
 
 	targetPath := filepath.Join(targetLoc.RootPath, relPath)
+	if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(targetLoc.RootPath)) {
+		s.writeJSONError(w, http.StatusBadRequest, "path escapes storage location")
+		return
+	}
+
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create directory: %v", err))
 		return
@@ -202,10 +212,12 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		// Hardlink non-RAW standalone photos into Tier 2 Immich exports for zero-storage duplication
 		if exportLoc != nil && isStandaloneDisplayable(ext) {
 			exportDest := filepath.Join(exportLoc.RootPath, "immich", relPath)
-			_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
-			if linkErr := os.Link(targetPath, exportDest); linkErr != nil {
-				// Fallback to copy if on different physical filesystem (EXDEV)
-				_ = copyFileContents(targetPath, exportDest)
+			if strings.HasPrefix(filepath.Clean(exportDest), filepath.Clean(exportLoc.RootPath)) {
+				_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
+				if linkErr := os.Link(targetPath, exportDest); linkErr != nil {
+					// Fallback to copy if on different physical filesystem (EXDEV)
+					_ = copyFileContents(targetPath, exportDest)
+				}
 			}
 		}
 
@@ -246,13 +258,16 @@ func isStandaloneDisplayable(ext string) bool {
 }
 
 func copyFileContents(src, dst string) error {
-	in, err := os.Open(src)
+	cleanSrc := filepath.Clean(src)
+	cleanDst := filepath.Clean(dst)
+
+	in, err := os.Open(cleanSrc)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
 
-	out, err := os.Create(dst)
+	out, err := os.Create(cleanDst)
 	if err != nil {
 		return err
 	}

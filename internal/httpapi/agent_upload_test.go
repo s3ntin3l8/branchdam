@@ -204,4 +204,36 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	exportContent, err := os.ReadFile(exportFile)
 	require.NoError(t, err)
 	assert.Equal(t, data, exportContent)
+
+	// Test collision handling on duplicate upload
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "IMG_2026.JPG")
+	req2.Header.Set("X-Camera-Model", "Pixel 9 Pro")
+	req2.Header.Set("X-Capture-Timestamp", "1787998200") // 2026-08-29
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusCreated, rec2.Code)
+	var resp2 AgentUploadResponse
+	err = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	require.NoError(t, err)
+	assert.Contains(t, resp2.RelativePath, "IMG_2026_2.JPG")
+
+	// Test RAW file upload (should NOT be hardlinked to exports/immich/)
+	rawData := []byte("RAW sensor payload")
+	reqRaw := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(rawData))
+	reqRaw.Header.Set("X-API-Key", routeTestAgentKey)
+	reqRaw.Header.Set("X-Filename", "DSC_9999.ARW")
+	reqRaw.Header.Set("X-Camera-Model", "Sony A7IV")
+	reqRaw.Header.Set("X-Capture-Timestamp", "1787998200")
+	recRaw := httptest.NewRecorder()
+	handler.ServeHTTP(recRaw, reqRaw)
+	assert.Equal(t, http.StatusCreated, recRaw.Code)
+	var respRaw AgentUploadResponse
+	err = json.Unmarshal(recRaw.Body.Bytes(), &respRaw)
+	require.NoError(t, err)
+	assert.Contains(t, respRaw.RelativePath, "DSC_9999.ARW")
+	rawExportFile := filepath.Join(exportsDir, "immich", respRaw.RelativePath)
+	_, statErr := os.Stat(rawExportFile)
+	assert.True(t, os.IsNotExist(statErr), "RAW files should not be hardlinked to Immich exports")
 }
