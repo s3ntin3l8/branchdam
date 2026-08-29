@@ -168,6 +168,10 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
    }
    ```
 4. **`EVENT_NODE_DELETED`:**
+   Processing `EVENT_NODE_DELETED` triggers a safe, multi-step soft delete:
+   - Sets `media_nodes.lifecycle_state = 'MISSING'` and purges `remote_sync_state`.
+   - Safely relocates the master file to `.trash/<rel_path>` in the storage location, retaining it for 30 days (`trash.retentionDays`) before automated prune unlinks it.
+   - Purges linked Tier 2 Immich exports immediately (unlinking export files and deleting sync state) and triggers an Immich library rescan so the asset disappears from galleries right away.
    ```json
    {
      "nodeUuid": "018f..."
@@ -183,7 +187,29 @@ Below is the complete message set specified both as **REST DTOs (JSON Schema)** 
    }
    ```
 
-#### D. Path Rebase Endpoint (`POST /api/v1/agent/rebase`)
+#### D. Direct Streaming Upload (`POST /api/v1/agent/upload`)
+
+Mobile companion apps and modern workstation agents stream raw binary media directly to the server's Master Archive without intermediate staging mounts.
+
+- **Headers:**
+  - `X-Filename`: Original filename (e.g. `PXL_20260829_120000.jpg`).
+  - `X-Camera-Model`: Optional device model (e.g. `Pixel 9 Pro`).
+  - `X-Capture-Timestamp`: Optional EXIF capture Unix timestamp.
+  - `X-Blake3-Hash`: Optional pre-computed 64-character BLAKE3 hex digest for integrity verification.
+  - `X-API-Key`: Machine API key.
+- **Request Body:** Raw binary octet stream.
+- **Response (`AgentUploadResponse` - Status 201 Created):**
+  ```json
+  {
+    "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
+    "status": "UPLOADED",
+    "bytesWritten": 48291040,
+    "blake3Hash": "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a",
+    "relativePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg"
+  }
+  ```
+
+#### E. Path Rebase Endpoint (`POST /api/v1/agent/rebase`)
 
 > **Rebasing a target inside Tier 3 (`TIER3_MASTER_ARCHIVE`) succeeds if and only if the file
 > already exists there.** This is spec §9's required `LOCAL_STAGING → CENTRAL_TIER3` scenario,

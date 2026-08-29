@@ -39,6 +39,15 @@ pruning:
   # Default is true.
   enabled: true
 
+trash:
+  # Number of days deleted files are kept in .trash/ before permanent purge (default 30).
+  # 0 disables automatic purge.
+  retentionDays: 30
+
+ingest:
+  # Centralized naming template for server-ingested media (POST /api/v1/agent/upload).
+  namingTemplate: "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}"
+
 agent:
   # Machine-principal key for /api/v1/agent/* routes, which bypass Authentik
   # ForwardAuth at the Traefik layer (see docs/forward-auth.md). Must be at
