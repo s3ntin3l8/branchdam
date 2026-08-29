@@ -66,12 +66,44 @@ func TestStagingUploadStreaming(t *testing.T) {
 	// Verify node in database
 	node, err := database.Reader.GetMediaNodeByUUID(context.Background(), resp.NodeUUID)
 	require.NoError(t, err)
-	assert.Equal(t, "INDEXED_FULL", node.IndexingStatus)
+	assert.Equal(t, "INDEXED_SHALLOW", node.IndexingStatus)
 	assert.Equal(t, expectedHash, *node.FullHash)
 }
 
+func TestStagingUploadNoWritableLocation(t *testing.T) {
+	srv, _ := fullTestServer(t)
+
+	handler := srv.Handler()
+
+	data := []byte("sample payload")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/staging/upload", bytes.NewReader(data))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "test.jpg")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
 func TestStagingUploadChecksumMismatch(t *testing.T) {
-	srv, _, _, _, _, _ := serverWithGuard(t)
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	locDir := filepath.Join(tmpDir, "tier1")
+	require.NoError(t, os.MkdirAll(locDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "Tier1_Upload",
+			RootPath: locDir,
+			Tier:     "TIER1_LOCAL_SCRATCH",
+			ReadOnly: 0,
+			Prunable: 1,
+		})
+		return err
+	})
+	require.NoError(t, err)
 
 	handler := srv.Handler()
 
