@@ -55,7 +55,7 @@ graph TD
      - `X-Camera-Model`: device model (e.g. `Pixel 9 Pro`).
      - `X-Capture-Timestamp`: EXIF capture Unix timestamp.
      - `X-Blake3-Hash`: optional pre-computed BLAKE3 hash for end-to-end integrity.
-   - The server streams bytes directly to disk in `TIER3_MASTER_ARCHIVE`, calculates BLAKE3 and fast hash in a single pass, resolves the folder structure according to the active naming template, and records the `media_nodes` row.
+   - The server streams bytes directly to disk in `TIER3_MASTER_ARCHIVE`, calculates its BLAKE3 hash during the stream write, resolves the folder structure according to the active naming template, records the `media_nodes` row, and returns `201 UPLOADED` with the verified `blake3Hash`.
 
 4. **Instant Zero-Storage Immich Display**:
    - Non-RAW displayable images and videos (`.jpg`, `.heic`, `.png`, `.webp`, `.mp4`, `.mov`) are automatically hardlinked into `TIER2_EXPORTS/immich/` under the matching folder structure.

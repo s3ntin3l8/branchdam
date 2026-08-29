@@ -202,13 +202,10 @@ Mobile companion apps and modern workstation agents stream raw binary media dire
   ```json
   {
     "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
-    "relativePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
-    "sizeBytes": 48291040,
-    "fastHash": "0123456789abcdef",
-    "fullHash": "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a",
-    "indexingStatus": "INDEXED_FULL",
-    "graphStatus": "ROOT",
-    "immichExportPath": "immich/2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg"
+    "status": "UPLOADED",
+    "bytesWritten": 48291040,
+    "blake3Hash": "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a",
+    "relativePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg"
   }
   ```
 
