@@ -123,24 +123,40 @@ func TestListStorageLocationsIncludesDisabledLocations(t *testing.T) {
 	}
 }
 
-// TestStorageLocationTierCheckEnforced proves the DB-level CHECK from
-// docs/schema.md fix #1 (Tier 3 must be read_only) is real, independent of
-// any application-level discipline about setting it correctly.
+// TestStorageLocationTierCheckEnforced proves that migration 00012 permits
+// writable TIER3_MASTER_ARCHIVE locations while still enforcing the DB-level
+// CHECK that only TIER1_LOCAL_SCRATCH locations can be marked prunable.
 func TestStorageLocationTierCheckEnforced(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 
+	// Writable TIER3_MASTER_ARCHIVE is permitted
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		_, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
-			Name:     "bad-archive",
+			Name:     "writable-archive",
 			RootPath: t.TempDir(),
 			Tier:     "TIER3_MASTER_ARCHIVE",
-			ReadOnly: 0, // violates CHECK (tier <> 'TIER3_MASTER_ARCHIVE' OR read_only = 1)
+			ReadOnly: 0,
 			Prunable: 0,
 		})
 		return err
 	})
+	if err != nil {
+		t.Fatalf("insert of writable TIER3_MASTER_ARCHIVE failed: %v", err)
+	}
+
+	// Prunable non-Tier-1 is rejected by CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name:     "bad-prunable-archive",
+			RootPath: t.TempDir(),
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 1, // violates CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)
+		})
+		return err
+	})
 	if err == nil {
-		t.Fatal("insert of a writable TIER3_MASTER_ARCHIVE location succeeded, want a CHECK constraint failure")
+		t.Fatal("insert of a prunable TIER3_MASTER_ARCHIVE location succeeded, want a CHECK constraint failure")
 	}
 }

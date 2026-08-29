@@ -22,6 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/metadata"
+	"github.com/s3ntin3l8/branchdam/internal/naming"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/projectfile"
@@ -1625,6 +1626,7 @@ type AgentHandshakeOutput struct {
 		ServerTimeUnix        int64  `json:"serverTimeUnix"`
 		AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 		PendingEventsCount    int64  `json:"pendingEventsCount"`
+		NamingTemplate        string `json:"namingTemplate,omitempty"`
 	}
 }
 
@@ -1655,12 +1657,18 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 		return nil, huma.Error500InternalServerError("handshake query failed", err)
 	}
 
+	namingTpl := naming.DefaultPathTemplate
+	if cfg := s.cfg(); cfg != nil && cfg.Ingest.NamingTemplate != "" {
+		namingTpl = cfg.Ingest.NamingTemplate
+	}
+
 	out := &AgentHandshakeOutput{}
 	out.Body.OK = true
 	out.Body.ServerVersion = s.version
 	out.Body.ServerTimeUnix = time.Now().Unix()
 	out.Body.AcknowledgedEventUUID = ackUUID
 	out.Body.PendingEventsCount = pendingCount
+	out.Body.NamingTemplate = namingTpl
 	return out, nil
 }
 

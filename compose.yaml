@@ -24,15 +24,12 @@ services:
       - branchdam-data:/data
       - ./config.yaml:/config/config.yaml:ro
       # One mount per storage tier declared in config.yaml's
-      # storageLocations. Tier 3 (the master archive) is ALWAYS :ro --
-      # storage.Guard enforces this at the application level too
-      # (docs/schema.md fix #1), but the mount itself is the first line of
-      # defense.
-      - /mnt/nas/staging:/storage/staging:rw # TIER0_LOCAL_STAGING
+      # storageLocations. Master archive is mounted :rw for server-governed
+      # ingest and archive storage.
       - /mnt/local/scratch:/storage/scratch:rw # TIER1_LOCAL_SCRATCH
       - /mnt/nas/exports:/storage/exports:rw # TIER2_EXPORTS
       - /mnt/nas/projects:/storage/projects:rw # PROJECTS
-      - /mnt/nas/archive:/storage/archive:ro # TIER3_MASTER_ARCHIVE — always read-only
+      - /mnt/nas/archive:/storage/archive:rw # TIER3_MASTER_ARCHIVE
       # Example SMB/NFS share matching config.example.yaml's `nas-share`
       # location (sweep-only, since fsnotify doesn't fire reliably over
       # SMB/NFS -- #60). Uncomment both the mount here and the

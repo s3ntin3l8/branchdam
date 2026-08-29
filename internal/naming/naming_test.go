@@ -1,6 +1,9 @@
 package naming
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestStem moved here from internal/pipeline/commit_test.go's TestFilenameStem
 // (issue #132 criterion 3) when the stem/suffix-classification logic moved
@@ -94,5 +97,39 @@ func TestSuffixKind(t *testing.T) {
 		if got := Kind(in); got != want {
 			t.Errorf("Kind(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestRenderPath(t *testing.T) {
+	capturedAt := time.Date(2026, time.August, 29, 14, 30, 0, 0, time.UTC)
+	vars := TemplateVars{
+		CapturedAt:   capturedAt,
+		CameraModel:  "Sony ILCE-7M4",
+		OriginalName: "DSC01234.ARW",
+	}
+
+	got := RenderPath("", vars)
+	want := "2026/2026-08-29_Sony ILCE-7M4/DSC01234.ARW"
+	if got != want {
+		t.Errorf("RenderPath default = %q, want %q", got, want)
+	}
+
+	customTpl := "{yyyy}/{mm}/{camera_model}/{stem}_processed.{ext}"
+	gotCustom := RenderPath(customTpl, vars)
+	wantCustom := "2026/08/Sony ILCE-7M4/DSC01234_processed.ARW"
+	if gotCustom != wantCustom {
+		t.Errorf("RenderPath custom = %q, want %q", gotCustom, wantCustom)
+	}
+
+	// Test fallback for missing camera model
+	varsNoCam := TemplateVars{
+		CapturedAt:   capturedAt,
+		CameraModel:  "",
+		OriginalName: "IMG_001.JPG",
+	}
+	gotNoCam := RenderPath("", varsNoCam)
+	wantNoCam := "2026/2026-08-29_unknown_camera/IMG_001.JPG"
+	if gotNoCam != wantNoCam {
+		t.Errorf("RenderPath no camera = %q, want %q", gotNoCam, wantNoCam)
 	}
 }
