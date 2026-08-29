@@ -486,4 +486,18 @@ describe("StorageHealthPage", () => {
       expect(api.deleteAgentTelemetry).toHaveBeenCalledWith("agent-to-dismiss");
     });
   });
+
+  it("renders mobile companion device with MOBILE_COMPANION badge", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation()],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [baseAgent({ agentId: "pixel-9-pro", clientVersion: "2.0.0" })],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("pixel-9-pro")).toBeInTheDocument());
+
+    expect(screen.getByText("MOBILE_COMPANION")).toBeInTheDocument();
+    expect(screen.getByText("v2.0.0")).toBeInTheDocument();
+  });
 });
