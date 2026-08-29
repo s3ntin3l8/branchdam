@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -204,9 +205,17 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list storage locations: %w", err)
 	}
-	locs := make([]storage.Location, len(rows))
-	for i, r := range rows {
-		locs[i] = storage.Location(r)
+	locs := make([]storage.Location, 0, len(rows))
+	for _, r := range rows {
+		resolved, err := filepath.EvalSymlinks(r.RootPath)
+		if err != nil {
+			continue
+		}
+		resolved = filepath.Clean(resolved)
+		loc := storage.Location(r)
+		loc.RootPath = resolved
+		locs = append(locs, loc)
 	}
-	return s.guard.ReloadLocations(locs)
+	s.guard.ReloadLocations(locs)
+	return nil
 }

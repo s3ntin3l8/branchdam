@@ -367,12 +367,9 @@ func TestGuardReloadLocations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve new root: %v", err)
 	}
-	err = guard.ReloadLocations([]Location{
+	guard.ReloadLocations([]Location{
 		{ID: 3, Name: "new", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false},
 	})
-	if err != nil {
-		t.Fatalf("ReloadLocations: %v", err)
-	}
 
 	// Old locations must no longer resolve.
 	if _, err := guard.Resolve(filepath.Join(tier2, "x.txt")); err == nil {
@@ -402,7 +399,7 @@ func TestGuardReloadLocationsConcurrent(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < 100; i++ {
-			_ = guard.ReloadLocations([]Location{
+			guard.ReloadLocations([]Location{
 				{ID: 3, Name: "new", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false},
 			})
 		}
