@@ -28,6 +28,10 @@ WHERE review_state = 'NEEDS_REVIEW'
 ORDER BY confidence DESC, id ASC
 LIMIT ?1 OFFSET ?2;
 
+-- name: CountAuditQueue :one
+SELECT COUNT(*) FROM v_media_edges_resolved
+WHERE review_state = 'NEEDS_REVIEW';
+
 -- name: ListAuditQueueDetailed :many
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,

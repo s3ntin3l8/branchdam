@@ -23,7 +23,7 @@ function renderWithClient(ui: React.ReactElement) {
 
 describe("AuditQueuePage", () => {
   it("shows an empty state when there is nothing to review", async () => {
-    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
     renderWithClient(<AuditQueuePage />);
 
     expect(await screen.findByText(/nothing needs review/i)).toBeInTheDocument();
@@ -61,6 +61,7 @@ describe("AuditQueuePage", () => {
           phashDistance: 2,
         },
       ],
+      total: 1,
     });
     renderWithClient(<AuditQueuePage />);
 
@@ -90,6 +91,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "tgt.jpg", filePath: "/tgt.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.confirmEdge).mockResolvedValue({ ok: true });
 
@@ -101,7 +103,7 @@ describe("AuditQueuePage", () => {
   });
 
   it("opens manual link modal and submits createEdge", async () => {
-    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
     vi.mocked(api.createEdge).mockResolvedValue({
       id: 99,
       sourceNodeId: 100,
@@ -152,6 +154,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.confirmEdge).mockRejectedValue(new Error("Database write failure"));
 
@@ -180,6 +183,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 3, nodeUuid: "uuid-3", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.rejectEdge).mockRejectedValue(new Error("Network disconnect"));
 

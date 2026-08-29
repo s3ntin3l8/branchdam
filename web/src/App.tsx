@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
+import { AuthErrorBanner } from "./components/AuthErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import BrandMark from "./components/BrandMark";
 
@@ -35,6 +36,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen">
+      <AuthErrorBanner />
       <nav className="w-56 shrink-0 border-r border-neutral-800 p-4">
         <div className="mb-6 flex items-center gap-2">
           <BrandMark className="h-5 w-5 text-brand" />
@@ -68,18 +70,48 @@ export default function App() {
           </div>
         )}
         <ErrorBoundary>
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
-            <Routes>
-              <Route path="/" element={<AssetListPage />} />
-              <Route path="/assets" element={<AssetListPage />} />
-              <Route path="/assets/:id" element={<AssetDetailPage />} />
-              <Route path="/audit" element={<AuditQueuePage />} />
-              <Route path="/ingest" element={<IngestPage />} />
-              <Route path="/jobs" element={<IngestJobsPage />} />
-              <Route path="/storage-health" element={<StorageHealthPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
-          </Suspense>
+          <Routes>
+            <Route path="/" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading assets…</div>}>
+                <AssetListPage />
+              </Suspense>
+            } />
+            <Route path="/assets" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading assets…</div>}>
+                <AssetListPage />
+              </Suspense>
+            } />
+            <Route path="/assets/:id" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading asset…</div>}>
+                <AssetDetailPage />
+              </Suspense>
+            } />
+            <Route path="/audit" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit queue…</div>}>
+                <AuditQueuePage />
+              </Suspense>
+            } />
+            <Route path="/ingest" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading ingest…</div>}>
+                <IngestPage />
+              </Suspense>
+            } />
+            <Route path="/jobs" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading jobs…</div>}>
+                <IngestJobsPage />
+              </Suspense>
+            } />
+            <Route path="/storage-health" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading storage health…</div>}>
+                <StorageHealthPage />
+              </Suspense>
+            } />
+            <Route path="/settings" element={
+              <Suspense fallback={<div className="p-6 text-neutral-400">Loading settings…</div>}>
+                <SettingsPage />
+              </Suspense>
+            } />
+          </Routes>
         </ErrorBoundary>
       </main>
     </div>
