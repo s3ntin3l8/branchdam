@@ -219,8 +219,9 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 				exportClean := filepath.Clean(exportDest)
 				exportRootClean := filepath.Clean(exportLoc.RootPath) + string(filepath.Separator)
 				if strings.HasPrefix(exportClean, exportRootClean) {
-					_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
-					_ = os.Link(targetPath, exportDest)
+					exportDir := filepath.Dir(exportClean)
+					_ = os.MkdirAll(exportDir, 0o755)
+					_ = os.Link(targetClean, exportClean)
 				}
 			}
 		}
