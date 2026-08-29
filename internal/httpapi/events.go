@@ -63,22 +63,31 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	notify, unsub := s.hub.Subscribe()
 	defer unsub()
 
-	send := func() {
+	send := func() error {
 		rows, err := s.db.Reader.ListRecentScanJobs(r.Context(), 5)
 		if err != nil {
-			return
+			return err
 		}
 		b, err := json.Marshal(rows)
 		if err != nil {
-			return
+			return err
 		}
-		_, _ = w.Write([]byte("event: progress\ndata: "))
-		_, _ = w.Write(b)
-		_, _ = w.Write([]byte("\n\n"))
+		if _, err := w.Write([]byte("event: progress\ndata: ")); err != nil {
+			return err
+		}
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("\n\n")); err != nil {
+			return err
+		}
 		flusher.Flush()
+		return nil
 	}
 
-	send() // initial state
+	if err := send(); err != nil {
+		return
+	}
 
 	ping := time.NewTicker(20 * time.Second)
 	defer ping.Stop()
@@ -97,9 +106,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			// routine restart (cmd/branchdam/main.go).
 			return
 		case <-notify:
-			send()
+			if err := send(); err != nil {
+				return
+			}
 		case <-ping.C:
-			_, _ = w.Write([]byte(": ping\n\n"))
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

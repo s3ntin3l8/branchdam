@@ -84,7 +84,10 @@ export function useAssetFacets() {
 export function useAsset(id: number | undefined) {
   return useQuery({
     queryKey: ["asset", id],
-    queryFn: () => api.getAsset(id as number),
+    queryFn: () => {
+      if (id == null) throw new Error("Asset ID is required");
+      return api.getAsset(id);
+    },
     enabled: id !== undefined,
   });
 }
@@ -92,7 +95,10 @@ export function useAsset(id: number | undefined) {
 export function useAssetGraph(id: number | undefined) {
   return useQuery({
     queryKey: ["asset-graph", id],
-    queryFn: () => api.getAssetGraph(id as number),
+    queryFn: () => {
+      if (id == null) throw new Error("Asset ID is required");
+      return api.getAssetGraph(id);
+    },
     enabled: id !== undefined,
   });
 }
@@ -100,7 +106,10 @@ export function useAssetGraph(id: number | undefined) {
 export function useAssetLineage(id: number | string | undefined, depth = 2) {
   return useQuery({
     queryKey: ["asset-lineage", id, depth],
-    queryFn: () => api.getAssetLineage(id as number | string, depth),
+    queryFn: () => {
+      if (id == null || id === "") throw new Error("Asset ID is required");
+      return api.getAssetLineage(id, depth);
+    },
     enabled: id !== undefined && id !== "",
   });
 }
@@ -108,7 +117,10 @@ export function useAssetLineage(id: number | string | undefined, depth = 2) {
 export function useAssetSyncStatus(id: number | undefined) {
   return useQuery({
     queryKey: ["asset-sync-status", id],
-    queryFn: () => api.getAssetSyncStatus(id as number),
+    queryFn: () => {
+      if (id == null) throw new Error("Asset ID is required");
+      return api.getAssetSyncStatus(id);
+    },
     enabled: id !== undefined,
     // Poll so the status stays fresh while the sync worker progresses
     // (useEventStream only nudges on SSE events, not on worker drain ticks).

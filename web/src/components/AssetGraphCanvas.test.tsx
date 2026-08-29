@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
+import { ReactFlowProvider } from "@xyflow/react";
 import AssetGraphCanvas from "./AssetGraphCanvas";
 
 describe("AssetGraphCanvas", () => {
   it("shows an empty-state message when there are no edges", () => {
     render(
       <MemoryRouter>
-        <AssetGraphCanvas assetId={1} graph={{ parents: [], children: [] }} />
+        <ReactFlowProvider>
+          <AssetGraphCanvas assetId={1} graph={{ parents: [], children: [] }} />
+        </ReactFlowProvider>
       </MemoryRouter>
     );
     expect(screen.getByText(/no known lineage edges/i)).toBeInTheDocument();
@@ -16,7 +19,8 @@ describe("AssetGraphCanvas", () => {
   it("renders the flow canvas when edges are present", () => {
     render(
       <MemoryRouter>
-        <AssetGraphCanvas
+        <ReactFlowProvider>
+          <AssetGraphCanvas
           assetId={1}
           graph={{
             parents: [
@@ -33,6 +37,7 @@ describe("AssetGraphCanvas", () => {
             children: [],
           }}
         />
+        </ReactFlowProvider>
       </MemoryRouter>
     );
     expect(screen.queryByText(/no known lineage edges/i)).not.toBeInTheDocument();
@@ -41,7 +46,8 @@ describe("AssetGraphCanvas", () => {
   it("renders multi-hop lineage data when lineage prop is provided", () => {
     render(
       <MemoryRouter>
-        <AssetGraphCanvas
+        <ReactFlowProvider>
+          <AssetGraphCanvas
           assetId={1}
           lineage={{
             rootId: 1,
@@ -86,6 +92,7 @@ describe("AssetGraphCanvas", () => {
             ],
           }}
         />
+        </ReactFlowProvider>
       </MemoryRouter>
     );
     expect(screen.queryByText(/no known lineage edges/i)).not.toBeInTheDocument();

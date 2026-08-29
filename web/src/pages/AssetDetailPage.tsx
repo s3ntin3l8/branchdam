@@ -10,6 +10,7 @@ import {
   useStorageLocations,
 } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
+import { ReactFlowProvider } from "@xyflow/react";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
@@ -315,7 +316,9 @@ export default function AssetDetailPage() {
         {isLineageLoading ? (
           <p className="text-sm text-neutral-500">Loading lineage graph…</p>
         ) : lineage ? (
-          <AssetGraphCanvas assetId={asset.id} lineage={lineage} />
+          <ReactFlowProvider>
+            <AssetGraphCanvas assetId={asset.id} lineage={lineage} />
+          </ReactFlowProvider>
         ) : (
           <p className="text-sm text-neutral-500">No known lineage data.</p>
         )}
