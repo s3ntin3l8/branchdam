@@ -1,6 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ASSET_DETAIL_QUERY_KEYS } from "./queries";
+
+export type ConnectionState = "connecting" | "open" | "disconnected";
 
 /**
  * Subscribes to the SSE progress stream (GET /api/v1/events) and
@@ -10,13 +12,19 @@ import { ASSET_DETAIL_QUERY_KEYS } from "./queries";
  * doc), not "here is the new state." Re-fetching through TanStack Query
  * also gets retry/dedup/caching for free instead of hand-rolling it here.
  */
-export function useEventStream() {
+export function useEventStream(): { connectionState: ConnectionState } {
   const queryClient = useQueryClient();
+  const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
 
   useEffect(() => {
     const source = new EventSource("/api/v1/events");
 
+    source.onopen = () => setConnectionState("open");
+
+    source.onerror = () => setConnectionState("disconnected");
+
     const onProgress = () => {
+      setConnectionState("open");
       void queryClient.invalidateQueries({ queryKey: ["progress"] });
       void queryClient.invalidateQueries({ queryKey: ["assets"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
@@ -52,4 +60,6 @@ export function useEventStream() {
       source.close();
     };
   }, [queryClient]);
+
+  return { connectionState };
 }

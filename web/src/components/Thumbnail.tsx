@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api } from "../api/client";
 import type { ThumbState } from "../api/types";
 
@@ -23,9 +24,10 @@ interface ThumbnailProps {
 // side for why that transition reliably fires shortly after generation.
 export default function Thumbnail({ assetId, thumbState, alt, className }: ThumbnailProps) {
   const base = className ?? "h-12 w-12 rounded object-cover";
+  const [imgFailed, setImgFailed] = useState(false);
 
-  if (thumbState === "READY") {
-    return <img src={api.thumbnailUrl(assetId)} alt={alt} loading="lazy" className={base} />;
+  if (thumbState === "READY" && !imgFailed) {
+    return <img src={api.thumbnailUrl(assetId)} alt={alt} loading="lazy" className={base} onError={() => setImgFailed(true)} />;
   }
 
   if (thumbState === "PENDING") {
