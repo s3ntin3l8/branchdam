@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/s3ntin3l8/branchdam/compare/v0.12.0...v0.13.0) (2026-08-29)
+
+
+### Features
+
+* **ingest:** add manual web upload in UI with naming template and custom paths ([#317](https://github.com/s3ntin3l8/branchdam/issues/317)) ([2771d47](https://github.com/s3ntin3l8/branchdam/commit/2771d477bffd4f8879d1d5dbbd9d965fc689ab4b))
+
 ## [0.12.0](https://github.com/s3ntin3l8/branchdam/compare/v0.11.0...v0.12.0) (2026-08-29)
 
 
