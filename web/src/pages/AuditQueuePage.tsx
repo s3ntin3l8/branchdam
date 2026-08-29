@@ -342,7 +342,8 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
 
 export default function AuditQueuePage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const page = Math.max(1, Number(searchParams.get("page") || "1"));
+  const rawPage = Number(searchParams.get("page") || "1");
+  const page = Math.max(1, Number.isNaN(rawPage) ? 1 : rawPage);
   const offset = (page - 1) * PAGE_SIZE;
   const { data, isLoading, isError } = useAuditQueue({ limit: PAGE_SIZE, offset });
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -350,6 +351,7 @@ export default function AuditQueuePage() {
   const entries = data?.entries ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const clampedPage = Math.min(page, totalPages);
 
   const handlePageChange = (newPage: number) => {
     const nextParams = new URLSearchParams(searchParams);
@@ -392,18 +394,18 @@ export default function AuditQueuePage() {
             </div>
             <div className="flex items-center space-x-2">
               <button
-                disabled={page <= 1}
-                onClick={() => handlePageChange(page - 1)}
+                disabled={clampedPage <= 1}
+                onClick={() => handlePageChange(clampedPage - 1)}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
                 Previous
               </button>
               <span className="px-2 font-mono">
-                Page {page} of {totalPages}
+                Page {clampedPage} of {totalPages}
               </span>
               <button
-                disabled={page >= totalPages}
-                onClick={() => handlePageChange(page + 1)}
+                disabled={clampedPage >= totalPages}
+                onClick={() => handlePageChange(clampedPage + 1)}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
                 Next
