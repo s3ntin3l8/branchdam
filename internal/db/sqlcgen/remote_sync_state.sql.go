@@ -34,6 +34,17 @@ func (q *Queries) CountRemoteSyncStateExhausted(ctx context.Context, arg CountRe
 	return count, err
 }
 
+const deleteRemoteSyncStateForNode = `-- name: DeleteRemoteSyncStateForNode :exec
+DELETE FROM remote_sync_state
+WHERE node_id = ?1
+`
+
+// Deletes remote_sync_state records when an asset is deleted / unlinked.
+func (q *Queries) DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRemoteSyncStateForNode, nodeID)
+	return err
+}
+
 const getRemoteSyncState = `-- name: GetRemoteSyncState :one
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state

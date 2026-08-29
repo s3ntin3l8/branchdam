@@ -1202,4 +1202,74 @@ func TestDrainer_StartWaitProcessesInBackground(t *testing.T) {
 	require.NoError(t, err)
 }
 
+type mockImmichScanner struct {
+	scanned bool
+}
+
+func (m *mockImmichScanner) TriggerScan(ctx context.Context) error {
+	m.scanned = true
+	return nil
+}
+
+func TestDrainer_NodeDeleted_PurgesRemoteSyncStateAndTriggersImmichScan(t *testing.T) {
+	env := setupTestDB(t)
+
+	nodeUUID := uuid.New().String()
+	var nodeID int64
+
+	// Create node
+	err := env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          nodeUUID,
+			StorageLocationID: env.locID1,
+			FilePath:          filepath.Join(env.staging, "delete_me.jpg"),
+			FileName:          "delete_me.jpg",
+			FileExt:           ".jpg",
+			SizeBytes:         1024,
+			MtimeUnix:         time.Now().Unix(),
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err == nil {
+			nodeID = n.ID
+		}
+		return err
+	})
+	require.NoError(t, err)
+
+	// Attach remote sync state
+	err = env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.UpsertRemoteSyncState(context.Background(), sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID:     nodeID,
+			Remote:     "IMMICH",
+			SyncStatus: "PUSHED",
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	scanner := &mockImmichScanner{}
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default(), agent.WithImmichScanner(scanner))
+
+	enqueueEvent(t, env.db, agent.EventNodeDeleted, agent.NodeDeletedPayload{
+		NodeUUID: nodeUUID,
+	})
+
+	stats, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.True(t, scanner.scanned)
+
+	// Verify media_nodes lifecycle_state is MISSING
+	node, err := env.db.Reader.GetMediaNodeByID(context.Background(), nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "MISSING", node.LifecycleState)
+
+	// Verify remote_sync_state is deleted
+	syncRows, err := env.db.Reader.ListRemoteSyncStateByNode(context.Background(), nodeID)
+	require.NoError(t, err)
+	require.Empty(t, syncRows)
+}
+
 func strPtr(s string) *string { return &s }

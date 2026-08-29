@@ -46,11 +46,17 @@ type Drainer struct {
 	// agent-created node sits graph_status='UNLINKED' forever. Both nil by
 	// default (existing NewDrainer call sites, mostly tests, are
 	// unaffected); set via WithNudge/WithEngine.
-	nudge  func()
-	engine *graph.Engine
+	nudge         func()
+	engine        *graph.Engine
+	immichScanner ImmichScanner
 
 	wg        sync.WaitGroup
 	startOnce sync.Once
+}
+
+// ImmichScanner defines the client interface for triggering external library scans.
+type ImmichScanner interface {
+	TriggerScan(ctx context.Context) error
 }
 
 // DrainerOption configures optional Drainer behavior not every caller
@@ -67,6 +73,11 @@ func WithNudge(nudge func()) DrainerOption {
 // an agent event freshly inserts.
 func WithEngine(engine *graph.Engine) DrainerOption {
 	return func(d *Drainer) { d.engine = engine }
+}
+
+// WithImmichScanner sets the ImmichScanner client used to trigger library rescans on asset deletion.
+func WithImmichScanner(scanner ImmichScanner) DrainerOption {
+	return func(d *Drainer) { d.immichScanner = scanner }
 }
 
 // NewDrainer creates an agent event queue drainer. guard and log may be
@@ -750,7 +761,23 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 
 	// Schema fix #6 / Spec Pillar 5: never delete row from database; set lifecycle_state='MISSING'.
-	return q.MarkNodeMissing(ctx, node.ID)
+	if err := q.MarkNodeMissing(ctx, node.ID); err != nil {
+		return err
+	}
+
+	// Purge remote sync state for this deleted node
+	if err := q.DeleteRemoteSyncStateForNode(ctx, node.ID); err != nil {
+		d.log.Warn("agent: delete remote sync state for node", "nodeID", node.ID, "err", err)
+	}
+
+	// If Immich client is wired, trigger external library rescan
+	if d.immichScanner != nil {
+		if scanErr := d.immichScanner.TriggerScan(ctx); scanErr != nil {
+			d.log.Warn("agent: trigger immich scan after node deletion", "nodeID", node.ID, "err", scanErr)
+		}
+	}
+
+	return nil
 }
 
 // applyPathRebased returns the freshly inserted node's ID when NodeUUID was
