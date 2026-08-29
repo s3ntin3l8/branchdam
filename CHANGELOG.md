@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.0](https://github.com/s3ntin3l8/branchdam/compare/v0.10.0...v0.11.0) (2026-08-29)
+
+
+### Features
+
+* **httpapi:** add resumable streaming upload endpoint (POST /api/v1/staging/upload) ([#302](https://github.com/s3ntin3l8/branchdam/issues/302)) ([7d178f9](https://github.com/s3ntin3l8/branchdam/commit/7d178f90fe34378cd216a1c4a842f8fa3e705c76))
+* **sync:** wire EVENT_NODE_DELETED to purge Tier 2 Immich exports and trigger scan ([#304](https://github.com/s3ntin3l8/branchdam/issues/304)) ([d821083](https://github.com/s3ntin3l8/branchdam/commit/d82108398057dfeda1d93d3ab75d06aed928ac39)), closes [#299](https://github.com/s3ntin3l8/branchdam/issues/299)
+* **telemetry:** add mobile device telemetry and Storage Health dashboard UI ([#305](https://github.com/s3ntin3l8/branchdam/issues/305)) ([9d5c8cd](https://github.com/s3ntin3l8/branchdam/commit/9d5c8cd0bec3ece6d430ca59fbaa2177e06c21c1)), closes [#300](https://github.com/s3ntin3l8/branchdam/issues/300)
+
 ## [0.10.0](https://github.com/s3ntin3l8/branchdam/compare/v0.9.1...v0.10.0) (2026-08-28)
 
 
