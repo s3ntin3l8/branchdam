@@ -77,26 +77,42 @@ export default function ManualUploadZone() {
     e.target.value = "";
   };
 
+  const readAllEntries = async (dirReader: FileSystemDirectoryEntry["createReader"] extends () => infer R ? R : never): Promise<FileSystemEntry[]> => {
+    const entries: FileSystemEntry[] = [];
+    while (true) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+        dirReader.readEntries(resolve, reject);
+      });
+      if (!batch || batch.length === 0) {
+        break;
+      }
+      entries.push(...batch);
+    }
+    return entries;
+  };
+
   const traverseFileTree = async (item: FileSystemEntry, path = ""): Promise<{ file: File; relativePath: string }[]> => {
-    return new Promise((resolve) => {
-      if (item.isFile) {
+    if (item.isFile) {
+      return new Promise((resolve) => {
         (item as FileSystemFileEntry).file((file) => {
           resolve([{ file, relativePath: path ? `${path}/${file.name}` : file.name }]);
         });
-      } else if (item.isDirectory) {
-        const dirReader = (item as FileSystemDirectoryEntry).createReader();
-        dirReader.readEntries(async (entries) => {
-          const results: { file: File; relativePath: string }[] = [];
-          for (const entry of entries) {
-            const nested = await traverseFileTree(entry, path ? `${path}/${item.name}` : item.name);
-            results.push(...nested);
-          }
-          resolve(results);
-        });
-      } else {
-        resolve([]);
+      });
+    } else if (item.isDirectory) {
+      const dirReader = (item as FileSystemDirectoryEntry).createReader();
+      try {
+        const entries = await readAllEntries(dirReader);
+        const results: { file: File; relativePath: string }[] = [];
+        for (const entry of entries) {
+          const nested = await traverseFileTree(entry, path ? `${path}/${item.name}` : item.name);
+          results.push(...nested);
+        }
+        return results;
+      } catch {
+        return [];
       }
-    });
+    }
+    return [];
   };
 
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {

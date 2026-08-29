@@ -175,9 +175,9 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	ext := filepath.Ext(cleanFilename)
-	stem := strings.TrimSuffix(cleanFilename, ext)
 	targetFileName := filepath.Base(targetPath)
+	ext := filepath.Ext(targetFileName)
+	stem := strings.TrimSuffix(targetFileName, ext)
 	collisionCount := 0
 
 	var outFile *os.File
@@ -309,19 +309,34 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	)
 	if exportLoc != nil && isStandaloneDisplayable(ext) {
 		safeExportDir, err := filepath.Abs(exportLoc.RootPath)
-		if err == nil {
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("failed to resolve export root directory", "err", err)
+			}
+		} else {
 			exportRel := filepath.Clean(filepath.Join("immich", cleanRel))
 			if filepath.IsLocal(exportRel) {
 				dest := filepath.Join(safeExportDir, exportRel)
 				if rel, err := filepath.Rel(safeExportDir, dest); err == nil && filepath.IsLocal(rel) {
 					exportDest = filepath.Join(safeExportDir, rel)
 					exportDir := filepath.Dir(exportDest)
-					if err := os.MkdirAll(exportDir, 0o755); err == nil {
-						if err := linkOrCopyFile(targetPath, exportDest); err == nil {
-							exportCreated = true
-							if expID, err := uuid.NewV7(); err == nil {
-								exportUUIDStr = expID.String()
-							}
+					if err := os.MkdirAll(exportDir, 0o755); err != nil {
+						if s.log != nil {
+							s.log.Warn("failed to create Immich export directory", "path", exportDir, "err", err)
+						}
+					} else if _, statErr := os.Lstat(exportDest); statErr == nil {
+						// Destination already exists; skip inserting duplicate export node
+						if s.log != nil {
+							s.log.Debug("Immich export destination already exists, skipping export node creation", "path", exportDest)
+						}
+					} else if err := linkOrCopyFile(targetPath, exportDest); err != nil {
+						if s.log != nil {
+							s.log.Warn("failed to create Immich export hardlink or copy", "src", targetPath, "dst", exportDest, "err", err)
+						}
+					} else {
+						exportCreated = true
+						if expID, err := uuid.NewV7(); err == nil {
+							exportUUIDStr = expID.String()
 						}
 					}
 				}
@@ -469,8 +484,11 @@ func linkOrCopyFile(src, dst string) error {
 	cleanDst := filepath.Clean(dst)
 
 	linkErr := os.Link(cleanSrc, cleanDst)
-	if linkErr == nil || errors.Is(linkErr, os.ErrExist) {
+	if linkErr == nil {
 		return nil
+	}
+	if errors.Is(linkErr, os.ErrExist) {
+		return linkErr
 	}
 
 	// Fallback to safe non-truncating copy on cross-device link failure
@@ -482,9 +500,6 @@ func linkOrCopyFile(src, dst string) error {
 
 	dstFile, err := os.OpenFile(cleanDst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil
-		}
 		return fmt.Errorf("link error: %w, create dst error: %v", linkErr, err)
 	}
 	defer func() { _ = dstFile.Close() }()
