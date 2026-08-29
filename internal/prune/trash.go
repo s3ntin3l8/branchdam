@@ -68,7 +68,7 @@ func PurgeTrash(ctx context.Context, locRootPath string, retentionDays int, now 
 		return nil
 	})
 
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil {
 		return res, err
 	}
 
@@ -158,8 +158,15 @@ func (w *TrashWorker) Start(ctx context.Context, interval time.Duration) {
 		go func() {
 			defer w.wg.Done()
 			// Run initial pass on startup
-			if res, err := w.PurgeOnce(ctx); err == nil && res.FilesPurged > 0 {
-				w.log.Info("trash: pruned expired files", "purged", res.FilesPurged, "freedBytes", res.BytesFreed)
+			if res, err := w.PurgeOnce(ctx); err != nil {
+				w.log.Warn("trash: purge pass failed", "err", err)
+			} else {
+				if len(res.Errors) > 0 {
+					w.log.Warn("trash: errors encountered during purge", "errCount", len(res.Errors))
+				}
+				if res.FilesPurged > 0 {
+					w.log.Info("trash: pruned expired files", "purged", res.FilesPurged, "freedBytes", res.BytesFreed)
+				}
 			}
 
 			ticker := time.NewTicker(interval)
@@ -170,8 +177,15 @@ func (w *TrashWorker) Start(ctx context.Context, interval time.Duration) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if res, err := w.PurgeOnce(ctx); err == nil && res.FilesPurged > 0 {
-						w.log.Info("trash: pruned expired files", "purged", res.FilesPurged, "freedBytes", res.BytesFreed)
+					if res, err := w.PurgeOnce(ctx); err != nil {
+						w.log.Warn("trash: purge pass failed", "err", err)
+					} else {
+						if len(res.Errors) > 0 {
+							w.log.Warn("trash: errors encountered during purge", "errCount", len(res.Errors))
+						}
+						if res.FilesPurged > 0 {
+							w.log.Info("trash: pruned expired files", "purged", res.FilesPurged, "freedBytes", res.BytesFreed)
+						}
 					}
 				}
 			}

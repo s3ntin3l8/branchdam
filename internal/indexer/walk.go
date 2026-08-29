@@ -48,6 +48,12 @@ func Walk(ctx context.Context, root string, onFile func(Record) error) error {
 
 		isSymlink := d.Type()&fs.ModeSymlink != 0
 		if d.IsDir() {
+			if path != root && (d.Name() == ".trash" || d.Name()[0] == '.') {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name()[0] == '.' {
 			return nil
 		}
 

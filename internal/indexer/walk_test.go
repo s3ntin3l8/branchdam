@@ -151,3 +151,31 @@ func TestWalkReturnsBeforeHashingCompletes(t *testing.T) {
 		t.Fatalf("hashesCompleted eventually = %d, want all %d to finish", got, fileCount)
 	}
 }
+
+func TestWalkSkipsDotFilesAndTrash(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, filepath.Join(root, "valid.jpg"), "valid")
+	writeFixtureFile(t, filepath.Join(root, "sub", "valid2.jpg"), "valid2")
+	writeFixtureFile(t, filepath.Join(root, ".trash", "deleted.jpg"), "trash")
+	writeFixtureFile(t, filepath.Join(root, ".trash", "2026", "08", "nested.jpg"), "trash-nested")
+	writeFixtureFile(t, filepath.Join(root, ".git", "config"), "git")
+	writeFixtureFile(t, filepath.Join(root, ".DS_Store"), "ds_store")
+
+	var paths []string
+	err := Walk(context.Background(), root, func(r Record) error {
+		paths = append(paths, filepath.Base(r.Path))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+
+	if len(paths) != 2 {
+		t.Fatalf("found %d files, want 2: %+v", len(paths), paths)
+	}
+	for _, p := range paths {
+		if p != "valid.jpg" && p != "valid2.jpg" {
+			t.Errorf("unexpected file walked: %s", p)
+		}
+	}
+}

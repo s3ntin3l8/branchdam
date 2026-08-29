@@ -777,13 +777,18 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		if loc, err := d.guard.Resolve(node.FilePath); err == nil {
 			if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
 				trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
+				now := time.Now().UTC()
 				if err := os.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
 					d.log.Warn("agent: failed to create trash directory", "err", err)
 				} else if _, statErr := os.Stat(node.FilePath); statErr == nil {
 					if err := os.Rename(node.FilePath, trashPath); err != nil {
 						if copyErr := moveFile(node.FilePath, trashPath); copyErr != nil {
 							d.log.Warn("agent: failed to move file to trash", "err", copyErr)
+						} else {
+							_ = os.Chtimes(trashPath, now, now)
 						}
+					} else {
+						_ = os.Chtimes(trashPath, now, now)
 					}
 				}
 			}
