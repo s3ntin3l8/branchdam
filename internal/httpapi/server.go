@@ -9,7 +9,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -380,7 +382,11 @@ func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	origin := html.EscapeString(requestOrigin(r))
+	var trustedProxies []string
+	if s.cfg() != nil {
+		trustedProxies = s.cfg().HTTP.TrustedProxies
+	}
+	origin := html.EscapeString(requestOrigin(r, trustedProxies))
 	page := bytes.ReplaceAll(data, []byte("__BRANCHDAM_ORIGIN__"), []byte(origin))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
@@ -391,16 +397,61 @@ func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
 // request, honoring the X-Forwarded-* headers Traefik sets when proxying,
 // and falling back to the direct connection's own Host/TLS state (e.g. for
 // `make dev-api`, which has no proxy in front).
-func requestOrigin(r *http.Request) string {
+func requestOrigin(r *http.Request, trustedProxies []string) string {
 	scheme := "http"
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		scheme = proto
+	host := r.Host
+	if isTrustedProxy(r.RemoteAddr, trustedProxies) {
+		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+			scheme = proto
+		} else if r.TLS != nil {
+			scheme = "https"
+		}
+		if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
+			host = fwdHost
+		}
 	} else if r.TLS != nil {
 		scheme = "https"
 	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
 	return scheme + "://" + host
+}
+
+// isTrustedProxy checks whether remoteAddr belongs to a trusted proxy range.
+func isTrustedProxy(remoteAddr string, trusted []string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	remoteIP, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	remoteIP = remoteIP.Unmap()
+
+	for _, entry := range trusted {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if entry == "*" {
+			return true
+		}
+		if strings.Contains(entry, "/") {
+			prefix, err := netip.ParsePrefix(entry)
+			if err != nil {
+				continue
+			}
+			if prefix.Contains(remoteIP) {
+				return true
+			}
+		} else {
+			addr, err := netip.ParseAddr(entry)
+			if err != nil {
+				continue
+			}
+			if addr == remoteIP {
+				return true
+			}
+		}
+	}
+	return false
 }

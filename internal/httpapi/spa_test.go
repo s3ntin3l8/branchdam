@@ -75,7 +75,24 @@ func TestServeIndexHTMLSubstitutesOriginFromDirectRequest(t *testing.T) {
 
 func TestServeIndexHTMLHonorsForwardedHeaders(t *testing.T) {
 	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
-	srv := testServerWithSPA(t, spa)
+	path := filepath.Join(t.TempDir(), "httpapi.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	log := slog.New(slog.DiscardHandler)
+	pool := workers.New[string](1, 4)
+	cfg := &config.Config{
+		HTTP: config.HTTP{TrustedProxies: []string{"*"}},
+	}
+	srv := New(Deps{
+		Config: cfg, Log: log, DB: database,
+		Prober: probe.New(), Pool: pool,
+		Engine: graph.NewEngine(database, log), Hub: sse.New(),
+		Version: "test", SPA: spa,
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://internal-backend:8080/", nil)
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -103,12 +120,100 @@ func TestServeIndexHTMLEscapesHostileHeaders(t *testing.T) {
 	// CodeQL flagged the pre-fix version of this handler as reflected XSS:
 	// requestOrigin() builds its return value straight from request headers,
 	// which are attacker-controlled, and that value lands inside an HTML
-	// attribute. The unescaped payload must never appear verbatim.
+	// attribute. With no trusted proxies configured, the hostile header is
+	// ignored entirely — the origin falls back to the direct request's Host.
 	if bytes.Contains(body, []byte(`"><script>`)) {
 		t.Fatalf("body = %q, contains an unescaped attribute breakout -- reflected XSS", body)
 	}
-	if !bytes.Contains(body, []byte("&lt;script&gt;")) {
-		t.Errorf("body = %q, want the header's <script> HTML-escaped, not stripped or passed through", body)
+	// The hostile header is ignored (no trusted proxies), so origin uses
+	// the direct Host header. Verify the escaped version does NOT appear
+	// either — the hostile content was simply dropped, not rendered.
+	if bytes.Contains(body, []byte("&lt;script&gt;")) {
+		t.Errorf("body = %q, hostile forwarded header should be ignored when no trusted proxies configured", body)
+	}
+	want := `content="http://branchdam.example/og-image.png"`
+	if !bytes.Contains(body, []byte(want)) {
+		t.Errorf("body = %q, want it to contain %q (direct Host, not the hostile forwarded header)", body, want)
+	}
+}
+
+func TestIsTrustedProxy(t *testing.T) {
+	tests := []struct {
+		name       string
+		trusted    []string
+		remoteAddr string
+		want       bool
+	}{
+		{"empty list denies all", nil, "10.0.0.1:1234", false},
+		{"wildcard accepts all", []string{"*"}, "10.0.0.1:1234", true},
+		{"exact IP match", []string{"10.0.0.1"}, "10.0.0.1:1234", true},
+		{"exact IP no match", []string{"10.0.0.2"}, "10.0.0.1:1234", false},
+		{"CIDR match", []string{"10.0.0.0/24"}, "10.0.0.5:1234", true},
+		{"CIDR no match", []string{"10.0.1.0/24"}, "10.0.0.5:1234", false},
+		{"IPv6 loopback", []string{"::1"}, "[::1]:1234", true},
+		{"IPv4-mapped IPv6", []string{"10.0.0.1"}, "[::ffff:10.0.0.1]:1234", true},
+		{"invalid IP ignored", []string{"not-an-ip"}, "10.0.0.1:1234", false},
+		{"empty entry skipped", []string{"", "10.0.0.1"}, "10.0.0.1:1234", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isTrustedProxy(tc.remoteAddr, tc.trusted)
+			if got != tc.want {
+				t.Errorf("isTrustedProxy(%q, %v) = %v, want %v", tc.remoteAddr, tc.trusted, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestServeIndexHTMLRejectsForwardedHeadersFromUntrustedProxy(t *testing.T) {
+	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
+	srv := testServerWithSPA(t, spa)
+
+	req := httptest.NewRequest(http.MethodGet, "http://internal-backend:8080/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "dam.example.com")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	body, _ := io.ReadAll(rr.Body)
+	want := `content="http://internal-backend:8080/og-image.png"`
+	if !bytes.Contains(body, []byte(want)) {
+		t.Errorf("body = %q, want forwarded headers ignored when no trusted proxies configured", body)
+	}
+}
+
+func TestServeIndexHTMLHonorsForwardedHeadersFromTrustedProxy(t *testing.T) {
+	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
+	path := filepath.Join(t.TempDir(), "httpapi.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	log := slog.New(slog.DiscardHandler)
+	pool := workers.New[string](1, 4)
+	cfg := &config.Config{
+		HTTP: config.HTTP{TrustedProxies: []string{"10.0.0.0/24"}},
+	}
+	srv := New(Deps{
+		Config: cfg, Log: log, DB: database,
+		Prober: probe.New(), Pool: pool,
+		Engine: graph.NewEngine(database, log), Hub: sse.New(),
+		Version: "test", SPA: spa,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://10.0.0.5:8080/", nil)
+	req.RemoteAddr = "10.0.0.99:54321"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "dam.example.com")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	body, _ := io.ReadAll(rr.Body)
+	want := `content="https://dam.example.com/og-image.png"`
+	if !bytes.Contains(body, []byte(want)) {
+		t.Errorf("body = %q, want forwarded headers honored from trusted proxy", body)
 	}
 }
 
