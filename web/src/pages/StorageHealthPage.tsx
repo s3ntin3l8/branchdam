@@ -480,6 +480,13 @@ function AgentScratchGaugeCard({ agent }: { agent: AgentScratchHealth }) {
 
   const itemCounts = Object.entries(agent.prunedItemCounts || {});
 
+  const isMobile =
+    agent.agentId.toLowerCase().includes("pixel") ||
+    agent.agentId.toLowerCase().includes("iphone") ||
+    agent.agentId.toLowerCase().includes("android") ||
+    agent.agentId.toLowerCase().includes("ios") ||
+    agent.agentId.toLowerCase().includes("mobile");
+
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-5 shadow-sm space-y-4">
       <div className="flex items-start justify-between gap-2">
@@ -491,9 +498,15 @@ function AgentScratchGaugeCard({ agent }: { agent: AgentScratchHealth }) {
                 v{agent.clientVersion}
               </span>
             )}
-            <span className="rounded bg-indigo-950/80 px-2 py-0.5 text-xs font-mono text-indigo-300 border border-indigo-800/60">
-              TIER1_SCRATCH
-            </span>
+            {isMobile ? (
+              <span className="rounded bg-purple-950/80 px-2 py-0.5 text-xs font-mono text-purple-300 border border-purple-800/60">
+                MOBILE_COMPANION
+              </span>
+            ) : (
+              <span className="rounded bg-indigo-950/80 px-2 py-0.5 text-xs font-mono text-indigo-300 border border-indigo-800/60">
+                TIER1_SCRATCH
+              </span>
+            )}
           </div>
           {agent.mountPath && (
             <p className="mt-1 text-xs font-mono text-neutral-400 break-all">{agent.mountPath}</p>
