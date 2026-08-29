@@ -258,3 +258,61 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	_, statErr := os.Stat(rawExportFile)
 	assert.True(t, os.IsNotExist(statErr), "RAW files should not be linked to Immich exports")
 }
+
+func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
+	// Two uploads of the same filename at the same timestamp must both succeed
+	// and land in distinct on-disk paths. The O_EXCL loop guarantees no
+	// Stat→Create window between the two goroutines.
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	data := []byte("concurrent upload payload bytes")
+
+	type result struct {
+		path string
+		code int
+	}
+
+	results := make(chan result, 2)
+	for i := range 2 {
+		go func(i int) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+			req.Header.Set("X-API-Key", routeTestAgentKey)
+			req.Header.Set("X-Filename", "CONCURRENT.JPG")
+			req.Header.Set("X-Camera-Model", "TestCamera")
+			req.Header.Set("X-Capture-Timestamp", "1787998200")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			var resp AgentUploadResponse
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			results <- result{path: resp.RelativePath, code: rec.Code}
+		}(i)
+	}
+
+	r1 := <-results
+	r2 := <-results
+	assert.Equal(t, http.StatusCreated, r1.code)
+	assert.Equal(t, http.StatusCreated, r2.code)
+	// Both must have landed at different paths — no file was silently overwritten.
+	assert.NotEqual(t, r1.path, r2.path, "concurrent uploads must produce distinct archive paths")
+	_, err1 := os.Stat(filepath.Join(archiveDir, r1.path))
+	_, err2 := os.Stat(filepath.Join(archiveDir, r2.path))
+	assert.NoError(t, err1, "first upload's file must exist on disk")
+	assert.NoError(t, err2, "second upload's file must exist on disk")
+}
