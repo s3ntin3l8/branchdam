@@ -211,6 +211,28 @@ export function useStartScan() {
   });
 }
 
+export function useUploadFile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      file,
+      options,
+      onProgress,
+      signal,
+    }: {
+      file: File;
+      options?: import("../api/types").UploadOptions;
+      onProgress?: (event: import("../api/types").UploadProgressEvent) => void;
+      signal?: AbortSignal;
+    }) => api.uploadFile(file, options, onProgress, signal),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
+      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+    },
+  });
+}
+
 export function useProgress(limit = 10) {
   return useQuery({
     queryKey: ["progress", limit],
