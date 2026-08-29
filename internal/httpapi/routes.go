@@ -361,10 +361,7 @@ func (s *Server) handleListAssetFacets(ctx context.Context, _ *struct{}) (*Asset
 		return nil, huma.Error500InternalServerError("list camera model facets", err)
 	}
 	out := &AssetFacetsOutput{}
-	out.Body.CameraModels = make([]string, len(models))
-	for i, m := range models {
-		out.Body.CameraModels[i] = m.String
-	}
+	out.Body.CameraModels = models
 	return out, nil
 }
 

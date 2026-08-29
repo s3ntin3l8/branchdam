@@ -16,6 +16,20 @@ type Querier interface {
 	// row can never share file_path even for an instant within the
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
+	// "Revert to config" deletes the row -- this is what makes provenance
+	// recoverable rather than merely resettable to some other stored value.
+	DeleteAppSetting(ctx context.Context, key string) error
+	// The resolver (internal/settings) loads the whole table once at startup
+	// and on every PUT; the table is expected to stay small (one row per
+	// overridden field, never one row per node), so no pagination.
+	ListAppSettings(ctx context.Context) ([]AppSetting, error)
+	// The row's mere existence is the override -- callers pass "" for value
+	// exactly when the operator wants "explicitly empty", never as a signal to
+	// skip the write. See internal/settings/resolver.go for why an empty
+	// override still beats a populated config/env base value. updated_at is
+	// set via unixepoch() here, not passed from Go, matching every other
+	// UPDATE/upsert in this package (docs/schema.md fix #5).
+	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
 	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
@@ -33,8 +47,8 @@ type Querier interface {
 	// 200. The returned target_node_id is what the caller re-derives
 	// graph_status from -- see routes.go's recomputeGraphStatus.
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
-	CountAuditQueue(ctx context.Context) (int64, error)
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
+	CountAuditQueue(ctx context.Context) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
 	// Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
 	// for this remote have a retry_count at or past the bound, so
@@ -45,6 +59,8 @@ type Querier interface {
 	// visible in logs instead of only discoverable via a direct SQLite query.
 	CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
+	// Deletes remote_sync_state records when an asset is deleted / unlinked.
+	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// #163/#226: called inside the same transaction as CreateScanJob (see
 	// pipeline.createScanJob) so the check-then-insert is one atomic unit, not
 	// just an accident of the writer pool being single-connection. Parameterized
@@ -68,9 +84,6 @@ type Querier interface {
 	// of this.
 	CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams) (MediaEdge, error)
 	CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error)
-	// cache_ttl_hours defaults to 0 ("never eligible", same as handlePrune's
-	// own <= 0 treatment) for the many test fixtures that don't care about it;
-	// pass it explicitly when a test needs a non-zero TTL persisted on the row.
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
 	// Backs M6: after seeding every location config.yaml currently lists,
 	// deactivate any PREVIOUSLY active location whose root_path is no longer
@@ -85,12 +98,6 @@ type Querier interface {
 	// matches nothing; this one would silently deactivate every location in
 	// the database on a misconfigured or empty config.yaml).
 	DeactivateStorageLocationsNotIn(ctx context.Context, jsonEach interface{}) (int64, error)
-	DeleteAgentScratchTelemetry(ctx context.Context, agentID string) error
-	// "Revert to config" deletes the row -- this is what makes provenance
-	// recoverable rather than merely resettable to some other stored value.
-	DeleteAppSetting(ctx context.Context, key string) error
-	// Deletes remote_sync_state records when an asset is deleted / unlinked.
-	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// Backs POST /api/v1/agent/events: persists and returns 202 in increment 1.
 	// Actually draining/processing these rows ships with the deferred
 	// workstation-agent increment -- this table and endpoint exist now so that
@@ -98,7 +105,6 @@ type Querier interface {
 	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
-	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
 	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
@@ -121,8 +127,6 @@ type Querier interface {
 	// already exist, and in what state?
 	GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncStateParams) (RemoteSyncState, error)
 	GetScanJob(ctx context.Context, id int64) (ScanJob, error)
-	// handlePrune (#61, #238) reads cache_ttl_hours directly off this row --
-	// it no longer re-joins config by root_path to recover the TTL.
 	GetStorageLocationByID(ctx context.Context, id int64) (StorageLocation, error)
 	// Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 	// the single source of truth for tier is this table, never a hardcoded
@@ -134,39 +138,34 @@ type Querier interface {
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
 	// Resets a node's thumbnail generation state to PENDING with attempts
-	// zeroed, so internal/thumbs.Worker regenerates it on its next pass. The
-	// Cache.Write path is os.CreateTemp + os.Rename to the same node_uuid path,
-	// so regeneration overwrites the stale file atomically -- no separate
-	// Cache.Delete is needed alongside this reset. Called from
-	// internal/httpapi's refreshNodeAfterInPlaceWrite, not from
-	// internal/pipeline: fast_hash is by construction unchanged on both the
-	// Touched branch (its own entry condition) and the rebase branch (it looks
-	// the node up BY fast_hash), so neither ever observes a fast_hash change --
-	// refreshNodeAfterInPlaceWrite is the one place a node's fast_hash changes
-	// while its node_uuid is preserved (the inherit-metadata endpoint's
-	// post-write DB sync, #188).
+	// zeroed, so internal/thumbs.Worker regenerates it on its next pass.
+	// Called from internal/pipeline's reconcilePromotedColumns call site when
+	// fast_hash changes on the Touched/rebase branches: the bytes on disk
+	// changed, so whatever thumbnail (if any) is cached no longer represents
+	// them.
 	InvalidateThumbnail(ctx context.Context, id int64) error
-	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
 	// Recursively list ancestor node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-	ListAncestors(ctx context.Context, id int64) ([]interface{}, error)
-	// The resolver (internal/settings) loads the whole table once at startup
-	// and on every PUT; the table is expected to stay small (one row per
-	// overridden field, never one row per node), so no pagination.
-	ListAppSettings(ctx context.Context) ([]AppSetting, error)
+	ListAncestors(ctx context.Context, id int64) ([]int64, error)
+	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
+	// ARCHIVED nodes excluded) and returns every live ancestor on a
+	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
+	// os.Lstat) immediately before deleting the candidate (#246).
+	ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error)
 	// The audit queue (spec §7) is this query over review_state, not a second
 	// table. v_media_edges_resolved's parent_missing works for every
 	// relationship_type -- the spec's deleted trigger never did. See
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
-	ListCameraModelFacets(ctx context.Context) ([]sql.NullString, error)
+	ListCameraModelFacets(ctx context.Context) ([]string, error)
 	// Recursively list descendant node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-	ListDescendants(ctx context.Context, id int64) ([]interface{}, error)
+	ListDescendants(ctx context.Context, id int64) ([]int64, error)
 	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
 	ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error)
-	ListEdgesForNodes(ctx context.Context, jsonEach interface{}) ([]ListEdgesForNodesRow, error)
+	ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
@@ -198,7 +197,7 @@ type Querier interface {
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
-	ListNodesByIDs(ctx context.Context, jsonEach interface{}) ([]MediaNode, error)
+	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
 	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
 	// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
 	// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
@@ -235,10 +234,7 @@ type Querier interface {
 	// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 	// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
 	// Ancestor, not "same full_hash": walks media_edges target->source
-	// (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
-	// mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
-	// exclusion exactly -- a chain that only connects through a superseded
-	// version doesn't represent the file currently on disk.
+	// (REJECTED edges excluded), mirroring ListAncestors' direction convention.
 	// Tier-1-only and prunable-only are already schema-enforced
 	// (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
 	// not re-checked here; the caller only invokes this against a location it
@@ -259,26 +255,20 @@ type Querier interface {
 	// something wrong with sqlc.arg's own syntax elsewhere in the codebase.
 	ListPrunableNodes(ctx context.Context, arg ListPrunableNodesParams) ([]ListPrunableNodesRow, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
-	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
-	// a node (both remotes), ordered by remote for a stable DTO.
-	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
 	// order, capped at one batch. Scoped to a single remote -- a node can hold
 	// both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
 	// ProcessPending(remote) must never list (or re-flip) another remote's rows.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
+	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row
+	// for a node (both remotes), ordered by remote for a stable DTO.
+	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
 	// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
-	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
-	// ARCHIVED nodes excluded) and returns every live ancestor on a
-	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
-	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
-	// os.Lstat) immediately before deleting the candidate (#246).
-	ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error)
 	// Backs POST /api/v1/assets/{id}/sync/retry (handleSyncRetry, #156): an
 	// explicit operator "try again" action on a PUSH_FAILED row, bypassing
 	// ResetRemoteSyncStateFailed's retry_count bound by design (see that
@@ -348,6 +338,16 @@ type Querier interface {
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
 	RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error
+	// The metadata-inheritance endpoint (#54) is the first server-initiated
+	// filesystem write: it rewrites a child's file in place via exiftool, which
+	// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
+	// next scan's commitOne sees a changed fast_hash at the same path and treats
+	// it as a version collision -- archiving the node and minting a new
+	// node_uuid, which strands every media_edges row (including a human
+	// CONFIRMED/REJECTED review decision) on the archived row. Called once,
+	// immediately after the write succeeds, so the DB and the file agree before
+	// any scan observes the change.
+	RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error
 	// Every row still 'RUNNING' at process startup, before this process has
 	// created any scan_jobs row of its own, was left behind by a previous
 	// process that never reached a terminal state -- SIGKILL, OOM-kill,
@@ -361,27 +361,12 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
-	// The metadata-inheritance endpoint (#54) is the first server-initiated
-	// filesystem write: it rewrites a child's file in place via exiftool, which
-	// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
-	// next scan's commitOne sees a changed fast_hash at the same path and treats
-	// it as a version collision -- archiving the node and minting a new
-	// node_uuid, which strands every media_edges row (including a human
-	// CONFIRMED/REJECTED review decision) on the archived row. Called once,
-	// immediately after the write succeeds, so the DB and the file agree before
-	// any scan observes the change.
-	//
-	// full_hash is always cleared and INDEXED_FULL is downgraded to
-	// INDEXED_SHALLOW: the write changed the file's bytes, so any previously
-	// computed BLAKE3 full_hash no longer matches it. Once fast_hash agrees
-	// again this row takes commitOne's Touched branch on the next scan, which
-	// never recomputes full_hash on its own (needsFullHash escalates based on
-	// current tier/collision state, not on the node's prior indexing_status) --
-	// so a stale full_hash would otherwise persist forever, masquerading as a
-	// verified integrity fingerprint it no longer is (docs/schema.md fix #8).
-	RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error
 	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
+	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
+	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
+	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
+	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound
 	// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --
@@ -395,10 +380,6 @@ type Querier interface {
 	// attempt, so this only re-claims rows that have not been retried recently
 	// (bounded retry frequency, not a hot loop).
 	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
-	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
-	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
-	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
-	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
@@ -422,20 +403,6 @@ type Querier interface {
 	// and, if the row was MISSING (a file re-created at its old path), reactivates
 	// it in place -- a MISSING row found alive again is not a version collision
 	// and must not stay MISSING.
-	//
-	// The CASE is MISSING-only, not a blanket reactivation, and that's what
-	// makes #226's now-possible concurrent FULL_SCAN + manual differential
-	// INCREMENTAL against the same Tier-3 location safe rather than merely
-	// untested: if a concurrent FULL_SCAN archives this node (a version
-	// collision on the same path) between the differential sweep's
-	// sweepUnchanged check and its deferred touchBatcher flush, this UPDATE
-	// still runs against the now-ARCHIVED row id -- but ARCHIVED falls into the
-	// ELSE branch and stays ARCHIVED. The touch is a harmless no-op on
-	// lifecycle_state (mtime_unix/last_seen_at/updated_at still advance on a
-	// dead row, a minor stale-audit-trail artifact), never a resurrection into
-	// a live duplicate alongside the FULL_SCAN's freshly inserted successor
-	// row. See TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
-	// in internal/pipeline for the regression test.
 	TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
@@ -451,39 +418,8 @@ type Querier interface {
 	// the node takes commitOne's Touched branch and would otherwise keep its
 	// insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
 	// inherit-metadata that never reaches media_nodes.derived_from_id.
-	//
-	// captured_at_unix (#204) is included on the same overwrite-on-differ
-	// contract as the other six, not fill-only-when-NULL: UpsertMediaEdge's
-	// confidence = MAX(excluded, stored) makes re-resolution monotone (it can
-	// only upgrade or leave an edge, never downgrade or delete one), so a value
-	// that changes here can at worst strand an already-committed Tier-3 edge at
-	// its old confidence -- not corrupt it -- while a NULL that never gets
-	// promoted is a permanent, not just temporary, blind spot for
-	// HeuristicSpatialTemporalResolver. See reconcilePromotedColumns' doc
-	// comment for the full reasoning, including why the inherit-metadata path's
-	// circular evidence (a child temporally matching the parent because the
-	// parent's own timestamp was just copied into it) is benign: every resolver
-	// derives Rel from the same inferRelationship, so a Tier-3 candidate always
-	// merges into the same (parent, child, rel) group as any stronger Tier-2
-	// edge and never creates a second one.
-	//
-	// The caller passes effective values: a column whose fresh probe value was
-	// empty or unchanged is passed through as the node's current value, so this
-	// query is only ever reached with at least one genuine change. Plain
-	// positional params (?1..?8), not sqlc.arg: this file already has earlier
-	// queries using bare ?N placeholders (ListTier3Candidates, ListPrunableNodes),
-	// and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder in
-	// the same file when a bare ?N appears anywhere earlier in it.
 	UpdateMediaNodePromotedColumns(ctx context.Context, arg UpdateMediaNodePromotedColumnsParams) error
 	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
-	UpsertAgentScratchTelemetry(ctx context.Context, arg UpsertAgentScratchTelemetryParams) (AgentScratchTelemetry, error)
-	// The row's mere existence is the override -- callers pass "" for value
-	// exactly when the operator wants "explicitly empty", never as a signal to
-	// skip the write. See internal/settings/resolver.go for why an empty
-	// override still beats a populated config/env base value. updated_at is
-	// set via unixepoch() here, not passed from Go, matching every other
-	// UPDATE/upsert in this package (docs/schema.md fix #5).
-	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
 	// A human decision outranks any resolver, permanently: the UPDATE branch is
 	// gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely.
 	// IMPORTANT: when that WHERE evaluates false, SQLite's RETURNING emits NO
@@ -544,20 +480,21 @@ type Querier interface {
 	// Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
 	// storageLocations list is applied idempotently on every restart, keyed on
 	// root_path's UNIQUE constraint, so re-running it against an
-	// already-seeded database updates tier/read_only/prunable/cache_ttl_hours
-	// in place rather than failing on the second startup. is_active is
-	// unconditionally reset to 1 here -- a location present in config is
-	// presumed active until storage.LoadGuard's post-seed resolvability check
-	// (M6) says otherwise via SetStorageLocationActive, which is what makes a
-	// location that vanished and came back self-heal on the next successful
-	// startup.
-	//
-	// cache_ttl_hours is persisted here (#238) instead of being re-joined from
-	// the live config by root_path at prune time -- that re-join silently
-	// orphaned a location's TTL whenever its rootPath was edited, since the
-	// new row (a different root_path) never matched the old config entry
-	// until the strings lined up again.
+	// already-seeded database updates tier/read_only/prunable in place rather
+	// than failing on the second startup. is_active is unconditionally reset
+	// to 1 here -- a location present in config is presumed active until
+	// storage.LoadGuard's post-seed resolvability check (M6) says otherwise
+	// via SetStorageLocationActive, which is what makes a location that
+	// vanished and came back self-heal on the next successful startup.
 	UpsertStorageLocation(ctx context.Context, arg UpsertStorageLocationParams) (StorageLocation, error)
+	// DeleteAgentScratchTelemetry removes an agent's telemetry row by agent_id.
+	DeleteAgentScratchTelemetry(ctx context.Context, agentID string) error
+	// GetAgentScratchTelemetry retrieves an agent's scratch telemetry by agent_id.
+	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
+	// ListAgentScratchTelemetry returns all reported workstation scratch telemetry rows.
+	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
+	// UpsertAgentScratchTelemetry inserts or updates a workstation scratch telemetry record.
+	UpsertAgentScratchTelemetry(ctx context.Context, arg UpsertAgentScratchTelemetryParams) (AgentScratchTelemetry, error)
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used
 	// by internal/graph (PR 7) inside the same write transaction as the edge

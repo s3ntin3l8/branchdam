@@ -10,24 +10,7 @@ import (
 	"database/sql"
 )
 
-const countAuditQueue = `-- name: CountAuditQueue :one
-;
-
-SELECT COUNT(*) FROM v_media_edges_resolved
-WHERE review_state = 'NEEDS_REVIEW
-`
-
-func (q *Queries) CountAuditQueue(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countAuditQueue)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const listAncestors = `-- name: ListAncestors :many
-;
-
-
 WITH RECURSIVE ancestors(id) AS (
     SELECT ?1 AS id
     UNION
@@ -38,24 +21,79 @@ WITH RECURSIVE ancestors(id) AS (
     WHERE e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
-SELECT ancestors.id FROM ancestor
+SELECT ancestors.id FROM ancestors
 `
 
 // Recursively list ancestor node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]interface{}, error) {
+func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]int64, error) {
 	rows, err := q.db.QueryContext(ctx, listAncestors, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []interface{}{}
+	items := []int64{}
 	for rows.Next() {
-		var id interface{}
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVerifiedTier3Ancestors = `-- name: ListVerifiedTier3Ancestors :many
+WITH RECURSIVE ancestors(ancestor_id) AS (
+    SELECT ?1 AS ancestor_id
+    UNION
+    SELECT e.source_node_id AS ancestor_id
+    FROM media_edges e
+    JOIN ancestors a ON e.target_node_id = a.ancestor_id
+    JOIN media_nodes n ON e.source_node_id = n.id
+    WHERE e.review_state <> 'REJECTED'
+      AND n.lifecycle_state <> 'ARCHIVED'
+)
+SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id
+FROM media_nodes
+WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
+  AND media_nodes.id <> ?1
+  AND media_nodes.storage_location_id IN (SELECT id FROM storage_locations WHERE tier = 'TIER3_MASTER_ARCHIVE')
+  AND media_nodes.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND media_nodes.full_hash IS NOT NULL
+  AND length(media_nodes.full_hash) = 64
+`
+
+type ListVerifiedTier3AncestorsRow struct {
+	ID                int64
+	FilePath          string
+	StorageLocationID int64
+}
+
+// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
+// ARCHIVED nodes excluded) and returns every live ancestor on a
+// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
+// os.Lstat) immediately before deleting the candidate (#246).
+func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listVerifiedTier3Ancestors, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListVerifiedTier3AncestorsRow{}
+	for rows.Next() {
+		var i ListVerifiedTier3AncestorsRow
+		if err := rows.Scan(&i.ID, &i.FilePath, &i.StorageLocationID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -72,7 +110,7 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
 FROM v_media_edges_resolved
 WHERE review_state = 'NEEDS_REVIEW'
 ORDER BY confidence DESC, id ASC
-LIMIT ?1 OFFSET ?
+LIMIT ?1 OFFSET ?2
 `
 
 type ListAuditQueueParams struct {
@@ -130,8 +168,6 @@ func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) 
 }
 
 const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
-;
-
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
        sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
@@ -145,7 +181,7 @@ JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
 ORDER BY e.confidence DESC, e.id ASC
-LIMIT ?1 OFFSET ?
+LIMIT ?1 OFFSET ?2
 `
 
 type ListAuditQueueDetailedParams struct {
@@ -229,8 +265,6 @@ func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueue
 }
 
 const listDescendants = `-- name: ListDescendants :many
-;
-
 WITH RECURSIVE descendants(id) AS (
     SELECT ?1 AS id
     UNION
@@ -241,20 +275,20 @@ WITH RECURSIVE descendants(id) AS (
     WHERE e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
-SELECT descendants.id FROM descendant
+SELECT descendants.id FROM descendants
 `
 
 // Recursively list descendant node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]interface{}, error) {
+func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]int64, error) {
 	rows, err := q.db.QueryContext(ctx, listDescendants, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []interface{}{}
+	items := []int64{}
 	for rows.Next() {
-		var id interface{}
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
@@ -270,14 +304,12 @@ func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]interface{},
 }
 
 const listEdgesForNodes = `-- name: ListEdgesForNodes :many
-;
-
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        review_state, resolver
 FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(?1))
   AND target_node_id IN (SELECT value FROM json_each(?1))
-  AND review_state <> 'REJECTED
+  AND review_state <> 'REJECTED'
 `
 
 type ListEdgesForNodesRow struct {
@@ -290,7 +322,7 @@ type ListEdgesForNodesRow struct {
 	Resolver         string
 }
 
-func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach interface{}) ([]ListEdgesForNodesRow, error) {
+func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error) {
 	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, jsonEach)
 	if err != nil {
 		return nil, err
@@ -322,14 +354,6 @@ func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach interface{}) (
 }
 
 const listNodesByIDs = `-- name: ListNodesByIDs :many
-;
-
-
-
-
-
-
-
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -339,10 +363,10 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts
 FROM media_nodes
 WHERE id IN (SELECT value FROM json_each(?1))
-  AND lifecycle_state <> 'ARCHIVED
+  AND lifecycle_state <> 'ARCHIVED'
 `
 
-func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach interface{}) ([]MediaNode, error) {
+func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listNodesByIDs, jsonEach)
 	if err != nil {
 		return nil, err
@@ -395,63 +419,6 @@ func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach interface{}) ([]M
 	return items, nil
 }
 
-const listVerifiedTier3Ancestors = `-- name: ListVerifiedTier3Ancestors :many
-;
-
-WITH RECURSIVE ancestors(ancestor_id) AS (
-    SELECT ?1 AS ancestor_id
-    UNION
-    SELECT e.source_node_id AS ancestor_id
-    FROM media_edges e
-    JOIN ancestors a ON e.target_node_id = a.ancestor_id
-    JOIN media_nodes n ON e.source_node_id = n.id
-    WHERE e.review_state <> 'REJECTED'
-      AND n.lifecycle_state <> 'ARCHIVED'
-)
-SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id
-FROM media_nodes
-WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
-  AND media_nodes.id <> ?1
-  AND media_nodes.storage_location_id IN (SELECT id FROM storage_locations WHERE tier = 'TIER3_MASTER_ARCHIVE')
-  AND media_nodes.lifecycle_state IN ('ACTIVE', 'HIDDEN')
-  AND media_nodes.full_hash IS NOT NULL
-  AND length(media_nodes.full_hash) = 6
-`
-
-type ListVerifiedTier3AncestorsRow struct {
-	ID                int64
-	FilePath          string
-	StorageLocationID int64
-}
-
-// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
-// ARCHIVED nodes excluded) and returns every live ancestor on a
-// TIER3_MASTER_ARCHIVE location with a verified full_hash.
-// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
-// os.Lstat) immediately before deleting the candidate (#246).
-func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listVerifiedTier3Ancestors, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListVerifiedTier3AncestorsRow{}
-	for rows.Next() {
-		var i ListVerifiedTier3AncestorsRow
-		if err := rows.Scan(&i.ID, &i.FilePath, &i.StorageLocationID); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const wouldCreateCycle = `-- name: WouldCreateCycle :one
 WITH RECURSIVE descendants(id) AS (
     SELECT ?2 AS id
@@ -481,4 +448,16 @@ func (q *Queries) WouldCreateCycle(ctx context.Context, arg WouldCreateCyclePara
 	var would_cycle bool
 	err := row.Scan(&would_cycle)
 	return would_cycle, err
+}
+
+const countAuditQueue = `-- name: CountAuditQueue :one
+SELECT COUNT(*) FROM v_media_edges_resolved
+WHERE review_state = 'NEEDS_REVIEW'
+`
+
+func (q *Queries) CountAuditQueue(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAuditQueue)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
