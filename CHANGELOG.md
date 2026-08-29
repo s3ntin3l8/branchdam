@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.0](https://github.com/s3ntin3l8/branchdam/compare/v0.11.0...v0.12.0) (2026-08-29)
+
+
+### Features
+
+* **agent:** migrate streaming upload to POST /api/v1/agent/upload and remove staging route ([#311](https://github.com/s3ntin3l8/branchdam/issues/311)) ([7546deb](https://github.com/s3ntin3l8/branchdam/commit/7546debfd0184f4dbd172ab6e4ef88c6e615064d)), closes [#306](https://github.com/s3ntin3l8/branchdam/issues/306)
+* **storage:** support writable master archive, server-evaluated naming templates, UI settings & Immich hardlinks ([#313](https://github.com/s3ntin3l8/branchdam/issues/313)) ([eb53958](https://github.com/s3ntin3l8/branchdam/commit/eb539580a2de8ae64cf24db70690e9d68e957373))
+* **sync:** implement 30-day soft-delete trash buffer for EVENT_NODE_DELETED with UI settings ([#315](https://github.com/s3ntin3l8/branchdam/issues/315)) ([6acfa38](https://github.com/s3ntin3l8/branchdam/commit/6acfa3841f7e23d27a4000029a6ffe56a7278461))
+
+
+### Bug Fixes
+
+* **agent-upload:** eliminate TOCTOU race and prevent orphaned export nodes ([#314](https://github.com/s3ntin3l8/branchdam/issues/314)) ([0d7919d](https://github.com/s3ntin3l8/branchdam/commit/0d7919d46fed5f935eb79434a7d15d4e0a1793a0))
+
 ## [0.11.0](https://github.com/s3ntin3l8/branchdam/compare/v0.10.0...v0.11.0) (2026-08-29)
 
 
