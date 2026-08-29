@@ -197,13 +197,7 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 	}
 	locs := make([]storage.Location, len(rows))
 	for i, r := range rows {
-		locs[i] = storage.Location{
-			ID:       r.ID,
-			Name:     r.Name,
-			RootPath: r.RootPath,
-			Tier:     r.Tier,
-			ReadOnly: r.ReadOnly,
-		}
+		locs[i] = storage.Location(r)
 	}
 	return s.guard.ReloadLocations(locs)
 }
