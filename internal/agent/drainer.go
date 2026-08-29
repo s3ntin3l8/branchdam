@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -770,6 +772,65 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		d.log.Warn("agent: delete remote sync state for node", "nodeID", node.ID, "err", err)
 	}
 
+	// Move physical master file to .trash/<rel_path> buffer inside storage location
+	if d.guard != nil && node.FilePath != "" {
+		if loc, err := d.guard.Resolve(node.FilePath); err == nil {
+			if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
+				trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
+				// Guard against overwriting pre-existing trashed files if the same relPath is trashed again
+				trashExt := filepath.Ext(trashPath)
+				trashStem := strings.TrimSuffix(trashPath, trashExt)
+				uniqueTrashPath := trashPath
+				collisionIdx := 0
+				for {
+					if _, err := os.Stat(uniqueTrashPath); os.IsNotExist(err) {
+						break
+					}
+					collisionIdx++
+					uniqueTrashPath = fmt.Sprintf("%s_%d%s", trashStem, collisionIdx, trashExt)
+				}
+				trashPath = uniqueTrashPath
+
+				now := time.Now().UTC()
+				if err := os.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
+					d.log.Warn("agent: failed to create trash directory", "err", err)
+				} else if _, statErr := os.Stat(node.FilePath); statErr == nil {
+					if err := os.Rename(node.FilePath, trashPath); err != nil {
+						if copyErr := moveFile(node.FilePath, trashPath); copyErr != nil {
+							d.log.Warn("agent: failed to move file to trash", "err", copyErr)
+						} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
+							d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
+						}
+					} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
+						d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
+					}
+				}
+			}
+		}
+	}
+
+	// Purge any Tier 2 Immich exports linked to this node (vanishes from gallery immediately)
+	edges, err := q.ListEdgesBySource(ctx, node.ID)
+	if err == nil {
+		for _, edge := range edges {
+			if edge.RelationshipType == "FINAL_EXPORT" || edge.Resolver == "immich_export" {
+				expNode, expErr := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
+				if expErr == nil {
+					if rmErr := os.Remove(expNode.FilePath); rmErr != nil && !os.IsNotExist(rmErr) {
+						d.log.Warn("agent: failed to unlink immich export file", "nodeID", expNode.ID, "err", rmErr)
+					} else {
+						if markErr := q.MarkNodeMissing(ctx, expNode.ID); markErr != nil {
+							d.log.Warn("agent: failed to mark export node missing", "nodeID", expNode.ID, "err", markErr)
+						}
+						if delErr := q.DeleteRemoteSyncStateForNode(ctx, expNode.ID); delErr != nil {
+							d.log.Warn("agent: failed to delete remote sync state for export node", "nodeID", expNode.ID, "err", delErr)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// If Immich client is wired, trigger external library rescan
 	if d.immichScanner != nil {
 		if scanErr := d.immichScanner.TriggerScan(ctx); scanErr != nil {
@@ -778,6 +839,28 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 
 	return nil
+}
+
+func moveFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	_ = in.Close()
+	_ = out.Close()
+	return os.Remove(src)
 }
 
 // applyPathRebased returns the freshly inserted node's ID when NodeUUID was

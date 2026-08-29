@@ -475,9 +475,33 @@ var ingestFields = []Field{
 	},
 }
 
+var trashFields = []Field{
+	{
+		Key:   "trash.retentionDays",
+		Type:  KindInt,
+		Label: "Retention Days",
+		Group: "Trash & Retention",
+		Apply: ApplyLive,
+		Get:   func(cfg *config.Config) any { return cfg.Trash.RetentionDays },
+		Set:   func(cfg *config.Config, v any) error { cfg.Trash.RetentionDays = v.(int); return nil },
+		Validate: func(v any) error {
+			n, ok := v.(int)
+			if !ok {
+				return fmt.Errorf("must be an integer")
+			}
+			if n < 0 {
+				return fmt.Errorf("retention days cannot be negative")
+			}
+			return nil
+		},
+		Editable: true,
+		Doc:      "Number of days deleted media files are retained in .trash/ buffer before automated purge (0 disables automatic purge).",
+	},
+}
+
 // Fields returns every registered field, in registration order.
 func Fields() []Field {
-	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, ingestFields, httpFields, agentFields, authzFields, pathRewriteFields}
+	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, ingestFields, trashFields, httpFields, agentFields, authzFields, pathRewriteFields}
 	n := 0
 	for _, g := range groups {
 		n += len(g)

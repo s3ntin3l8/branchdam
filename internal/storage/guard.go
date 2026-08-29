@@ -252,6 +252,15 @@ func (g *Guard) Exists(path string) (bool, error) {
 	return true, nil
 }
 
+// Locations returns a copy of all configured locations in the Guard.
+func (g *Guard) Locations() []Location {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make([]Location, len(g.locs))
+	copy(out, g.locs)
+	return out
+}
+
 // canonicalize resolves path to its real, symlink-free form. path need not
 // exist: canonicalize walks up to the deepest existing ancestor, resolves
 // that ancestor fully (EvalSymlinks), and rejoins the non-existent suffix

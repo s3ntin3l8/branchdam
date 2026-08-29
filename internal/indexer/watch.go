@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,13 +82,19 @@ func logWatcherError(log *slog.Logger, werr error) {
 }
 
 func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer, log *slog.Logger, onEvent func(Record) error, onRemove func(path string) error) {
+	// Skip .trash and hidden paths from being watched or processed
+	base := filepath.Base(event.Name)
+	if base == ".trash" || (len(base) > 0 && base[0] == '.') || strings.Contains(event.Name, string(filepath.Separator)+".") {
+		return
+	}
+
 	// A newly created directory needs its own watch, and needs it added
 	// promptly (not after the debounce delay) or files created inside it
 	// in the same burst would be missed entirely.
 	if event.Has(fsnotify.Create) {
 		if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
 			if err := addRecursive(watcher, event.Name); err != nil && log != nil {
-				log.Warn("indexer: watch new directory", "path", event.Name, "err", err)
+				log.Warn("indexer: watch new directory", "err", err)
 			}
 		}
 	}
@@ -129,6 +136,9 @@ func addRecursive(watcher *fsnotify.Watcher, root string) error {
 		}
 		if !d.IsDir() {
 			return nil
+		}
+		if path != root && (d.Name() == ".trash" || d.Name()[0] == '.') {
+			return filepath.SkipDir
 		}
 		return watcher.Add(path)
 	})
