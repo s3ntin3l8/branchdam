@@ -125,3 +125,17 @@ FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(?1))
   AND target_node_id IN (SELECT value FROM json_each(?1))
   AND review_state <> 'REJECTED';
+
+-- name: ListEdgesByMultipleTargets :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE target_node_id IN (SELECT value FROM json_each(?1));
+
+-- name: ListEdgesByMultipleSources :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE source_node_id IN (SELECT value FROM json_each(?1));

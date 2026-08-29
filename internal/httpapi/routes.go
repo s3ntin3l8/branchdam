@@ -484,33 +484,38 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 		if len(currentLevel) == 0 {
 			break
 		}
+		levelJSON, err := json.Marshal(currentLevel)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("marshal level node ids", err)
+		}
+		levelStr := string(levelJSON)
+
+		parents, err := s.db.Reader.ListEdgesByMultipleTargets(ctx, levelStr)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list parent edges", err)
+		}
+		children, err := s.db.Reader.ListEdgesByMultipleSources(ctx, levelStr)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list child edges", err)
+		}
+
 		var nextLevel []int64
-		for _, nodeID := range currentLevel {
-			parents, err := s.db.Reader.ListEdgesByTarget(ctx, nodeID)
-			if err != nil {
-				return nil, huma.Error500InternalServerError("list parent edges", err)
+		for _, p := range parents {
+			if p.ReviewState == "REJECTED" {
+				continue
 			}
-			for _, p := range parents {
-				if p.ReviewState == "REJECTED" {
-					continue
-				}
-				if !nodeIDs[p.SourceNodeID] {
-					nodeIDs[p.SourceNodeID] = true
-					nextLevel = append(nextLevel, p.SourceNodeID)
-				}
+			if !nodeIDs[p.SourceNodeID] {
+				nodeIDs[p.SourceNodeID] = true
+				nextLevel = append(nextLevel, p.SourceNodeID)
 			}
-			children, err := s.db.Reader.ListEdgesBySource(ctx, nodeID)
-			if err != nil {
-				return nil, huma.Error500InternalServerError("list child edges", err)
+		}
+		for _, c := range children {
+			if c.ReviewState == "REJECTED" {
+				continue
 			}
-			for _, c := range children {
-				if c.ReviewState == "REJECTED" {
-					continue
-				}
-				if !nodeIDs[c.TargetNodeID] {
-					nodeIDs[c.TargetNodeID] = true
-					nextLevel = append(nextLevel, c.TargetNodeID)
-				}
+			if !nodeIDs[c.TargetNodeID] {
+				nodeIDs[c.TargetNodeID] = true
+				nextLevel = append(nextLevel, c.TargetNodeID)
 			}
 		}
 		currentLevel = nextLevel

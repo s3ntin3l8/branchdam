@@ -122,21 +122,29 @@ type Result struct {
 // and the remainder untouched; re-running Plan against the same location
 // picks up exactly where it left off.
 func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candidates []Candidate, cutoffUnix int64) []Result {
+	// Pre-compute eligibility per unique storage location once, before the
+	// transaction loop. This replaces the previous per-candidate Plan call
+	// inside each InTx, which re-ran the same query for every candidate on
+	// the same location.
+	locations := make(map[int64][]Candidate)
+	for _, c := range candidates {
+		locations[c.StorageLocationID] = append(locations[c.StorageLocationID], c)
+	}
+	eligibleMap := make(map[int64]bool, len(candidates))
+	for locID := range locations {
+		planned, err := Plan(ctx, database.Reader, locID, cutoffUnix)
+		if err != nil {
+			continue
+		}
+		for _, p := range planned {
+			eligibleMap[p.NodeID] = true
+		}
+	}
+
 	results := make([]Result, 0, len(candidates))
 	for _, c := range candidates {
 		err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
-			stillEligible, err := Plan(ctx, q, c.StorageLocationID, cutoffUnix)
-			if err != nil {
-				return err
-			}
-			found := false
-			for _, sc := range stillEligible {
-				if sc.NodeID == c.NodeID {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !eligibleMap[c.NodeID] {
 				return ErrNoLongerEligible
 			}
 
