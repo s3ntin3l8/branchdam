@@ -9,6 +9,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
 type PutStorageLocationInput struct {
@@ -171,6 +172,10 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 		return nil, huma.Error500InternalServerError("apply storage location override", err)
 	}
 
+	if err := s.reloadGuardLocations(ctx); err != nil {
+		s.log.Warn("storage: failed to reload guard after location update", "err", err)
+	}
+
 	if s.hub != nil {
 		s.hub.Broadcast()
 	}
@@ -178,4 +183,27 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 	out := &PutStorageLocationOutput{}
 	out.Body.OK = true
 	return out, nil
+}
+
+// reloadGuardLocations re-reads all storage locations from the database and
+// hot-swaps the Guard's in-memory set so subsequent requests reflect the
+// updated configuration without a server restart. A failure here is logged
+// but does not fail the PUT request -- the DB write already succeeded and
+// the next restart will pick up the change regardless.
+func (s *Server) reloadGuardLocations(ctx context.Context) error {
+	rows, err := s.db.ListStorageLocations(ctx)
+	if err != nil {
+		return fmt.Errorf("list storage locations: %w", err)
+	}
+	locs := make([]storage.Location, len(rows))
+	for i, r := range rows {
+		locs[i] = storage.Location{
+			ID:       r.ID,
+			Name:     r.Name,
+			RootPath: r.RootPath,
+			Tier:     r.Tier,
+			ReadOnly: r.ReadOnly,
+		}
+	}
+	return s.guard.ReloadLocations(locs)
 }

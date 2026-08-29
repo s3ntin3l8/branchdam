@@ -63,18 +63,41 @@ type Guard struct {
 	locs []Location // sorted by len(RootPath) descending: longest-prefix-first match
 }
 
+// buildSortedLocations returns a copy of locs sorted by RootPath length
+// descending (longest-prefix-first match). Extracted so both NewGuard and
+// ReloadLocations can share the sorting logic without duplicating it.
+func buildSortedLocations(locs []Location) ([]Location, error) {
+	sorted := make([]Location, len(locs))
+	copy(sorted, locs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return len(sorted[i].RootPath) > len(sorted[j].RootPath)
+	})
+	return sorted, nil
+}
+
 // NewGuard builds a Guard directly from a list of locations, already
 // resolved. Used by tests and by LoadGuard below; production startup should
 // prefer LoadGuard so the locations come from the same storage_locations
 // table storage.Guard is meant to be the single source of truth for
 // (docs/schema.md fix #1).
 func NewGuard(locs []Location) *Guard {
-	sorted := make([]Location, len(locs))
-	copy(sorted, locs)
-	sort.Slice(sorted, func(i, j int) bool {
-		return len(sorted[i].RootPath) > len(sorted[j].RootPath)
-	})
+	sorted, _ := buildSortedLocations(locs)
 	return &Guard{locs: sorted}
+}
+
+// ReloadLocations atomically replaces the Guard's location set. Called after
+// a storage_locations row is updated in the database so the in-memory Guard
+// reflects the new configuration without requiring a server restart. Returns
+// an error (and leaves the old locations untouched) if locs fails sorting.
+func (g *Guard) ReloadLocations(locs []Location) error {
+	sorted, err := buildSortedLocations(locs)
+	if err != nil {
+		return err
+	}
+	g.mu.Lock()
+	g.locs = sorted
+	g.mu.Unlock()
+	return nil
 }
 
 // locationLister is the subset of sqlcgen.Querier LoadGuard needs. Declared
