@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import AuditQueuePage from "./AuditQueuePage";
 import { api } from "../api/client";
 
@@ -18,7 +19,15 @@ vi.mock("../api/client", () => ({
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+  const router = createMemoryRouter(
+    [{ path: "/", element: ui }],
+    { initialEntries: ["/"] },
+  );
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
 }
 
 describe("AuditQueuePage", () => {
