@@ -219,11 +219,11 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 				exportDir := filepath.Dir(exportDest)
 				if err := os.MkdirAll(exportDir, 0o755); err != nil {
 					if s.log != nil {
-						s.log.Warn("failed to create Immich export directory", "dir", exportDir, "err", err)
+						s.log.Warn("failed to create Immich export directory", "err", err)
 					}
 				} else if err := linkOrCopyFile(targetPath, exportDest); err != nil {
 					if s.log != nil {
-						s.log.Warn("failed to create Immich export file", "target", targetPath, "dest", exportDest, "err", err)
+						s.log.Warn("failed to create Immich export file", "err", err)
 					}
 				} else {
 					exportCreated = true
