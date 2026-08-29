@@ -81,11 +81,19 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	if filename == "" {
 		filename = "upload_" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".bin"
 	}
-	filename = filepath.Base(filename)
+	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
+		s.writeJSONError(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	filename = filepath.Base(filepath.Clean(filename))
 
 	cameraModel := r.Header.Get("X-Camera-Model")
 	if cameraModel == "" {
 		cameraModel = "unknown_camera"
+	}
+	if strings.Contains(cameraModel, "/") || strings.Contains(cameraModel, "\\") || strings.Contains(cameraModel, "..") {
+		s.writeJSONError(w, http.StatusBadRequest, "invalid camera model")
+		return
 	}
 
 	expectedBlake3 := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Blake3-Hash")))
@@ -115,10 +123,17 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetPath := filepath.Join(targetLoc.RootPath, relPath)
-	targetClean := filepath.Clean(targetPath)
-	targetRootClean := filepath.Clean(targetLoc.RootPath) + string(filepath.Separator)
-	if !strings.HasPrefix(targetClean, targetRootClean) {
+	safeArchiveDir, err := filepath.Abs(targetLoc.RootPath)
+	if err != nil {
+		s.writeJSONError(w, http.StatusInternalServerError, "failed to resolve archive root")
+		return
+	}
+	if !strings.HasSuffix(safeArchiveDir, string(filepath.Separator)) {
+		safeArchiveDir += string(filepath.Separator)
+	}
+
+	targetPath, err := filepath.Abs(filepath.Join(safeArchiveDir, relPath))
+	if err != nil || !strings.HasPrefix(targetPath, safeArchiveDir) {
 		s.writeJSONError(w, http.StatusBadRequest, "path escapes storage location")
 		return
 	}
@@ -134,14 +149,17 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	targetFileName := filepath.Base(targetPath)
 	collisionCount := 0
 	for {
-		if _, err := os.Stat(targetClean); errorsIsNotExist(err) {
+		if _, err := os.Stat(targetPath); errorsIsNotExist(err) {
 			break
 		}
 		collisionCount++
 		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
 		relPath = filepath.Join(filepath.Dir(relPath), suffixedName)
-		targetPath = filepath.Join(targetLoc.RootPath, relPath)
-		targetClean = filepath.Clean(targetPath)
+		targetPath, err = filepath.Abs(filepath.Join(safeArchiveDir, relPath))
+		if err != nil || !strings.HasPrefix(targetPath, safeArchiveDir) {
+			s.writeJSONError(w, http.StatusBadRequest, "path escapes storage location")
+			return
+		}
 		targetFileName = suffixedName
 	}
 
@@ -215,20 +233,21 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 
 		// Hardlink non-RAW standalone photos into Tier 2 Immich exports for zero-storage duplication
 		if exportLoc != nil && isStandaloneDisplayable(ext) {
-			exportRel := filepath.Clean(filepath.Join("immich", relPath))
-			if !strings.HasPrefix(exportRel, "..") && !filepath.IsAbs(exportRel) {
-				exportDest := filepath.Join(exportLoc.RootPath, exportRel)
-				exportClean := filepath.Clean(exportDest)
-				exportRootClean := filepath.Clean(exportLoc.RootPath) + string(filepath.Separator)
-				if strings.HasPrefix(exportClean, exportRootClean) {
-					exportDir := filepath.Dir(exportClean)
+			safeExportDir, err := filepath.Abs(exportLoc.RootPath)
+			if err == nil {
+				if !strings.HasSuffix(safeExportDir, string(filepath.Separator)) {
+					safeExportDir += string(filepath.Separator)
+				}
+				exportDest, err := filepath.Abs(filepath.Join(safeExportDir, "immich", relPath))
+				if err == nil && strings.HasPrefix(exportDest, safeExportDir) {
+					exportDir := filepath.Dir(exportDest)
 					if err := os.MkdirAll(exportDir, 0o755); err != nil {
 						if s.log != nil {
 							s.log.Warn("failed to create Immich export directory", "dir", exportDir, "err", err)
 						}
-					} else if err := os.Link(targetClean, exportClean); err != nil && !errors.Is(err, os.ErrExist) {
+					} else if err := os.Link(targetPath, exportDest); err != nil && !errors.Is(err, os.ErrExist) {
 						if s.log != nil {
-							s.log.Warn("failed to create Immich export hardlink", "target", targetClean, "dest", exportClean, "err", err)
+							s.log.Warn("failed to create Immich export hardlink", "target", targetPath, "dest", exportDest, "err", err)
 						}
 					}
 				}
