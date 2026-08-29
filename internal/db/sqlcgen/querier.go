@@ -58,6 +58,8 @@ type Querier interface {
 	// visible in logs instead of only discoverable via a direct SQLite query.
 	CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
+	// Deletes remote_sync_state records when an asset is deleted / unlinked.
+	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// #163/#226: called inside the same transaction as CreateScanJob (see
 	// pipeline.createScanJob) so the check-then-insert is one atomic unit, not
 	// just an accident of the writer pool being single-connection. Parameterized

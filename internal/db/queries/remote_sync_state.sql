@@ -138,3 +138,8 @@ UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', last_error = NULL, retry_count = 0,
     updated_at = unixepoch()
 WHERE node_id = ?1 AND remote = ?2;
+
+-- name: DeleteRemoteSyncStateForNode :exec
+-- Deletes remote_sync_state records when an asset is deleted / unlinked.
+DELETE FROM remote_sync_state
+WHERE node_id = ?1;

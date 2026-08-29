@@ -44,11 +44,12 @@ type Supervisor struct {
 	database *db.DB
 	log      *slog.Logger
 
-	mu      sync.Mutex
-	rootCtx context.Context // set by Start; every worker's context is derived from this
-	cancel  context.CancelFunc
-	worker  *Worker
-	running immichParams // params of the currently running (or last attempted) worker
+	mu           sync.Mutex
+	rootCtx      context.Context // set by Start; every worker's context is derived from this
+	cancel       context.CancelFunc
+	worker       *Worker
+	immichClient *immich.Client
+	running      immichParams // params of the currently running (or last attempted) worker
 }
 
 func NewSupervisor(database *db.DB, log *slog.Logger) *Supervisor {
@@ -162,6 +163,7 @@ func (sv *Supervisor) startLocked(cfg *config.Config) {
 	worker.Start(ctx)
 	sv.worker = worker
 	sv.cancel = cancel
+	sv.immichClient = immichClient
 	sv.log.Info("sync: immich worker started", "libraryID", params.libraryID, "exportPath", exportPath)
 }
 
@@ -177,6 +179,18 @@ func (sv *Supervisor) stopLocked() {
 	}
 	sv.worker = nil
 	sv.cancel = nil
+	sv.immichClient = nil
+}
+
+// TriggerScan triggers an external library scan on the running Immich client, if configured.
+func (sv *Supervisor) TriggerScan(ctx context.Context) error {
+	sv.mu.Lock()
+	client := sv.immichClient
+	sv.mu.Unlock()
+	if client == nil {
+		return nil
+	}
+	return client.TriggerScan(ctx)
 }
 
 // Wait blocks until the currently running worker, if any, has fully

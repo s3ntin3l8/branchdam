@@ -253,7 +253,8 @@ func main() {
 	// queue to gate on -- it's one global queue, not per-storage-location).
 	drainer := agent.NewDrainer(database, guard, log,
 		agent.WithNudge(func() { hub.Broadcast() }),
-		agent.WithEngine(engine))
+		agent.WithEngine(engine),
+		agent.WithImmichScanner(immichSupervisor))
 	drainer.Start(ctx, 0)
 
 	thumbWorker, thumbCache := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)
