@@ -79,7 +79,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if s.log != nil && status == http.StatusInternalServerError {
-			s.log.Error("agent upload internal error", "err", err)
+			s.log.Error("agent upload internal processing failure")
 		}
 		s.writeJSONError(w, status, userMsg)
 		return

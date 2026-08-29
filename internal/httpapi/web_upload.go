@@ -119,7 +119,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if s.log != nil && status == http.StatusInternalServerError {
-			s.log.Error("web upload internal error", "err", err)
+			s.log.Error("web upload internal processing failure")
 		}
 		s.writeJSONError(w, status, userMsg)
 		return
