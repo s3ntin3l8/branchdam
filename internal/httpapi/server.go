@@ -207,6 +207,8 @@ func (s *Server) Handler() http.Handler {
 	// reason -- Huma's response model expects a JSON body, not a raw
 	// image/jpeg byte stream.
 	mux.HandleFunc("GET /api/v1/assets/{id}/thumbnail", s.handleThumbnail)
+	// Staging upload accepts raw octet stream with custom headers
+	mux.HandleFunc("POST /api/v1/staging/upload", s.handleStagingUpload)
 	mux.Handle("GET /", s.spaHandler())
 
 	var apiKey string

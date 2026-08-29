@@ -11,19 +11,17 @@ import (
 // paths Traefik routes around ForwardAuth are exactly the paths this
 // package needs to treat as untrusted-until-keyed.
 const AgentPathPrefix = "/api/v1/agent"
+const StagingPathPrefix = "/api/v1/staging"
 
 // Route is the only place that decides which auth chain applies to a
-// request: AgentChain for AgentPathPrefix, BrowserChain for everything
-// else. next is the shared handler both chains eventually call -- the
-// chains differ in what they do to the request BEFORE next runs (attach a
-// Principal; for the agent path, also strip forged identity headers), not
-// in what next itself is.
+// request: AgentChain for AgentPathPrefix and StagingPathPrefix, BrowserChain
+// for everything else. next is the shared handler both chains eventually call.
 func Route(apiKey string, log *slog.Logger, next http.Handler) http.Handler {
 	agent := AgentChain(apiKey, log)(next)
 	browser := BrowserChain(next)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, AgentPathPrefix) {
+		if strings.HasPrefix(r.URL.Path, AgentPathPrefix) || strings.HasPrefix(r.URL.Path, StagingPathPrefix) {
 			agent.ServeHTTP(w, r)
 			return
 		}
