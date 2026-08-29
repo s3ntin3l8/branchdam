@@ -322,16 +322,13 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 					exportDir := filepath.Dir(exportDest)
 					if err := os.MkdirAll(exportDir, 0o755); err != nil {
 						if s.log != nil {
-							s.log.Warn("failed to create Immich export directory", "path", exportDir, "err", err)
+							s.log.Warn("failed to create Immich export directory", "err", err)
 						}
 					} else if _, statErr := os.Lstat(exportDest); statErr == nil {
 						// Destination already exists; skip inserting duplicate export node
-						if s.log != nil {
-							s.log.Debug("Immich export destination already exists, skipping export node creation", "path", exportDest)
-						}
 					} else if err := linkOrCopyFile(targetPath, exportDest); err != nil {
 						if s.log != nil {
-							s.log.Warn("failed to create Immich export hardlink or copy", "src", targetPath, "dst", exportDest, "err", err)
+							s.log.Warn("failed to create Immich export hardlink or copy", "err", err)
 						}
 					} else {
 						exportCreated = true
