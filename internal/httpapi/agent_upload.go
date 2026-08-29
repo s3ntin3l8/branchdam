@@ -2,11 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -78,42 +74,4 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		Blake3Hash:   result.Blake3Hash,
 		RelativePath: result.RelativePath,
 	})
-}
-
-func isStandaloneDisplayable(ext string) bool {
-	switch strings.ToLower(ext) {
-	case ".jpg", ".jpeg", ".heic", ".png", ".webp", ".mp4", ".mov":
-		return true
-	default:
-		return false
-	}
-}
-
-func linkOrCopyFile(src, dst string) error {
-	linkErr := os.Link(src, dst)
-	if linkErr == nil || errors.Is(linkErr, os.ErrExist) {
-		return nil
-	}
-
-	// Fallback to safe non-truncating copy on cross-device link failure
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("link error: %w, open src error: %v", linkErr, err)
-	}
-	defer func() { _ = srcFile.Close() }()
-
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil
-		}
-		return fmt.Errorf("link error: %w, create dst error: %v", linkErr, err)
-	}
-	defer func() { _ = dstFile.Close() }()
-
-	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		_ = os.Remove(dst)
-		return fmt.Errorf("link error: %w, copy error: %v", linkErr, err)
-	}
-	return nil
 }
