@@ -49,19 +49,39 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		status := http.StatusInternalServerError
+		userMsg := "upload processing failed"
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "invalid filename") ||
-			strings.Contains(errMsg, "invalid camera model") ||
-			strings.Contains(errMsg, "invalid rendered path") ||
-			strings.Contains(errMsg, "path escapes storage location") ||
-			strings.Contains(errMsg, "checksum mismatch") {
+
+		if strings.Contains(errMsg, "invalid filename") {
 			status = http.StatusBadRequest
+			userMsg = "invalid filename"
+		} else if strings.Contains(errMsg, "invalid camera model") {
+			status = http.StatusBadRequest
+			userMsg = "invalid camera model"
+		} else if strings.Contains(errMsg, "invalid rendered path") || strings.Contains(errMsg, "invalid relative path") {
+			status = http.StatusBadRequest
+			userMsg = "invalid path"
+		} else if strings.Contains(errMsg, "path escapes storage location") {
+			status = http.StatusBadRequest
+			userMsg = "path escapes storage location"
+		} else if strings.Contains(errMsg, "checksum mismatch") {
+			status = http.StatusBadRequest
+			userMsg = "checksum mismatch"
+		} else if strings.Contains(errMsg, "upload exceeds maximum allowed file size") {
+			status = http.StatusRequestEntityTooLarge
+			userMsg = "upload exceeds maximum allowed file size (50 GB)"
 		} else if strings.Contains(errMsg, "read-only") {
 			status = http.StatusConflict
+			userMsg = "storage location is read-only"
 		} else if strings.Contains(errMsg, "no writable storage location configured") || strings.Contains(errMsg, "not configured") || strings.Contains(errMsg, "not found") {
 			status = http.StatusServiceUnavailable
+			userMsg = "no writable storage location configured"
 		}
-		s.writeJSONError(w, status, errMsg)
+
+		if s.log != nil && status == http.StatusInternalServerError {
+			s.log.Error("agent upload internal error", "err", err)
+		}
+		s.writeJSONError(w, status, userMsg)
 		return
 	}
 

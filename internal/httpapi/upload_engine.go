@@ -25,6 +25,9 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
+// DefaultMaxUploadSizeBytes defines the default upper limit for uploaded files (50 GiB).
+const DefaultMaxUploadSizeBytes int64 = 50 * 1024 * 1024 * 1024
+
 // UploadParams contains parameters for ingesting an uploaded file stream.
 type UploadParams struct {
 	Filename            string
@@ -35,6 +38,7 @@ type UploadParams struct {
 	CameraModel         string
 	CapturedAtUnix      int64
 	ExpectedBlake3      string
+	MaxBytes            int64 // Maximum allowed bytes (<= 0 defaults to DefaultMaxUploadSizeBytes)
 }
 
 // UploadResult contains the result of a successful upload.
@@ -217,11 +221,22 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	hasher := blake3.New()
 	multiWriter := io.MultiWriter(outFile, hasher)
 
-	bytesWritten, err := io.Copy(multiWriter, params.Body)
+	maxAllowed := params.MaxBytes
+	if maxAllowed <= 0 {
+		maxAllowed = DefaultMaxUploadSizeBytes
+	}
+
+	limitReader := io.LimitReader(params.Body, maxAllowed+1)
+	bytesWritten, err := io.Copy(multiWriter, limitReader)
 	if err != nil {
 		_ = outFile.Close()
 		_ = os.Remove(targetPath)
 		return nil, fmt.Errorf("failed to write stream: %w", err)
+	}
+	if bytesWritten > maxAllowed {
+		_ = outFile.Close()
+		_ = os.Remove(targetPath)
+		return nil, errors.New("upload exceeds maximum allowed file size (50 GB)")
 	}
 
 	computedBlake3 := hex.EncodeToString(hasher.Sum(nil))
