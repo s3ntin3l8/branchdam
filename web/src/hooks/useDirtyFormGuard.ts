@@ -1,39 +1,44 @@
-import { createContext, useRef, useState } from "react";
+import { createContext, useCallback, useState } from "react";
 import { useBlocker, useBeforeUnload } from "react-router";
 
 export const DirtyFormContext = createContext<{
   dirtyCount: number;
-  register: () => { markDirty: () => void; markClean: () => void };
+  register: (key: string) => { markDirty: () => void; markClean: () => void };
 }>({
   dirtyCount: 0,
   register: () => ({ markDirty: () => {}, markClean: () => {} }),
 });
 
 export function useDirtyFormProvider() {
-  const [dirtyCount, setDirtyCount] = useState(0);
-  const countRef = useRef(0);
+  const [dirtyFields, setDirtyFields] = useState(new Set<string>());
 
-  const register = () => {
-    let isDirty = false;
-    return {
-      markDirty: () => {
-        if (!isDirty) {
-          isDirty = true;
-          countRef.current += 1;
-          setDirtyCount(countRef.current);
-        }
-      },
-      markClean: () => {
-        if (isDirty) {
-          isDirty = false;
-          countRef.current = Math.max(0, countRef.current - 1);
-          setDirtyCount(countRef.current);
-        }
-      },
-    };
-  };
+  const markDirty = useCallback((key: string) => {
+    setDirtyFields((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
 
-  return { dirtyCount, register };
+  const markClean = useCallback((key: string) => {
+    setDirtyFields((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const register = useCallback(
+    (key: string) => ({
+      markDirty: () => markDirty(key),
+      markClean: () => markClean(key),
+    }),
+    [markDirty, markClean],
+  );
+
+  return { dirtyCount: dirtyFields.size, register };
 }
 
 export function useDirtyGuard(dirtyCount: number) {

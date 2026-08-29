@@ -85,7 +85,7 @@ function SettingsFieldEditor({
   onRevert: (key: string, onError: () => void) => void;
 }) {
   const { register } = useContext(DirtyFormContext);
-  const { markDirty, markClean } = register();
+  const { markDirty, markClean } = register(field.key);
   const baseline = field.secret ? "" : field.value;
   const [prevBaseline, setPrevBaseline] = useState(baseline);
   const [draft, setDraft] = useState<unknown>(baseline);
@@ -186,7 +186,7 @@ function PathRewritesEditor({
   onRevert: (key: string, onError: () => void) => void;
 }) {
   const { register } = useContext(DirtyFormContext);
-  const { markDirty, markClean } = register();
+  const { markDirty, markClean } = register(field?.key ?? "pathRewrites");
   const currentRules = useMemo(() => {
     if (!field || !Array.isArray(field.value)) return [] as Array<{ from: string; to: string }>;
     return field.value as Array<{ from: string; to: string }>;
