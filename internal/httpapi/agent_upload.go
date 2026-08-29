@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -131,15 +132,16 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	ext := filepath.Ext(filename)
 	stem := strings.TrimSuffix(filename, ext)
 	targetFileName := filepath.Base(targetPath)
-	collisionCount := 1
+	collisionCount := 0
 	for {
-		if _, err := os.Stat(targetPath); errorsIsNotExist(err) {
+		if _, err := os.Stat(targetClean); errorsIsNotExist(err) {
 			break
 		}
 		collisionCount++
 		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
 		relPath = filepath.Join(filepath.Dir(relPath), suffixedName)
 		targetPath = filepath.Join(targetLoc.RootPath, relPath)
+		targetClean = filepath.Clean(targetPath)
 		targetFileName = suffixedName
 	}
 
@@ -220,8 +222,15 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 				exportRootClean := filepath.Clean(exportLoc.RootPath) + string(filepath.Separator)
 				if strings.HasPrefix(exportClean, exportRootClean) {
 					exportDir := filepath.Dir(exportClean)
-					_ = os.MkdirAll(exportDir, 0o755)
-					_ = os.Link(targetClean, exportClean)
+					if err := os.MkdirAll(exportDir, 0o755); err != nil {
+						if s.log != nil {
+							s.log.Warn("failed to create Immich export directory", "dir", exportDir, "err", err)
+						}
+					} else if err := os.Link(targetClean, exportClean); err != nil && !errors.Is(err, os.ErrExist) {
+						if s.log != nil {
+							s.log.Warn("failed to create Immich export hardlink", "target", targetClean, "dest", exportClean, "err", err)
+						}
+					}
 				}
 			}
 		}

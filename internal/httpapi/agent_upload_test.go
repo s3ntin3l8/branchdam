@@ -217,7 +217,7 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	var resp2 AgentUploadResponse
 	err = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	require.NoError(t, err)
-	assert.Contains(t, resp2.RelativePath, "IMG_2026_2.JPG")
+	assert.Contains(t, resp2.RelativePath, "IMG_2026_1.JPG")
 
 	// Test RAW file upload (should NOT be linked to exports/immich/)
 	rawData := []byte("RAW sensor payload")

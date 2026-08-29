@@ -31,6 +31,8 @@ PRAGMA foreign_keys = ON;
 -- +goose Down
 PRAGMA foreign_keys = OFF;
 
+UPDATE storage_locations SET read_only = 1 WHERE tier = 'TIER3_MASTER_ARCHIVE';
+
 CREATE TABLE storage_locations_old (
     id              INTEGER PRIMARY KEY,
     name            TEXT    NOT NULL,

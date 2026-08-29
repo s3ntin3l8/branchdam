@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/s3ntin3l8/branchdam/internal/naming"
 )
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -196,7 +198,7 @@ func defaultConfig() Config {
 			Enabled: true,
 		},
 		Ingest: Ingest{
-			NamingTemplate: "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}",
+			NamingTemplate: naming.DefaultPathTemplate,
 		},
 	}
 }
