@@ -20,6 +20,8 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/naming"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
 type AgentUploadResponse struct {
@@ -27,6 +29,7 @@ type AgentUploadResponse struct {
 	Status       string `json:"status"`
 	BytesWritten int64  `json:"bytesWritten"`
 	Blake3Hash   string `json:"blake3Hash"`
+	RelativePath string `json:"relativePath,omitempty"`
 }
 
 func (s *Server) writeJSONError(w http.ResponseWriter, statusCode int, message string) {
@@ -42,24 +45,34 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify writable storage location before creating files
-	var stagingBase string
-	var locID int64
+	// Select target storage location: prefer writable TIER3_MASTER_ARCHIVE, otherwise first writable tier
+	var targetLoc *storage.StorageLocationRow
+	var exportLoc *storage.StorageLocationRow
 	if s.db != nil {
 		locs, err := s.db.Reader.ListStorageLocations(r.Context())
 		if err == nil {
 			for _, loc := range locs {
+				row := storage.StorageLocationRow{
+					ID:       loc.ID,
+					Name:     loc.Name,
+					RootPath: loc.RootPath,
+					Tier:     loc.Tier,
+					ReadOnly: loc.ReadOnly != 0,
+				}
+				if loc.Tier == "TIER2_EXPORTS" && loc.ReadOnly == 0 {
+					exportLoc = &row
+				}
 				if loc.ReadOnly == 0 {
-					stagingBase = loc.RootPath
-					locID = loc.ID
-					break
+					if targetLoc == nil || loc.Tier == "TIER3_MASTER_ARCHIVE" {
+						targetLoc = &row
+					}
 				}
 			}
 		}
 	}
 
-	if locID == 0 || stagingBase == "" {
-		s.writeJSONError(w, http.StatusServiceUnavailable, "no writable storage location configured for staging")
+	if targetLoc == nil {
+		s.writeJSONError(w, http.StatusServiceUnavailable, "no writable storage location configured for upload")
 		return
 	}
 
@@ -68,6 +81,11 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		filename = "upload_" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".bin"
 	}
 	filename = filepath.Base(filename)
+
+	cameraModel := r.Header.Get("X-Camera-Model")
+	if cameraModel == "" {
+		cameraModel = "unknown_camera"
+	}
 
 	expectedBlake3 := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Blake3-Hash")))
 	capturedAtHeader := r.Header.Get("X-Capture-Timestamp")
@@ -79,10 +97,38 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		capturedAtUnix = time.Now().Unix()
 	}
 
-	stagingDir := filepath.Join(stagingBase, "_staging", "mobile", time.Now().Format("2006-01-02"))
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create staging directory: %v", err))
+	capturedAt := time.Unix(capturedAtUnix, 0).UTC()
+	namingTpl := naming.DefaultPathTemplate
+	if cfg := s.cfg(); cfg != nil && cfg.Ingest.NamingTemplate != "" {
+		namingTpl = cfg.Ingest.NamingTemplate
+	}
+
+	relPath := naming.RenderPath(namingTpl, naming.TemplateVars{
+		CapturedAt:   capturedAt,
+		CameraModel:  cameraModel,
+		OriginalName: filename,
+	})
+
+	targetPath := filepath.Join(targetLoc.RootPath, relPath)
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create directory: %v", err))
 		return
+	}
+
+	// Handle filename collisions by auto-suffixing
+	ext := filepath.Ext(filename)
+	stem := strings.TrimSuffix(filename, ext)
+	targetFileName := filepath.Base(targetPath)
+	collisionCount := 1
+	for {
+		if _, err := os.Stat(targetPath); errorsIsNotExist(err) {
+			break
+		}
+		collisionCount++
+		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
+		relPath = filepath.Join(filepath.Dir(relPath), suffixedName)
+		targetPath = filepath.Join(targetLoc.RootPath, relPath)
+		targetFileName = suffixedName
 	}
 
 	nodeID, err := uuid.NewV7()
@@ -91,11 +137,6 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeUUIDStr := nodeID.String()
-
-	ext := filepath.Ext(filename)
-	stem := strings.TrimSuffix(filename, ext)
-	targetFileName := fmt.Sprintf("%s_%s%s", stem, nodeUUIDStr[:8], ext)
-	targetPath := filepath.Join(stagingDir, targetFileName)
 
 	outFile, err := os.Create(targetPath)
 	if err != nil {
@@ -135,7 +176,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 
 			_, insErr := q.InsertMediaNode(r.Context(), sqlcgen.InsertMediaNodeParams{
 				NodeUuid:          nodeUUIDStr,
-				StorageLocationID: locID,
+				StorageLocationID: targetLoc.ID,
 				FilePath:          targetPath,
 				FileName:          targetFileName,
 				FileExt:           ext,
@@ -158,6 +199,16 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Hardlink non-RAW standalone photos into Tier 2 Immich exports for zero-storage duplication
+		if exportLoc != nil && isStandaloneDisplayable(ext) {
+			exportDest := filepath.Join(exportLoc.RootPath, "immich", relPath)
+			_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
+			if linkErr := os.Link(targetPath, exportDest); linkErr != nil {
+				// Fallback to copy if on different physical filesystem (EXDEV)
+				_ = copyFileContents(targetPath, exportDest)
+			}
+		}
+
 		if s.engine != nil {
 			node, err := s.db.Reader.GetMediaNodeByUUID(r.Context(), nodeUUIDStr)
 			if err == nil {
@@ -177,5 +228,36 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		Status:       "UPLOADED",
 		BytesWritten: bytesWritten,
 		Blake3Hash:   computedBlake3,
+		RelativePath: relPath,
 	})
+}
+
+func errorsIsNotExist(err error) bool {
+	return os.IsNotExist(err)
+}
+
+func isStandaloneDisplayable(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg", ".heic", ".png", ".webp", ".mp4", ".mov":
+		return true
+	default:
+		return false
+	}
+}
+
+func copyFileContents(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	_, err = io.Copy(out, in)
+	return err
 }

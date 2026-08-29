@@ -461,9 +461,23 @@ var pathRewriteFields = []Field{
 	},
 }
 
+var ingestFields = []Field{
+	{
+		Key:      "ingest.namingTemplate",
+		Type:     KindString,
+		Label:    "Naming Template",
+		Group:    "Ingest & Archive",
+		Apply:    ApplyLive,
+		Get:      func(cfg *config.Config) any { return cfg.Ingest.NamingTemplate },
+		Set:      func(cfg *config.Config, v any) error { cfg.Ingest.NamingTemplate = v.(string); return nil },
+		Editable: true,
+		Doc:      "Naming and folder path template for ingested files (e.g. {yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}).",
+	},
+}
+
 // Fields returns every registered field, in registration order.
 func Fields() []Field {
-	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, httpFields, agentFields, authzFields, pathRewriteFields}
+	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, ingestFields, httpFields, agentFields, authzFields, pathRewriteFields}
 	n := 0
 	for _, g := range groups {
 		n += len(g)

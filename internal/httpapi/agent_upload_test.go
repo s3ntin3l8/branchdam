@@ -132,3 +132,76 @@ func TestAgentUploadAuthForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
+func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	exportsDir := filepath.Join(tmpDir, "exports")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+	require.NoError(t, os.MkdirAll(exportsDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "Exports",
+			RootPath: exportsDir,
+			Tier:     "TIER2_EXPORTS",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+
+	data := []byte("JPEG image binary content for testing standalone upload")
+	hasher := blake3.New()
+	_, err = hasher.Write(data)
+	require.NoError(t, err)
+	expectedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "IMG_2026.JPG")
+	req.Header.Set("X-Camera-Model", "Pixel 9 Pro")
+	req.Header.Set("X-Capture-Timestamp", "1787998200") // 2026-08-29
+	req.Header.Set("X-Blake3-Hash", expectedHash)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp AgentUploadResponse
+	err = json.Unmarshal(rec.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "UPLOADED", resp.Status)
+	assert.Equal(t, expectedHash, resp.Blake3Hash)
+	assert.NotEmpty(t, resp.RelativePath)
+	assert.Contains(t, resp.RelativePath, "Pixel 9 Pro")
+	assert.Contains(t, resp.RelativePath, "IMG_2026.JPG")
+
+	// Verify file exists on archive disk
+	archiveFile := filepath.Join(archiveDir, resp.RelativePath)
+	content, err := os.ReadFile(archiveFile)
+	require.NoError(t, err)
+	assert.Equal(t, data, content)
+
+	// Verify hardlink exists in exports/immich/
+	exportFile := filepath.Join(exportsDir, "immich", resp.RelativePath)
+	exportContent, err := os.ReadFile(exportFile)
+	require.NoError(t, err)
+	assert.Equal(t, data, exportContent)
+}

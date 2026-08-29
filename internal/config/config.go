@@ -37,6 +37,12 @@ type Config struct {
 
 	Thumbnails Thumbnails `yaml:"thumbnails"`
 	Pruning    Pruning    `yaml:"pruning"`
+	Ingest     Ingest     `yaml:"ingest"`
+}
+
+// Ingest configures server-side ingest and folder naming templates.
+type Ingest struct {
+	NamingTemplate string `yaml:"namingTemplate"`
 }
 
 // Pruning configures the cache pruning engine (internal/prune).
@@ -188,6 +194,9 @@ func defaultConfig() Config {
 		},
 		Pruning: Pruning{
 			Enabled: true,
+		},
+		Ingest: Ingest{
+			NamingTemplate: "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}",
 		},
 	}
 }

@@ -11,6 +11,7 @@ package naming
 import (
 	"regexp"
 	"strings"
+	"time"
 )
 
 // SuffixKind classifies the suffix Analyze stripped off a filename, if any.
@@ -105,4 +106,56 @@ func Stem(fileName string) string {
 func Kind(fileName string) SuffixKind {
 	_, kind := Analyze(fileName)
 	return kind
+}
+
+// DefaultPathTemplate is the canonical folder and file naming template.
+const DefaultPathTemplate = "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}"
+
+// TemplateVars holds placeholder values for RenderPath.
+type TemplateVars struct {
+	CapturedAt   time.Time
+	CameraModel  string
+	OriginalName string
+}
+
+func splitBase(name string) (stem, ext string) {
+	dot := strings.LastIndex(name, ".")
+	if dot <= 0 {
+		return name, ""
+	}
+	return name[:dot], name[dot+1:]
+}
+
+func sanitizeSegment(s string) string {
+	if s == "" {
+		return s
+	}
+	replacer := strings.NewReplacer(
+		"/", "_", "\\", "_", ":", "_", "*", "_", "?", "_",
+		"\"", "_", "<", "_", ">", "_", "|", "_",
+	)
+	return replacer.Replace(s)
+}
+
+// RenderPath renders a relative path using tpl and vars.
+func RenderPath(tpl string, vars TemplateVars) string {
+	if tpl == "" {
+		tpl = DefaultPathTemplate
+	}
+	cameraModel := vars.CameraModel
+	if cameraModel == "" {
+		cameraModel = "unknown_camera"
+	}
+	stem, ext := splitBase(vars.OriginalName)
+
+	replacer := strings.NewReplacer(
+		"{yyyy}", vars.CapturedAt.Format("2006"),
+		"{mm}", vars.CapturedAt.Format("01"),
+		"{dd}", vars.CapturedAt.Format("02"),
+		"{camera_model}", sanitizeSegment(cameraModel),
+		"{original_name}", sanitizeSegment(vars.OriginalName),
+		"{stem}", sanitizeSegment(stem),
+		"{ext}", sanitizeSegment(ext),
+	)
+	return replacer.Replace(tpl)
 }
