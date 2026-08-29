@@ -190,7 +190,16 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 // updated configuration without a server restart. A failure here is logged
 // but does not fail the PUT request -- the DB write already succeeded and
 // the next restart will pick up the change regardless.
+//
+// s.guard is allowed to be nil (the storage_locations tests build a Server
+// without a Guard to isolate the override path from filesystem coupling):
+// there's nothing to hot-swap in that case, so this is a no-op rather than
+// a panic. Matches the optional-Guard pattern in routes.go
+// (handleResolvePath, handlePurgeTrash).
 func (s *Server) reloadGuardLocations(ctx context.Context) error {
+	if s.guard == nil {
+		return nil
+	}
 	rows, err := s.db.ListStorageLocations(ctx)
 	if err != nil {
 		return fmt.Errorf("list storage locations: %w", err)
