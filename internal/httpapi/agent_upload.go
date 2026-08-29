@@ -22,7 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 )
 
-type StagingUploadResponse struct {
+type AgentUploadResponse struct {
 	NodeUUID     string `json:"nodeUuid"`
 	Status       string `json:"status"`
 	BytesWritten int64  `json:"bytesWritten"`
@@ -35,7 +35,7 @@ func (s *Server) writeJSONError(w http.ResponseWriter, statusCode int, message s
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
-func (s *Server) handleStagingUpload(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	p, ok := auth.From(r.Context())
 	if !ok || (p.Kind != auth.KindMachine && !p.Authenticated) {
 		s.writeJSONError(w, http.StatusForbidden, "authentication required")
@@ -172,9 +172,9 @@ func (s *Server) handleStagingUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(StagingUploadResponse{
+	_ = json.NewEncoder(w).Encode(AgentUploadResponse{
 		NodeUUID:     nodeUUIDStr,
-		Status:       "STAGED",
+		Status:       "UPLOADED",
 		BytesWritten: bytesWritten,
 		Blake3Hash:   computedBlake3,
 	})
