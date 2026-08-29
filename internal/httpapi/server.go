@@ -416,11 +416,11 @@ func requestOrigin(r *http.Request, trustedProxies []string) string {
 }
 
 // isTrustedProxy checks whether remoteAddr belongs to a trusted proxy range.
-// When trusted is nil or empty, all proxies are trusted for backward
-// compatibility — the original behavior honored X-Forwarded-* headers
-// unconditionally.
+// When trusted is nil, all proxies are trusted for backward compatibility:
+// the original behavior honored X-Forwarded-* headers unconditionally.
+// An explicitly empty list denies all forwarded headers.
 func isTrustedProxy(remoteAddr string, trusted []string) bool {
-	if len(trusted) == 0 {
+	if trusted == nil {
 		return true
 	}
 

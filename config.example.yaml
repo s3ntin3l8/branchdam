@@ -17,7 +17,7 @@ http:
   exposeOpenAPI: false            # expose /openapi.json and /docs (default false)
   # IP addresses or CIDR ranges of trusted reverse proxies.
   # X-Forwarded-* headers are only honored from these sources.
-  # Default (unset or empty): trust all (backward-compatible).
+  # Default (unset): trust all (backward-compatible).
   # Set to [] (empty list) to deny all forwarded headers.
   # trustedProxies:
   #   - 10.0.0.0/8

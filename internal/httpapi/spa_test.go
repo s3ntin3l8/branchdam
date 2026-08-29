@@ -138,7 +138,8 @@ func TestIsTrustedProxy(t *testing.T) {
 		remoteAddr string
 		want       bool
 	}{
-		{"empty list trusts all (backward compatible)", nil, "10.0.0.1:1234", true},
+		{"unset trusts all (backward compatible)", nil, "10.0.0.1:1234", true},
+		{"empty list denies all", []string{}, "10.0.0.1:1234", false},
 		{"wildcard accepts all", []string{"*"}, "10.0.0.1:1234", true},
 		{"exact IP match", []string{"10.0.0.1"}, "10.0.0.1:1234", true},
 		{"exact IP no match", []string{"10.0.0.2"}, "10.0.0.1:1234", false},
@@ -173,6 +174,40 @@ func TestServeIndexHTMLHonorsForwardedHeadersByDefault(t *testing.T) {
 	want := `content="https://dam.example.com/og-image.png"`
 	if !bytes.Contains(body, []byte(want)) {
 		t.Errorf("body = %q, want forwarded headers honored by default (backward-compatible trust-all)", body)
+	}
+}
+
+func TestServeIndexHTMLRejectsForwardedHeadersFromUntrustedProxy(t *testing.T) {
+	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
+	path := filepath.Join(t.TempDir(), "httpapi.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	log := slog.New(slog.DiscardHandler)
+	pool := workers.New[string](1, 4)
+	cfg := &config.Config{
+		HTTP: config.HTTP{TrustedProxies: []string{}},
+	}
+	srv := New(Deps{
+		Config: cfg, Log: log, DB: database,
+		Prober: probe.New(), Pool: pool,
+		Engine: graph.NewEngine(database, log), Hub: sse.New(),
+		Version: "test", SPA: spa,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://internal-backend:8080/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "dam.example.com")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	body, _ := io.ReadAll(rr.Body)
+	want := `content="http://internal-backend:8080/og-image.png"`
+	if !bytes.Contains(body, []byte(want)) {
+		t.Errorf("body = %q, want forwarded headers ignored when trusted proxies is explicitly empty", body)
 	}
 }
 
