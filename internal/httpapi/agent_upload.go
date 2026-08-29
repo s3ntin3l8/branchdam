@@ -143,15 +143,27 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle filename collisions by auto-suffixing
+	// Handle filename collisions by atomically attempting O_CREATE|O_EXCL.
+	// Using O_EXCL eliminates the TOCTOU gap between a stat-based check and a
+	// subsequent Create: whichever concurrent upload wins the exclusive create
+	// owns that path; the loser retries with the next collision suffix.
 	ext := filepath.Ext(filename)
 	stem := strings.TrimSuffix(filename, ext)
 	targetFileName := filepath.Base(targetPath)
 	collisionCount := 0
+
+	var outFile *os.File
 	for {
-		if _, err := os.Stat(targetPath); errorsIsNotExist(err) {
+		f, createErr := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+		if createErr == nil {
+			outFile = f
 			break
 		}
+		if !errors.Is(createErr, os.ErrExist) {
+			s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create target file: %v", createErr))
+			return
+		}
+		// Path already exists — pick the next collision suffix and retry.
 		collisionCount++
 		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
 		relPath = filepath.Join(filepath.Dir(relPath), suffixedName)
@@ -165,16 +177,12 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 
 	nodeID, err := uuid.NewV7()
 	if err != nil {
+		_ = outFile.Close()
+		_ = os.Remove(targetPath)
 		s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to mint node uuid: %v", err))
 		return
 	}
 	nodeUUIDStr := nodeID.String()
-
-	outFile, err := os.Create(targetPath)
-	if err != nil {
-		s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create target file: %v", err))
-		return
-	}
 
 	hasher := blake3.New()
 	multiWriter := io.MultiWriter(outFile, hasher)
@@ -277,17 +285,23 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 					FilenameStem:      sql.NullString{String: stem, Valid: stem != ""},
 					CapturedAtUnix:    sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
 				})
-				if expInsErr == nil {
-					_, _ = q.CreateMediaEdge(r.Context(), sqlcgen.CreateMediaEdgeParams{
-						SourceNodeID:     archiveNode.ID,
-						TargetNodeID:     exportNode.ID,
-						RelationshipType: "FINAL_EXPORT",
-						Confidence:       1.0,
-						Tier:             1,
-						Resolver:         "immich_export",
-						EvidenceJson:     `{"reason":"immich_hardlink_export"}`,
-						ReviewState:      "AUTO_ACCEPTED",
-					})
+				if expInsErr != nil {
+					// Roll back the whole transaction so neither the archive node
+					// nor the export node land in the DB; the caller's err != nil
+					// cleanup block removes both on-disk files.
+					return fmt.Errorf("insert export media node: %w", expInsErr)
+				}
+				if _, edgeErr := q.CreateMediaEdge(r.Context(), sqlcgen.CreateMediaEdgeParams{
+					SourceNodeID:     archiveNode.ID,
+					TargetNodeID:     exportNode.ID,
+					RelationshipType: "FINAL_EXPORT",
+					Confidence:       1.0,
+					Tier:             1,
+					Resolver:         "immich_export",
+					EvidenceJson:     `{"reason":"immich_hardlink_export"}`,
+					ReviewState:      "AUTO_ACCEPTED",
+				}); edgeErr != nil {
+					return fmt.Errorf("create export edge: %w", edgeErr)
 				}
 			}
 			return nil
@@ -323,10 +337,6 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		Blake3Hash:   computedBlake3,
 		RelativePath: relPath,
 	})
-}
-
-func errorsIsNotExist(err error) bool {
-	return os.IsNotExist(err)
 }
 
 func isStandaloneDisplayable(ext string) bool {
