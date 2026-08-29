@@ -142,7 +142,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		cleanedRel = strings.TrimPrefix(cleanedRel, string(filepath.Separator))
 		cleanedRel = strings.TrimPrefix(cleanedRel, "/")
 		cleanedRel = strings.TrimPrefix(cleanedRel, "\\")
-		if strings.HasPrefix(cleanedRel, "..") || filepath.IsAbs(cleanedRel) {
+		if !filepath.IsLocal(cleanedRel) {
 			return nil, errors.New("invalid relative path: cannot escape root")
 		}
 		if filepath.Base(cleanedRel) == cleanFilename {
@@ -155,7 +155,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	}
 
 	cleanRel := filepath.Clean(relPath)
-	if strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
+	if !filepath.IsLocal(cleanRel) {
 		return nil, errors.New("invalid rendered path")
 	}
 
@@ -163,14 +163,13 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve archive root: %w", err)
 	}
-	if !strings.HasSuffix(safeArchiveDir, string(filepath.Separator)) {
-		safeArchiveDir += string(filepath.Separator)
-	}
 
-	targetPath, err := filepath.Abs(filepath.Join(safeArchiveDir, cleanRel))
-	if err != nil || !strings.HasPrefix(targetPath, safeArchiveDir) {
+	targetPath := filepath.Join(safeArchiveDir, cleanRel)
+	rel, err := filepath.Rel(safeArchiveDir, targetPath)
+	if err != nil || !filepath.IsLocal(rel) {
 		return nil, errors.New("path escapes storage location")
 	}
+	targetPath = filepath.Join(safeArchiveDir, rel)
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
@@ -193,14 +192,17 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		}
 		collisionCount++
 		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
-		cleanRel = filepath.Clean(filepath.Join(filepath.Dir(cleanRel), suffixedName))
-		if strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
+		nextCleanRel := filepath.Clean(filepath.Join(filepath.Dir(cleanRel), suffixedName))
+		if !filepath.IsLocal(nextCleanRel) {
 			return nil, errors.New("path escapes storage location")
 		}
-		targetPath, err = filepath.Abs(filepath.Join(safeArchiveDir, cleanRel))
-		if err != nil || !strings.HasPrefix(targetPath, safeArchiveDir) {
+		nextTargetPath := filepath.Join(safeArchiveDir, nextCleanRel)
+		nextRel, relErr := filepath.Rel(safeArchiveDir, nextTargetPath)
+		if relErr != nil || !filepath.IsLocal(nextRel) {
 			return nil, errors.New("path escapes storage location")
 		}
+		cleanRel = nextCleanRel
+		targetPath = filepath.Join(safeArchiveDir, nextRel)
 		targetFileName = suffixedName
 	}
 
@@ -308,18 +310,18 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	if exportLoc != nil && isStandaloneDisplayable(ext) {
 		safeExportDir, err := filepath.Abs(exportLoc.RootPath)
 		if err == nil {
-			if !strings.HasSuffix(safeExportDir, string(filepath.Separator)) {
-				safeExportDir += string(filepath.Separator)
-			}
-			dest, err := filepath.Abs(filepath.Join(safeExportDir, "immich", cleanRel))
-			if err == nil && strings.HasPrefix(dest, safeExportDir) {
-				exportDest = dest
-				exportDir := filepath.Dir(exportDest)
-				if err := os.MkdirAll(exportDir, 0o755); err == nil {
-					if err := linkOrCopyFile(targetPath, exportDest); err == nil {
-						exportCreated = true
-						if expID, err := uuid.NewV7(); err == nil {
-							exportUUIDStr = expID.String()
+			exportRel := filepath.Clean(filepath.Join("immich", cleanRel))
+			if filepath.IsLocal(exportRel) {
+				dest := filepath.Join(safeExportDir, exportRel)
+				if rel, err := filepath.Rel(safeExportDir, dest); err == nil && filepath.IsLocal(rel) {
+					exportDest = filepath.Join(safeExportDir, rel)
+					exportDir := filepath.Dir(exportDest)
+					if err := os.MkdirAll(exportDir, 0o755); err == nil {
+						if err := linkOrCopyFile(targetPath, exportDest); err == nil {
+							exportCreated = true
+							if expID, err := uuid.NewV7(); err == nil {
+								exportUUIDStr = expID.String()
+							}
 						}
 					}
 				}
