@@ -209,6 +209,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/assets/{id}/thumbnail", s.handleThumbnail)
 	// Agent streaming upload accepts raw octet stream with custom headers
 	mux.HandleFunc("POST /api/v1/agent/upload", s.handleAgentUpload)
+	// Web browser multipart upload
+	mux.HandleFunc("POST /api/v1/upload", s.handleWebUpload)
 	mux.Handle("GET /", s.spaHandler())
 
 	var apiKey string

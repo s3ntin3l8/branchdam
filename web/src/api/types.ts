@@ -149,6 +149,29 @@ export interface StartScanRequest {
   differential?: boolean;
 }
 
+export interface UploadOptions {
+  storageLocationId?: number;
+  relativePath?: string;
+  applyNamingTemplate?: boolean;
+  overrideCameraModel?: string;
+  overrideCapturedAt?: number;
+}
+
+export interface UploadProgressEvent {
+  loaded: number;
+  total: number;
+  percent: number;
+}
+
+export interface WebUploadResponse {
+  asset: Asset;
+  nodeUuid: string;
+  status: string;
+  bytesWritten: number;
+  blake3Hash: string;
+  relativePath: string;
+}
+
 export interface LineageResponse {
   rootId: number;
   nodes: Asset[];

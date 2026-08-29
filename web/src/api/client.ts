@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -115,4 +115,76 @@ export const api = {
       body: JSON.stringify(input),
     }),
   postRestart: () => request<PostRestartResponse>("/api/v1/restart", { method: "POST" }),
+
+  uploadFile: (
+    file: File,
+    options: UploadOptions = {},
+    onProgress?: (event: UploadProgressEvent) => void,
+    signal?: AbortSignal
+  ): Promise<WebUploadResponse> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/v1/upload");
+
+      if (signal) {
+        signal.addEventListener("abort", () => {
+          xhr.abort();
+          reject(new DOMException("Upload aborted", "AbortError"));
+        });
+      }
+
+      if (onProgress && xhr.upload) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            onProgress({ loaded: e.loaded, total: e.total, percent });
+          }
+        };
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText) as WebUploadResponse;
+            resolve(data);
+          } catch {
+            reject(new ApiError(xhr.status, "Invalid JSON response"));
+          }
+        } else {
+          let detail = xhr.statusText;
+          try {
+            const errBody = JSON.parse(xhr.responseText) as { error?: string; detail?: string };
+            detail = errBody.error || errBody.detail || detail;
+          } catch {
+            // non-json response
+          }
+          reject(new ApiError(xhr.status, detail));
+        }
+      };
+
+      xhr.onerror = () => {
+        reject(new ApiError(xhr.status || 0, "Network error during upload"));
+      };
+
+      const formData = new FormData();
+      formData.append("file", file, file.name);
+      if (options.storageLocationId) {
+        formData.append("storageLocationId", String(options.storageLocationId));
+      }
+      if (options.relativePath) {
+        formData.append("relativePath", options.relativePath);
+      }
+      if (options.applyNamingTemplate !== undefined) {
+        formData.append("applyNamingTemplate", String(options.applyNamingTemplate));
+      }
+      if (options.overrideCameraModel) {
+        formData.append("overrideCameraModel", options.overrideCameraModel);
+      }
+      if (options.overrideCapturedAt) {
+        formData.append("overrideCapturedAt", String(options.overrideCapturedAt));
+      }
+
+      xhr.send(formData);
+    });
+  },
 };
