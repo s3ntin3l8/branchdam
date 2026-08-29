@@ -115,7 +115,9 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	targetPath := filepath.Join(targetLoc.RootPath, relPath)
-	if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(targetLoc.RootPath)) {
+	targetClean := filepath.Clean(targetPath)
+	targetRootClean := filepath.Clean(targetLoc.RootPath) + string(filepath.Separator)
+	if !strings.HasPrefix(targetClean, targetRootClean) {
 		s.writeJSONError(w, http.StatusBadRequest, "path escapes storage location")
 		return
 	}
@@ -214,8 +216,12 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 			exportRel := filepath.Clean(filepath.Join("immich", relPath))
 			if !strings.HasPrefix(exportRel, "..") && !filepath.IsAbs(exportRel) {
 				exportDest := filepath.Join(exportLoc.RootPath, exportRel)
-				_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
-				_ = os.Link(targetPath, exportDest)
+				exportClean := filepath.Clean(exportDest)
+				exportRootClean := filepath.Clean(exportLoc.RootPath) + string(filepath.Separator)
+				if strings.HasPrefix(exportClean, exportRootClean) {
+					_ = os.MkdirAll(filepath.Dir(exportDest), 0o755)
+					_ = os.Link(targetPath, exportDest)
+				}
 			}
 		}
 
