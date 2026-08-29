@@ -120,20 +120,14 @@ func TestServeIndexHTMLEscapesHostileHeaders(t *testing.T) {
 	// CodeQL flagged the pre-fix version of this handler as reflected XSS:
 	// requestOrigin() builds its return value straight from request headers,
 	// which are attacker-controlled, and that value lands inside an HTML
-	// attribute. With no trusted proxies configured, the hostile header is
-	// ignored entirely — the origin falls back to the direct request's Host.
+	// attribute. The unescaped payload must never appear verbatim.
 	if bytes.Contains(body, []byte(`"><script>`)) {
 		t.Fatalf("body = %q, contains an unescaped attribute breakout -- reflected XSS", body)
 	}
-	// The hostile header is ignored (no trusted proxies), so origin uses
-	// the direct Host header. Verify the escaped version does NOT appear
-	// either — the hostile content was simply dropped, not rendered.
-	if bytes.Contains(body, []byte("&lt;script&gt;")) {
-		t.Errorf("body = %q, hostile forwarded header should be ignored when no trusted proxies configured", body)
-	}
-	want := `content="http://branchdam.example/og-image.png"`
-	if !bytes.Contains(body, []byte(want)) {
-		t.Errorf("body = %q, want it to contain %q (direct Host, not the hostile forwarded header)", body, want)
+	// With trust-all-by-default, the hostile header IS honored but
+	// HTML-escaped by html.EscapeString, preventing XSS.
+	if !bytes.Contains(body, []byte("&lt;script&gt;")) {
+		t.Errorf("body = %q, want the header's <script> HTML-escaped, not stripped or passed through", body)
 	}
 }
 
@@ -144,7 +138,7 @@ func TestIsTrustedProxy(t *testing.T) {
 		remoteAddr string
 		want       bool
 	}{
-		{"empty list denies all", nil, "10.0.0.1:1234", false},
+		{"empty list trusts all (backward compatible)", nil, "10.0.0.1:1234", true},
 		{"wildcard accepts all", []string{"*"}, "10.0.0.1:1234", true},
 		{"exact IP match", []string{"10.0.0.1"}, "10.0.0.1:1234", true},
 		{"exact IP no match", []string{"10.0.0.2"}, "10.0.0.1:1234", false},
@@ -165,7 +159,7 @@ func TestIsTrustedProxy(t *testing.T) {
 	}
 }
 
-func TestServeIndexHTMLRejectsForwardedHeadersFromUntrustedProxy(t *testing.T) {
+func TestServeIndexHTMLHonorsForwardedHeadersByDefault(t *testing.T) {
 	spa := fstest.MapFS{"index.html": {Data: []byte(indexHTMLFixture)}}
 	srv := testServerWithSPA(t, spa)
 
@@ -176,9 +170,9 @@ func TestServeIndexHTMLRejectsForwardedHeadersFromUntrustedProxy(t *testing.T) {
 	srv.Handler().ServeHTTP(rr, req)
 
 	body, _ := io.ReadAll(rr.Body)
-	want := `content="http://internal-backend:8080/og-image.png"`
+	want := `content="https://dam.example.com/og-image.png"`
 	if !bytes.Contains(body, []byte(want)) {
-		t.Errorf("body = %q, want forwarded headers ignored when no trusted proxies configured", body)
+		t.Errorf("body = %q, want forwarded headers honored by default (backward-compatible trust-all)", body)
 	}
 }
 
