@@ -1402,4 +1402,56 @@ func TestDrainer_NodeDeleted_MovesToTrashAndUnlinksImmichExport(t *testing.T) {
 	require.Empty(t, eSync)
 }
 
+func TestDrainer_NodeDeleted_AvoidsOverwritingExistingTrashFile(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default())
+
+	// Pre-create existing file in .trash
+	trashPath := filepath.Join(env.staging, ".trash", "IMG_9999.JPG")
+	require.NoError(t, os.MkdirAll(filepath.Dir(trashPath), 0o755))
+	require.NoError(t, os.WriteFile(trashPath, []byte("first deleted version"), 0o644))
+
+	// Now create a new master file at the same original path
+	masterFile := filepath.Join(env.staging, "IMG_9999.JPG")
+	require.NoError(t, os.WriteFile(masterFile, []byte("second deleted version"), 0o644))
+
+	masterUUID := uuid.New().String()
+	err := env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          masterUUID,
+			StorageLocationID: env.locID1,
+			FilePath:          masterFile,
+			FileName:          "IMG_9999.JPG",
+			FileExt:           ".JPG",
+			SizeBytes:         22,
+			MtimeUnix:         time.Now().Unix(),
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	// Delete the second master node
+	enqueueEvent(t, env.db, agent.EventNodeDeleted, agent.NodeDeletedPayload{
+		NodeUUID: masterUUID,
+	})
+
+	stats, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+
+	// The original trash file should be preserved
+	origTrashData, err := os.ReadFile(trashPath)
+	require.NoError(t, err)
+	require.Equal(t, []byte("first deleted version"), origTrashData)
+
+	// The second trash file should be saved as IMG_9999_1.JPG
+	suffixedTrashPath := filepath.Join(env.staging, ".trash", "IMG_9999_1.JPG")
+	suffixedData, err := os.ReadFile(suffixedTrashPath)
+	require.NoError(t, err, "second deleted file should be saved under suffixed name")
+	require.Equal(t, []byte("second deleted version"), suffixedData)
+}
+
 func strPtr(s string) *string { return &s }

@@ -777,6 +777,20 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		if loc, err := d.guard.Resolve(node.FilePath); err == nil {
 			if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
 				trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
+				// Guard against overwriting pre-existing trashed files if the same relPath is trashed again
+				trashExt := filepath.Ext(trashPath)
+				trashStem := strings.TrimSuffix(trashPath, trashExt)
+				uniqueTrashPath := trashPath
+				collisionIdx := 0
+				for {
+					if _, err := os.Stat(uniqueTrashPath); os.IsNotExist(err) {
+						break
+					}
+					collisionIdx++
+					uniqueTrashPath = fmt.Sprintf("%s_%d%s", trashStem, collisionIdx, trashExt)
+				}
+				trashPath = uniqueTrashPath
+
 				now := time.Now().UTC()
 				if err := os.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
 					d.log.Warn("agent: failed to create trash directory", "err", err)
@@ -784,11 +798,11 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 					if err := os.Rename(node.FilePath, trashPath); err != nil {
 						if copyErr := moveFile(node.FilePath, trashPath); copyErr != nil {
 							d.log.Warn("agent: failed to move file to trash", "err", copyErr)
-						} else {
-							_ = os.Chtimes(trashPath, now, now)
+						} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
+							d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
 						}
-					} else {
-						_ = os.Chtimes(trashPath, now, now)
+					} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
+						d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
 					}
 				}
 			}
@@ -802,9 +816,16 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 			if edge.RelationshipType == "FINAL_EXPORT" || edge.Resolver == "immich_export" {
 				expNode, expErr := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
 				if expErr == nil {
-					_ = os.Remove(expNode.FilePath)
-					_ = q.MarkNodeMissing(ctx, expNode.ID)
-					_ = q.DeleteRemoteSyncStateForNode(ctx, expNode.ID)
+					if rmErr := os.Remove(expNode.FilePath); rmErr != nil && !os.IsNotExist(rmErr) {
+						d.log.Warn("agent: failed to unlink immich export file", "nodeID", expNode.ID, "err", rmErr)
+					} else {
+						if markErr := q.MarkNodeMissing(ctx, expNode.ID); markErr != nil {
+							d.log.Warn("agent: failed to mark export node missing", "nodeID", expNode.ID, "err", markErr)
+						}
+						if delErr := q.DeleteRemoteSyncStateForNode(ctx, expNode.ID); delErr != nil {
+							d.log.Warn("agent: failed to delete remote sync state for export node", "nodeID", expNode.ID, "err", delErr)
+						}
+					}
 				}
 			}
 		}
