@@ -28,6 +28,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/httpapi"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/prune"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
@@ -256,6 +257,11 @@ func main() {
 		agent.WithEngine(engine),
 		agent.WithImmichScanner(immichSupervisor))
 	drainer.Start(ctx, 0)
+
+	trashWorker := prune.NewTrashWorker(guard, func() int {
+		return settingsStore.Effective().Trash.RetentionDays
+	}, log)
+	trashWorker.Start(ctx, 0)
 
 	thumbWorker, thumbCache := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)
 

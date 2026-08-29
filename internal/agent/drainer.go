@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -770,6 +772,39 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		d.log.Warn("agent: delete remote sync state for node", "nodeID", node.ID, "err", err)
 	}
 
+	// Move physical master file to .trash/<rel_path> buffer inside storage location
+	if d.guard != nil && node.FilePath != "" {
+		if loc, err := d.guard.Resolve(node.FilePath); err == nil {
+			if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
+				trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
+				if err := os.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
+					d.log.Warn("agent: failed to create trash directory", "err", err)
+				} else if _, statErr := os.Stat(node.FilePath); statErr == nil {
+					if err := os.Rename(node.FilePath, trashPath); err != nil {
+						if copyErr := moveFile(node.FilePath, trashPath); copyErr != nil {
+							d.log.Warn("agent: failed to move file to trash", "err", copyErr)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Purge any Tier 2 Immich exports linked to this node (vanishes from gallery immediately)
+	edges, err := q.ListEdgesBySource(ctx, node.ID)
+	if err == nil {
+		for _, edge := range edges {
+			if edge.RelationshipType == "FINAL_EXPORT" || edge.Resolver == "immich_export" {
+				expNode, expErr := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
+				if expErr == nil {
+					_ = os.Remove(expNode.FilePath)
+					_ = q.MarkNodeMissing(ctx, expNode.ID)
+					_ = q.DeleteRemoteSyncStateForNode(ctx, expNode.ID)
+				}
+			}
+		}
+	}
+
 	// If Immich client is wired, trigger external library rescan
 	if d.immichScanner != nil {
 		if scanErr := d.immichScanner.TriggerScan(ctx); scanErr != nil {
@@ -778,6 +813,28 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 
 	return nil
+}
+
+func moveFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	_ = in.Close()
+	_ = out.Close()
+	return os.Remove(src)
 }
 
 // applyPathRebased returns the freshly inserted node's ID when NodeUUID was

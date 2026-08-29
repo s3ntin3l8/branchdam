@@ -40,6 +40,12 @@ type Config struct {
 	Thumbnails Thumbnails `yaml:"thumbnails"`
 	Pruning    Pruning    `yaml:"pruning"`
 	Ingest     Ingest     `yaml:"ingest"`
+	Trash      Trash      `yaml:"trash"`
+}
+
+// Trash configures the soft-delete trash buffer and automated retention.
+type Trash struct {
+	RetentionDays int `yaml:"retentionDays"`
 }
 
 // Ingest configures server-side ingest and folder naming templates.
@@ -199,6 +205,9 @@ func defaultConfig() Config {
 		},
 		Ingest: Ingest{
 			NamingTemplate: naming.DefaultPathTemplate,
+		},
+		Trash: Trash{
+			RetentionDays: 30,
 		},
 	}
 }

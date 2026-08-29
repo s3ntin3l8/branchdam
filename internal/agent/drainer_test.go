@@ -1272,4 +1272,134 @@ func TestDrainer_NodeDeleted_PurgesRemoteSyncStateAndTriggersImmichScan(t *testi
 	require.Empty(t, syncRows)
 }
 
+func TestDrainer_NodeDeleted_MovesToTrashAndUnlinksImmichExport(t *testing.T) {
+	env := setupTestDB(t)
+	scanner := &mockImmichScanner{}
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default(), agent.WithImmichScanner(scanner))
+
+	// Setup physical files on disk
+	masterFile := filepath.Join(env.staging, "2026", "08", "IMG_0042.JPG")
+	exportFile := filepath.Join(env.exports, "immich", "2026", "08", "IMG_0042.JPG")
+	require.NoError(t, os.MkdirAll(filepath.Dir(masterFile), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(exportFile), 0o755))
+	require.NoError(t, os.WriteFile(masterFile, []byte("master image bytes"), 0o644))
+	require.NoError(t, os.WriteFile(exportFile, []byte("export image bytes"), 0o644))
+
+	masterUUID := uuid.New().String()
+	exportUUID := uuid.New().String()
+
+	var (
+		masterNodeID int64
+		exportNodeID int64
+	)
+	err := env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		mn, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          masterUUID,
+			StorageLocationID: env.locID1,
+			FilePath:          masterFile,
+			FileName:          "IMG_0042.JPG",
+			FileExt:           ".JPG",
+			SizeBytes:         18,
+			MtimeUnix:         time.Now().Unix(),
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		masterNodeID = mn.ID
+
+		en, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          exportUUID,
+			StorageLocationID: env.locID2,
+			FilePath:          exportFile,
+			FileName:          "IMG_0042.JPG",
+			FileExt:           ".JPG",
+			SizeBytes:         18,
+			MtimeUnix:         time.Now().Unix(),
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "LINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		exportNodeID = en.ID
+
+		_, err = q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID:     masterNodeID,
+			TargetNodeID:     exportNodeID,
+			RelationshipType: "FINAL_EXPORT",
+			Confidence:       1.0,
+			Tier:             1,
+			Resolver:         "immich_export",
+			EvidenceJson:     `{"reason":"immich_export"}`,
+			ReviewState:      "AUTO_ACCEPTED",
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = q.UpsertRemoteSyncState(context.Background(), sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID:     masterNodeID,
+			Remote:     "IMMICH",
+			SyncStatus: "PUSHED",
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = q.UpsertRemoteSyncState(context.Background(), sqlcgen.UpsertRemoteSyncStateParams{
+			NodeID:     exportNodeID,
+			Remote:     "IMMICH",
+			SyncStatus: "PUSHED",
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	// Process EVENT_NODE_DELETED for the master node
+	enqueueEvent(t, env.db, agent.EventNodeDeleted, agent.NodeDeletedPayload{
+		NodeUUID: masterUUID,
+	})
+
+	stats, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.True(t, scanner.scanned, "Immich library rescan should be triggered")
+
+	// 1. Master file at original path is gone
+	_, statErr := os.Stat(masterFile)
+	require.True(t, os.IsNotExist(statErr), "original master file should no longer exist at original path")
+
+	// 2. Master file moved to .trash/<relPath>
+	trashPath := filepath.Join(env.staging, ".trash", "2026", "08", "IMG_0042.JPG")
+	trashData, err := os.ReadFile(trashPath)
+	require.NoError(t, err, "master file must be safely moved into .trash buffer")
+	require.Equal(t, []byte("master image bytes"), trashData)
+
+	// 3. Export file is removed from disk immediately
+	_, expStatErr := os.Stat(exportFile)
+	require.True(t, os.IsNotExist(expStatErr), "Immich export file must be removed from disk immediately")
+
+	// 4. DB nodes are marked MISSING
+	mNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), masterNodeID)
+	require.NoError(t, err)
+	require.Equal(t, "MISSING", mNode.LifecycleState)
+
+	eNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), exportNodeID)
+	require.NoError(t, err)
+	require.Equal(t, "MISSING", eNode.LifecycleState)
+
+	// 5. Remote sync state for both is deleted
+	mSync, err := env.db.Reader.ListRemoteSyncStateByNode(context.Background(), masterNodeID)
+	require.NoError(t, err)
+	require.Empty(t, mSync)
+
+	eSync, err := env.db.Reader.ListRemoteSyncStateByNode(context.Background(), exportNodeID)
+	require.NoError(t, err)
+	require.Empty(t, eSync)
+}
+
 func strPtr(s string) *string { return &s }
