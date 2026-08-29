@@ -16,6 +16,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
 func itoa(id int64) string {
@@ -496,6 +497,66 @@ func TestStorageHealthReflectsStorageLocationOverrides(t *testing.T) {
 // uses, rather than showing a raw override that's since become invalid
 // purely from a config.yaml edit flipping prunable to false with no PUT
 // involved.
+// TestReloadGuardLocationsPicksUpOverrides verifies that reloadGuardLocations
+// rebuilds the Guard from the same source-of-truth main.go uses
+// (cfg.StorageLocations + app_settings overrides), not from the
+// storage_locations table directly. The override-only flow (PUT writes
+// app_settings, not the table) would otherwise be invisible to the Guard.
+func TestReloadGuardLocationsPicksUpOverrides(t *testing.T) {
+	root := t.TempDir()
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "reload.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	guard := storage.NewGuard(nil) // empty initial set
+
+	base := config.Config{Authz: config.Authz{Groups: []string{"dam-admins"}}, StorageLocations: []config.StorageLocation{
+		{Name: "scratch", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH"},
+	}}
+	store, err := settings.NewStore(context.Background(), database, base, settingsTestKey(t), nil)
+	if err != nil {
+		t.Fatalf("settings.NewStore: %v", err)
+	}
+	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Guard: guard, Version: "test"})
+
+	// Initial reload: Guard has the base location.
+	if err := srv.reloadGuardLocations(context.Background()); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+	if _, err := guard.Resolve(filepath.Join(resolvedRoot, "a.txt")); err != nil {
+		t.Fatalf("resolve base location after initial reload: %v", err)
+	}
+
+	// PUT an override that renames the location. The storage_locations
+	// table is NOT touched (only app_settings is), so a reload that reads
+	// from the table would see the old name.
+	if err := settings.ApplyStorageLocationOverride(context.Background(), database, root,
+		map[string]any{"name": "renamed"}, nil, "tester"); err != nil {
+		t.Fatalf("ApplyStorageLocationOverride: %v", err)
+	}
+
+	if err := srv.reloadGuardLocations(context.Background()); err != nil {
+		t.Fatalf("reload after override: %v", err)
+	}
+
+	// The Guard must reflect the override: still resolvable by path
+	// (rootPath didn't change), but the name changed.
+	locs := guard.Locations()
+	if len(locs) != 1 {
+		t.Fatalf("guard.Locations() returned %d, want 1", len(locs))
+	}
+	if locs[0].Name != "renamed" {
+		t.Errorf("guard location name = %q, want %q (override not applied)", locs[0].Name, "renamed")
+	}
+}
+
 func TestStorageHealthCacheTtlHoursFallsBackWhenOverrideBecomesInvalid(t *testing.T) {
 	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "storage-health-cachettl.db"))
 	if err != nil {

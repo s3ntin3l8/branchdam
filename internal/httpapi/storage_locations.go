@@ -186,11 +186,24 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 	return out, nil
 }
 
-// reloadGuardLocations re-reads all storage locations from the database and
-// hot-swaps the Guard's in-memory set so subsequent requests reflect the
-// updated configuration without a server restart. A failure here is logged
-// but does not fail the PUT request -- the DB write already succeeded and
-// the next restart will pick up the change regardless.
+// reloadGuardLocations rebuilds the Guard from the same source-of-truth
+// main.go uses: cfg.StorageLocations (the config.yaml list) overlaid with
+// any storageLocation.* overrides from app_settings, then EvalSymlinks
+// canonicalized. This is the only way to see a change made via PUT to an
+// override field (the storage_locations table is only seeded at boot --
+// ListStorageLocations returns the same rows every time after that, so a
+// reload-from-DB-only path is a no-op for the change just made).
+//
+// Unresolvable roots (mount down, symlink target gone) are logged and
+// dropped from the Guard, matching LoadGuard's startup semantics. The DB
+// row stays active (the operator's config still says it should exist);
+// a future restart will retry the resolution. If a mount comes back,
+// POST /api/v1/restart picks it up; the next manual override change
+// triggers this same path and will pick it up too.
+//
+// A failure here is logged but does not fail the PUT request -- the DB
+// write already succeeded and the next restart will pick up the change
+// regardless.
 //
 // s.guard is allowed to be nil (the storage_locations tests build a Server
 // without a Guard to isolate the override path from filesystem coupling):
@@ -201,20 +214,31 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 	if s.guard == nil {
 		return nil
 	}
-	rows, err := s.db.ListStorageLocations(ctx)
-	if err != nil {
-		return fmt.Errorf("list storage locations: %w", err)
+	cfg := s.cfg()
+	if cfg == nil {
+		return fmt.Errorf("config unavailable")
 	}
-	locs := make([]storage.Location, 0, len(rows))
-	for _, r := range rows {
-		resolved, err := filepath.EvalSymlinks(r.RootPath)
+	overrides, err := settings.LoadStorageLocationOverrides(ctx, s.db.Reader)
+	if err != nil {
+		return fmt.Errorf("load storage location overrides: %w", err)
+	}
+	effective := settings.ResolveStorageLocations(cfg.StorageLocations, overrides, s.log)
+
+	locs := make([]storage.Location, 0, len(effective))
+	for _, c := range effective {
+		resolved, err := filepath.EvalSymlinks(c.RootPath)
 		if err != nil {
+			s.log.Warn("storage reload: skipping unresolvable root",
+				"name", c.Name, "rootPath", c.RootPath, "err", err)
 			continue
 		}
-		resolved = filepath.Clean(resolved)
-		loc := storage.Location(r)
-		loc.RootPath = resolved
-		locs = append(locs, loc)
+		locs = append(locs, storage.Location{
+			ID:       0, // re-resolved from override; Guard doesn't need the DB id for Resolve/CheckWrite
+			Name:     c.Name,
+			RootPath: filepath.Clean(resolved),
+			Tier:     c.Tier,
+			ReadOnly: c.ReadOnly,
+		})
 	}
 	s.guard.ReloadLocations(locs)
 	return nil
