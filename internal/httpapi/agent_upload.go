@@ -201,12 +201,46 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = outFile.Close()
 
+	// Hardlink non-RAW standalone photos into Tier 2 Immich exports for zero-storage duplication
+	var (
+		exportCreated bool
+		exportDest    string
+		exportUUIDStr string
+	)
+	if exportLoc != nil && isStandaloneDisplayable(ext) {
+		safeExportDir, err := filepath.Abs(exportLoc.RootPath)
+		if err == nil {
+			if !strings.HasSuffix(safeExportDir, string(filepath.Separator)) {
+				safeExportDir += string(filepath.Separator)
+			}
+			dest, err := filepath.Abs(filepath.Join(safeExportDir, "immich", relPath))
+			if err == nil && strings.HasPrefix(dest, safeExportDir) {
+				exportDest = dest
+				exportDir := filepath.Dir(exportDest)
+				if err := os.MkdirAll(exportDir, 0o755); err != nil {
+					if s.log != nil {
+						s.log.Warn("failed to create Immich export directory", "dir", exportDir, "err", err)
+					}
+				} else if err := linkOrCopyFile(targetPath, exportDest); err != nil {
+					if s.log != nil {
+						s.log.Warn("failed to create Immich export file", "target", targetPath, "dest", exportDest, "err", err)
+					}
+				} else {
+					exportCreated = true
+					if expID, err := uuid.NewV7(); err == nil {
+						exportUUIDStr = expID.String()
+					}
+				}
+			}
+		}
+	}
+
 	// Register media node in database
 	if s.db != nil {
 		err = s.db.InTx(r.Context(), func(q *sqlcgen.Queries) error {
 			nullFull := &computedBlake3
 
-			_, insErr := q.InsertMediaNode(r.Context(), sqlcgen.InsertMediaNodeParams{
+			archiveNode, insErr := q.InsertMediaNode(r.Context(), sqlcgen.InsertMediaNodeParams{
 				NodeUuid:          nodeUUIDStr,
 				StorageLocationID: targetLoc.ID,
 				FilePath:          targetPath,
@@ -222,36 +256,50 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 				FilenameStem:      sql.NullString{String: stem, Valid: stem != ""},
 				CapturedAtUnix:    sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
 			})
-			return insErr
+			if insErr != nil {
+				return insErr
+			}
+
+			if exportCreated && exportLoc != nil && exportUUIDStr != "" {
+				exportNode, expInsErr := q.InsertMediaNode(r.Context(), sqlcgen.InsertMediaNodeParams{
+					NodeUuid:          exportUUIDStr,
+					StorageLocationID: exportLoc.ID,
+					FilePath:          exportDest,
+					FileName:          targetFileName,
+					FileExt:           ext,
+					SizeBytes:         bytesWritten,
+					MtimeUnix:         time.Now().Unix(),
+					FastHash:          nullFast,
+					FullHash:          nullFull,
+					IndexingStatus:    "INDEXED_SHALLOW",
+					GraphStatus:       "LINKED",
+					LifecycleState:    "ACTIVE",
+					FilenameStem:      sql.NullString{String: stem, Valid: stem != ""},
+					CapturedAtUnix:    sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
+				})
+				if expInsErr == nil {
+					_, _ = q.CreateMediaEdge(r.Context(), sqlcgen.CreateMediaEdgeParams{
+						SourceNodeID:     archiveNode.ID,
+						TargetNodeID:     exportNode.ID,
+						RelationshipType: "FINAL_EXPORT",
+						Confidence:       1.0,
+						Tier:             1,
+						Resolver:         "immich_export",
+						EvidenceJson:     `{"reason":"immich_hardlink_export"}`,
+						ReviewState:      "AUTO_ACCEPTED",
+					})
+				}
+			}
+			return nil
 		})
 
 		if err != nil {
 			_ = os.Remove(targetPath)
+			if exportCreated && exportDest != "" {
+				_ = os.Remove(exportDest)
+			}
 			s.writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to record media node: %v", err))
 			return
-		}
-
-		// Hardlink non-RAW standalone photos into Tier 2 Immich exports for zero-storage duplication
-		if exportLoc != nil && isStandaloneDisplayable(ext) {
-			safeExportDir, err := filepath.Abs(exportLoc.RootPath)
-			if err == nil {
-				if !strings.HasSuffix(safeExportDir, string(filepath.Separator)) {
-					safeExportDir += string(filepath.Separator)
-				}
-				exportDest, err := filepath.Abs(filepath.Join(safeExportDir, "immich", relPath))
-				if err == nil && strings.HasPrefix(exportDest, safeExportDir) {
-					exportDir := filepath.Dir(exportDest)
-					if err := os.MkdirAll(exportDir, 0o755); err != nil {
-						if s.log != nil {
-							s.log.Warn("failed to create Immich export directory", "dir", exportDir, "err", err)
-						}
-					} else if err := os.Link(targetPath, exportDest); err != nil && !errors.Is(err, os.ErrExist) {
-						if s.log != nil {
-							s.log.Warn("failed to create Immich export hardlink", "target", targetPath, "dest", exportDest, "err", err)
-						}
-					}
-				}
-			}
 		}
 
 		if s.engine != nil {
@@ -288,4 +336,33 @@ func isStandaloneDisplayable(ext string) bool {
 	default:
 		return false
 	}
+}
+
+func linkOrCopyFile(src, dst string) error {
+	linkErr := os.Link(src, dst)
+	if linkErr == nil || errors.Is(linkErr, os.ErrExist) {
+		return nil
+	}
+
+	// Fallback to safe non-truncating copy on cross-device link failure
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("link error: %w, open src error: %v", linkErr, err)
+	}
+	defer func() { _ = srcFile.Close() }()
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return fmt.Errorf("link error: %w, create dst error: %v", linkErr, err)
+	}
+	defer func() { _ = dstFile.Close() }()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("link error: %w, copy error: %v", linkErr, err)
+	}
+	return nil
 }

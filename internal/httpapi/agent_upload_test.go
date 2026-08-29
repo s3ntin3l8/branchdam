@@ -142,8 +142,13 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
 	require.NoError(t, os.MkdirAll(exportsDir, 0o755))
 
+	var (
+		archiveLoc sqlcgen.StorageLocation
+		exportsLoc sqlcgen.StorageLocation
+	)
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
-		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+		var err error
+		archiveLoc, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
 			Name:     "MasterArchive",
 			RootPath: archiveDir,
 			Tier:     "TIER3_MASTER_ARCHIVE",
@@ -153,7 +158,7 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+		exportsLoc, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
 			Name:     "Exports",
 			RootPath: exportsDir,
 			Tier:     "TIER2_EXPORTS",
@@ -204,6 +209,22 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	exportContent, err := os.ReadFile(exportFile)
 	require.NoError(t, err)
 	assert.Equal(t, data, exportContent)
+
+	// Verify both nodes and edge in database
+	archiveNode, err := database.Reader.GetMediaNodeByUUID(context.Background(), resp.NodeUUID)
+	require.NoError(t, err)
+	assert.Equal(t, archiveLoc.ID, archiveNode.StorageLocationID)
+
+	edges, err := database.Reader.ListEdgesBySource(context.Background(), archiveNode.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, "FINAL_EXPORT", edges[0].RelationshipType)
+	assert.Equal(t, "immich_export", edges[0].Resolver)
+
+	exportNode, err := database.Reader.GetMediaNodeByID(context.Background(), edges[0].TargetNodeID)
+	require.NoError(t, err)
+	assert.Equal(t, exportsLoc.ID, exportNode.StorageLocationID)
+	assert.Equal(t, exportFile, exportNode.FilePath)
 
 	// Test collision handling on duplicate upload
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
