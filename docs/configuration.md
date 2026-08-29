@@ -41,6 +41,8 @@ One domain is intentionally excluded from the registry, not just left for later:
 
 Operator Path Rewrites (`pathRewrites`) are registered with `applyMode: "live"` and `editable: true` — UI overrides take effect immediately for subsequent project file introspection. Reverting the override restores the rules from `config.yaml`.
 
+Naming Template (`ingest.namingTemplate`) and Trash Retention Days (`trash.retentionDays`) are registered with `applyMode: "live"` and `editable: true` — UI overrides take effect immediately for subsequent ingest and background trash pruning passes.
+
 Secret-typed fields (e.g. `immich.apiKey`) are encrypted at rest with a key from
 `BRANCHDAM_SECRET_KEY`, never returned by `GET` (only `hasValue: true`), and a `PUT` fails with
 `422` if the key isn't configured — see [`operations.md`](operations.md) for backup/restore
@@ -86,6 +88,18 @@ implications and what happens if that key is absent or lost.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `groups` | list of string | empty | Groups permitted write (mutating-method) access on browser-routed endpoints, matched against `X-Authentik-Groups`. **Empty means every authenticated user has write access** — the solo-homelab default — and logs a startup WARN naming `authz.groups` so the choice isn't silent. Must match the Authentik group name exactly; there's no validation against Authentik's own group list. |
+
+## `ingest`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `namingTemplate` | string | `{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}` | Path and filename pattern evaluated by server when ingesting media (`POST /api/v1/agent/upload`). Available tokens: `{yyyy}`, `{mm}`, `{dd}`, `{camera_model}`, `{original_name}`, `{stem}`, `{ext}`. Editable live via web UI settings. |
+
+## `trash`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `retentionDays` | int | `30` | Number of days deleted files are safely preserved under `.trash/` in their storage location before permanent background prune. `0` disables automated unlinking. Editable live via web UI settings. |
 
 ## `immich`
 

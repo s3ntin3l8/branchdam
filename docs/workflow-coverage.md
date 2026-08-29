@@ -41,7 +41,8 @@ Three things follow from that:
 | # | Step | Status | Detail |
 |---|---|---|---|
 | 1–2 | SD card → one copy to the NAS archive, one to local NVMe for editing | Built, in `branchdam-agent` | Not in this repo — `branchdam-agent`'s `ingest` subcommand (dual-copy write, bit-for-bit verification, safe-eject signalling). A manual copy still works without the agent, but loses that verification and the automatic folder mirror between the two copies |
-| 3 | Server learns about the new master | Manual, cheaper since #226 | `POST /api/v1/scan` (full) or `{differential: true}` (touch-only fast path for unchanged files, Tier-3 only) — still operator-triggered, not automatic; see §4 |
+| 1b | Mobile companion → direct streaming ingest to Master Archive | Built (`branchdam-mobile` & `POST /api/v1/agent/upload`) | Direct binary streaming upload to `TIER3_MASTER_ARCHIVE` with server-evaluated naming templates (`ingest.namingTemplate`), single-pass BLAKE3 verification, zero-storage Immich hardlink export, and Safe Space device reclaim; see [`docs/mobile.md`](mobile.md) |
+| 3 | Server learns about the new master | Automatic for streaming ingest; manual/differential for external mounts | Streaming ingest registers nodes instantly; for manual mounts `POST /api/v1/scan` (full) or `{differential: true}` (touch-only fast path for unchanged files, Tier-3 only) |
 | 4 | Master indexed: fast/full hash, EXIF, pHash, promoted camera columns | Works | Requires `exiftool` and `ffprobe`; degrades gracefully (fast-hash only) if either is absent |
 | 5 | Luminar: edit local copy → export to Tier 2 | Works via heuristics by default; confidence-1.00 available via `branchdam-agent` | Without the agent, falls back to Tier 2 (filename stem, `XMP:OriginalDocumentID`) and Tier 3 (camera serial + lens + ±2s + pHash Hamming ≤ 10). `branchdam-agent`'s `luminar-sync` reads Luminar's `catalog.db` directly, though its schema mapping is unverified against a real catalog — see that repo's `docs/luminar-catalog.md` |
 | 6 | DaVinci Resolve: edit local copy → render + `.dam.json` to Tier 2 | Built, both sides | The `.dam.json` parser is live server-side and yields confidence-1.00 edges; the post-render hook that writes the manifest ships as `branchdam-agent`'s `hooks/resolve/` — see §5 |
@@ -51,7 +52,8 @@ Three things follow from that:
 | 10 | Child export inherits parent EXIF/GPS | Works | `POST /api/v1/assets/{id}/inherit-metadata` — a manual call, not triggered automatically when an export is detected |
 | 11 | Immich indexes the export | Works, with prerequisites | Requires a new **external** library in Immich; see §6 |
 | 12 | Local scratch pruned once the master is verified | Built, agent-orchestrated (Option 3 / #266) | Ephemeral NLE render caches (`CacheClip/`) and proxies are pruned client-side by `branchdam-agent` once `POST /api/v1/agent/node-status` confirms Tier-3 masters are live and hash-verified. Camera originals on `LocalEditRoot` remain user-governed. Storage metrics are reported via `POST /api/v1/agent/telemetry` |
-| 13 | Google Photos push | No-go by decision | See [`google-photos.md`](google-photos.md) — the sync layer carries no file path, so no byte transfer is possible without reshaping it |
+| 13 | 30-Day Trash Buffer & Gallery Deletion Sync | Built (`EVENT_NODE_DELETED`) | Master files moved to `.trash/<rel_path>` with automated 30-day retention pruning; linked Immich exports unlinked immediately and rescan triggered; see [`docs/mobile.md`](mobile.md) |
+| 14 | Google Photos push | No-go by decision | See [`google-photos.md`](google-photos.md) — the sync layer carries no file path, so no byte transfer is possible without reshaping it |
 
 ## 3. The folder-mirror requirement
 
