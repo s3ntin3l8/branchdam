@@ -26,7 +26,11 @@ export default function Thumbnail({ assetId, thumbState, alt, className }: Thumb
   const base = className ?? "h-12 w-12 rounded object-cover";
 
   if (thumbState === "READY") {
-    return <ReadyThumbnail key={assetId} assetId={assetId} alt={alt} className={base} />;
+    // key includes src so a regenerated thumbnail (different cache key)
+    // remounts the <img> with a fresh imgFailed state. Without this, a
+    // transient load failure on the old src would lock the placeholder
+    // in even after the worker regenerated the thumbnail.
+    return <ReadyThumbnail key={api.thumbnailUrl(assetId)} assetId={assetId} alt={alt} className={base} />;
   }
 
   if (thumbState === "PENDING") {
