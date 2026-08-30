@@ -1455,3 +1455,107 @@ func TestDrainer_NodeDeleted_AvoidsOverwritingExistingTrashFile(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestDrainer_NodeCreated_ContentDedup_SkipsDuplicateHash(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+
+	hash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	uuid1 := "018d3b2f-7630-7e50-9844-3d96e9592471"
+	uuid2 := "018d3b2f-7630-7e50-9844-3d96e9592472"
+
+	file1 := filepath.Join(env.staging, "file1.jpg")
+	file2 := filepath.Join(env.staging, "file2.jpg")
+	require.NoError(t, os.WriteFile(file1, []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(file2, []byte("hello"), 0o644))
+
+	// First event: should insert node1
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid1,
+		FilePath: file1,
+		FullHash: &hash,
+	})
+
+	stats1, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats1.Processed)
+
+	// Second event with same full_hash but different UUID and path: should be skipped
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid2,
+		FilePath: file2,
+		FullHash: &hash,
+	})
+
+	stats2, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats2.Processed)
+
+	// Verify node1 exists and node2 was not created
+	var node1 sqlcgen.MediaNode
+	var err1, err2 error
+	_ = env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		node1, err1 = q.GetMediaNodeByUUID(context.Background(), uuid1)
+		_, err2 = q.GetMediaNodeByUUID(context.Background(), uuid2)
+		return nil
+	})
+	require.NoError(t, err1)
+	require.Equal(t, uuid1, node1.NodeUuid)
+	require.ErrorIs(t, err2, sql.ErrNoRows)
+}
+
+func TestDrainer_NodeCreated_ContentDedup_AllowsReingestAfterArchive(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+
+	hash := "a1b2c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123"
+	uuid1 := "018d3b2f-7630-7e50-9844-3d96e9592481"
+	uuid2 := "018d3b2f-7630-7e50-9844-3d96e9592482"
+
+	file1 := filepath.Join(env.staging, "reingest1.jpg")
+	file2 := filepath.Join(env.staging, "reingest2.jpg")
+	require.NoError(t, os.WriteFile(file1, []byte("data"), 0o644))
+	require.NoError(t, os.WriteFile(file2, []byte("data"), 0o644))
+
+	// Insert node1 and drain it
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid1,
+		FilePath: file1,
+		FullHash: &hash,
+	})
+	stats1, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats1.Processed)
+
+	// Archive node1
+	err = env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.GetMediaNodeByUUID(context.Background(), uuid1)
+		if err != nil {
+			return err
+		}
+		return q.ArchiveMediaNode(context.Background(), n.ID)
+	})
+	require.NoError(t, err)
+
+	// Re-ingest with same full_hash: should create node2
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid2,
+		FilePath: file2,
+		FullHash: &hash,
+	})
+	stats2, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats2.Processed)
+
+	// Both should exist, node1 ARCHIVED, node2 ACTIVE
+	_ = env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n1, err1 := q.GetMediaNodeByUUID(context.Background(), uuid1)
+		require.NoError(t, err1)
+		require.Equal(t, "ARCHIVED", n1.LifecycleState)
+
+		n2, err2 := q.GetMediaNodeByUUID(context.Background(), uuid2)
+		require.NoError(t, err2)
+		require.Equal(t, "ACTIVE", n2.LifecycleState)
+		return nil
+	})
+}

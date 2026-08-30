@@ -409,6 +409,21 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		return 0, fmt.Errorf("lookup node by uuid: %w", err)
 	}
 
+	// Strict content dedup: if a live (non-ARCHIVED) node already has this full_hash,
+	// skip insertion and succeed without creating a duplicate media node.
+	if p.FullHash != nil && *p.FullHash != "" {
+		if existing, err := q.GetMediaNodeByFullHash(ctx, p.FullHash); err == nil {
+			d.log.Info("agent: content dedup — EVENT_NODE_CREATED skipped",
+				"incomingUuid", p.NodeUUID,
+				"existingUuid", existing.NodeUuid,
+				"existingPath", existing.FilePath,
+				"fullHash", *p.FullHash)
+			return 0, nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("lookup node by full_hash: %w", err)
+		}
+	}
+
 	// storage_location_id always comes from Guard.Resolve(FilePath), never
 	// from the payload -- storage.Guard exposes no lookup-by-ID, so a
 	// payload-supplied StorageLocationID is fundamentally unverifiable and
@@ -514,6 +529,15 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		LensModel:          nullLensModel,
 	})
 	if err != nil {
+		if p.FullHash != nil && *p.FullHash != "" {
+			if existing, lookupErr := q.GetMediaNodeByFullHash(ctx, p.FullHash); lookupErr == nil {
+				d.log.Info("agent: content dedup race — winner already inserted",
+					"incomingUuid", p.NodeUUID,
+					"existingUuid", existing.NodeUuid,
+					"existingPath", existing.FilePath)
+				return 0, nil
+			}
+		}
 		return 0, err
 	}
 
