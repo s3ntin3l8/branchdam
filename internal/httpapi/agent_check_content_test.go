@@ -40,12 +40,26 @@ func TestAgentCheckContent_Auth(t *testing.T) {
 func TestAgentCheckContent_Validation(t *testing.T) {
 	srv, _, _, _, _, _ := serverWithGuard(t)
 
-	// Missing fullHash query param
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agent/check-content", nil)
-	req.Header.Set("X-API-Key", routeTestAgentKey)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// 1. Missing fullHash query param -> 400
+	reqMissing := httptest.NewRequest(http.MethodGet, "/api/v1/agent/check-content", nil)
+	reqMissing.Header.Set("X-API-Key", routeTestAgentKey)
+	recMissing := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recMissing, reqMissing)
+	assert.Equal(t, http.StatusBadRequest, recMissing.Code)
+
+	// 2. Malformed fullHash (not 64 hex chars) -> 422 or 400
+	reqBadFull := httptest.NewRequest(http.MethodGet, "/api/v1/agent/check-content?fullHash=not-a-valid-hex-hash", nil)
+	reqBadFull.Header.Set("X-API-Key", routeTestAgentKey)
+	recBadFull := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recBadFull, reqBadFull)
+	assert.Contains(t, []int{http.StatusBadRequest, http.StatusUnprocessableEntity}, recBadFull.Code)
+
+	// 3. Malformed fastHash (not 16 hex chars) -> 422 or 400
+	reqBadFast := httptest.NewRequest(http.MethodGet, "/api/v1/agent/check-content?fastHash=bad&fullHash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", nil)
+	reqBadFast.Header.Set("X-API-Key", routeTestAgentKey)
+	recBadFast := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recBadFast, reqBadFast)
+	assert.Contains(t, []int{http.StatusBadRequest, http.StatusUnprocessableEntity}, recBadFast.Code)
 }
 
 func TestAgentCheckContent_NotFound(t *testing.T) {
@@ -63,7 +77,7 @@ func TestAgentCheckContent_NotFound(t *testing.T) {
 	assert.Empty(t, res.NodeUUID)
 }
 
-func TestAgentCheckContent_FoundAndShortCircuit(t *testing.T) {
+func TestAgentCheckContent_Found(t *testing.T) {
 	srv, database, _, _, _, _ := serverWithGuard(t)
 	ctx := context.Background()
 
@@ -128,7 +142,8 @@ func TestAgentCheckContent_FoundAndShortCircuit(t *testing.T) {
 	assert.True(t, res2.Found)
 	assert.Equal(t, nodeUUID, res2.NodeUUID)
 
-	// 3. Non-existent fastHash short-circuits to found=false even if fullHash exists
+	// 3. Even with a different fastHash (e.g. legacy node where fast_hash was NULL/recomputed),
+	// authoritative fullHash lookup succeeds and returns found=true (no false negatives)
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/agent/check-content?fastHash=fedcba9876543210&fullHash="+fullHash, nil)
 	req3.Header.Set("X-API-Key", routeTestAgentKey)
 	rec3 := httptest.NewRecorder()
@@ -137,8 +152,8 @@ func TestAgentCheckContent_FoundAndShortCircuit(t *testing.T) {
 
 	var res3 AgentCheckContentResult
 	require.NoError(t, json.Unmarshal(rec3.Body.Bytes(), &res3))
-	assert.False(t, res3.Found)
-	assert.Empty(t, res3.NodeUUID)
+	assert.True(t, res3.Found)
+	assert.Equal(t, nodeUUID, res3.NodeUUID)
 }
 
 func TestAgentCheckContent_ArchivedAndMissingNotMatched(t *testing.T) {

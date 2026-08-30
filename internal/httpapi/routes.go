@@ -1953,8 +1953,8 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 // --- /api/v1/agent/check-content ---
 
 type AgentCheckContentInput struct {
-	FastHash string `query:"fastHash" doc:"Optional xxHash64 hex (16 chars) fast pre-screen"`
-	FullHash string `query:"fullHash" doc:"BLAKE3-256 hex (64 chars) definitive content hash"`
+	FastHash string `query:"fastHash" doc:"Optional xxHash64 hex (16 chars) fast pre-screen" pattern:"^[0-9a-fA-F]{16}$"`
+	FullHash string `query:"fullHash" doc:"BLAKE3-256 hex (64 chars) definitive content hash" pattern:"^[0-9a-fA-F]{64}$"`
 }
 
 type AgentCheckContentResult struct {
@@ -1969,31 +1969,36 @@ type AgentCheckContentOutput struct {
 	Body AgentCheckContentResult
 }
 
+func isHexChars(s string, length int) bool {
+	if len(s) != length {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckContentInput) (*AgentCheckContentOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
 	}
 
 	fullHash := strings.ToLower(strings.TrimSpace(in.FullHash))
-	if fullHash == "" {
-		return nil, huma.Error400BadRequest("fullHash query parameter is required", nil)
+	if !isHexChars(fullHash, 64) {
+		return nil, huma.Error400BadRequest("fullHash must be 64 hexadecimal characters", nil)
+	}
+
+	fastHash := strings.ToLower(strings.TrimSpace(in.FastHash))
+	if fastHash != "" && !isHexChars(fastHash, 16) {
+		return nil, huma.Error400BadRequest("fastHash must be 16 hexadecimal characters", nil)
 	}
 
 	if s.db == nil {
 		return nil, huma.Error500InternalServerError("database not available", nil)
-	}
-
-	fastHash := strings.ToLower(strings.TrimSpace(in.FastHash))
-	if fastHash != "" {
-		_, err := s.db.Reader.GetMediaNodeByFastHash(ctx, &fastHash)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return &AgentCheckContentOutput{
-					Body: AgentCheckContentResult{Found: false},
-				}, nil
-			}
-			return nil, huma.Error500InternalServerError("fast hash query failed", err)
-		}
 	}
 
 	node, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &fullHash)
