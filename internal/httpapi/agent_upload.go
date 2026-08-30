@@ -86,6 +86,19 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if result.IsDedup {
+		w.Header().Set("X-Dedup", "true")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(AgentUploadResponse{
+			NodeUUID:     result.NodeUUID,
+			Status:       "DEDUPLICATED",
+			BytesWritten: result.SizeBytes,
+			Blake3Hash:   result.Blake3Hash,
+			RelativePath: result.RelativePath,
+		})
+		return
+	}
+
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(AgentUploadResponse{
 		NodeUUID:     result.NodeUUID,

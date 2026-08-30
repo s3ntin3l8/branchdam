@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -226,8 +227,9 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 	assert.Equal(t, exportsLoc.ID, exportNode.StorageLocationID)
 	assert.Equal(t, exportFile, exportNode.FilePath)
 
-	// Test collision handling on duplicate upload
-	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	// Test collision handling on duplicate upload with different content
+	data2 := []byte("Different JPEG image content for collision test")
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data2))
 	req2.Header.Set("X-API-Key", routeTestAgentKey)
 	req2.Header.Set("X-Filename", "IMG_2026.JPG")
 	req2.Header.Set("X-Camera-Model", "Pixel 9 Pro")
@@ -282,7 +284,6 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := srv.Handler()
-	data := []byte("concurrent upload payload bytes")
 
 	type result struct {
 		nodeUUID string
@@ -293,6 +294,7 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 	results := make(chan result, 2)
 	for i := range 2 {
 		go func(i int) {
+			data := []byte(fmt.Sprintf("concurrent upload payload bytes %d", i))
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
 			req.Header.Set("X-API-Key", routeTestAgentKey)
 			req.Header.Set("X-Filename", "CONCURRENT.JPG")
@@ -326,4 +328,139 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 	node2, err := database.Reader.GetMediaNodeByUUID(context.Background(), r2.nodeUUID)
 	require.NoError(t, err)
 	assert.NotNil(t, node2.FastHash, "fast_hash must be populated for second upload node")
+}
+
+func TestAgentUploadContentDedup(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	data := []byte("identical upload bytes for dedup test")
+	hasher := blake3.New()
+	_, _ = hasher.Write(data)
+	expectedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// First upload: creates node
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req1.Header.Set("X-API-Key", routeTestAgentKey)
+	req1.Header.Set("X-Filename", "FIRST.JPG")
+	req1.Header.Set("X-Blake3-Hash", expectedHash)
+
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	require.Equal(t, "UPLOADED", resp1.Status)
+	require.Equal(t, expectedHash, resp1.Blake3Hash)
+	firstUUID := resp1.NodeUUID
+
+	// Second upload with pre-flight X-Blake3-Hash header: pre-write dedup hit
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "SECOND.JPG")
+	req2.Header.Set("X-Blake3-Hash", expectedHash)
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "true", rec2.Header().Get("X-Dedup"))
+
+	var resp2 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, "DEDUPLICATED", resp2.Status)
+	assert.Equal(t, firstUUID, resp2.NodeUUID)
+	assert.Equal(t, expectedHash, resp2.Blake3Hash)
+	assert.Equal(t, int64(0), resp2.BytesWritten)
+
+	// Third upload without X-Blake3-Hash header: post-compute dedup hit
+	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req3.Header.Set("X-API-Key", routeTestAgentKey)
+	req3.Header.Set("X-Filename", "THIRD.JPG")
+
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+	assert.Equal(t, http.StatusOK, rec3.Code)
+	assert.Equal(t, "true", rec3.Header().Get("X-Dedup"))
+
+	var resp3 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec3.Body.Bytes(), &resp3))
+	assert.Equal(t, "DEDUPLICATED", resp3.Status)
+	assert.Equal(t, firstUUID, resp3.NodeUUID)
+}
+
+func TestAgentUploadContentDedup_AllowsReingestAfterMissing(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	data := []byte("content for missing node re-ingest test")
+
+	// First upload: creates node1
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req1.Header.Set("X-API-Key", routeTestAgentKey)
+	req1.Header.Set("X-Filename", "UPLOAD1.JPG")
+
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	require.Equal(t, "UPLOADED", resp1.Status)
+
+	// Mark node1 as MISSING
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.GetMediaNodeByUUID(context.Background(), resp1.NodeUUID)
+		if err != nil {
+			return err
+		}
+		return q.MarkNodeMissing(context.Background(), n.ID)
+	})
+	require.NoError(t, err)
+
+	// Second upload of identical content: should create fresh node2, NOT dedup to MISSING node1
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "UPLOAD2.JPG")
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusCreated, rec2.Code)
+
+	var resp2 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, "UPLOADED", resp2.Status)
+	assert.NotEqual(t, resp1.NodeUUID, resp2.NodeUUID)
 }

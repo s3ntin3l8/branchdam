@@ -53,6 +53,7 @@ type UploadResult struct {
 	FullHash     *string
 	Blake3Hash   string
 	RelativePath string
+	IsDedup      bool
 	Asset        assetDTO
 }
 
@@ -71,21 +72,25 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 	var exportLoc *storage.StorageLocationRow
 
 	for _, loc := range locs {
+		locCopy := loc
 		row := storage.StorageLocationRow{
-			ID:       loc.ID,
-			Name:     loc.Name,
-			RootPath: loc.RootPath,
-			Tier:     loc.Tier,
-			ReadOnly: loc.ReadOnly != 0,
+			ID:       locCopy.ID,
+			Name:     locCopy.Name,
+			RootPath: locCopy.RootPath,
+			Tier:     locCopy.Tier,
+			ReadOnly: locCopy.ReadOnly != 0,
 		}
-		if loc.Tier == "TIER2_EXPORTS" && loc.ReadOnly == 0 {
-			exportLoc = &row
+		if locCopy.Tier == "TIER2_EXPORTS" && locCopy.ReadOnly == 0 {
+			exp := row
+			exportLoc = &exp
 		}
-		if locationID > 0 && loc.ID == locationID {
-			targetLoc = &row
-		} else if locationID <= 0 && loc.ReadOnly == 0 {
-			if targetLoc == nil || loc.Tier == "TIER3_MASTER_ARCHIVE" {
-				targetLoc = &row
+		if locationID > 0 && locCopy.ID == locationID {
+			tgt := row
+			targetLoc = &tgt
+		} else if locationID <= 0 && locCopy.ReadOnly == 0 {
+			if targetLoc == nil || locCopy.Tier == "TIER3_MASTER_ARCHIVE" {
+				tgt := row
+				targetLoc = &tgt
 			}
 		}
 	}
@@ -103,6 +108,27 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 // processUploadedStream streams a file to disk, calculates hashes, probes metadata,
 // inserts the media node and metadata in DB, links lineage, and broadcasts SSE.
 func (s *Server) processUploadedStream(ctx context.Context, params UploadParams) (*UploadResult, error) {
+	// Pre-write dedup check: trust-the-agent optimization for authenticated clients
+	// providing a trusted X-Blake3-Hash pre-flight header. If a live node already has
+	// this hash, skip writing bytes to disk entirely and return HTTP 200 + DEDUPLICATED.
+	// For streaming uploads without pre-flight headers, BLAKE3 is computed unconditionally
+	// during streaming and deduplicated post-write.
+	if params.ExpectedBlake3 != "" && s.db != nil {
+		cleanHash := strings.ToLower(strings.TrimSpace(params.ExpectedBlake3))
+		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &cleanHash); err == nil {
+			return &UploadResult{
+				NodeID:       existing.ID,
+				NodeUUID:     existing.NodeUuid,
+				FilePath:     existing.FilePath,
+				FileName:     filepath.Base(existing.FilePath),
+				FileExt:      filepath.Ext(existing.FilePath),
+				Blake3Hash:   cleanHash,
+				RelativePath: existing.FilePath,
+				IsDedup:      true,
+			}, nil
+		}
+	}
+
 	targetLoc, exportLoc, err := s.resolveTargetStorageLocation(ctx, params.StorageLocationID)
 	if err != nil {
 		return nil, err
@@ -252,6 +278,23 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		nullFast = &computedFastHash
 	}
 	_ = outFile.Close()
+
+	if s.db != nil {
+		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); err == nil {
+			_ = os.Remove(targetPath)
+			return &UploadResult{
+				NodeID:       existing.ID,
+				NodeUUID:     existing.NodeUuid,
+				FilePath:     existing.FilePath,
+				FileName:     filepath.Base(existing.FilePath),
+				FileExt:      filepath.Ext(existing.FilePath),
+				SizeBytes:    bytesWritten,
+				Blake3Hash:   computedBlake3,
+				RelativePath: existing.FilePath,
+				IsDedup:      true,
+			}, nil
+		}
+	}
 
 	// Probe metadata if prober is present
 	var (
@@ -416,13 +459,15 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				SizeBytes:         bytesWritten,
 				MtimeUnix:         time.Now().Unix(),
 				FastHash:          nullFast,
-				FullHash:          nullFull,
-				IndexingStatus:    "INDEXED_SHALLOW",
-				GraphStatus:       "LINKED",
-				LifecycleState:    "ACTIVE",
-				FilenameStem:      sql.NullString{String: stem, Valid: stem != ""},
-				CapturedAtUnix:    sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
-				CameraModel:       cameraModelDB,
+				// FullHash is left nil for export hardlinks/copies so they do not conflict
+				// with the ux_media_nodes_live_full_hash unique index on the master archive node.
+				FullHash:       nil,
+				IndexingStatus: "INDEXED_SHALLOW",
+				GraphStatus:    "LINKED",
+				LifecycleState: "ACTIVE",
+				FilenameStem:   sql.NullString{String: stem, Valid: stem != ""},
+				CapturedAtUnix: sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
+				CameraModel:    cameraModelDB,
 			})
 			if expInsErr != nil {
 				return fmt.Errorf("insert export media node: %w", expInsErr)
@@ -447,6 +492,21 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		_ = os.Remove(targetPath)
 		if exportCreated && exportDest != "" {
 			_ = os.Remove(exportDest)
+		}
+		if s.db != nil && computedBlake3 != "" {
+			if existing, lookupErr := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); lookupErr == nil {
+				return &UploadResult{
+					NodeID:       existing.ID,
+					NodeUUID:     existing.NodeUuid,
+					FilePath:     existing.FilePath,
+					FileName:     filepath.Base(existing.FilePath),
+					FileExt:      filepath.Ext(existing.FilePath),
+					SizeBytes:    bytesWritten,
+					Blake3Hash:   computedBlake3,
+					RelativePath: existing.FilePath,
+					IsDedup:      true,
+				}, nil
+			}
 		}
 		return nil, fmt.Errorf("failed to record media node: %w", err)
 	}

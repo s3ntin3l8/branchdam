@@ -484,3 +484,12 @@ UPDATE media_nodes SET thumb_state = ?2, thumb_attempts = ?3, updated_at = unixe
 -- while its node_uuid is preserved (the inherit-metadata endpoint's
 -- post-write DB sync, #188).
 UPDATE media_nodes SET thumb_state = 'PENDING', thumb_attempts = 0, updated_at = unixepoch() WHERE id = ?1;
+
+-- name: GetMediaNodeByFullHash :one
+-- Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
+-- Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+FROM media_nodes
+WHERE full_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+LIMIT 1;

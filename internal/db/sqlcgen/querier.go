@@ -119,6 +119,7 @@ type Querier interface {
 	// superseded node's post-archive state (superseded_by, lifecycle_state).
 	GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, error)
 	GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error)
+	GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error)
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)

@@ -331,3 +331,54 @@ func TestWebUpload_CollisionHandling(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
 	assert.Equal(t, filepath.Join("coll_test", "photo_1.jpg"), filepath.Clean(resp2.RelativePath))
 }
+
+func TestWebUpload_ContentDedup(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	payload := []byte("identical binary content for web dedup")
+
+	// First upload
+	req1, _ := createMultipartUploadRequest(t, "dedup.jpg", payload, map[string]string{
+		"relativePath":        "dedup_test",
+		"applyNamingTemplate": "false",
+	})
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 WebUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	assert.Equal(t, "UPLOADED", resp1.Status)
+
+	// Second upload with same content
+	req2, _ := createMultipartUploadRequest(t, "another_name.jpg", payload, map[string]string{
+		"relativePath":        "dedup_test",
+		"applyNamingTemplate": "false",
+	})
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "true", rec2.Header().Get("X-Dedup"))
+
+	var resp2 WebUploadResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, "DEDUPLICATED", resp2.Status)
+	assert.Equal(t, resp1.NodeUUID, resp2.NodeUUID)
+}
