@@ -93,7 +93,7 @@ available to the repo owner.
 
 `required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
 be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
-[`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for the exact commands (thread
+[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for the exact commands (thread
 resolution is a GraphQL-only concept, not a `gh pr` verb).
 
 ## Automated review
@@ -102,7 +102,7 @@ Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` Git
 posted once on `opened` (or once on `ready_for_review` if the PR started as a draft). Ask for
 another look at any point -- including after addressing feedback -- by commenting
 `@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). See
-[`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for replying to and resolving
+[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for replying to and resolving
 Hermes's inline comments.
 
 Because `required_conversation_resolution` is on, any inline comment Hermes (or a human
