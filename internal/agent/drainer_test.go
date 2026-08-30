@@ -1559,3 +1559,59 @@ func TestDrainer_NodeCreated_ContentDedup_AllowsReingestAfterArchive(t *testing.
 		return nil
 	})
 }
+
+func TestDrainer_NodeCreated_ContentDedup_AllowsReingestAfterMissing(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+
+	hash := "b1b2c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123"
+	uuid1 := "018d3b2f-7630-7e50-9844-3d96e9592491"
+	uuid2 := "018d3b2f-7630-7e50-9844-3d96e9592492"
+
+	file1 := filepath.Join(env.staging, "missing1.jpg")
+	file2 := filepath.Join(env.staging, "missing2.jpg")
+	require.NoError(t, os.WriteFile(file1, []byte("data"), 0o644))
+	require.NoError(t, os.WriteFile(file2, []byte("data"), 0o644))
+
+	// Insert node1 and drain it
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid1,
+		FilePath: file1,
+		FullHash: &hash,
+	})
+	stats1, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats1.Processed)
+
+	// Mark node1 as MISSING (e.g. file vanished from storage)
+	err = env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.GetMediaNodeByUUID(context.Background(), uuid1)
+		if err != nil {
+			return err
+		}
+		return q.MarkNodeMissing(context.Background(), n.ID)
+	})
+	require.NoError(t, err)
+
+	// Re-ingest with same full_hash: should create node2 rather than deduping against MISSING node
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: uuid2,
+		FilePath: file2,
+		FullHash: &hash,
+	})
+	stats2, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats2.Processed)
+
+	// Both should exist, node1 MISSING, node2 ACTIVE
+	_ = env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n1, err1 := q.GetMediaNodeByUUID(context.Background(), uuid1)
+		require.NoError(t, err1)
+		require.Equal(t, "MISSING", n1.LifecycleState)
+
+		n2, err2 := q.GetMediaNodeByUUID(context.Background(), uuid2)
+		require.NoError(t, err2)
+		require.Equal(t, "ACTIVE", n2.LifecycleState)
+		return nil
+	})
+}

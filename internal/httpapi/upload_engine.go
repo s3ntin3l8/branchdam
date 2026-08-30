@@ -108,6 +108,11 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 // processUploadedStream streams a file to disk, calculates hashes, probes metadata,
 // inserts the media node and metadata in DB, links lineage, and broadcasts SSE.
 func (s *Server) processUploadedStream(ctx context.Context, params UploadParams) (*UploadResult, error) {
+	// Pre-write dedup check: trust-the-agent optimization for authenticated clients
+	// providing a trusted X-Blake3-Hash pre-flight header. If a live node already has
+	// this hash, skip writing bytes to disk entirely and return HTTP 200 + DEDUPLICATED.
+	// For streaming uploads without pre-flight headers, BLAKE3 is computed unconditionally
+	// during streaming and deduplicated post-write.
 	if params.ExpectedBlake3 != "" && s.db != nil {
 		cleanHash := strings.ToLower(strings.TrimSpace(params.ExpectedBlake3))
 		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &cleanHash); err == nil {
@@ -485,6 +490,21 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		_ = os.Remove(targetPath)
 		if exportCreated && exportDest != "" {
 			_ = os.Remove(exportDest)
+		}
+		if s.db != nil && computedBlake3 != "" {
+			if existing, lookupErr := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); lookupErr == nil {
+				return &UploadResult{
+					NodeID:       existing.ID,
+					NodeUUID:     existing.NodeUuid,
+					FilePath:     existing.FilePath,
+					FileName:     filepath.Base(existing.FilePath),
+					FileExt:      filepath.Ext(existing.FilePath),
+					SizeBytes:    bytesWritten,
+					Blake3Hash:   computedBlake3,
+					RelativePath: existing.FilePath,
+					IsDedup:      true,
+				}, nil
+			}
 		}
 		return nil, fmt.Errorf("failed to record media node: %w", err)
 	}

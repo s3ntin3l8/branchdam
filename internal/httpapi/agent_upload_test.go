@@ -404,3 +404,63 @@ func TestAgentUploadContentDedup(t *testing.T) {
 	assert.Equal(t, "DEDUPLICATED", resp3.Status)
 	assert.Equal(t, firstUUID, resp3.NodeUUID)
 }
+
+func TestAgentUploadContentDedup_AllowsReingestAfterMissing(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	data := []byte("content for missing node re-ingest test")
+
+	// First upload: creates node1
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req1.Header.Set("X-API-Key", routeTestAgentKey)
+	req1.Header.Set("X-Filename", "UPLOAD1.JPG")
+
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	require.Equal(t, "UPLOADED", resp1.Status)
+
+	// Mark node1 as MISSING
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.GetMediaNodeByUUID(context.Background(), resp1.NodeUUID)
+		if err != nil {
+			return err
+		}
+		return q.MarkNodeMissing(context.Background(), n.ID)
+	})
+	require.NoError(t, err)
+
+	// Second upload of identical content: should create fresh node2, NOT dedup to MISSING node1
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "UPLOAD2.JPG")
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusCreated, rec2.Code)
+
+	var resp2 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, "UPLOADED", resp2.Status)
+	assert.NotEqual(t, resp1.NodeUUID, resp2.NodeUUID)
+}

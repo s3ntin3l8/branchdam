@@ -1449,7 +1449,7 @@ const getMediaNodeByFullHash = `-- name: GetMediaNodeByFullHash :one
 SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
 FROM media_nodes
 WHERE full_hash = ?1
-  AND lifecycle_state != 'ARCHIVED'
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 LIMIT 1
 `
 
@@ -1461,8 +1461,8 @@ type GetMediaNodeByFullHashRow struct {
 	IndexingStatus string
 }
 
-// Strict dedup: find a live (non-ARCHIVED) node with the given BLAKE3 full_hash.
-// Excludes ARCHIVED nodes so re-ingesting removed content creates a fresh node.
+// Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
+// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
 func (q *Queries) GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error) {
 	row := q.db.QueryRowContext(ctx, getMediaNodeByFullHash, fullHash)
 	var i GetMediaNodeByFullHashRow
@@ -1480,7 +1480,7 @@ const getMediaNodeByFastHash = `-- name: GetMediaNodeByFastHash :one
 SELECT id, node_uuid, file_path, lifecycle_state
 FROM media_nodes
 WHERE fast_hash = ?1
-  AND lifecycle_state != 'ARCHIVED'
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 LIMIT 1
 `
 
