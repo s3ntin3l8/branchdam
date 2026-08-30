@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import AuditQueuePage from "./AuditQueuePage";
 import { api } from "../api/client";
 
@@ -18,12 +19,20 @@ vi.mock("../api/client", () => ({
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+  const router = createMemoryRouter(
+    [{ path: "/", element: ui }],
+    { initialEntries: ["/"] },
+  );
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
 }
 
 describe("AuditQueuePage", () => {
   it("shows an empty state when there is nothing to review", async () => {
-    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
     renderWithClient(<AuditQueuePage />);
 
     expect(await screen.findByText(/nothing needs review/i)).toBeInTheDocument();
@@ -61,6 +70,7 @@ describe("AuditQueuePage", () => {
           phashDistance: 2,
         },
       ],
+      total: 1,
     });
     renderWithClient(<AuditQueuePage />);
 
@@ -90,6 +100,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "tgt.jpg", filePath: "/tgt.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.confirmEdge).mockResolvedValue({ ok: true });
 
@@ -101,7 +112,7 @@ describe("AuditQueuePage", () => {
   });
 
   it("opens manual link modal and submits createEdge", async () => {
-    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
     vi.mocked(api.createEdge).mockResolvedValue({
       id: 99,
       sourceNodeId: 100,
@@ -152,6 +163,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.confirmEdge).mockRejectedValue(new Error("Database write failure"));
 
@@ -180,6 +192,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 3, nodeUuid: "uuid-3", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.rejectEdge).mockRejectedValue(new Error("Network disconnect"));
 

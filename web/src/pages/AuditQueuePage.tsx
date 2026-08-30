@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
 import Thumbnail from "../components/Thumbnail";
 import type { AuditEntry } from "../api/types";
+
+const PAGE_SIZE = 50;
 
 function formatTimestamp(unix?: number): string {
   if (!unix) return "—";
@@ -186,8 +189,46 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   const [targetId, setTargetId] = useState("");
   const [relType, setRelType] = useState<AuditEntry["relationshipType"]>("DERIVED_FROM");
   const [errorMsg, setErrorMsg] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
 
   const createEdge = useCreateEdge();
+
+  useEffect(() => {
+    if (isOpen) {
+      previousFocusRef.current = document.activeElement as HTMLElement;
+      const timer = setTimeout(() => {
+        dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+      }, 50);
+      return () => clearTimeout(timer);
+    } else if (previousFocusRef.current) {
+      previousFocusRef.current.focus();
+    }
+  }, [isOpen]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onClose();
+    }
+  }, [onClose]);
+
+  const handleTrapFocus = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== "Tab" || !dialogRef.current) return;
+    const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
+      'input, select, button, [tabindex]:not([tabindex="-1"])'
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }, []);
 
   if (!isOpen) return null;
 
@@ -219,9 +260,19 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
-      <div className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl">
-        <h2 className="mb-4 text-lg font-semibold text-white">Manual Link Edge</h2>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manual-link-modal-title"
+        onKeyDown={(e) => { handleKeyDown(e); handleTrapFocus(e); }}
+        className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
+      >
+        <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-white">Manual Link Edge</h2>
         {errorMsg && (
           <div className="mb-4 rounded bg-red-900/60 p-3 text-xs text-red-200 border border-red-800">
             {errorMsg}
@@ -290,13 +341,38 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
 }
 
 export default function AuditQueuePage() {
-  const { data, isLoading, isError } = useAuditQueue({ limit: 100 });
+  const [searchParams, setSearchParams] = useSearchParams();
+  // beforeId=0 means "first page". We store it in the URL so a deep
+  // link shares the right cursor; offset is intentionally not in the URL
+  // because offset drifts across mutations (confirm/reject on page N
+  // shifts the offset window).
+  const beforeId = Number(searchParams.get("beforeId") || "0") || 0;
+  const { data, isLoading, isError } = useAuditQueue({ limit: PAGE_SIZE, beforeId });
   const [isModalOpen, setIsModalOpen] = useState(false);
+
+  const entries = data?.entries ?? [];
+  const total = data?.total ?? 0;
+  // hasMore: server returns total consistently with the page (single
+  // query with COUNT(*) OVER()). If the page is full, there may be more.
+  const hasMore = entries.length === PAGE_SIZE;
+
+  const handleFirst = () => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("beforeId");
+    setSearchParams(nextParams);
+  };
+
+  const handleNext = () => {
+    if (entries.length === 0) return;
+    const lastId = entries[entries.length - 1].id;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("beforeId", String(lastId));
+    setSearchParams(nextParams);
+    window.scrollTo(0, 0);
+  };
 
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
   if (isError) return <div className="p-6 text-red-400">Failed to load the audit queue.</div>;
-
-  const entries = data?.entries ?? [];
 
   return (
     <div className="p-6">
@@ -317,11 +393,33 @@ export default function AuditQueuePage() {
       {entries.length === 0 ? (
         <p className="text-neutral-500">Nothing needs review right now.</p>
       ) : (
-        <div className="space-y-4">
-          {entries.map((e) => (
-            <AuditRow key={e.id} entry={e} />
-          ))}
-        </div>
+        <>
+          <div className="space-y-4">
+            {entries.map((e) => (
+              <AuditRow key={e.id} entry={e} />
+            ))}
+          </div>
+
+          <div className="flex items-center justify-between pt-4 border-t border-neutral-800 text-xs text-neutral-400 mt-4">
+            <div>{total} item{total === 1 ? "" : "s"} awaiting review</div>
+            <div className="flex items-center space-x-2">
+              <button
+                disabled={beforeId === 0}
+                onClick={handleFirst}
+                className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
+              >
+                First
+              </button>
+              <button
+                disabled={!hasMore}
+                onClick={handleNext}
+                className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </>
       )}
 
       <ManualLinkModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router";
-import { Background, Controls, ReactFlow, type Edge as FlowEdge, type Node as FlowNode } from "@xyflow/react";
+import { Background, Controls, ReactFlow, ReactFlowProvider, type Edge as FlowEdge, type Node as FlowNode } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { AssetGraph, LineageResponse } from "../api/types";
 
@@ -70,16 +70,18 @@ export default function AssetGraphCanvas({ assetId, lineage, graph }: AssetGraph
 
   return (
     <div className="h-96 w-full rounded border border-neutral-800">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodeClick={handleNodeClick}
-        fitView
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background />
-        <Controls showInteractive={false} />
-      </ReactFlow>
+      <ReactFlowProvider>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodeClick={handleNodeClick}
+          fitView
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </ReactFlowProvider>
     </div>
   );
 }

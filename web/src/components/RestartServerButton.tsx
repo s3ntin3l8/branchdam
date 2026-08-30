@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRestartServer } from "../hooks/queries";
 
 // Shared by SettingsPage's "Restart server" card and StorageHealthPage's
@@ -12,25 +12,19 @@ function useRestartConfirm() {
   const restart = useRestartServer();
   const [confirming, setConfirming] = useState(false);
   const [justRestarted, setJustRestarted] = useState(false);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current !== null) {
-        clearTimeout(timeoutRef.current);
-      }
-    };
-  }, []);
 
   const handleConfirm = () => {
     setConfirming(false);
     restart.mutate(undefined, {
       onSuccess: () => {
         setJustRestarted(true);
-        if (timeoutRef.current !== null) {
-          clearTimeout(timeoutRef.current);
-        }
-        timeoutRef.current = setTimeout(() => setJustRestarted(false), 15_000);
+        // The server is unreachable for a few seconds while it re-execs
+        // (see internal/httpapi/restart.go's restartGraceDelay plus the
+        // process replacing itself) -- this is purely a local UI note, not
+        // a poll: useStorageHealth's existing 10s refetchInterval and
+        // default query retry are what actually detect the server coming
+        // back, per useRestartServer's own doc comment.
+        setTimeout(() => setJustRestarted(false), 15_000);
       },
     });
   };

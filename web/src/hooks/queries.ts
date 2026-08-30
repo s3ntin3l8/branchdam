@@ -84,10 +84,7 @@ export function useAssetFacets() {
 export function useAsset(id: number | undefined) {
   return useQuery({
     queryKey: ["asset", id],
-    queryFn: () => {
-      if (id == null) throw new Error("Asset ID is required");
-      return api.getAsset(id);
-    },
+    queryFn: () => api.getAsset(id as number),
     enabled: id !== undefined,
   });
 }
@@ -95,10 +92,7 @@ export function useAsset(id: number | undefined) {
 export function useAssetGraph(id: number | undefined) {
   return useQuery({
     queryKey: ["asset-graph", id],
-    queryFn: () => {
-      if (id == null) throw new Error("Asset ID is required");
-      return api.getAssetGraph(id);
-    },
+    queryFn: () => api.getAssetGraph(id as number),
     enabled: id !== undefined,
   });
 }
@@ -106,10 +100,7 @@ export function useAssetGraph(id: number | undefined) {
 export function useAssetLineage(id: number | string | undefined, depth = 2) {
   return useQuery({
     queryKey: ["asset-lineage", id, depth],
-    queryFn: () => {
-      if (id == null || id === "") throw new Error("Asset ID is required");
-      return api.getAssetLineage(id, depth);
-    },
+    queryFn: () => api.getAssetLineage(id as number | string, depth),
     enabled: id !== undefined && id !== "",
   });
 }
@@ -117,10 +108,7 @@ export function useAssetLineage(id: number | string | undefined, depth = 2) {
 export function useAssetSyncStatus(id: number | undefined) {
   return useQuery({
     queryKey: ["asset-sync-status", id],
-    queryFn: () => {
-      if (id == null) throw new Error("Asset ID is required");
-      return api.getAssetSyncStatus(id);
-    },
+    queryFn: () => api.getAssetSyncStatus(id as number),
     enabled: id !== undefined,
     // Poll so the status stays fresh while the sync worker progresses
     // (useEventStream only nudges on SSE events, not on worker drain ticks).
@@ -162,7 +150,7 @@ export function useUnlinkedCount() {
   });
 }
 
-export function useAuditQueue(params: { limit?: number; offset?: number } = {}) {
+export function useAuditQueue(params: { limit?: number; beforeId?: number } = {}) {
   return useQuery({
     queryKey: ["audit-queue", params],
     queryFn: () => api.listAuditQueue(params),

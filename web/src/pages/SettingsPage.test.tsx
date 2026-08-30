@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import SettingsPage from "./SettingsPage";
 import { api, ApiError } from "../api/client";
 import type { SettingsField, SettingsResponse } from "../api/types";
@@ -101,7 +102,15 @@ function settingsResponse(overrides: Partial<SettingsResponse> = {}): SettingsRe
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+  const router = createMemoryRouter(
+    [{ path: "*", element: ui }],
+    { initialEntries: ["/settings"] },
+  );
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
 }
 
 describe("SettingsPage", () => {
