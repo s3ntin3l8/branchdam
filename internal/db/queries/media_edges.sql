@@ -29,6 +29,42 @@ ORDER BY confidence DESC, id ASC
 LIMIT ?1 OFFSET ?2;
 
 -- name: ListAuditQueueDetailed :many
+-- Keyset (cursor) pagination: when `before_id` is non-zero, only rows
+-- ordered AFTER the (confidence, id) cursor are returned. Ordering is
+-- (confidence DESC, id ASC); "after" means strictly greater in the
+-- lexicographic order. When `before_id` is 0, the first page is returned
+-- (no cursor constraint).
+--
+-- Keyset over offset: a confirm/reject while the user is on page N
+-- shifts the offset window in the offset-based query, so page N+1 may
+-- duplicate or skip rows. Keyset pagination is stable across mutations
+-- because the cursor is a row identity, not a position.
+--
+-- The tie-break for same-confidence rows uses `e.id > cursor.id` (not `<`)
+-- because the ordering is `id ASC`: within a confidence tier, the lower
+-- id comes first, so "after" the cursor means higher id. A `<` tie-break
+-- would duplicate rows on the previous page and skip the rows that should
+-- be on this one.
+--
+-- `total` is returned as a column on every row via a separate subquery,
+-- avoiding a second COUNT(*) query per page turn and the race where a
+-- confirmation between the list and the count makes total disagree with
+-- what the list shows. The subquery applies only the review_state
+-- filter, so total always reflects the full NEEDS_REVIEW set regardless
+-- of cursor.
+--
+-- The cursor (confidence, id) is resolved in a CTE first, then the main
+-- query references it -- sqlc v1.31.1 mis-counts placeholders when a
+-- subquery in the WHERE clause references the same ?N as the outer
+-- query, so a single-pass subquery would generate one too few args.
+WITH cursor(cd, id) AS (
+  SELECT confidence, id FROM media_edges WHERE id = ?2
+),
+total_rows AS (
+  SELECT COUNT(*) AS n
+  FROM v_media_edges_resolved e
+  WHERE e.review_state = 'NEEDS_REVIEW'
+)
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
        sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
@@ -36,13 +72,16 @@ SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confiden
        sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
        tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
        tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
-       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state
+       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state,
+       (SELECT n FROM total_rows) AS total
 FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
+  AND (?2 = 0 OR e.confidence < (SELECT cd FROM cursor)
+       OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
 ORDER BY e.confidence DESC, e.id ASC
-LIMIT ?1 OFFSET ?2;
+LIMIT ?1;
 
 
 -- name: ListAncestors :many
@@ -125,17 +164,3 @@ FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(?1))
   AND target_node_id IN (SELECT value FROM json_each(?1))
   AND review_state <> 'REJECTED';
-
--- name: ListEdgesByMultipleTargets :many
-SELECT id, source_node_id, target_node_id, relationship_type, confidence,
-       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
-FROM media_edges
-WHERE target_node_id IN (SELECT value FROM json_each(?1));
-
--- name: ListEdgesByMultipleSources :many
-SELECT id, source_node_id, target_node_id, relationship_type, confidence,
-       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
-FROM media_edges
-WHERE source_node_id IN (SELECT value FROM json_each(?1));

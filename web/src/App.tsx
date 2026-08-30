@@ -1,7 +1,8 @@
 import { lazy, Suspense } from "react";
-import { NavLink, Route, Routes } from "react-router";
+import { NavLink, Outlet, Route, Routes } from "react-router";
 import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
+import { AuthErrorBanner } from "./components/AuthErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import BrandMark from "./components/BrandMark";
 
@@ -28,13 +29,17 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   );
 }
 
-export default function App() {
-  const { connectionState } = useEventStream();
+// Layout wraps every route. It owns the SSE hook, the auth banner, and the
+// nav sidebar. useEventStream must run here (not in App's body) so it's
+// inside the Router context that useNavigation/useBlocker require.
+export function Layout() {
+  useEventStream();
   const { data: me } = useMe();
   const { data: unlinkedCount } = useUnlinkedCount();
 
   return (
     <div className="flex h-screen">
+      <AuthErrorBanner />
       <nav className="w-56 shrink-0 border-r border-neutral-800 p-4">
         <div className="mb-6 flex items-center gap-2">
           <BrandMark className="h-5 w-5 text-brand" />
@@ -62,26 +67,62 @@ export default function App() {
         )}
       </nav>
       <main className="flex-1 overflow-auto">
-        {connectionState === "disconnected" && (
-          <div className="mx-6 mt-4 rounded-lg border border-amber-800/60 bg-amber-950/30 p-4 text-sm text-amber-300">
-            <span className="font-semibold">Reconnecting</span> to event stream — live updates are paused.
-          </div>
-        )}
         <ErrorBoundary>
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
-            <Routes>
-              <Route path="/" element={<AssetListPage />} />
-              <Route path="/assets" element={<AssetListPage />} />
-              <Route path="/assets/:id" element={<AssetDetailPage />} />
-              <Route path="/audit" element={<AuditQueuePage />} />
-              <Route path="/ingest" element={<IngestPage />} />
-              <Route path="/jobs" element={<IngestJobsPage />} />
-              <Route path="/storage-health" element={<StorageHealthPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
-          </Suspense>
+          <Outlet />
         </ErrorBoundary>
       </main>
     </div>
+  );
+}
+
+// App is kept as a thin wrapper that re-renders the original imperative
+// <Routes> tree for any code paths (tests, legacy callers) that mount it
+// directly. Production now uses the data-router created in main.tsx.
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route path="/" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading assets…</div>}>
+            <AssetListPage />
+          </Suspense>
+        } />
+        <Route path="/assets" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading assets…</div>}>
+            <AssetListPage />
+          </Suspense>
+        } />
+        <Route path="/assets/:id" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading asset…</div>}>
+            <AssetDetailPage />
+          </Suspense>
+        } />
+        <Route path="/audit" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit queue…</div>}>
+            <AuditQueuePage />
+          </Suspense>
+        } />
+        <Route path="/ingest" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading ingest…</div>}>
+            <IngestPage />
+          </Suspense>
+        } />
+        <Route path="/jobs" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading jobs…</div>}>
+            <IngestJobsPage />
+          </Suspense>
+        } />
+        <Route path="/storage-health" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading storage health…</div>}>
+            <StorageHealthPage />
+          </Suspense>
+        } />
+        <Route path="/settings" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading settings…</div>}>
+            <SettingsPage />
+          </Suspense>
+        } />
+      </Route>
+    </Routes>
   );
 }

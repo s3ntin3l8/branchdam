@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { api } from "../api/client";
 import type { ThumbState } from "../api/types";
 
@@ -26,11 +25,7 @@ export default function Thumbnail({ assetId, thumbState, alt, className }: Thumb
   const base = className ?? "h-12 w-12 rounded object-cover";
 
   if (thumbState === "READY") {
-    // key includes src so a regenerated thumbnail (different cache key)
-    // remounts the <img> with a fresh imgFailed state. Without this, a
-    // transient load failure on the old src would lock the placeholder
-    // in even after the worker regenerated the thumbnail.
-    return <ReadyThumbnail key={api.thumbnailUrl(assetId)} assetId={assetId} alt={alt} className={base} />;
+    return <img src={api.thumbnailUrl(assetId)} alt={alt} loading="lazy" className={base} />;
   }
 
   if (thumbState === "PENDING") {
@@ -46,31 +41,9 @@ export default function Thumbnail({ assetId, thumbState, alt, className }: Thumb
   // UNSUPPORTED (no embedded preview, expected for some formats) and FAILED
   // (retries exhausted) both render the same static placeholder -- neither
   // is worth distinguishing to a user scanning a list of files.
-  return <ThumbnailPlaceholder className={base} />;
-}
-
-function ReadyThumbnail({ assetId, alt, className }: { assetId: number; alt: string; className: string }) {
-  const [imgFailed, setImgFailed] = useState(false);
-
-  if (imgFailed) {
-    return <ThumbnailPlaceholder className={className} />;
-  }
-
-  return (
-    <img
-      src={api.thumbnailUrl(assetId)}
-      alt={alt}
-      loading="lazy"
-      className={className}
-      onError={() => setImgFailed(true)}
-    />
-  );
-}
-
-function ThumbnailPlaceholder({ className }: { className: string }) {
   return (
     <div
-      className={`${className} flex items-center justify-center bg-neutral-800 text-neutral-600`}
+      className={`${base} flex items-center justify-center bg-neutral-800 text-neutral-600`}
       role="img"
       aria-label="No thumbnail available"
     >

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import AuditQueuePage from "./AuditQueuePage";
 import { api } from "../api/client";
 
@@ -18,12 +19,20 @@ vi.mock("../api/client", () => ({
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+  const router = createMemoryRouter(
+    [{ path: "/", element: ui }],
+    { initialEntries: ["/"] },
+  );
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
 }
 
 describe("AuditQueuePage", () => {
   it("shows an empty state when there is nothing to review", async () => {
-    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
     renderWithClient(<AuditQueuePage />);
 
     expect(await screen.findByText(/nothing needs review/i)).toBeInTheDocument();
@@ -61,6 +70,7 @@ describe("AuditQueuePage", () => {
           phashDistance: 2,
         },
       ],
+      total: 1,
     });
     renderWithClient(<AuditQueuePage />);
 
@@ -90,6 +100,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "tgt.jpg", filePath: "/tgt.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.confirmEdge).mockResolvedValue({ ok: true });
 
@@ -101,7 +112,7 @@ describe("AuditQueuePage", () => {
   });
 
   it("opens manual link modal and submits createEdge", async () => {
-    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
     vi.mocked(api.createEdge).mockResolvedValue({
       id: 99,
       sourceNodeId: 100,
@@ -152,6 +163,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.confirmEdge).mockRejectedValue(new Error("Database write failure"));
 
@@ -180,6 +192,7 @@ describe("AuditQueuePage", () => {
           targetNode: { id: 3, nodeUuid: "uuid-3", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
         },
       ],
+      total: 1,
     });
     vi.mocked(api.rejectEdge).mockRejectedValue(new Error("Network disconnect"));
 
@@ -188,5 +201,54 @@ describe("AuditQueuePage", () => {
     await userEvent.click(button);
 
     expect(await screen.findByText(/Failed to reject edge: Error: Network disconnect/i)).toBeInTheDocument();
+  });
+
+  it("uses keyset pagination: first page beforeId=0", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 100, sourceNodeId: 1, targetNodeId: 2, relationshipType: "DERIVED_FROM",
+          confidence: 0.9, tier: 2, resolver: "x", evidenceJson: "{}",
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 1, nodeUuid: "u-1", fileName: "s.arw", filePath: "/s.arw", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "u-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
+        },
+        {
+          id: 101, sourceNodeId: 3, targetNodeId: 4, relationshipType: "DERIVED_FROM",
+          confidence: 0.85, tier: 2, resolver: "x", evidenceJson: "{}",
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 3, nodeUuid: "u-3", fileName: "s2.arw", filePath: "/s2.arw", thumbState: "READY" },
+          targetNode: { id: 4, nodeUuid: "u-4", fileName: "t2.jpg", filePath: "/t2.jpg", thumbState: "READY" },
+        },
+      ],
+      total: 5, // more than the page size, so Next is enabled
+    });
+
+    renderWithClient(<AuditQueuePage />);
+    await screen.findByText("s.arw"); // wait for first page to render
+
+    // First page: no cursor, beforeId=0.
+    expect(api.listAuditQueue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 50, beforeId: 0 }),
+    );
+  });
+
+  it("Next button is disabled when entries.length < PAGE_SIZE (last page)", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 200, sourceNodeId: 1, targetNodeId: 2, relationshipType: "DERIVED_FROM",
+          confidence: 0.9, tier: 2, resolver: "x", evidenceJson: "{}",
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 1, nodeUuid: "u-1", fileName: "s.arw", filePath: "/s.arw", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "u-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+
+    renderWithClient(<AuditQueuePage />);
+    const nextBtn = await screen.findByRole("button", { name: /next/i });
+    expect(nextBtn).toBeDisabled();
   });
 });

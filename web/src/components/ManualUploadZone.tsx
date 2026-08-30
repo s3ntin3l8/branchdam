@@ -2,7 +2,6 @@ import React, { useCallback, useRef, useState } from "react";
 import { Link } from "react-router";
 import { useStorageLocations, useUploadFile } from "../hooks/queries";
 import type { StorageLocation, UploadProgressEvent, WebUploadResponse } from "../api/types";
-import { formatBytes } from "../utils/format";
 
 export interface QueueItem {
   id: string;
@@ -13,6 +12,14 @@ export interface QueueItem {
   error?: string;
   response?: WebUploadResponse;
   abortController?: AbortController;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
 export default function ManualUploadZone() {
@@ -470,6 +477,7 @@ export default function ManualUploadZone() {
                       onClick={() => removeItem(item.id)}
                       className="text-neutral-500 hover:text-red-400 p-1"
                       title="Remove from queue"
+                      aria-label={`Remove ${item.file.name} from upload queue`}
                     >
                       ✕
                     </button>

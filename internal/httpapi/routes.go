@@ -1169,8 +1169,15 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 // --- /api/v1/edges/audit ---
 
 type AuditQueueInput struct {
-	Limit  int64 `query:"limit" default:"50" minimum:"1" maximum:"500"`
-	Offset int64 `query:"offset" default:"0" minimum:"0"`
+	// Limit caps the page size. 50 by default matches the UI's
+	// PAGE_SIZE constant in web/src/pages/AuditQueuePage.tsx.
+	Limit int64 `query:"limit" default:"50" minimum:"1" maximum:"500"`
+	// BeforeID is a keyset cursor: when non-zero, only rows ordered
+	// strictly before the (confidence, id) of this edge are returned.
+	// 0 means "first page". Replaces offset-based pagination, which
+	// drifted when confirm/reject mutated the queue while the user was
+	// on page N.
+	BeforeID int64 `query:"beforeId" default:"0" minimum:"0"`
 }
 
 type auditNodeDTO struct {
@@ -1204,17 +1211,31 @@ type auditEntryDTO struct {
 type AuditQueueOutput struct {
 	Body struct {
 		Entries []auditEntryDTO `json:"entries"`
+		Total   int64           `json:"total"`
 	}
 }
 
 func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*AuditQueueOutput, error) {
-	rows, err := s.db.Reader.ListAuditQueueDetailed(ctx, sqlcgen.ListAuditQueueDetailedParams{Limit: in.Limit, Offset: in.Offset})
+	// Keyset pagination + total via COUNT(*) OVER(): one query per page
+	// turn, total consistent with the rows returned. Replaces the
+	// offset+separate-COUNT(*) pair, which both drifted across mutations
+	// (offset shifted out from under the user) and could disagree
+	// (confirm between list and count made total stale).
+	rows, err := s.db.Reader.ListAuditQueueDetailed(ctx, sqlcgen.ListAuditQueueDetailedParams{
+		Limit:    in.Limit,
+		BeforeID: in.BeforeID,
+	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list audit queue", err)
 	}
 	out := &AuditQueueOutput{}
 	out.Body.Entries = make([]auditEntryDTO, len(rows))
 	for i, r := range rows {
+		if i == 0 {
+			// Every row carries the same total (COUNT(*) OVER() is
+			// computed over the full filter set, not the page).
+			out.Body.Total = r.Total
+		}
 		sn := auditNodeDTO{
 			ID:         r.SourceNodeID,
 			NodeUUID:   r.SourceNodeUuid,

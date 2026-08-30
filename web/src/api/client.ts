@@ -12,10 +12,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
-    headers: {
-      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
-      ...init?.headers,
-    },
+    headers: { "Content-Type": "application/json", ...init?.headers },
   });
   if (!res.ok) {
     let detail = res.statusText;
@@ -25,9 +22,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // response body wasn't JSON -- fall back to statusText
     }
+    if (res.status === 401 || res.status === 403) {
+      window.dispatchEvent(
+        new CustomEvent("api-auth-error", { detail: { status: res.status, message: detail } })
+      );
+    }
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
+  window.dispatchEvent(new CustomEvent("api-auth-success"));
   return (await res.json()) as T;
 }
 
@@ -62,11 +65,11 @@ export const api = {
   // auth, same as any other same-origin image request.
   thumbnailUrl: (id: number) => `/api/v1/assets/${id}/thumbnail`,
 
-  listAuditQueue: (params: { limit?: number; offset?: number } = {}) => {
+  listAuditQueue: (params: { limit?: number; beforeId?: number } = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
-    if (params.offset) qs.set("offset", String(params.offset));
-    return request<{ entries: AuditEntry[] }>(`/api/v1/edges/audit?${qs}`);
+    if (params.beforeId) qs.set("beforeId", String(params.beforeId));
+    return request<{ entries: AuditEntry[]; total: number }>(`/api/v1/edges/audit?${qs}`);
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),
   rejectEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/reject`, { method: "POST" }),
