@@ -164,6 +164,8 @@ type Querier interface {
 	ListDescendants(ctx context.Context, id int64) ([]int64, error)
 	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
 	ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error)
+	ListEdgesByMultipleSources(ctx context.Context, jsonEach string) ([]MediaEdge, error)
+	ListEdgesByMultipleTargets(ctx context.Context, jsonEach string) ([]MediaEdge, error)
 	ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage

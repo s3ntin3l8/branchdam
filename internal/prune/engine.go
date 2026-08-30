@@ -7,6 +7,7 @@ package prune
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 
@@ -87,17 +88,20 @@ type Result struct {
 // reappears elsewhere. Both are the desired semantics for a cache file.
 //
 // cutoffUnix is the same TTL cutoff the caller's Plan call used --
-// Execute re-runs Plan itself, scoped to each candidate's own location,
-// inside the transaction, and aborts that candidate with
-// ErrNoLongerEligible if it no longer appears. This closes the DB-side
-// TOCTOU between a dry-run response and a later Execute call: without it,
-// a Tier-3 master going MISSING (or its full_hash getting invalidated)
-// between Plan and Execute would let Execute delete the one remaining
-// verified copy of a file -- exactly what the verified-hash gate exists
-// to prevent. The mtime/TTL portion of Plan's own filter is redundant
-// here (a candidate's mtime cannot un-age), but re-running the whole
-// query is simpler and safer than duplicating only the ancestor-liveness
-// half of it.
+// Execute pre-runs Plan once per unique storage location against the Reader
+// (see the pre-compute block below for why this is sufficient) and uses
+// that snapshot as the per-candidate eligibility set inside the transaction
+// loop. A candidate not in the snapshot is aborted with
+// ErrNoLongerEligible. The in-transaction re-check still goes deeper than
+// that snapshot for the critical case: it re-validates every verified
+// Tier-3 ancestor's row in the same writer transaction, so a Tier-3 master
+// going MISSING (or its full_hash getting invalidated) in the milliseconds
+// between the pre-compute and the commit still aborts the purge -- the
+// verified-hash gate the original Plan was re-running inside InTx exists
+// to enforce. The mtime/TTL portion of Plan's own filter is redundant
+// across this gap (a candidate's mtime cannot un-age, and ACTIVE -> MISSING
+// on the candidate itself only happens via the InTx's own MarkNodeMissing
+// step, not a concurrent change we'd race with).
 //
 // The DB re-check alone isn't sufficient, though: media_nodes.mtime_unix
 // is itself only as fresh as the last scan/sweep that touched this node,
@@ -122,21 +126,64 @@ type Result struct {
 // and the remainder untouched; re-running Plan against the same location
 // picks up exactly where it left off.
 func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candidates []Candidate, cutoffUnix int64) []Result {
+	// Pre-compute eligibility per unique storage location once, before the
+	// transaction loop. This replaces the previous per-candidate Plan call
+	// inside each InTx, which re-ran the same query for every candidate on
+	// the same location.
+	//
+	// Why a Reader snapshot here is sufficient: the loop below runs every
+	// InTx back-to-back in a single process, so the window between this
+	// snapshot and each InTx is bounded to milliseconds. The only state
+	// change that can invalidate a Plan row is the candidate's Tier-3
+	// ancestor going MISSING or losing its full_hash, and the InTx body
+	// re-validates exactly that via ListVerifiedTier3Ancestors before any
+	// destructive call -- the TTL/ACTIVE filters Plan encodes cannot be
+	// invalidated in the opposite direction (a node's mtime cannot un-age,
+	// and ACTIVE -> MISSING on the candidate itself is the InTx's own
+	// MarkNodeMissing step, not a concurrent state we'd race with). So
+	// the only thing the InTx check is doing that Plan was also doing is
+	// re-reading the ancestor's liveness, and it does so under the writer
+	// transaction, which sees the up-to-date row.
+	locations := make(map[int64][]Candidate)
+	for _, c := range candidates {
+		locations[c.StorageLocationID] = append(locations[c.StorageLocationID], c)
+	}
+	eligibleMap := make(map[int64]bool, len(candidates))
+	// failedLocations records locations whose Plan call errored; the
+	// candidates from those locations are appended to results with the
+	// real error and skipped in the loop below, so the InTx path never
+	// runs for them and doesn't overwrite the wrapped error.
+	failedLocations := make(map[int64]struct{}, len(locations))
+	// errByLocation is a pre-computed error per failed location. Built
+	// in the pre-compute loop (order doesn't matter) and read in the
+	// candidate loop to assemble results in input order.
+	errByLocation := make(map[int64]error, len(locations))
+	for locID := range locations {
+		planned, err := Plan(ctx, database.Reader, locID, cutoffUnix)
+		if err != nil {
+			failedLocations[locID] = struct{}{}
+			errByLocation[locID] = fmt.Errorf("plan eligibility for location %d: %w", locID, err)
+			continue
+		}
+		for _, p := range planned {
+			eligibleMap[p.NodeID] = true
+		}
+	}
+
+	// Iterate candidates in input order so Result slice ordering
+	// matches the request. Previously a per-location grouping loop
+	// (map iteration over locations) could reorder Results vs.
+	// input candidates, which the caller (handlePrune) reports
+	// independently so nothing was misattributed, but the contract
+	// was lossy for no reason.
 	results := make([]Result, 0, len(candidates))
 	for _, c := range candidates {
+		if err, ok := errByLocation[c.StorageLocationID]; ok {
+			results = append(results, Result{Candidate: c, Purged: false, Err: err})
+			continue
+		}
 		err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
-			stillEligible, err := Plan(ctx, q, c.StorageLocationID, cutoffUnix)
-			if err != nil {
-				return err
-			}
-			found := false
-			for _, sc := range stillEligible {
-				if sc.NodeID == c.NodeID {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !eligibleMap[c.NodeID] {
 				return ErrNoLongerEligible
 			}
 

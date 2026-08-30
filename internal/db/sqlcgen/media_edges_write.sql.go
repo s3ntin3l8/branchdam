@@ -240,3 +240,95 @@ func (q *Queries) ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]
 	}
 	return items, nil
 }
+
+const listEdgesByMultipleTargets = `-- name: ListEdgesByMultipleTargets :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE target_node_id IN (SELECT value FROM json_each(?1))
+  AND review_state <> 'REJECTED'
+`
+
+func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, jsonEach string) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleTargets, jsonEach)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaEdge{}
+	for rows.Next() {
+		var i MediaEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ReviewState,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgesByMultipleSources = `-- name: ListEdgesByMultipleSources :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE source_node_id IN (SELECT value FROM json_each(?1))
+  AND review_state <> 'REJECTED'
+`
+
+func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, jsonEach string) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleSources, jsonEach)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaEdge{}
+	for rows.Next() {
+		var i MediaEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ReviewState,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -647,4 +648,58 @@ func countMediaNodes(t *testing.T, database *db.DB) int {
 		t.Fatalf("ListMediaNodes: %v", err)
 	}
 	return len(rows)
+}
+
+// TestExecuteSurfacesPlanFailureForLocation proves the pre-compute error
+// path: when Plan fails for a storage location (transient DB error, schema
+// drift, etc.), every candidate from that location must surface the real
+// error in Result.Err -- not be silently mislabeled ErrNoLongerEligible.
+// For a disk-reclaiming operation, the difference matters: ErrNoLongerEligible
+// tells the caller the row is no longer eligible and the prune is
+// appropriate-on-paper-but-deferred; a propagated Plan error tells the
+// caller the prune is being skipped because of a downstream problem they
+// need to investigate. Swallowing it as ErrNoLongerEligible masks systematic
+// failures and was the behavior Hermes flagged on the pre-compute refactor.
+//
+// The test forces Plan to fail by closing the DB before Execute is called --
+// after Close, every Query on either the reader or writer pool returns
+// "sql: database is closed". Without the fix, the candidate falls through
+// to InTx which itself errors with the writer's "begin transaction:
+// database is closed" -- a different (writer-side) error than the Plan
+// failure, and one that doesn't identify the pre-compute as the source.
+// With the fix, the candidate's Result.Err is the wrapped Plan error from
+// the pre-compute, identifiable by its "plan eligibility for location"
+// message and the underlying DB-closed cause.
+func TestExecuteSurfacesPlanFailureForLocation(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache.jpg")
+	if err := os.WriteFile(filePath, []byte("cache content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
+	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	results := Execute(context.Background(), database, guard, []Candidate{
+		{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID, MtimeUnix: oldMtime, SizeBytes: 13},
+	}, cutoffUnix)
+
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want exactly 1", results)
+	}
+	if results[0].Purged {
+		t.Fatal("candidate purged despite a Plan failure, want refused")
+	}
+	if !strings.Contains(results[0].Err.Error(), "plan eligibility for location") {
+		t.Fatalf("err = %q, want it to wrap the Plan error with a location-scoped message so callers can see where the failure originated", results[0].Err)
+	}
+	if !strings.Contains(results[0].Err.Error(), "closed") {
+		t.Errorf("err = %q, want it to surface the underlying DB error (got a closed DB, so \"closed\" should appear in the message)", results[0].Err)
+	}
 }
