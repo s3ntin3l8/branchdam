@@ -11,6 +11,7 @@ package settings
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -376,6 +377,49 @@ var httpFields = []Field{
 		Set:      func(cfg *config.Config, v any) error { cfg.HTTP.ExposeOpenAPI = v.(bool); return nil },
 		Editable: true,
 		Doc:      "Serves /openapi.json, /openapi.yaml, and /docs.",
+	},
+	{
+		Key:   "http.trustedProxies",
+		Type:  KindStringList,
+		Label: "Trusted Proxies",
+		Group: "HTTP",
+		Apply: ApplyRestart,
+		Get:   func(cfg *config.Config) any { return cfg.HTTP.TrustedProxies },
+		Set: func(cfg *config.Config, v any) error {
+			list, ok := v.([]string)
+			if !ok {
+				return fmt.Errorf("must be a string list")
+			}
+			cfg.HTTP.TrustedProxies = list
+			return nil
+		},
+		Validate: func(v any) error {
+			list, ok := v.([]string)
+			if !ok {
+				return fmt.Errorf("must be a string list")
+			}
+			for _, entry := range list {
+				entry = strings.TrimSpace(entry)
+				if entry == "" {
+					return fmt.Errorf("proxy entry cannot be empty")
+				}
+				if entry == "*" {
+					continue
+				}
+				if strings.Contains(entry, "/") {
+					if _, err := netip.ParsePrefix(entry); err != nil {
+						return fmt.Errorf("invalid CIDR %q: %v", entry, err)
+					}
+				} else {
+					if _, err := netip.ParseAddr(entry); err != nil {
+						return fmt.Errorf("invalid IP address %q: %v", entry, err)
+					}
+				}
+			}
+			return nil
+		},
+		Editable: true,
+		Doc:      "IP addresses or CIDR ranges of trusted reverse proxies. X-Forwarded-* headers are only honored from these sources. Use '*' to trust all.",
 	},
 }
 

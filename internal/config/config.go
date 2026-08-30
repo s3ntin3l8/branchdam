@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
@@ -14,6 +15,29 @@ import (
 )
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
+var unresolvedVarRe = regexp.MustCompile(`\$\{[^}]+\}`)
+
+func validateSecretExpansion(cfg Config) error {
+	sensitiveFields := []struct {
+		path string
+		val  string
+	}{
+		{"agent.apiKey", cfg.Agent.APIKey},
+		{"immich.apiKey", cfg.Immich.APIKey},
+		{"immich.apiUrl", cfg.Immich.APIURL},
+	}
+	var unresolved []string
+	for _, f := range sensitiveFields {
+		if unresolvedVarRe.MatchString(f.val) {
+			unresolved = append(unresolved, f.path)
+		}
+	}
+	if len(unresolved) > 0 {
+		return fmt.Errorf("unresolved environment variables in security-sensitive fields: %s — either set the corresponding environment variables or remove the ${VAR} references",
+			strings.Join(unresolved, ", "))
+	}
+	return nil
+}
 
 // Config is branchDAM's top-level configuration.
 //
@@ -99,9 +123,10 @@ type Database struct {
 
 // HTTP configures the stdlib http.Server wrapping the mux.
 type HTTP struct {
-	ReadTimeoutSecs  int  `yaml:"readTimeoutSecs"`
-	WriteTimeoutSecs int  `yaml:"writeTimeoutSecs"`
-	ExposeOpenAPI    bool `yaml:"exposeOpenAPI"`
+	ReadTimeoutSecs  int      `yaml:"readTimeoutSecs"`
+	WriteTimeoutSecs int      `yaml:"writeTimeoutSecs"`
+	ExposeOpenAPI    bool     `yaml:"exposeOpenAPI"`
+	TrustedProxies   []string `yaml:"trustedProxies"`
 }
 
 // Workers configures the bounded hash worker pool (internal/workers, PR 4).
@@ -225,10 +250,23 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("read config: %w", err)
 	}
 
+	if info, err := os.Stat(path); err == nil {
+		mode := info.Mode().Perm()
+		if mode&0007 != 0 {
+			slog.Warn("config file is world-readable — consider tightening permissions to 0600",
+				"path", path,
+				"mode", fmt.Sprintf("%04o", mode))
+		}
+	}
+
 	expanded := expandEnv(string(data))
 
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := validateSecretExpansion(cfg); err != nil {
+		return cfg, fmt.Errorf("config validation: %w", err)
 	}
 
 	return cfg, nil

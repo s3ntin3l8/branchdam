@@ -1,8 +1,10 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,16 +63,28 @@ func TestExpandEnvSet(t *testing.T) {
 }
 
 func TestExpandEnvUnsetLeftLiteral(t *testing.T) {
-	// An unset ${VAR} must be left as literal text, not silently emptied --
-	// an empty agent API key would otherwise fail closed silently instead of
-	// loudly, which is the wrong direction for a security-relevant field.
-	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_DEFINITELY_UNSET_VAR}\"\n")
+	// An unset ${VAR} in a non-sensitive field must be left as literal text,
+	// not silently emptied -- a typo'd variable name fails loudly downstream.
+	path := writeConfig(t, "listenAddr: \"${BRANCHDAM_DEFINITELY_UNSET_VAR}\"\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Agent.APIKey != "${BRANCHDAM_DEFINITELY_UNSET_VAR}" {
-		t.Errorf("Agent.APIKey = %q, want literal ${BRANCHDAM_DEFINITELY_UNSET_VAR}", cfg.Agent.APIKey)
+	if cfg.ListenAddr != "${BRANCHDAM_DEFINITELY_UNSET_VAR}" {
+		t.Errorf("ListenAddr = %q, want literal ${BRANCHDAM_DEFINITELY_UNSET_VAR}", cfg.ListenAddr)
+	}
+}
+
+func TestExpandEnvUnsetInSensitiveFieldRejected(t *testing.T) {
+	// An unset ${VAR} in a sensitive field must be rejected by
+	// validateSecretExpansion -- leaving an unresolved env var in an API key
+	// would silently authenticate with a broken credential.
+	t.Setenv("BRANCHDAM_TEST_UNSET_VAR_XYZ", "")
+	os.Unsetenv("BRANCHDAM_TEST_UNSET_VAR_XYZ") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_TEST_UNSET_VAR_XYZ}\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load with unresolved secret: want error, got nil")
 	}
 }
 
@@ -108,6 +122,9 @@ storageLocations:
 }
 
 func TestLoadExampleConfig(t *testing.T) {
+	t.Setenv("BRANCHDAM_AGENT_API_KEY", "example-agent-key")
+	t.Setenv("IMMICH_API_KEY", "example-immich-key")
+	t.Setenv("IMMICH_API_URL", "http://immich.example.com")
 	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"))
 	if err != nil {
 		t.Fatalf("Load(config.example.yaml): %v", err)
@@ -156,5 +173,94 @@ http:
 	}
 	if !cfg.HTTP.ExposeOpenAPI {
 		t.Errorf("HTTP.ExposeOpenAPI = false, want true")
+	}
+}
+
+func writeConfigWithPerm(t *testing.T, contents string, perm os.FileMode) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(contents), perm); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	return path
+}
+
+func TestLoadWarnsOnWorldReadableConfig(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	slog.SetDefault(logger)
+
+	path := writeConfigWithPerm(t, "listenAddr: \":9090\"\n", 0o644)
+	_, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !strings.Contains(buf.String(), "world-readable") {
+		t.Errorf("expected world-readable warning in log output, got: %s", buf.String())
+	}
+}
+
+func TestLoadNoWarningOnRestrictedConfig(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	slog.SetDefault(logger)
+
+	path := writeConfigWithPerm(t, "listenAddr: \":9090\"\n", 0o600)
+	_, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Contains(buf.String(), "world-readable") {
+		t.Errorf("unexpected world-readable warning for 0600 config: %s", buf.String())
+	}
+}
+
+func TestLoadRejectsUnresolvedSecretEnvVars(t *testing.T) {
+	t.Setenv("BRANCHDAM_UNDEFINED_TEST_VAR", "")
+	os.Unsetenv("BRANCHDAM_UNDEFINED_TEST_VAR") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_UNDEFINED_TEST_VAR}\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load with unresolved secret: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "agent.apiKey") {
+		t.Errorf("error = %q, want it to mention agent.apiKey", err.Error())
+	}
+}
+
+func TestLoadRejectsMultipleUnresolvedSecrets(t *testing.T) {
+	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_A") //nolint:errcheck // intentional: test needs var unset
+	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_B") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_A}\"\nimmich:\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_B}\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load with multiple unresolved secrets: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "agent.apiKey") {
+		t.Errorf("error = %q, want it to mention agent.apiKey", err.Error())
+	}
+	if !strings.Contains(err.Error(), "immich.apiKey") {
+		t.Errorf("error = %q, want it to mention immich.apiKey", err.Error())
+	}
+}
+
+func TestLoadAcceptsResolvedSecretEnvVars(t *testing.T) {
+	t.Setenv("BRANCHDAM_TEST_SECRET", "my-api-key")
+	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_TEST_SECRET}\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.APIKey != "my-api-key" {
+		t.Errorf("Agent.APIKey = %q, want my-api-key", cfg.Agent.APIKey)
+	}
+}
+
+func TestLoadAllowsEmptySecretFields(t *testing.T) {
+	path := writeConfig(t, "agent:\n  apiKey: \"\"\nimmich:\n  apiUrl: \"\"\n  apiKey: \"\"\n")
+	_, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load with empty secrets: %v, want nil", err)
 	}
 }

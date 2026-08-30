@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -134,5 +135,62 @@ func TestKindAndApplyModeString(t *testing.T) {
 		if got := tc.m.String(); got != tc.want {
 			t.Errorf("ApplyMode(%d).String() = %q, want %q", tc.m, got, tc.want)
 		}
+	}
+}
+
+func TestTrustedProxiesFieldValidation(t *testing.T) {
+	field, ok := Lookup("http.trustedProxies")
+	if !ok {
+		t.Fatal("http.trustedProxies not registered")
+	}
+
+	valid := [][]string{
+		nil,
+		{},
+		{"*"},
+		{"10.0.0.1"},
+		{"10.0.0.0/24"},
+		{"2001:db8::1"},
+		{"2001:db8::/32"},
+		{" 10.0.0.1 "},
+	}
+	for _, entries := range valid {
+		if err := field.Validate(entries); err != nil {
+			t.Errorf("Validate(%v) = %v, want nil", entries, err)
+		}
+	}
+
+	invalid := []struct {
+		name    string
+		value   any
+		wantErr string
+	}{
+		{"wrong type", "10.0.0.1", "must be a string list"},
+		{"empty entry", []string{""}, "proxy entry cannot be empty"},
+		{"invalid IP", []string{"not-an-ip"}, "invalid IP address"},
+		{"invalid CIDR", []string{"10.0.0.0/not-a-prefix"}, "invalid CIDR"},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			err := field.Validate(tc.value)
+			if err == nil {
+				t.Fatal("Validate = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate error = %q, want it to contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestTrustedProxiesFieldSetRejectsWrongType(t *testing.T) {
+	field, ok := Lookup("http.trustedProxies")
+	if !ok {
+		t.Fatal("http.trustedProxies not registered")
+	}
+
+	cfg := &config.Config{}
+	if err := field.Set(cfg, "10.0.0.1"); err == nil {
+		t.Fatal("Set with wrong type = nil, want error")
 	}
 }

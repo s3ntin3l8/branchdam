@@ -15,6 +15,14 @@ http:
   readTimeoutSecs: 15
   writeTimeoutSecs: 15
   exposeOpenAPI: false            # expose /openapi.json and /docs (default false)
+  # IP addresses or CIDR ranges of trusted reverse proxies.
+  # X-Forwarded-* headers are only honored from these sources.
+  # Default (unset): trust all (backward-compatible).
+  # Set to [] (empty list) to deny all forwarded headers.
+  # trustedProxies:
+  #   - 10.0.0.0/8
+  #   - 192.168.0.0/16
+  #   - "*"  # trust all (same as unset)
 
 workers:
   hashWorkers: 0                  # 0 = auto (min(4, NumCPU)); hashing is I/O
