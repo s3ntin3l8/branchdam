@@ -147,6 +147,16 @@ func New(d Deps) *Server {
 	if d.Settings != nil {
 		cfgProvider = d.Settings
 	}
+	// Surface the trust-all-proxy default at startup so a security-minded
+	// operator notices they're running with the backward-compat branch
+	// of isTrustedProxy. The check below mirrors isTrustedProxy's nil =>
+	// true behavior: nil or empty list means "trust all". An explicit
+	// non-empty list (even just "*") means the operator has opted in.
+	if cfg := cfgProvider.Effective(); cfg != nil {
+		if len(cfg.HTTP.TrustedProxies) == 0 {
+			log.Warn("http: trustedProxies is empty -- X-Forwarded-* headers are trusted from any source (backward-compat default). Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
+		}
+	}
 	return &Server{
 		cfgProvider:    cfgProvider,
 		settingsStore:  d.Settings,
