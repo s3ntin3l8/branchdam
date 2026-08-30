@@ -388,3 +388,11 @@ export interface PutSettingsRequest {
 export interface PostRestartResponse {
   ok: boolean;
 }
+
+export interface CheckContentResult {
+  found: boolean;
+  nodeUuid?: string;
+  filePath?: string;
+  lifecycleState?: string;
+  indexingStatus?: string;
+}

@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -189,5 +189,12 @@ export const api = {
 
       xhr.send(formData);
     });
+  },
+
+  checkContent: (fastHash: string | undefined, fullHash: string) => {
+    const qs = new URLSearchParams();
+    if (fastHash) qs.set("fastHash", fastHash);
+    qs.set("fullHash", fullHash);
+    return request<CheckContentResult>(`/api/v1/agent/check-content?${qs.toString()}`);
   },
 };

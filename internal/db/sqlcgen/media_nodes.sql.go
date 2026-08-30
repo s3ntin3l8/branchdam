@@ -1475,3 +1475,18 @@ func (q *Queries) GetMediaNodeByFullHash(ctx context.Context, fullHash *string) 
 	)
 	return i, err
 }
+
+const getMediaNodeByFastHash = `-- name: GetMediaNodeByFastHash :one
+SELECT id
+FROM media_nodes
+WHERE fast_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+LIMIT 1
+`
+
+func (q *Queries) GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeByFastHash, fastHash)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
