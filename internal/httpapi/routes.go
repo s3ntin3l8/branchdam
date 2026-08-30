@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,6 +110,13 @@ func (s *Server) registerRoutes(api huma.API) {
 		Summary:       "Submit workstation agent scratch telemetry and prune stats",
 		DefaultStatus: http.StatusOK,
 	}, s.handleAgentTelemetry)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodGet,
+		Path:          "/api/v1/agent/check-content",
+		OperationID:   "agentCheckContent",
+		Summary:       "Pre-flight hash check before byte transfer",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentCheckContent)
 }
 
 // --- /api/v1/me ---
@@ -1940,6 +1948,73 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 		return nil, huma.Error500InternalServerError("node status query failed", err)
 	}
 	return out, nil
+}
+
+// --- /api/v1/agent/check-content ---
+
+type AgentCheckContentInput struct {
+	FastHash string `query:"fastHash" doc:"Optional xxHash64 hex (16 chars) fast pre-screen"`
+	FullHash string `query:"fullHash" doc:"BLAKE3-256 hex (64 chars) definitive content hash"`
+}
+
+type AgentCheckContentResult struct {
+	Found          bool   `json:"found"`
+	NodeUUID       string `json:"nodeUuid,omitempty"`
+	FilePath       string `json:"filePath,omitempty"`
+	LifecycleState string `json:"lifecycleState,omitempty"`
+	IndexingStatus string `json:"indexingStatus,omitempty"`
+}
+
+type AgentCheckContentOutput struct {
+	Body AgentCheckContentResult
+}
+
+func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckContentInput) (*AgentCheckContentOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	fullHash := strings.ToLower(strings.TrimSpace(in.FullHash))
+	if fullHash == "" {
+		return nil, huma.Error400BadRequest("fullHash query parameter is required", nil)
+	}
+
+	if s.db == nil {
+		return nil, huma.Error500InternalServerError("database not available", nil)
+	}
+
+	fastHash := strings.ToLower(strings.TrimSpace(in.FastHash))
+	if fastHash != "" {
+		_, err := s.db.Reader.GetMediaNodeByFastHash(ctx, &fastHash)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return &AgentCheckContentOutput{
+					Body: AgentCheckContentResult{Found: false},
+				}, nil
+			}
+			return nil, huma.Error500InternalServerError("fast hash query failed", err)
+		}
+	}
+
+	node, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &fullHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &AgentCheckContentOutput{
+				Body: AgentCheckContentResult{Found: false},
+			}, nil
+		}
+		return nil, huma.Error500InternalServerError("full hash query failed", err)
+	}
+
+	return &AgentCheckContentOutput{
+		Body: AgentCheckContentResult{
+			Found:          true,
+			NodeUUID:       node.NodeUuid,
+			FilePath:       node.FilePath,
+			LifecycleState: node.LifecycleState,
+			IndexingStatus: node.IndexingStatus,
+		},
+	}, nil
 }
 
 // --- /api/v1/agent/telemetry ---
