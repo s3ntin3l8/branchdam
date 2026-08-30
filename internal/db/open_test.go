@@ -398,3 +398,60 @@ func TestListTier3Candidates(t *testing.T) {
 		t.Fatalf("transaction failed: %v", err)
 	}
 }
+
+func TestGetMediaNodeByFullHashAndFastHash(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		sl, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name:     "loc",
+			RootPath: "/tmp/test_hashes",
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+
+		fastHash := "0123456789abcdef"
+		fullHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "00000000-0000-7000-8000-000000000010",
+			StorageLocationID: sl.ID,
+			FilePath:          "/tmp/test_hashes/file.jpg",
+			FileName:          "file.jpg",
+			FileExt:           "jpg",
+			FastHash:          &fastHash,
+			FullHash:          &fullHash,
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		byFull, err := q.GetMediaNodeByFullHash(ctx, &fullHash)
+		if err != nil {
+			return err
+		}
+		if byFull.ID != node.ID || byFull.NodeUuid != node.NodeUuid {
+			t.Errorf("GetMediaNodeByFullHash got ID=%d, want %d", byFull.ID, node.ID)
+		}
+
+		byFast, err := q.GetMediaNodeByFastHash(ctx, &fastHash)
+		if err != nil {
+			return err
+		}
+		if byFast.ID != node.ID || byFast.NodeUuid != node.NodeUuid {
+			t.Errorf("GetMediaNodeByFastHash got ID=%d, want %d", byFast.ID, node.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("transaction failed: %v", err)
+	}
+}
