@@ -399,7 +399,7 @@ func TestListTier3Candidates(t *testing.T) {
 	}
 }
 
-func TestGetMediaNodeByFullHashAndFastHash(t *testing.T) {
+func TestGetMediaNodeByFullHash(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 
@@ -415,7 +415,6 @@ func TestGetMediaNodeByFullHashAndFastHash(t *testing.T) {
 			return err
 		}
 
-		fastHash := "0123456789abcdef"
 		fullHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
@@ -424,7 +423,6 @@ func TestGetMediaNodeByFullHashAndFastHash(t *testing.T) {
 			FilePath:          "/tmp/test_hashes/file.jpg",
 			FileName:          "file.jpg",
 			FileExt:           "jpg",
-			FastHash:          &fastHash,
 			FullHash:          &fullHash,
 			IndexingStatus:    "INDEXED_SHALLOW",
 			GraphStatus:       "UNLINKED",
@@ -440,14 +438,6 @@ func TestGetMediaNodeByFullHashAndFastHash(t *testing.T) {
 		}
 		if byFull.ID != node.ID || byFull.NodeUuid != node.NodeUuid {
 			t.Errorf("GetMediaNodeByFullHash got ID=%d, want %d", byFull.ID, node.ID)
-		}
-
-		byFast, err := q.GetMediaNodeByFastHash(ctx, &fastHash)
-		if err != nil {
-			return err
-		}
-		if byFast.ID != node.ID || byFast.NodeUuid != node.NodeUuid {
-			t.Errorf("GetMediaNodeByFastHash got ID=%d, want %d", byFast.ID, node.ID)
 		}
 		return nil
 	})

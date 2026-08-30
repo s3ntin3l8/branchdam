@@ -493,10 +493,3 @@ FROM media_nodes
 WHERE full_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 LIMIT 1;
-
--- name: GetMediaNodeByFastHash :one
-SELECT id, node_uuid, file_path, lifecycle_state
-FROM media_nodes
-WHERE fast_hash = ?1
-  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
-LIMIT 1;
