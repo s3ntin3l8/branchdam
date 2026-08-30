@@ -30,8 +30,8 @@ LIMIT ?1 OFFSET ?2;
 
 -- name: ListAuditQueueDetailed :many
 -- Keyset (cursor) pagination: when `before_id` is non-zero, only rows
--- ordered BEFORE the (confidence, id) cursor are returned. Ordering is
--- (confidence DESC, id ASC); "before" means strictly less in the
+-- ordered AFTER the (confidence, id) cursor are returned. Ordering is
+-- (confidence DESC, id ASC); "after" means strictly greater in the
 -- lexicographic order. When `before_id` is 0, the first page is returned
 -- (no cursor constraint).
 --
@@ -40,13 +40,18 @@ LIMIT ?1 OFFSET ?2;
 -- duplicate or skip rows. Keyset pagination is stable across mutations
 -- because the cursor is a row identity, not a position.
 --
--- `total` is returned as a column on every row via COUNT(*) OVER() in
--- the same scan, avoiding a second COUNT(*) query per page turn and the
--- race where a confirmation between the list and the count makes total
--- disagree with what the list shows. The OVER() window is the full
--- NEEDS_REVIEW set (not the cursor-restricted set) by computing total
--- in a subquery that applies only the review_state filter, then joining
--- it onto the cursor-restricted row set.
+-- The tie-break for same-confidence rows uses `e.id > cursor.id` (not `<`)
+-- because the ordering is `id ASC`: within a confidence tier, the lower
+-- id comes first, so "after" the cursor means higher id. A `<` tie-break
+-- would duplicate rows on the previous page and skip the rows that should
+-- be on this one.
+--
+-- `total` is returned as a column on every row via a separate subquery,
+-- avoiding a second COUNT(*) query per page turn and the race where a
+-- confirmation between the list and the count makes total disagree with
+-- what the list shows. The subquery applies only the review_state
+-- filter, so total always reflects the full NEEDS_REVIEW set regardless
+-- of cursor.
 --
 -- The cursor (confidence, id) is resolved in a CTE first, then the main
 -- query references it -- sqlc v1.31.1 mis-counts placeholders when a
@@ -73,7 +78,8 @@ FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
-  AND (?2 = 0 OR (e.confidence, e.id) < (SELECT cd, id FROM cursor))
+  AND (?2 = 0 OR e.confidence < (SELECT cd FROM cursor)
+       OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
 ORDER BY e.confidence DESC, e.id ASC
 LIMIT ?1;
 

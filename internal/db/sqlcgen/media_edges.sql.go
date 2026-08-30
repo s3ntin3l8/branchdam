@@ -189,7 +189,8 @@ FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
-  AND (?2 = 0 OR (e.confidence, e.id) < (SELECT cd, id FROM cursor))
+  AND (?2 = 0 OR e.confidence < (SELECT cd FROM cursor)
+       OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
 ORDER BY e.confidence DESC, e.id ASC
 LIMIT ?1
 `

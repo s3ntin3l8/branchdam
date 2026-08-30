@@ -1257,6 +1257,88 @@ func TestAuditQueueKeysetPagination(t *testing.T) {
 	}
 }
 
+// TestAuditQueueKeysetSharedConfidenceTieBreak verifies the keyset cursor's
+// tie-break behavior when multiple edges share the same confidence. With
+// ORDER BY confidence DESC, id ASC, the "after" condition is:
+//
+//	confidence < cursor.confidence
+//	OR (confidence = cursor.confidence AND id > cursor.id)
+//
+// A naive lexicographic "<" comparison would include same-confidence edges
+// with id < cursor.id (duplicates from the previous page) and exclude
+// same-confidence edges with id > cursor.id (rows that belong on this
+// page). This test seeds 4 edges at the same confidence and verifies
+// the page boundary sits cleanly between them.
+func TestAuditQueueKeysetSharedConfidenceTieBreak(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedAuditLocation(t, database)
+
+	// All 4 edges at confidence 0.90, ordered by id ASC.
+	confidences := []float64{0.90, 0.90, 0.90, 0.90}
+	var ids []int64
+	for _, c := range confidences {
+		_, _, id := seedAuditQueueEntry(t, database, locID, c, 2, "test")
+		ids = append(ids, id)
+	}
+
+	// Page 1: limit=2 should return the two lowest-id edges.
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/edges/audit?limit=2", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 1 status = %d", rr.Code)
+	}
+	var page1 struct {
+		Entries []struct {
+			ID int64 `json:"id"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page1); err != nil {
+		t.Fatalf("unmarshal page 1: %v", err)
+	}
+	if len(page1.Entries) != 2 {
+		t.Fatalf("page 1 entries = %d, want 2", len(page1.Entries))
+	}
+	if page1.Total != 4 {
+		t.Errorf("page 1 total = %d, want 4", page1.Total)
+	}
+	if page1.Entries[0].ID != ids[0] || page1.Entries[1].ID != ids[1] {
+		t.Errorf("page 1 ids = [%d, %d], want [%d, %d]",
+			page1.Entries[0].ID, page1.Entries[1].ID, ids[0], ids[1])
+	}
+	page1LastID := page1.Entries[1].ID
+
+	// Page 2: beforeId=ids[1] should return the two highest-id edges,
+	// not the ones already on page 1.
+	rr = doJSON(t, srv.Handler(), http.MethodGet,
+		fmt.Sprintf("/api/v1/edges/audit?limit=2&beforeId=%d", page1LastID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 2 status = %d", rr.Code)
+	}
+	var page2 struct {
+		Entries []struct {
+			ID int64 `json:"id"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page2); err != nil {
+		t.Fatalf("unmarshal page 2: %v", err)
+	}
+	if len(page2.Entries) != 2 {
+		t.Fatalf("page 2 entries = %d, want 2", len(page2.Entries))
+	}
+	if page2.Entries[0].ID != ids[2] || page2.Entries[1].ID != ids[3] {
+		t.Errorf("page 2 ids = [%d, %d], want [%d, %d] (cursor tie-break inverted)",
+			page2.Entries[0].ID, page2.Entries[1].ID, ids[2], ids[3])
+	}
+	for _, e := range page1.Entries {
+		for _, f := range page2.Entries {
+			if e.ID == f.ID {
+				t.Errorf("edge %d appears on both page 1 and page 2 (tie-break inverted)", e.ID)
+			}
+		}
+	}
+}
+
 // TestAuditQueueKeysetStableUnderMutation verifies the keyset pagination
 // invariant that offset-based pagination violates: confirming an edge on
 // page N must not cause page N+1 to duplicate or skip entries. The cursor
