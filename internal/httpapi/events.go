@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -63,22 +65,46 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	notify, unsub := s.hub.Subscribe()
 	defer unsub()
 
-	send := func() {
+	// errClientGone is a sentinel returned by send() when the underlying
+	// http.ResponseWriter rejected a write. Genuine client-gone events
+	// (browser tab closed, network partition) are the only thing that
+	// warrants breaking the loop; the old code conflated this with
+	// transient ListRecentScanJobs/marshal failures, terminating the
+	// stream (and forcing EventSource to reconnect) on a momentary DB
+	// hiccup that the next tick would have recovered from on its own.
+	var errClientGone = errors.New("sse: client gone")
+
+	send := func() error {
 		rows, err := s.db.Reader.ListRecentScanJobs(r.Context(), 5)
 		if err != nil {
-			return
+			// Transient -- log and let the next tick retry.
+			s.log.Warn("sse: list recent scan jobs", "err", err)
+			return nil
 		}
 		b, err := json.Marshal(rows)
 		if err != nil {
-			return
+			// Marshal on a fixed struct shape can't realistically fail
+			// at runtime, but if it ever does, log and skip this tick
+			// rather than tearing the connection down.
+			s.log.Warn("sse: marshal scan jobs", "err", err)
+			return nil
 		}
-		_, _ = w.Write([]byte("event: progress\ndata: "))
-		_, _ = w.Write(b)
-		_, _ = w.Write([]byte("\n\n"))
+		if _, err := w.Write([]byte("event: progress\ndata: ")); err != nil {
+			return fmt.Errorf("%w: %v", errClientGone, err)
+		}
+		if _, err := w.Write(b); err != nil {
+			return fmt.Errorf("%w: %v", errClientGone, err)
+		}
+		if _, err := w.Write([]byte("\n\n")); err != nil {
+			return fmt.Errorf("%w: %v", errClientGone, err)
+		}
 		flusher.Flush()
+		return nil
 	}
 
-	send() // initial state
+	if err := send(); err != nil && errors.Is(err, errClientGone) {
+		return
+	}
 
 	ping := time.NewTicker(20 * time.Second)
 	defer ping.Stop()
@@ -97,9 +123,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			// routine restart (cmd/branchdam/main.go).
 			return
 		case <-notify:
-			send()
+			if err := send(); err != nil && errors.Is(err, errClientGone) {
+				return
+			}
 		case <-ping.C:
-			_, _ = w.Write([]byte(": ping\n\n"))
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
