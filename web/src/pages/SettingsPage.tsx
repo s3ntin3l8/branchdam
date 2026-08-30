@@ -199,7 +199,7 @@ function PathRewritesEditor({
   const [newFrom, setNewFrom] = useState("");
   const [newTo, setNewTo] = useState("");
 
-  if (currentRules !== prevRules) {
+  if (JSON.stringify(currentRules) !== JSON.stringify(prevRules)) {
     setPrevRules(currentRules);
     if (!dirty) {
       setRules(currentRules);

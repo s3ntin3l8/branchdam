@@ -29,7 +29,7 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 }
 
 export default function App() {
-  useEventStream();
+  const { connectionState } = useEventStream();
   const { data: me } = useMe();
   const { data: unlinkedCount } = useUnlinkedCount();
 
@@ -62,6 +62,11 @@ export default function App() {
         )}
       </nav>
       <main className="flex-1 overflow-auto">
+        {connectionState === "disconnected" && (
+          <div className="mx-6 mt-4 rounded-lg border border-amber-800/60 bg-amber-950/30 p-4 text-sm text-amber-300">
+            <span className="font-semibold">Reconnecting</span> to event stream — live updates are paused.
+          </div>
+        )}
         <ErrorBoundary>
           <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
             <Routes>
