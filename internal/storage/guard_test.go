@@ -349,3 +349,69 @@ func TestExistsDanglingLeafSymlinkReportsAbsent(t *testing.T) {
 		t.Error("Exists(dangling symlink) = true, want false -- the symlink itself exists but its target does not")
 	}
 }
+
+// TestGuardReloadLocations verifies that ReloadLocations atomically replaces
+// the Guard's location set: paths under the old location are no longer
+// resolved, and paths under the new location are.
+func TestGuardReloadLocations(t *testing.T) {
+	guard, tier2, tier3 := newTestGuard(t)
+
+	// Sanity: original locations resolve.
+	if _, err := guard.Resolve(filepath.Join(tier2, "x.txt")); err != nil {
+		t.Fatalf("Resolve under original tier2 failed: %v", err)
+	}
+
+	// Create a third location and reload with only that one.
+	newRoot := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(newRoot)
+	if err != nil {
+		t.Fatalf("resolve new root: %v", err)
+	}
+	guard.ReloadLocations([]Location{
+		{ID: 3, Name: "new", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false},
+	})
+
+	// Old locations must no longer resolve.
+	if _, err := guard.Resolve(filepath.Join(tier2, "x.txt")); err == nil {
+		t.Error("Resolve under old tier2 succeeded after reload, want ErrUnknownLocation")
+	}
+	if _, err := guard.Resolve(filepath.Join(tier3, "x.arw")); err == nil {
+		t.Error("Resolve under old tier3 succeeded after reload, want ErrUnknownLocation")
+	}
+
+	// New location must resolve.
+	if _, err := guard.Resolve(filepath.Join(resolved, "y.txt")); err != nil {
+		t.Errorf("Resolve under new location failed after reload: %v", err)
+	}
+}
+
+// TestGuardReloadLocationsConcurrent hammers Resolve and ReloadLocations
+// concurrently to verify there are no data races. Run with -race.
+func TestGuardReloadLocationsConcurrent(t *testing.T) {
+	guard, tier2, tier3 := newTestGuard(t)
+	newRoot := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(newRoot)
+	if err != nil {
+		t.Fatalf("resolve new root: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			guard.ReloadLocations([]Location{
+				{ID: 3, Name: "new", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false},
+			})
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		// Resolve against whichever location set is active -- either may
+		// return ErrUnknownLocation, that's fine; we just need no panic/race.
+		_, _ = guard.Resolve(filepath.Join(tier2, "x.txt"))
+		_, _ = guard.Resolve(filepath.Join(tier3, "x.arw"))
+		_, _ = guard.Resolve(filepath.Join(resolved, "y.txt"))
+	}
+
+	<-done
+}
