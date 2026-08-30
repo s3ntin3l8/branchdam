@@ -1083,6 +1083,326 @@ func TestAuditQueueEmpty(t *testing.T) {
 	}
 }
 
+// seedAuditQueueEntry inserts a NEEDS_REVIEW edge between two nodes in the
+// given storage location, with a caller-supplied confidence. Returns the
+// edge id so tests can chain further assertions on it. The pair of nodes
+// is created on the fly (one parent, one child) since media_edges requires
+// both endpoints to exist.
+func seedAuditQueueEntry(t *testing.T, database *db.DB, locID int64, confidence float64, tier int64, resolver string) (parentID, childID, edgeID int64) {
+	t.Helper()
+	ctx := context.Background()
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		uniq := uuid.New().String()
+		parent, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: uniq + "-p", StorageLocationID: locID,
+			FilePath: "/seed/" + uniq + "-p.jpg", FileName: uniq + "-p.jpg", FileExt: ".jpg",
+			SizeBytes: 1, MtimeUnix: 1, IndexingStatus: "INDEXED_SHALLOW",
+			GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		parentID = parent.ID
+		uniq2 := uuid.New().String()
+		child, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: uniq2 + "-c", StorageLocationID: locID,
+			FilePath: "/seed/" + uniq2 + "-c.jpg", FileName: uniq2 + "-c.jpg", FileExt: ".jpg",
+			SizeBytes: 1, MtimeUnix: 1, IndexingStatus: "INDEXED_SHALLOW",
+			GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		childID = child.ID
+		row, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: confidence, Tier: tier, Resolver: resolver, EvidenceJson: "{}",
+			ReviewState: "NEEDS_REVIEW",
+		})
+		if err != nil {
+			return err
+		}
+		edgeID = row.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed audit entry (confidence=%.2f): %v", confidence, err)
+	}
+	return parentID, childID, edgeID
+}
+
+// seedAuditLocation creates a single storage location and returns its id.
+func seedAuditLocation(t *testing.T, database *db.DB) int64 {
+	t.Helper()
+	var locID int64
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "audit-test", RootPath: t.TempDir(), Tier: "TIER1_LOCAL_SCRATCH",
+			ReadOnly: 0, Prunable: 0,
+		})
+		locID = loc.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed location: %v", err)
+	}
+	return locID
+}
+
+func TestAuditQueueKeysetPagination(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedAuditLocation(t, database)
+
+	// Seed five NEEDS_REVIEW edges with distinct confidences so the
+	// (confidence DESC, id ASC) order is deterministic. The ordering
+	// query is: 0.95, 0.90, 0.85, 0.80, 0.75.
+	confidences := []float64{0.75, 0.95, 0.80, 0.90, 0.85}
+	var firstID int64
+	for _, c := range confidences {
+		_, _, id := seedAuditQueueEntry(t, database, locID, c, 2, "test")
+		if firstID == 0 {
+			firstID = id
+		}
+	}
+
+	// Fetch the first page with limit=2: should get the two highest-
+	// confidence entries (0.95, 0.90) with total=5.
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/edges/audit?limit=2", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 1 status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var page1 struct {
+		Entries []struct {
+			ID         int64   `json:"id"`
+			Confidence float64 `json:"confidence"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page1); err != nil {
+		t.Fatalf("unmarshal page 1: %v", err)
+	}
+	if len(page1.Entries) != 2 {
+		t.Fatalf("page 1 entries = %d, want 2 (limit=2)", len(page1.Entries))
+	}
+	if page1.Total != 5 {
+		t.Errorf("page 1 total = %d, want 5 (all NEEDS_REVIEW)", page1.Total)
+	}
+	if page1.Entries[0].Confidence != 0.95 || page1.Entries[1].Confidence != 0.90 {
+		t.Errorf("page 1 confidences = [%.2f, %.2f], want [0.95, 0.90] (DESC)",
+			page1.Entries[0].Confidence, page1.Entries[1].Confidence)
+	}
+	lastOnPage1 := page1.Entries[1].ID
+
+	// Fetch the next page using beforeId = last ID of page 1. The keyset
+	// comparison (confidence, id) < (0.90, lastOnPage1) must return
+	// exactly the 0.85, 0.80, 0.75 entries in that order.
+	rr = doJSON(t, srv.Handler(), http.MethodGet,
+		fmt.Sprintf("/api/v1/edges/audit?limit=2&beforeId=%d", lastOnPage1), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 2 status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var page2 struct {
+		Entries []struct {
+			ID         int64   `json:"id"`
+			Confidence float64 `json:"confidence"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page2); err != nil {
+		t.Fatalf("unmarshal page 2: %v", err)
+	}
+	if len(page2.Entries) != 2 {
+		t.Fatalf("page 2 entries = %d, want 2", len(page2.Entries))
+	}
+	if page2.Total != 5 {
+		t.Errorf("page 2 total = %d, want 5 (consistent with page 1)", page2.Total)
+	}
+	if page2.Entries[0].Confidence != 0.85 || page2.Entries[1].Confidence != 0.80 {
+		t.Errorf("page 2 confidences = [%.2f, %.2f], want [0.85, 0.80]",
+			page2.Entries[0].Confidence, page2.Entries[1].Confidence)
+	}
+	for _, e := range page1.Entries {
+		for _, f := range page2.Entries {
+			if e.ID == f.ID {
+				t.Errorf("edge %d appears on both page 1 and page 2 (pagination not stable)", e.ID)
+			}
+		}
+	}
+
+	// Fetch the final page (only 0.75 should remain).
+	lastOnPage2 := page2.Entries[1].ID
+	rr = doJSON(t, srv.Handler(), http.MethodGet,
+		fmt.Sprintf("/api/v1/edges/audit?limit=2&beforeId=%d", lastOnPage2), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 3 status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var page3 struct {
+		Entries []struct {
+			ID         int64   `json:"id"`
+			Confidence float64 `json:"confidence"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page3); err != nil {
+		t.Fatalf("unmarshal page 3: %v", err)
+	}
+	if len(page3.Entries) != 1 {
+		t.Fatalf("page 3 entries = %d, want 1 (the last one)", len(page3.Entries))
+	}
+	if page3.Total != 5 {
+		t.Errorf("page 3 total = %d, want 5", page3.Total)
+	}
+	if page3.Entries[0].Confidence != 0.75 {
+		t.Errorf("page 3 confidence = %.2f, want 0.75 (lowest)", page3.Entries[0].Confidence)
+	}
+}
+
+// TestAuditQueueKeysetStableUnderMutation verifies the keyset pagination
+// invariant that offset-based pagination violates: confirming an edge on
+// page N must not cause page N+1 to duplicate or skip entries. The cursor
+// is a row identity, not a position.
+func TestAuditQueueKeysetStableUnderMutation(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedAuditLocation(t, database)
+
+	// Seed five edges.
+	confidences := []float64{0.95, 0.90, 0.85, 0.80, 0.75}
+	for _, c := range confidences {
+		seedAuditQueueEntry(t, database, locID, c, 2, "test")
+	}
+
+	// Page 1: top two.
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/edges/audit?limit=2", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 1 status = %d", rr.Code)
+	}
+	var page1 struct {
+		Entries []struct {
+			ID int64 `json:"id"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page1); err != nil {
+		t.Fatalf("unmarshal page 1: %v", err)
+	}
+	if page1.Total != 5 {
+		t.Errorf("page 1 total = %d, want 5", page1.Total)
+	}
+	firstID := page1.Entries[0].ID
+	lastOnPage1 := page1.Entries[1].ID
+
+	// Confirm the second edge on page 1 (simulating a user clicking
+	// Confirm on the second row). Total must drop to 4.
+	confirmPath := fmt.Sprintf("/api/v1/edges/%d/confirm", lastOnPage1)
+	rr = doJSON(t, srv.Handler(), http.MethodPost, confirmPath, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Page 2 using the original cursor: must skip the confirmed edge
+	// and return the remaining 3 edges, with total=4 (the full
+	// NEEDS_REVIEW count, not the cursor-restricted count -- this is
+	// the whole point of computing total via a separate subquery).
+	// Offset-based pagination would have re-fetched the same window
+	// and either duplicated or skipped rows.
+	rr = doJSON(t, srv.Handler(), http.MethodGet,
+		fmt.Sprintf("/api/v1/edges/audit?limit=10&beforeId=%d", firstID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("page 2 status = %d", rr.Code)
+	}
+	var page2 struct {
+		Entries []struct {
+			ID         int64   `json:"id"`
+			Confidence float64 `json:"confidence"`
+		} `json:"entries"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page2); err != nil {
+		t.Fatalf("unmarshal page 2: %v", err)
+	}
+	// We asked for beforeId=firstID (the highest-confidence edge, 0.95).
+	// Rows strictly before (0.95, firstID) are everything except 0.95
+	// itself. The confirmed one (0.90) is gone, so we get 3 rows
+	// (0.85, 0.80, 0.75) in confidence-DESC order. Total=4 because
+	// the full NEEDS_REVIEW set (5) minus the confirmed (1) = 4.
+	if page2.Total != 4 {
+		t.Errorf("page 2 total = %d, want 4 (full NEEDS_REVIEW count, one confirmed)", page2.Total)
+	}
+	if len(page2.Entries) != 3 {
+		t.Fatalf("page 2 entries = %d, want 3 (one was confirmed, cursor excludes firstID)", len(page2.Entries))
+	}
+	wantConfs := []float64{0.85, 0.80, 0.75}
+	for i, e := range page2.Entries {
+		if e.Confidence != wantConfs[i] {
+			t.Errorf("page 2 entry %d confidence = %.2f, want %.2f", i, e.Confidence, wantConfs[i])
+		}
+	}
+	// The confirmed edge must not appear.
+	for _, e := range page2.Entries {
+		if e.ID == lastOnPage1 {
+			t.Errorf("confirmed edge %d still appears on page 2", e.ID)
+		}
+	}
+}
+
+// TestAuditQueueTotalConsistentWithEntries guards the COUNT(*) OVER()
+// contract: total must match the number of NEEDS_REVIEW rows in the DB,
+// regardless of the page size or cursor. A separate COUNT(*) would race
+// with a confirm/reject between the two queries and can disagree; the
+// single-scan window-count guarantees they cannot.
+func TestAuditQueueTotalConsistentWithEntries(t *testing.T) {
+	srv, database := fullTestServer(t)
+	locID := seedAuditLocation(t, database)
+
+	// 3 NEEDS_REVIEW + 2 AUTO_ACCEPTED. Total must report 3, not 5.
+	for _, c := range []float64{0.95, 0.90, 0.85} {
+		seedAuditQueueEntry(t, database, locID, c, 2, "test")
+	}
+	for _, c := range []float64{0.99, 0.98} {
+		_, _, _ = seedAuditQueueEntry(t, database, locID, c, 1, "test")
+		// Override to AUTO_ACCEPTED below.
+	}
+	// Set the last two edges to AUTO_ACCEPTED so they don't count.
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		// ListAuditQueue returns NEEDS_REVIEW rows ordered by confidence
+		// DESC, id ASC. The two highest-confidence seeded edges (0.99, 0.98)
+		// are at the top; confirm them so only the 0.95/0.90/0.85 edges
+		// remain in NEEDS_REVIEW.
+		rows, err := q.ListAuditQueue(context.Background(), sqlcgen.ListAuditQueueParams{Limit: 2, Offset: 0})
+		if err != nil {
+			return err
+		}
+		for _, e := range rows {
+			if _, err := q.ConfirmMediaEdge(context.Background(), sqlcgen.ConfirmMediaEdgeParams{
+				ID: e.ID, ReviewedBy: sql.NullString{String: "test", Valid: true},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed confirm: %v", err)
+	}
+
+	for _, limit := range []int{1, 2, 3, 10} {
+		rr := doJSON(t, srv.Handler(), http.MethodGet,
+			fmt.Sprintf("/api/v1/edges/audit?limit=%d", limit), nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("limit=%d status = %d", limit, rr.Code)
+		}
+		var got struct {
+			Entries []any `json:"entries"`
+			Total   int64 `json:"total"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+			t.Fatalf("limit=%d unmarshal: %v", limit, err)
+		}
+		if got.Total != 3 {
+			t.Errorf("limit=%d: total = %d, want 3 (NEEDS_REVIEW only)", limit, got.Total)
+		}
+	}
+}
+
 func TestListStorageLocations(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()

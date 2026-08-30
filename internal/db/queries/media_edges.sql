@@ -43,7 +43,10 @@ LIMIT ?1 OFFSET ?2;
 -- `total` is returned as a column on every row via COUNT(*) OVER() in
 -- the same scan, avoiding a second COUNT(*) query per page turn and the
 -- race where a confirmation between the list and the count makes total
--- disagree with what the list shows.
+-- disagree with what the list shows. The OVER() window is the full
+-- NEEDS_REVIEW set (not the cursor-restricted set) by computing total
+-- in a subquery that applies only the review_state filter, then joining
+-- it onto the cursor-restricted row set.
 --
 -- The cursor (confidence, id) is resolved in a CTE first, then the main
 -- query references it -- sqlc v1.31.1 mis-counts placeholders when a
@@ -51,6 +54,11 @@ LIMIT ?1 OFFSET ?2;
 -- query, so a single-pass subquery would generate one too few args.
 WITH cursor(cd, id) AS (
   SELECT confidence, id FROM media_edges WHERE id = ?2
+),
+total_rows AS (
+  SELECT COUNT(*) AS n
+  FROM v_media_edges_resolved e
+  WHERE e.review_state = 'NEEDS_REVIEW'
 )
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
@@ -60,7 +68,7 @@ SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confiden
        tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
        tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
        tn.phash AS target_phash, tn.thumb_state AS target_thumb_state,
-       COUNT(*) OVER() AS total
+       (SELECT n FROM total_rows) AS total
 FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
