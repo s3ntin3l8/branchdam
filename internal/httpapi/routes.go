@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1973,13 +1974,8 @@ func isHexChars(s string, length int) bool {
 	if len(s) != length {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckContentInput) (*AgentCheckContentOutput, error) {
