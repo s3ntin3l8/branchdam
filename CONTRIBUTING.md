@@ -12,7 +12,7 @@ and tests fail. `make build`/`make test`/`make dev` all depend on the `web-stub`
 runs `.github/ci-prebuild.sh` to create a placeholder if none exists yet. Run `npm run build` in
 `web/` first if you want the real SPA embedded instead of the stub.
 
-See [`CLAUDE.md`](CLAUDE.md) for the full architecture and package tour.
+See [`AGENTS.md`](AGENTS.md) for the full architecture and package tour.
 
 ## Before opening a PR
 
