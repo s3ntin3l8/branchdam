@@ -190,14 +190,14 @@ INSERT INTO media_nodes (
     indexing_status, graph_status, lifecycle_state,
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
-    camera_serial, lens_model,
+    camera_serial, lens_model, source_path_hash,
     first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5,
     ?6, ?7, ?8, ?9, ?10,
     ?11, ?12, ?13,
     ?14, ?15, ?16,
-    ?17, ?18, ?19, ?20, ?21,
+    ?17, ?18, ?19, ?20, ?21, ?22,
     unixepoch(), unixepoch(), unixepoch(), unixepoch()
 )
 RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -206,7 +206,7 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
           first_seen_at, last_seen_at, created_at, updated_at,
-          camera_serial, lens_model, thumb_state, thumb_attempts
+          camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 `
 
 type InsertMediaNodeParams struct {
@@ -231,6 +231,7 @@ type InsertMediaNodeParams struct {
 	FilenameStem       sql.NullString
 	CameraSerial       sql.NullString
 	LensModel          sql.NullString
+	SourcePathHash     *string
 }
 
 func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error) {
@@ -256,6 +257,7 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		arg.FilenameStem,
 		arg.CameraSerial,
 		arg.LensModel,
+		arg.SourcePathHash,
 	)
 	var i MediaNode
 	err := row.Scan(
@@ -288,6 +290,7 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		&i.LensModel,
 		&i.ThumbState,
 		&i.ThumbAttempts,
+		&i.SourcePathHash,
 	)
 	return i, err
 }
@@ -1489,4 +1492,47 @@ func (q *Queries) GetMediaNodeByFastHash(ctx context.Context, fastHash *string) 
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const getMediaNodeBySourcePathHash = `-- name: GetMediaNodeBySourcePathHash :one
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+FROM media_nodes
+WHERE source_path_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+LIMIT 1
+`
+
+type GetMediaNodeBySourcePathHashRow struct {
+	ID             int64
+	NodeUuid       string
+	FilePath       string
+	LifecycleState string
+	IndexingStatus string
+}
+
+func (q *Queries) GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHash *string) (GetMediaNodeBySourcePathHashRow, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeBySourcePathHash, sourcePathHash)
+	var i GetMediaNodeBySourcePathHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.FilePath,
+		&i.LifecycleState,
+		&i.IndexingStatus,
+	)
+	return i, err
+}
+
+const updateSourcePathHash = `-- name: UpdateSourcePathHash :exec
+UPDATE media_nodes SET source_path_hash = ?2, updated_at = unixepoch() WHERE id = ?1
+`
+
+type UpdateSourcePathHashParams struct {
+	ID             int64
+	SourcePathHash *string
+}
+
+func (q *Queries) UpdateSourcePathHash(ctx context.Context, arg UpdateSourcePathHashParams) error {
+	_, err := q.db.ExecContext(ctx, updateSourcePathHash, arg.ID, arg.SourcePathHash)
+	return err
 }

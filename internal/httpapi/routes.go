@@ -118,6 +118,13 @@ func (s *Server) registerRoutes(api huma.API) {
 		Summary:       "Pre-flight hash check before byte transfer",
 		DefaultStatus: http.StatusOK,
 	}, s.handleAgentCheckContent)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodGet,
+		Path:          "/api/v1/agent/source-status",
+		OperationID:   "agentSourceStatus",
+		Summary:       "Check if a source path hash is already tracked in the library",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentSourceStatus)
 }
 
 // --- /api/v1/me ---
@@ -2035,6 +2042,63 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 			FilePath:       node.FilePath,
 			LifecycleState: node.LifecycleState,
 			IndexingStatus: node.IndexingStatus,
+		},
+	}, nil
+}
+
+// --- /api/v1/agent/source-status ---
+
+type AgentSourceStatusInput struct {
+	SourcePath     string `query:"sourcePath" doc:"SHA-256 hex (64 chars) of original workstation-side file path" pattern:"^[0-9a-fA-F]{64}$"`
+	SourcePathHash string `query:"sourcePathHash" doc:"Optional alias for sourcePath" pattern:"^[0-9a-fA-F]{64}$"`
+}
+
+type AgentSourceStatusResult struct {
+	Tracked        bool   `json:"tracked"`
+	NodeUUID       string `json:"nodeUuid,omitempty"`
+	FilePath       string `json:"filePath,omitempty"`
+	IndexingStatus string `json:"indexingStatus,omitempty"`
+	LifecycleState string `json:"lifecycleState,omitempty"`
+}
+
+type AgentSourceStatusOutput struct {
+	Body AgentSourceStatusResult
+}
+
+func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceStatusInput) (*AgentSourceStatusOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	sourceHash := strings.ToLower(strings.TrimSpace(in.SourcePath))
+	if sourceHash == "" {
+		sourceHash = strings.ToLower(strings.TrimSpace(in.SourcePathHash))
+	}
+	if !isHexChars(sourceHash, 64) {
+		return nil, huma.Error400BadRequest("sourcePath query parameter must be 64 hexadecimal characters (SHA-256)", nil)
+	}
+
+	if s.db == nil {
+		return nil, huma.Error500InternalServerError("database not available", nil)
+	}
+
+	node, err := s.db.Reader.GetMediaNodeBySourcePathHash(ctx, &sourceHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &AgentSourceStatusOutput{
+				Body: AgentSourceStatusResult{Tracked: false},
+			}, nil
+		}
+		return nil, huma.Error500InternalServerError("source path hash query failed", err)
+	}
+
+	return &AgentSourceStatusOutput{
+		Body: AgentSourceStatusResult{
+			Tracked:        true,
+			NodeUUID:       node.NodeUuid,
+			FilePath:       node.FilePath,
+			IndexingStatus: node.IndexingStatus,
+			LifecycleState: node.LifecycleState,
 		},
 	}, nil
 }

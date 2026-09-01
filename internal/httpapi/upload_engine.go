@@ -38,6 +38,7 @@ type UploadParams struct {
 	CameraModel         string
 	CapturedAtUnix      int64
 	ExpectedBlake3      string
+	SourcePathHash      string
 	MaxBytes            int64 // Maximum allowed bytes (<= 0 defaults to DefaultMaxUploadSizeBytes)
 }
 
@@ -402,6 +403,14 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	var insertedNode sqlcgen.MediaNode
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		nullFull := &computedBlake3
+		var nullSourcePathHash *string
+		if params.SourcePathHash != "" {
+			h := strings.ToLower(strings.TrimSpace(params.SourcePathHash))
+			if len(h) == 64 {
+				nullSourcePathHash = &h
+			}
+		}
+
 		archiveNode, insErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:           nodeUUIDStr,
 			StorageLocationID:  targetLoc.ID,
@@ -424,6 +433,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			DocumentID:         docID,
 			DerivedFromID:      derivedFromID,
 			Phash:              pHashVal,
+			SourcePathHash:     nullSourcePathHash,
 		})
 		if insErr != nil {
 			return insErr

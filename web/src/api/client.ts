@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -199,5 +199,11 @@ export const api = {
     if (fastHash) qs.set("fastHash", fastHash);
     qs.set("fullHash", fullHash);
     return request<CheckContentResult>(`/api/v1/agent/check-content?${qs.toString()}`);
+  },
+
+  getSourceStatus: (sourcePath: string) => {
+    const qs = new URLSearchParams();
+    qs.set("sourcePath", sourcePath);
+    return request<SourceStatusResult>(`/api/v1/agent/source-status?${qs.toString()}`);
   },
 };

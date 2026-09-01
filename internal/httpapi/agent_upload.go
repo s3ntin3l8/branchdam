@@ -33,6 +33,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	filename := r.Header.Get("X-Filename")
 	cameraModel := r.Header.Get("X-Camera-Model")
 	expectedBlake3 := r.Header.Get("X-Blake3-Hash")
+	sourcePathHash := r.Header.Get("X-Source-Path-Hash")
 	capturedAtHeader := r.Header.Get("X-Capture-Timestamp")
 	var capturedAtUnix int64
 	if capturedAtHeader != "" {
@@ -46,6 +47,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		CameraModel:         cameraModel,
 		CapturedAtUnix:      capturedAtUnix,
 		ExpectedBlake3:      expectedBlake3,
+		SourcePathHash:      sourcePathHash,
 	})
 	if err != nil {
 		status := http.StatusInternalServerError

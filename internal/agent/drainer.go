@@ -500,6 +500,14 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		nullFilenameStem = sql.NullString{String: *p.FilenameStem, Valid: true}
 	}
 
+	var nullSourcePathHash *string
+	if p.SourcePathHash != nil && *p.SourcePathHash != "" {
+		h := strings.ToLower(strings.TrimSpace(*p.SourcePathHash))
+		if len(h) == 64 {
+			nullSourcePathHash = &h
+		}
+	}
+
 	mtime := p.MtimeUnix
 	if mtime == 0 {
 		mtime = time.Now().Unix()
@@ -527,6 +535,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		FilenameStem:       nullFilenameStem,
 		CameraSerial:       nullCameraSerial,
 		LensModel:          nullLensModel,
+		SourcePathHash:     nullSourcePathHash,
 	})
 	if err != nil {
 		if p.FullHash != nil && *p.FullHash != "" {
