@@ -381,4 +381,6 @@ func TestWebUpload_ContentDedup(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
 	assert.Equal(t, "DEDUPLICATED", resp2.Status)
 	assert.Equal(t, resp1.NodeUUID, resp2.NodeUUID)
+	assert.NotZero(t, resp2.Asset.ID)
+	assert.Equal(t, resp1.Asset.ID, resp2.Asset.ID)
 }

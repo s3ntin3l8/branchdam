@@ -126,6 +126,15 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				Blake3Hash:   cleanHash,
 				RelativePath: existing.FilePath,
 				IsDedup:      true,
+				Asset: assetDTO{
+					ID:             existing.ID,
+					NodeUUID:       existing.NodeUuid,
+					FilePath:       existing.FilePath,
+					FileName:       filepath.Base(existing.FilePath),
+					FileExt:        filepath.Ext(existing.FilePath),
+					LifecycleState: existing.LifecycleState,
+					IndexingStatus: existing.IndexingStatus,
+				},
 			}, nil
 		}
 	}
@@ -293,6 +302,16 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				Blake3Hash:   computedBlake3,
 				RelativePath: existing.FilePath,
 				IsDedup:      true,
+				Asset: assetDTO{
+					ID:             existing.ID,
+					NodeUUID:       existing.NodeUuid,
+					FilePath:       existing.FilePath,
+					FileName:       filepath.Base(existing.FilePath),
+					FileExt:        filepath.Ext(existing.FilePath),
+					SizeBytes:      bytesWritten,
+					LifecycleState: existing.LifecycleState,
+					IndexingStatus: existing.IndexingStatus,
+				},
 			}, nil
 		}
 	}
@@ -515,6 +534,16 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 					Blake3Hash:   computedBlake3,
 					RelativePath: existing.FilePath,
 					IsDedup:      true,
+					Asset: assetDTO{
+						ID:             existing.ID,
+						NodeUUID:       existing.NodeUuid,
+						FilePath:       existing.FilePath,
+						FileName:       filepath.Base(existing.FilePath),
+						FileExt:        filepath.Ext(existing.FilePath),
+						SizeBytes:      bytesWritten,
+						LifecycleState: existing.LifecycleState,
+						IndexingStatus: existing.IndexingStatus,
+					},
 				}, nil
 			}
 		}
