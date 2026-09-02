@@ -106,7 +106,35 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 	return targetLoc, exportLoc, nil
 }
 
-// processUploadedStream streams a file to disk, calculates hashes, probes metadata,
+// dedupUploadResult constructs a unified UploadResult and assetDTO for deduplicated upload responses.
+// bytesWritten represents the bytes transferred to disk during this specific request (0 for pre-write hits,
+// whereas Asset.SizeBytes always reflects the existing media node's stored size).
+func dedupUploadResult(existing sqlcgen.GetMediaNodeByFullHashRow, blake3Hash string, bytesWritten int64) *UploadResult {
+	return &UploadResult{
+		NodeID:       existing.ID,
+		NodeUUID:     existing.NodeUuid,
+		FilePath:     existing.FilePath,
+		FileName:     filepath.Base(existing.FilePath),
+		FileExt:      filepath.Ext(existing.FilePath),
+		SizeBytes:    bytesWritten,
+		Blake3Hash:   blake3Hash,
+		RelativePath: existing.FilePath,
+		IsDedup:      true,
+		Asset: assetDTO{
+			ID:             existing.ID,
+			NodeUUID:       existing.NodeUuid,
+			FilePath:       existing.FilePath,
+			FileName:       filepath.Base(existing.FilePath),
+			FileExt:        filepath.Ext(existing.FilePath),
+			SizeBytes:      existing.SizeBytes,
+			LifecycleState: existing.LifecycleState,
+			IndexingStatus: existing.IndexingStatus,
+		},
+	}
+}
+
+// processUploadedStream is the unified ingest pipeline for agent and web uploads.
+// It handles storage location resolution, naming, streaming disk writes, Blake3 checksumming,
 // inserts the media node and metadata in DB, links lineage, and broadcasts SSE.
 func (s *Server) processUploadedStream(ctx context.Context, params UploadParams) (*UploadResult, error) {
 	// Pre-write dedup check: trust-the-agent optimization for authenticated clients
@@ -117,27 +145,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	if params.ExpectedBlake3 != "" && s.db != nil {
 		cleanHash := strings.ToLower(strings.TrimSpace(params.ExpectedBlake3))
 		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &cleanHash); err == nil {
-			return &UploadResult{
-				NodeID:       existing.ID,
-				NodeUUID:     existing.NodeUuid,
-				FilePath:     existing.FilePath,
-				FileName:     filepath.Base(existing.FilePath),
-				FileExt:      filepath.Ext(existing.FilePath),
-				SizeBytes:    0,
-				Blake3Hash:   cleanHash,
-				RelativePath: existing.FilePath,
-				IsDedup:      true,
-				Asset: assetDTO{
-					ID:             existing.ID,
-					NodeUUID:       existing.NodeUuid,
-					FilePath:       existing.FilePath,
-					FileName:       filepath.Base(existing.FilePath),
-					FileExt:        filepath.Ext(existing.FilePath),
-					SizeBytes:      existing.SizeBytes,
-					LifecycleState: existing.LifecycleState,
-					IndexingStatus: existing.IndexingStatus,
-				},
-			}, nil
+			return dedupUploadResult(existing, cleanHash, 0), nil
 		}
 	}
 
@@ -294,27 +302,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	if s.db != nil {
 		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); err == nil {
 			_ = os.Remove(targetPath)
-			return &UploadResult{
-				NodeID:       existing.ID,
-				NodeUUID:     existing.NodeUuid,
-				FilePath:     existing.FilePath,
-				FileName:     filepath.Base(existing.FilePath),
-				FileExt:      filepath.Ext(existing.FilePath),
-				SizeBytes:    existing.SizeBytes,
-				Blake3Hash:   computedBlake3,
-				RelativePath: existing.FilePath,
-				IsDedup:      true,
-				Asset: assetDTO{
-					ID:             existing.ID,
-					NodeUUID:       existing.NodeUuid,
-					FilePath:       existing.FilePath,
-					FileName:       filepath.Base(existing.FilePath),
-					FileExt:        filepath.Ext(existing.FilePath),
-					SizeBytes:      existing.SizeBytes,
-					LifecycleState: existing.LifecycleState,
-					IndexingStatus: existing.IndexingStatus,
-				},
-			}, nil
+			return dedupUploadResult(existing, computedBlake3, bytesWritten), nil
 		}
 	}
 
@@ -526,27 +514,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		}
 		if s.db != nil && computedBlake3 != "" {
 			if existing, lookupErr := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); lookupErr == nil {
-				return &UploadResult{
-					NodeID:       existing.ID,
-					NodeUUID:     existing.NodeUuid,
-					FilePath:     existing.FilePath,
-					FileName:     filepath.Base(existing.FilePath),
-					FileExt:      filepath.Ext(existing.FilePath),
-					SizeBytes:    existing.SizeBytes,
-					Blake3Hash:   computedBlake3,
-					RelativePath: existing.FilePath,
-					IsDedup:      true,
-					Asset: assetDTO{
-						ID:             existing.ID,
-						NodeUUID:       existing.NodeUuid,
-						FilePath:       existing.FilePath,
-						FileName:       filepath.Base(existing.FilePath),
-						FileExt:        filepath.Ext(existing.FilePath),
-						SizeBytes:      existing.SizeBytes,
-						LifecycleState: existing.LifecycleState,
-						IndexingStatus: existing.IndexingStatus,
-					},
-				}, nil
+				return dedupUploadResult(existing, computedBlake3, bytesWritten), nil
 			}
 		}
 		return nil, fmt.Errorf("failed to record media node: %w", err)
