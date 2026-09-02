@@ -152,6 +152,8 @@ export const api = {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText) as WebUploadResponse;
+            const dedupHeader = xhr.getResponseHeader("X-Dedup") || xhr.getResponseHeader("x-dedup");
+            data.isDedup = dedupHeader === "true" || data.status === "DEDUPLICATED";
             resolve(data);
           } catch {
             reject(new ApiError(xhr.status, "Invalid JSON response"));

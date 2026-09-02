@@ -118,4 +118,37 @@ describe("api client", () => {
     expect(calledUrl).toContain("/api/v1/agent/source-status?");
     expect(calledUrl).toContain("sourcePathHash=hash789");
   });
+
+  it("uploadFile detects X-Dedup header and marks isDedup: true", async () => {
+    const mockXHR = {
+      open: vi.fn(),
+      send: vi.fn(),
+      status: 200,
+      responseText: JSON.stringify({
+        asset: { id: 99, nodeUuid: "u-99" },
+        nodeUuid: "u-99",
+        status: "DEDUPLICATED",
+        bytesWritten: 1234,
+        blake3Hash: "hash123",
+        relativePath: "foo.jpg",
+      }),
+      getResponseHeader: vi.fn((header: string) => (header.toLowerCase() === "x-dedup" ? "true" : null)),
+      onload: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      upload: {},
+    };
+
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function () {
+      setTimeout(() => {
+        if (mockXHR.onload) mockXHR.onload();
+      }, 0);
+      return mockXHR;
+    }));
+
+    const file = new File(["test data"], "test.jpg", { type: "image/jpeg" });
+    const res = await api.uploadFile(file);
+    expect(res.isDedup).toBe(true);
+    expect(res.nodeUuid).toBe("u-99");
+    expect(res.status).toBe("DEDUPLICATED");
+  });
 });
