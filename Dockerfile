@@ -22,7 +22,7 @@ RUN npm run build
 # see docs/operations.md's Docker image size note. Multi-arch: the manifest
 # list covers both linux/amd64 and linux/arm64, matching docker-publish.yml's
 # build matrix.
-FROM mwader/static-ffmpeg@sha256:78ebc8cc0368a109db21961a14a4e890a7b1ccafb373a1b3109f0be7fcec8171 AS ffprobe
+FROM mwader/static-ffmpeg@sha256:17ec9de35b3adb3b8a68d5ca2d6d49d18c56682c8d06c8e0613dc09dadfc0f83 AS ffprobe
 
 # --- Stage 3: build the Go binary (with embedded dist) ---
 # golang:1.26-bookworm, NOT -alpine: CGO_ENABLED=1 (mattn/go-sqlite3, see
@@ -30,7 +30,7 @@ FROM mwader/static-ffmpeg@sha256:78ebc8cc0368a109db21961a14a4e890a7b1ccafb373a1b
 # an alpine (musl) build here would not run on debian-slim. CI builds each
 # platform on a native runner (docker-publish.yml), so CGO's usual
 # cross-compile pain doesn't apply.
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
