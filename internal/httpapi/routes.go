@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1999,11 +1998,7 @@ type AgentCheckContentOutput struct {
 }
 
 func isHexChars(s string, length int) bool {
-	if len(s) != length {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
+	return hashing.IsValidHex(s, length)
 }
 
 func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckContentInput) (*AgentCheckContentOutput, error) {
@@ -2050,7 +2045,7 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 
 type AgentSourceStatusInput struct {
 	SourcePath     string `query:"sourcePath" doc:"SHA-256 hex (64 chars) of original workstation-side file path" pattern:"^[0-9a-fA-F]{64}$"`
-	SourcePathHash string `query:"sourcePathHash" doc:"Optional alias for sourcePath" pattern:"^[0-9a-fA-F]{64}$"`
+	SourcePathHash string `query:"sourcePathHash" doc:"Optional alias for sourcePath (must match sourcePath if both are provided)" pattern:"^[0-9a-fA-F]{64}$"`
 }
 
 type AgentSourceStatusResult struct {
@@ -2070,9 +2065,15 @@ func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceSta
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
 	}
 
-	sourceHash := strings.ToLower(strings.TrimSpace(in.SourcePath))
+	sp := strings.ToLower(strings.TrimSpace(in.SourcePath))
+	sph := strings.ToLower(strings.TrimSpace(in.SourcePathHash))
+	if sp != "" && sph != "" && sp != sph {
+		return nil, huma.Error400BadRequest("conflicting sourcePath and sourcePathHash query parameters", nil)
+	}
+
+	sourceHash := sp
 	if sourceHash == "" {
-		sourceHash = strings.ToLower(strings.TrimSpace(in.SourcePathHash))
+		sourceHash = sph
 	}
 	if !isHexChars(sourceHash, 64) {
 		return nil, huma.Error400BadRequest("sourcePath query parameter must be 64 hexadecimal characters (SHA-256)", nil)

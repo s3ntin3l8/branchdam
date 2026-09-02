@@ -18,6 +18,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -503,7 +504,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 	var nullSourcePathHash *string
 	if p.SourcePathHash != nil && *p.SourcePathHash != "" {
 		h := strings.ToLower(strings.TrimSpace(*p.SourcePathHash))
-		if len(h) == 64 {
+		if hashing.IsValidHex(h, 64) {
 			nullSourcePathHash = &h
 		}
 	}

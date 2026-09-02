@@ -281,6 +281,10 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	if err := goose.UpTo(writerDB, migrationsDir, 7); err != nil {
 		t.Fatalf("goose UpTo 7: %v", err)
 	}
+	// Add additive source_path_hash column (from migration 15) so GetMediaNodeByID succeeds.
+	if _, err := writerDB.Exec("ALTER TABLE media_nodes ADD COLUMN source_path_hash TEXT CHECK (source_path_hash IS NULL OR length(source_path_hash) = 64);"); err != nil {
+		t.Fatalf("alter table add source_path_hash: %v", err)
+	}
 
 	gotIndex, err := q.GetMediaEdge(ctx, indexEdge.ID)
 	if err != nil {

@@ -406,7 +406,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		var nullSourcePathHash *string
 		if params.SourcePathHash != "" {
 			h := strings.ToLower(strings.TrimSpace(params.SourcePathHash))
-			if len(h) == 64 {
+			if hashing.IsValidHex(h, 64) {
 				nullSourcePathHash = &h
 			}
 		}

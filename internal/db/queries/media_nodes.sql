@@ -508,7 +508,5 @@ SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
 FROM media_nodes
 WHERE source_path_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+ORDER BY id DESC
 LIMIT 1;
-
--- name: UpdateSourcePathHash :exec
-UPDATE media_nodes SET source_path_hash = ?2, updated_at = unixepoch() WHERE id = ?1;

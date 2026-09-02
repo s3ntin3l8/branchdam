@@ -122,7 +122,6 @@ type Querier interface {
 	GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error)
 	GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error)
 	GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHash *string) (GetMediaNodeBySourcePathHashRow, error)
-	UpdateSourcePathHash(ctx context.Context, arg UpdateSourcePathHashParams) error
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
