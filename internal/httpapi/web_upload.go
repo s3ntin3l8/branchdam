@@ -78,6 +78,11 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		filename = "uploaded_media.bin"
 	}
 
+	expectedBlake3 := r.Header.Get("X-Blake3-Hash")
+	if expectedBlake3 == "" {
+		expectedBlake3 = r.FormValue("expectedBlake3")
+	}
+
 	result, err := s.processUploadedStream(r.Context(), UploadParams{
 		Filename:            filename,
 		Body:                file,
@@ -86,6 +91,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		ApplyNamingTemplate: applyNamingTemplate,
 		CameraModel:         cameraModel,
 		CapturedAtUnix:      capturedAtUnix,
+		ExpectedBlake3:      expectedBlake3,
 	})
 	if err != nil {
 		status := http.StatusInternalServerError

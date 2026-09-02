@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 )
 
 func createMultipartUploadRequest(t *testing.T, filename string, content []byte, formFields map[string]string) (*http.Request, string) {
@@ -381,4 +382,71 @@ func TestWebUpload_ContentDedup(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
 	assert.Equal(t, "DEDUPLICATED", resp2.Status)
 	assert.Equal(t, resp1.NodeUUID, resp2.NodeUUID)
+	assert.NotZero(t, resp2.Asset.ID)
+	assert.Equal(t, resp1.Asset.ID, resp2.Asset.ID)
+	assert.Equal(t, resp1.Asset.SizeBytes, resp2.Asset.SizeBytes)
+	assert.Positive(t, resp2.Asset.SizeBytes)
+	assert.Equal(t, int64(len(payload)), resp2.Asset.SizeBytes)
+}
+
+func TestWebUpload_ContentDedup_PreFlightHash(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	payload := []byte("distinct content for preflight dedup test")
+	blake3Hash, err := hashing.FullHash(bytes.NewReader(payload))
+	require.NoError(t, err)
+
+	// First upload
+	req1, _ := createMultipartUploadRequest(t, "original.jpg", payload, map[string]string{
+		"relativePath":        "preflight_test",
+		"applyNamingTemplate": "false",
+	})
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 WebUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	assert.Equal(t, "UPLOADED", resp1.Status)
+	assert.Equal(t, int64(len(payload)), resp1.Asset.SizeBytes)
+
+	// Second upload with pre-flight X-Blake3-Hash header
+	req2, _ := createMultipartUploadRequest(t, "preflight_dup.jpg", payload, map[string]string{
+		"relativePath":        "preflight_test",
+		"applyNamingTemplate": "false",
+	})
+	req2.Header.Set("X-Blake3-Hash", blake3Hash)
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "true", rec2.Header().Get("X-Dedup"))
+
+	var resp2 WebUploadResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, "DEDUPLICATED", resp2.Status)
+	assert.Equal(t, resp1.NodeUUID, resp2.NodeUUID)
+	assert.Equal(t, int64(0), resp2.BytesWritten)
+	assert.NotZero(t, resp2.Asset.ID)
+	assert.Equal(t, resp1.Asset.ID, resp2.Asset.ID)
+	assert.Equal(t, resp1.Asset.SizeBytes, resp2.Asset.SizeBytes)
+	assert.Positive(t, resp2.Asset.SizeBytes)
+	assert.Equal(t, int64(len(payload)), resp2.Asset.SizeBytes)
 }

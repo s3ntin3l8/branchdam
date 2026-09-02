@@ -1460,7 +1460,7 @@ func (q *Queries) InvalidateThumbnail(ctx context.Context, id int64) error {
 }
 
 const getMediaNodeByFullHash = `-- name: GetMediaNodeByFullHash :one
-SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status, size_bytes
 FROM media_nodes
 WHERE full_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
@@ -1473,6 +1473,7 @@ type GetMediaNodeByFullHashRow struct {
 	FilePath       string
 	LifecycleState string
 	IndexingStatus string
+	SizeBytes      int64
 }
 
 // Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
@@ -1486,6 +1487,7 @@ func (q *Queries) GetMediaNodeByFullHash(ctx context.Context, fullHash *string) 
 		&i.FilePath,
 		&i.LifecycleState,
 		&i.IndexingStatus,
+		&i.SizeBytes,
 	)
 	return i, err
 }
