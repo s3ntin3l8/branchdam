@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from "react";
 import { Link } from "react-router";
 import { useStorageLocations, useUploadFile } from "../hooks/queries";
 import type { StorageLocation, UploadProgressEvent, WebUploadResponse } from "../api/types";
+import DedupNotice from "./DedupNotice";
 
 export interface QueueItem {
   id: string;
@@ -12,6 +13,12 @@ export interface QueueItem {
   error?: string;
   response?: WebUploadResponse;
   abortController?: AbortController;
+}
+
+export interface DedupNoticeItem {
+  id: string;
+  fileName: string;
+  assetId?: number;
 }
 
 function formatBytes(bytes: number): string {
@@ -33,6 +40,7 @@ export default function ManualUploadZone() {
   const [applyNamingTemplate, setApplyNamingTemplate] = useState<boolean>(true);
   const [customSubdir, setCustomSubdir] = useState<string>("");
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [dedupNotices, setDedupNotices] = useState<DedupNoticeItem[]>([]);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isProcessingQueue, setIsProcessingQueue] = useState<boolean>(false);
 
@@ -138,7 +146,12 @@ export default function ManualUploadZone() {
     }
   };
 
+  const dismissDedupNotice = useCallback((id: string) => {
+    setDedupNotices((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
   const removeItem = (id: string) => {
+    dismissDedupNotice(id);
     setQueue((prev) => {
       const item = prev.find((i) => i.id === id);
       if (item?.status === "uploading" && item.abortController) {
@@ -149,6 +162,7 @@ export default function ManualUploadZone() {
   };
 
   const clearCompleted = () => {
+    setDedupNotices([]);
     setQueue((prev) => prev.filter((i) => i.status !== "complete"));
   };
 
@@ -187,6 +201,17 @@ export default function ManualUploadZone() {
           },
           signal: abortController.signal,
         });
+
+        if (res.isDedup) {
+          setDedupNotices((prev) => [
+            ...prev.filter((n) => n.id !== item.id),
+            {
+              id: item.id,
+              fileName: item.file.name,
+              assetId: res.asset?.id,
+            },
+          ]);
+        }
 
         setQueue((prev) =>
           prev.map((i) =>
@@ -307,6 +332,20 @@ export default function ManualUploadZone() {
           </div>
         </div>
       </div>
+
+      {/* Dedup Notices */}
+      {dedupNotices.length > 0 && (
+        <div className="space-y-2">
+          {dedupNotices.map((notice) => (
+            <DedupNotice
+              key={notice.id}
+              fileName={notice.fileName}
+              assetId={notice.assetId}
+              onDismiss={() => dismissDedupNotice(notice.id)}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Drag and Drop Zone */}
       <div
@@ -457,14 +496,32 @@ export default function ManualUploadZone() {
                   )}
                   {item.status === "complete" && (
                     <div className="flex items-center gap-2">
-                      <span className="rounded bg-emerald-950 px-2 py-0.5 text-[11px] text-emerald-400">Ready</span>
-                      {item.response?.asset?.id && (
-                        <Link
-                          to={`/assets/${item.response.asset.id}`}
-                          className="text-sky-400 underline hover:text-sky-300"
-                        >
-                          View Asset
-                        </Link>
+                      {item.response?.isDedup ? (
+                        <>
+                          <span className="rounded bg-amber-950 border border-amber-800/60 px-2 py-0.5 text-[11px] text-amber-300 font-medium">
+                            Already in library
+                          </span>
+                          {item.response?.asset?.id && (
+                            <Link
+                              to={`/assets/${item.response.asset.id}`}
+                              className="text-sky-400 underline hover:text-sky-300"
+                            >
+                              View existing node →
+                            </Link>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span className="rounded bg-emerald-950 px-2 py-0.5 text-[11px] text-emerald-400">Ready</span>
+                          {item.response?.asset?.id && (
+                            <Link
+                              to={`/assets/${item.response.asset.id}`}
+                              className="text-sky-400 underline hover:text-sky-300"
+                            >
+                              View Asset
+                            </Link>
+                          )}
+                        </>
                       )}
                     </div>
                   )}

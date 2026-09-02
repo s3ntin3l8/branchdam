@@ -170,6 +170,7 @@ export interface WebUploadResponse {
   bytesWritten: number;
   blake3Hash: string;
   relativePath: string;
+  isDedup?: boolean;
 }
 
 export interface LineageResponse {
