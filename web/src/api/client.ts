@@ -201,9 +201,9 @@ export const api = {
     return request<CheckContentResult>(`/api/v1/agent/check-content?${qs.toString()}`);
   },
 
-  getSourceStatus: (sourcePath: string) => {
+  getSourceStatus: (sourcePathHash: string) => {
     const qs = new URLSearchParams();
-    qs.set("sourcePath", sourcePath);
+    qs.set("sourcePathHash", sourcePathHash);
     return request<SourceStatusResult>(`/api/v1/agent/source-status?${qs.toString()}`);
   },
 };

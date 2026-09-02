@@ -116,6 +116,6 @@ describe("api client", () => {
     expect(result).toEqual({ tracked: true, nodeUuid: "u2" });
     const calledUrl = fetchMock.mock.calls[0][0] as string;
     expect(calledUrl).toContain("/api/v1/agent/source-status?");
-    expect(calledUrl).toContain("sourcePath=hash789");
+    expect(calledUrl).toContain("sourcePathHash=hash789");
   });
 });

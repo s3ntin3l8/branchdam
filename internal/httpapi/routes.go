@@ -2043,9 +2043,17 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 
 // --- /api/v1/agent/source-status ---
 
+// AgentSourceStatusInput defines query parameters for the pre-flight source status check.
+// sourcePathHash is the primary parameter; sourcePath is supported as an alias for
+// backwards compatibility. Both must be the 64-character lowercase SHA-256 hex digest
+// of the original workstation file path.
+//
+// Note: source_path_hash is client-asserted and advisory for pre-flight dedup. Pre-migration
+// media nodes (prior to migration 00015) have NULL source_path_hash and will report
+// tracked=false until re-ingested.
 type AgentSourceStatusInput struct {
-	SourcePath     string `query:"sourcePath" doc:"SHA-256 hex (64 chars) of original workstation-side file path" pattern:"^[0-9a-fA-F]{64}$"`
-	SourcePathHash string `query:"sourcePathHash" doc:"Optional alias for sourcePath (must match sourcePath if both are provided)" pattern:"^[0-9a-fA-F]{64}$"`
+	SourcePathHash string `query:"sourcePathHash" doc:"SHA-256 hex (64 chars) of original workstation-side file path" pattern:"^[0-9a-fA-F]{64}$"`
+	SourcePath     string `query:"sourcePath" doc:"Alias for sourcePathHash (must match sourcePathHash if both are provided)" pattern:"^[0-9a-fA-F]{64}$"`
 }
 
 type AgentSourceStatusResult struct {
@@ -2065,18 +2073,18 @@ func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceSta
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
 	}
 
-	sp := strings.ToLower(strings.TrimSpace(in.SourcePath))
 	sph := strings.ToLower(strings.TrimSpace(in.SourcePathHash))
-	if sp != "" && sph != "" && sp != sph {
+	sp := strings.ToLower(strings.TrimSpace(in.SourcePath))
+	if sph != "" && sp != "" && sph != sp {
 		return nil, huma.Error400BadRequest("conflicting sourcePath and sourcePathHash query parameters", nil)
 	}
 
-	sourceHash := sp
+	sourceHash := sph
 	if sourceHash == "" {
-		sourceHash = sph
+		sourceHash = sp
 	}
 	if !isHexChars(sourceHash, 64) {
-		return nil, huma.Error400BadRequest("sourcePath query parameter must be 64 hexadecimal characters (SHA-256)", nil)
+		return nil, huma.Error400BadRequest("sourcePathHash (or sourcePath) query parameter must be 64 hexadecimal characters (SHA-256)", nil)
 	}
 
 	if s.db == nil {
