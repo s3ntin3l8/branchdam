@@ -1,9 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Link } from "react-router";
 
 export interface DedupNoticeProps {
   fileName?: string;
-  nodeUuid?: string;
   assetId?: number;
   onDismiss: () => void;
   autoDismissMs?: number;
@@ -11,20 +10,24 @@ export interface DedupNoticeProps {
 
 export default function DedupNotice({
   fileName,
-  nodeUuid,
   assetId,
   onDismiss,
   autoDismissMs = 10000,
 }: DedupNoticeProps) {
+  const onDismissRef = useRef(onDismiss);
+  useEffect(() => {
+    onDismissRef.current = onDismiss;
+  }, [onDismiss]);
+
   useEffect(() => {
     if (autoDismissMs <= 0) return;
     const timer = setTimeout(() => {
-      onDismiss();
+      onDismissRef.current();
     }, autoDismissMs);
     return () => clearTimeout(timer);
-  }, [onDismiss, autoDismissMs]);
+  }, [autoDismissMs]);
 
-  const targetLink = assetId ? `/assets/${assetId}` : nodeUuid ? `/assets/${nodeUuid}` : "/assets";
+  const targetLink = assetId ? `/assets/${assetId}` : "/assets";
 
   return (
     <div

@@ -18,7 +18,6 @@ export interface QueueItem {
 export interface DedupNoticeItem {
   id: string;
   fileName: string;
-  nodeUuid: string;
   assetId?: number;
 }
 
@@ -147,8 +146,12 @@ export default function ManualUploadZone() {
     }
   };
 
-  const removeItem = (id: string) => {
+  const dismissDedupNotice = useCallback((id: string) => {
     setDedupNotices((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  const removeItem = (id: string) => {
+    dismissDedupNotice(id);
     setQueue((prev) => {
       const item = prev.find((i) => i.id === id);
       if (item?.status === "uploading" && item.abortController) {
@@ -205,7 +208,6 @@ export default function ManualUploadZone() {
             {
               id: item.id,
               fileName: item.file.name,
-              nodeUuid: res.nodeUuid,
               assetId: res.asset?.id,
             },
           ]);
@@ -338,9 +340,8 @@ export default function ManualUploadZone() {
             <DedupNotice
               key={notice.id}
               fileName={notice.fileName}
-              nodeUuid={notice.nodeUuid}
               assetId={notice.assetId}
-              onDismiss={() => setDedupNotices((prev) => prev.filter((n) => n.id !== notice.id))}
+              onDismiss={() => dismissDedupNotice(notice.id)}
             />
           ))}
         </div>
@@ -500,21 +501,14 @@ export default function ManualUploadZone() {
                           <span className="rounded bg-amber-950 border border-amber-800/60 px-2 py-0.5 text-[11px] text-amber-300 font-medium">
                             Already in library
                           </span>
-                          {item.response?.asset?.id ? (
+                          {item.response?.asset?.id && (
                             <Link
                               to={`/assets/${item.response.asset.id}`}
                               className="text-sky-400 underline hover:text-sky-300"
                             >
                               View existing node →
                             </Link>
-                          ) : item.response?.nodeUuid ? (
-                            <Link
-                              to={`/assets/${item.response.nodeUuid}`}
-                              className="text-sky-400 underline hover:text-sky-300"
-                            >
-                              View existing node →
-                            </Link>
-                          ) : null}
+                          )}
                         </>
                       ) : (
                         <>

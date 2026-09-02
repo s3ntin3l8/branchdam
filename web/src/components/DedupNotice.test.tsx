@@ -36,7 +36,7 @@ describe("DedupNotice", () => {
     render(
       <MemoryRouter>
         <DedupNotice
-          nodeUuid="u-123"
+          assetId={42}
           onDismiss={onDismiss}
         />
       </MemoryRouter>
@@ -44,7 +44,7 @@ describe("DedupNotice", () => {
 
     expect(screen.getByText("This file is already in your library.")).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /view existing node/i });
-    expect(link).toHaveAttribute("href", "/assets/u-123");
+    expect(link).toHaveAttribute("href", "/assets/42");
   });
 
   it("dismisses on click of close button", async () => {
@@ -88,5 +88,46 @@ describe("DedupNotice", () => {
       vi.advanceTimersByTime(1);
     });
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reset the auto-dismiss timer on parent re-renders with new callback references", () => {
+    const onDismiss1 = vi.fn();
+    const { rerender } = render(
+      <MemoryRouter>
+        <DedupNotice
+          fileName="sample.raw"
+          assetId={42}
+          onDismiss={onDismiss1}
+          autoDismissMs={10000}
+        />
+      </MemoryRouter>
+    );
+
+    // Advance 6 seconds
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    expect(onDismiss1).not.toHaveBeenCalled();
+
+    // Re-render with new callback
+    const onDismiss2 = vi.fn();
+    rerender(
+      <MemoryRouter>
+        <DedupNotice
+          fileName="sample.raw"
+          assetId={42}
+          onDismiss={onDismiss2}
+          autoDismissMs={10000}
+        />
+      </MemoryRouter>
+    );
+
+    // Advance remaining 4 seconds (total 10 seconds from initial mount)
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    // The new callback should be called, without timer having reset back to 0
+    expect(onDismiss2).toHaveBeenCalledTimes(1);
+    expect(onDismiss1).not.toHaveBeenCalled();
   });
 });
