@@ -152,6 +152,7 @@ func TestDrainer_NodeCreated_And_Idempotency(t *testing.T) {
 	nodeUUID := uuid.New().String()
 	fastHash := "0123456789abcdef"
 	filePath := filepath.Join(env.staging, "raw_001.arw")
+	sourcePathHash := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	payload := agent.NodeCreatedPayload{
 		NodeUUID:          nodeUUID,
 		StorageLocationID: env.locID1,
@@ -161,6 +162,7 @@ func TestDrainer_NodeCreated_And_Idempotency(t *testing.T) {
 		SizeBytes:         50000000,
 		MtimeUnix:         time.Now().Unix(),
 		FastHash:          &fastHash,
+		SourcePathHash:    &sourcePathHash,
 	}
 
 	enqueueEvent(t, env.db, agent.EventNodeCreated, payload)
@@ -181,6 +183,8 @@ func TestDrainer_NodeCreated_And_Idempotency(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filePath, node.FilePath)
 	require.Equal(t, "ACTIVE", node.LifecycleState)
+	require.NotNil(t, node.SourcePathHash)
+	require.Equal(t, sourcePathHash, *node.SourcePathHash)
 
 	// Enqueue duplicate event with same nodeUUID -> verify idempotency
 	enqueueEvent(t, env.db, agent.EventNodeCreated, payload)

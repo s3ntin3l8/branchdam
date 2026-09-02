@@ -119,3 +119,12 @@ func PerceptualHash(img image.Image) (int64, error) {
 func HammingDistance(a, b int64) int {
 	return bits.OnesCount64(uint64(a) ^ uint64(b))
 }
+
+// IsValidHex reports whether s contains exactly length hexadecimal characters (0-9, a-f, A-F).
+func IsValidHex(s string, length int) bool {
+	if len(s) != length {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}

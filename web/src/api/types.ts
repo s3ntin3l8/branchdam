@@ -396,3 +396,11 @@ export interface CheckContentResult {
   lifecycleState?: string;
   indexingStatus?: string;
 }
+
+export interface SourceStatusResult {
+  tracked: boolean;
+  nodeUuid?: string;
+  filePath?: string;
+  indexingStatus?: string;
+  lifecycleState?: string;
+}

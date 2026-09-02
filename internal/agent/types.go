@@ -62,6 +62,7 @@ type NodeCreatedPayload struct {
 	MtimeUnix          int64   `json:"mtimeUnix,omitempty"`
 	FastHash           *string `json:"fastHash,omitempty"`
 	FullHash           *string `json:"fullHash,omitempty"`
+	SourcePathHash     *string `json:"sourcePathHash,omitempty"`
 	Phash              *int64  `json:"phash,omitempty"`
 	CameraModel        *string `json:"cameraModel,omitempty"`
 	CameraSerial       *string `json:"cameraSerial,omitempty"`

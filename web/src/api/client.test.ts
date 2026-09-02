@@ -87,4 +87,35 @@ describe("api client", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ storageLocationId: 4, differential: true });
   });
+
+  it("checkContent builds correct query parameters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ found: true, nodeUuid: "u1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await api.checkContent("fast123", "full456");
+    expect(result).toEqual({ found: true, nodeUuid: "u1" });
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toContain("/api/v1/agent/check-content?");
+    expect(calledUrl).toContain("fastHash=fast123");
+    expect(calledUrl).toContain("fullHash=full456");
+  });
+
+  it("getSourceStatus builds correct query parameter", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ tracked: true, nodeUuid: "u2" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await api.getSourceStatus("hash789");
+    expect(result).toEqual({ tracked: true, nodeUuid: "u2" });
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toContain("/api/v1/agent/source-status?");
+    expect(calledUrl).toContain("sourcePathHash=hash789");
+  });
 });

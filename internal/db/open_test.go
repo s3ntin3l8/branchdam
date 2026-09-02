@@ -281,6 +281,10 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	if err := goose.UpTo(writerDB, migrationsDir, 7); err != nil {
 		t.Fatalf("goose UpTo 7: %v", err)
 	}
+	// Add additive source_path_hash column (from migration 15) so GetMediaNodeByID succeeds.
+	if _, err := writerDB.Exec("ALTER TABLE media_nodes ADD COLUMN source_path_hash TEXT CHECK (source_path_hash IS NULL OR length(source_path_hash) = 64);"); err != nil {
+		t.Fatalf("alter table add source_path_hash: %v", err)
+	}
 
 	gotIndex, err := q.GetMediaEdge(ctx, indexEdge.ID)
 	if err != nil {
@@ -417,6 +421,7 @@ func TestGetMediaNodeByFullHash(t *testing.T) {
 
 		fastHash := "0123456789abcdef"
 		fullHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		sourcePathHash := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
 		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:          "00000000-0000-7000-8000-000000000010",
@@ -426,6 +431,7 @@ func TestGetMediaNodeByFullHash(t *testing.T) {
 			FileExt:           "jpg",
 			FastHash:          &fastHash,
 			FullHash:          &fullHash,
+			SourcePathHash:    &sourcePathHash,
 			IndexingStatus:    "INDEXED_SHALLOW",
 			GraphStatus:       "UNLINKED",
 			LifecycleState:    "ACTIVE",
@@ -448,6 +454,14 @@ func TestGetMediaNodeByFullHash(t *testing.T) {
 		}
 		if fastNodeID != node.ID {
 			t.Errorf("GetMediaNodeByFastHash got ID=%d, want %d", fastNodeID, node.ID)
+		}
+
+		bySource, err := q.GetMediaNodeBySourcePathHash(ctx, &sourcePathHash)
+		if err != nil {
+			return err
+		}
+		if bySource.ID != node.ID || bySource.NodeUuid != node.NodeUuid {
+			t.Errorf("GetMediaNodeBySourcePathHash got ID=%d, want %d", bySource.ID, node.ID)
 		}
 		return nil
 	})

@@ -18,6 +18,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/hashing"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -500,6 +501,14 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		nullFilenameStem = sql.NullString{String: *p.FilenameStem, Valid: true}
 	}
 
+	var nullSourcePathHash *string
+	if p.SourcePathHash != nil && *p.SourcePathHash != "" {
+		h := strings.ToLower(strings.TrimSpace(*p.SourcePathHash))
+		if hashing.IsValidHex(h, 64) {
+			nullSourcePathHash = &h
+		}
+	}
+
 	mtime := p.MtimeUnix
 	if mtime == 0 {
 		mtime = time.Now().Unix()
@@ -527,6 +536,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		FilenameStem:       nullFilenameStem,
 		CameraSerial:       nullCameraSerial,
 		LensModel:          nullLensModel,
+		SourcePathHash:     nullSourcePathHash,
 	})
 	if err != nil {
 		if p.FullHash != nil && *p.FullHash != "" {
