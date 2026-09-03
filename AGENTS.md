@@ -1,6 +1,11 @@
 # AGENTS.md — branchDAM
 
-<!-- mullion:briefing:start -->
+This file is the single source of truth for this repo's workflow rules and
+load-bearing invariants — the ones every agent needs before touching
+anything, regardless of which CLI you are. `CLAUDE.md` is a one-line
+`@AGENTS.md` import, so every CLI (Claude Code, Codex, opencode, agy) reads
+this file, natively or via that import. See [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the contributor workflow and [`docs/`](docs) for deeper architecture detail.
 
 Self-hosted Digital Asset Management server. Models media assets as a version
 node graph with confidence-weighted lineage edges. Go backend (Huma v2, SQLite
@@ -67,5 +72,3 @@ gh api repos/s3ntin3l8/branchdam/pulls/<PR>/comments/<comment_id>/replies -f bod
 # 2. Resolve thread (GraphQL)
 gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
 ```
-
-<!-- mullion:briefing:end -->
