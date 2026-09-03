@@ -212,3 +212,26 @@ func TestHammingDistance(t *testing.T) {
 		}
 	}
 }
+
+func TestIsValidHex(t *testing.T) {
+	cases := []struct {
+		input  string
+		length int
+		want   bool
+	}{
+		{"", 0, true},
+		{"", 16, false},
+		{"0123456789abcdef", 16, true},
+		{"0123456789ABCDEF", 16, true},
+		{"0123456789abcdef", 15, false},
+		{"0123456789abcdef", 17, false},
+		{"0123456789abcdeg", 16, false}, // 'g' is not hex
+		{"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 64, true},
+		{"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85z", 64, false},
+	}
+	for _, c := range cases {
+		if got := IsValidHex(c.input, c.length); got != c.want {
+			t.Errorf("IsValidHex(%q, %d) = %v, want %v", c.input, c.length, got, c.want)
+		}
+	}
+}

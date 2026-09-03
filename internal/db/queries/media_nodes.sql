@@ -8,7 +8,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
@@ -21,7 +21,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE (sqlc.narg('lifecycle_state') IS NULL OR lifecycle_state = sqlc.narg('lifecycle_state'))
   AND (sqlc.narg('camera_model') IS NULL OR camera_model = sqlc.narg('camera_model'))
@@ -54,7 +54,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE id = ?1;
 
@@ -68,7 +68,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -81,7 +81,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
 LIMIT 1;
@@ -96,7 +96,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -110,7 +110,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -129,7 +129,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
 LIMIT ?2;
@@ -144,7 +144,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE camera_serial = ?1
   AND captured_at_unix >= ?2
@@ -160,7 +160,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -174,14 +174,14 @@ INSERT INTO media_nodes (
     indexing_status, graph_status, lifecycle_state,
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
-    camera_serial, lens_model,
+    camera_serial, lens_model, source_path_hash,
     first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5,
     ?6, ?7, ?8, ?9, ?10,
     ?11, ?12, ?13,
     ?14, ?15, ?16,
-    ?17, ?18, ?19, ?20, ?21,
+    ?17, ?18, ?19, ?20, ?21, ?22,
     unixepoch(), unixepoch(), unixepoch(), unixepoch()
 )
 RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -190,7 +190,7 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
           first_seen_at, last_seen_at, created_at, updated_at,
-          camera_serial, lens_model, thumb_state, thumb_attempts;
+          camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash;
 
 -- name: ArchiveMediaNode :exec
 -- Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
@@ -348,7 +348,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
 WHERE node_uuid = ?1;
 
@@ -488,7 +488,7 @@ UPDATE media_nodes SET thumb_state = 'PENDING', thumb_attempts = 0, updated_at =
 -- name: GetMediaNodeByFullHash :one
 -- Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
 -- Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
-SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status, size_bytes
 FROM media_nodes
 WHERE full_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
@@ -499,4 +499,14 @@ SELECT id
 FROM media_nodes
 WHERE fast_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+LIMIT 1;
+
+-- name: GetMediaNodeBySourcePathHash :one
+-- Agent dedup: find an active or hidden node with the given SHA-256 source_path_hash.
+-- Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+FROM media_nodes
+WHERE source_path_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+ORDER BY id DESC
 LIMIT 1;

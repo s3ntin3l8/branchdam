@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,6 +117,13 @@ func (s *Server) registerRoutes(api huma.API) {
 		Summary:       "Pre-flight hash check before byte transfer",
 		DefaultStatus: http.StatusOK,
 	}, s.handleAgentCheckContent)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodGet,
+		Path:          "/api/v1/agent/source-status",
+		OperationID:   "agentSourceStatus",
+		Summary:       "Check if a source path hash is already tracked in the library",
+		DefaultStatus: http.StatusOK,
+	}, s.handleAgentSourceStatus)
 }
 
 // --- /api/v1/me ---
@@ -1992,11 +1998,7 @@ type AgentCheckContentOutput struct {
 }
 
 func isHexChars(s string, length int) bool {
-	if len(s) != length {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
+	return hashing.IsValidHex(s, length)
 }
 
 func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckContentInput) (*AgentCheckContentOutput, error) {
@@ -2035,6 +2037,77 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 			FilePath:       node.FilePath,
 			LifecycleState: node.LifecycleState,
 			IndexingStatus: node.IndexingStatus,
+		},
+	}, nil
+}
+
+// --- /api/v1/agent/source-status ---
+
+// AgentSourceStatusInput defines query parameters for the pre-flight source status check.
+// sourcePathHash is the primary parameter; sourcePath is supported as an alias for
+// backwards compatibility. Both must be the 64-character lowercase SHA-256 hex digest
+// of the original workstation file path.
+//
+// Note: source_path_hash is client-asserted and advisory for pre-flight dedup. Pre-migration
+// media nodes (prior to migration 00015) have NULL source_path_hash and will report
+// tracked=false until re-ingested.
+type AgentSourceStatusInput struct {
+	SourcePathHash string `query:"sourcePathHash" doc:"SHA-256 hex (64 chars) of original workstation-side file path" pattern:"^[0-9a-fA-F]{64}$"`
+	SourcePath     string `query:"sourcePath" doc:"Alias for sourcePathHash (must match sourcePathHash if both are provided)" pattern:"^[0-9a-fA-F]{64}$"`
+}
+
+type AgentSourceStatusResult struct {
+	Tracked        bool   `json:"tracked"`
+	NodeUUID       string `json:"nodeUuid,omitempty"`
+	FilePath       string `json:"filePath,omitempty"`
+	IndexingStatus string `json:"indexingStatus,omitempty"`
+	LifecycleState string `json:"lifecycleState,omitempty"`
+}
+
+type AgentSourceStatusOutput struct {
+	Body AgentSourceStatusResult
+}
+
+func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceStatusInput) (*AgentSourceStatusOutput, error) {
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	sph := strings.ToLower(strings.TrimSpace(in.SourcePathHash))
+	sp := strings.ToLower(strings.TrimSpace(in.SourcePath))
+	if sph != "" && sp != "" && sph != sp {
+		return nil, huma.Error400BadRequest("conflicting sourcePath and sourcePathHash query parameters", nil)
+	}
+
+	sourceHash := sph
+	if sourceHash == "" {
+		sourceHash = sp
+	}
+	if !isHexChars(sourceHash, 64) {
+		return nil, huma.Error400BadRequest("sourcePathHash (or sourcePath) query parameter must be 64 hexadecimal characters (SHA-256)", nil)
+	}
+
+	if s.db == nil {
+		return nil, huma.Error500InternalServerError("database not available", nil)
+	}
+
+	node, err := s.db.Reader.GetMediaNodeBySourcePathHash(ctx, &sourceHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &AgentSourceStatusOutput{
+				Body: AgentSourceStatusResult{Tracked: false},
+			}, nil
+		}
+		return nil, huma.Error500InternalServerError("source path hash query failed", err)
+	}
+
+	return &AgentSourceStatusOutput{
+		Body: AgentSourceStatusResult{
+			Tracked:        true,
+			NodeUUID:       node.NodeUuid,
+			FilePath:       node.FilePath,
+			IndexingStatus: node.IndexingStatus,
+			LifecycleState: node.LifecycleState,
 		},
 	}, nil
 }

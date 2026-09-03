@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -152,6 +152,8 @@ export const api = {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText) as WebUploadResponse;
+            const dedupHeader = xhr.getResponseHeader("X-Dedup") || xhr.getResponseHeader("x-dedup");
+            data.isDedup = dedupHeader === "true" || data.status === "DEDUPLICATED";
             resolve(data);
           } catch {
             reject(new ApiError(xhr.status, "Invalid JSON response"));
@@ -199,5 +201,11 @@ export const api = {
     if (fastHash) qs.set("fastHash", fastHash);
     qs.set("fullHash", fullHash);
     return request<CheckContentResult>(`/api/v1/agent/check-content?${qs.toString()}`);
+  },
+
+  getSourceStatus: (sourcePathHash: string) => {
+    const qs = new URLSearchParams();
+    qs.set("sourcePathHash", sourcePathHash);
+    return request<SourceStatusResult>(`/api/v1/agent/source-status?${qs.toString()}`);
   },
 };

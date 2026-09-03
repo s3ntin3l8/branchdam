@@ -170,6 +170,7 @@ export interface WebUploadResponse {
   bytesWritten: number;
   blake3Hash: string;
   relativePath: string;
+  isDedup?: boolean;
 }
 
 export interface LineageResponse {
@@ -395,4 +396,12 @@ export interface CheckContentResult {
   filePath?: string;
   lifecycleState?: string;
   indexingStatus?: string;
+}
+
+export interface SourceStatusResult {
+  tracked: boolean;
+  nodeUuid?: string;
+  filePath?: string;
+  indexingStatus?: string;
+  lifecycleState?: string;
 }

@@ -142,4 +142,60 @@ describe("ManualUploadZone", () => {
     expect(await screen.findByText("Failed")).toBeInTheDocument();
     expect(screen.getByText("Disk quota exceeded")).toBeInTheDocument();
   });
+
+  it("surfaces 'already in library' dedup notice and row badge when upload returns an existing node", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
+
+    const mockDedupResponse: WebUploadResponse = {
+      asset: {
+        id: 77,
+        nodeUuid: "018f-uuid-77",
+        filePath: "/storage/archive/2026/08/Pixel/IMG_EXISTING.JPG",
+        fileName: "IMG_EXISTING.JPG",
+        fileExt: ".JPG",
+        sizeBytes: 2048,
+        indexingStatus: "INDEXED_FULL",
+        graphStatus: "UNLINKED",
+        lifecycleState: "ACTIVE",
+        storageLocationId: 2,
+        thumbState: "READY",
+      },
+      nodeUuid: "018f-uuid-77",
+      status: "DEDUPLICATED",
+      isDedup: true,
+      bytesWritten: 2048,
+      blake3Hash: "blake3hash77",
+      relativePath: "2026/08/Pixel/IMG_EXISTING.JPG",
+    };
+
+    vi.mocked(api.uploadFile).mockResolvedValueOnce(mockDedupResponse);
+
+    renderWithClient(<ManualUploadZone />);
+    await screen.findByRole("combobox");
+
+    const file = new File(["duplicate content"], "IMG_EXISTING.JPG", { type: "image/jpeg" });
+    const hiddenFileInput = document.querySelector('input[type="file"]:not([webkitdirectory])') as HTMLInputElement;
+    await userEvent.upload(hiddenFileInput, file);
+
+    const startButton = await screen.findByRole("button", { name: /start upload/i });
+    await userEvent.click(startButton);
+
+    // Dedup notice banner appears with link to existing node
+    expect(await screen.findAllByText(/IMG_EXISTING\.JPG/)).toHaveLength(2);
+    expect(screen.getByText(/already in your library/i)).toBeInTheDocument();
+
+    // Queue item row shows 'Already in library' badge rather than 'Ready' or 'Failed'
+    expect(screen.getByText("Already in library")).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+
+    // Link in banner/row points to /assets/77
+    const links = screen.getAllByRole("link", { name: /view existing node/i });
+    expect(links.length).toBeGreaterThanOrEqual(1);
+    expect(links[0]).toHaveAttribute("href", "/assets/77");
+
+    // Dismiss notice
+    const dismissBtn = screen.getByRole("button", { name: /dismiss notice/i });
+    await userEvent.click(dismissBtn);
+    expect(screen.queryByText("This file is already in your library.")).not.toBeInTheDocument();
+  });
 });

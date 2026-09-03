@@ -94,6 +94,7 @@ type MediaNode struct {
 	LensModel          sql.NullString
 	ThumbState         string
 	ThumbAttempts      int64
+	SourcePathHash     *string
 }
 
 type NodeMetadatum struct {

@@ -87,4 +87,68 @@ describe("api client", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ storageLocationId: 4, differential: true });
   });
+
+  it("checkContent builds correct query parameters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ found: true, nodeUuid: "u1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await api.checkContent("fast123", "full456");
+    expect(result).toEqual({ found: true, nodeUuid: "u1" });
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toContain("/api/v1/agent/check-content?");
+    expect(calledUrl).toContain("fastHash=fast123");
+    expect(calledUrl).toContain("fullHash=full456");
+  });
+
+  it("getSourceStatus builds correct query parameter", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ tracked: true, nodeUuid: "u2" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await api.getSourceStatus("hash789");
+    expect(result).toEqual({ tracked: true, nodeUuid: "u2" });
+    const calledUrl = fetchMock.mock.calls[0][0] as string;
+    expect(calledUrl).toContain("/api/v1/agent/source-status?");
+    expect(calledUrl).toContain("sourcePathHash=hash789");
+  });
+
+  it("uploadFile detects X-Dedup header and marks isDedup: true", async () => {
+    const mockXHR = {
+      open: vi.fn(),
+      send: vi.fn(),
+      status: 200,
+      responseText: JSON.stringify({
+        asset: { id: 99, nodeUuid: "u-99" },
+        nodeUuid: "u-99",
+        status: "DEDUPLICATED",
+        bytesWritten: 1234,
+        blake3Hash: "hash123",
+        relativePath: "foo.jpg",
+      }),
+      getResponseHeader: vi.fn((header: string) => (header.toLowerCase() === "x-dedup" ? "true" : null)),
+      onload: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      upload: {},
+    };
+
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function () {
+      setTimeout(() => {
+        if (mockXHR.onload) mockXHR.onload();
+      }, 0);
+      return mockXHR;
+    }));
+
+    const file = new File(["test data"], "test.jpg", { type: "image/jpeg" });
+    const res = await api.uploadFile(file);
+    expect(res.isDedup).toBe(true);
+    expect(res.nodeUuid).toBe("u-99");
+    expect(res.status).toBe("DEDUPLICATED");
+  });
 });
