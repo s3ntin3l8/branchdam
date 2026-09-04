@@ -130,6 +130,21 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 			}); err != nil {
 				return err
 			}
+			if r.FullHash != "" {
+				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+					ID:       missing.ID,
+					FullHash: &r.FullHash,
+				}); err != nil {
+					return err
+				}
+			} else if missing.FullHash != nil && *missing.FullHash != "" && missing.IndexingStatus != "INDEXED_FULL" {
+				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+					ID:       missing.ID,
+					FullHash: missing.FullHash,
+				}); err != nil {
+					return err
+				}
+			}
 			// A rebased node backfills metadata the same way a touched one
 			// does -- see the touched branch above, #86, and #105.
 			return reconcileAllMetadata(ctx, q, missing, r, stats, log)

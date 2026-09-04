@@ -4623,3 +4623,100 @@ func TestAgentNodeStatus_400NodeBatch_Performance(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentRebase_SetsIndexedFullWhenFullHashKnown(t *testing.T) {
+	srv, database, _, staging, exports, _ := serverWithGuard(t)
+
+	fullHash1 := "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	fullHash2 := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+	// 1. Unknown node rebased with fullHash -> created as INDEXED_FULL
+	unknownUUID := "018f0000-0000-7000-8000-000000000999"
+	targetPath1 := filepath.Join(exports, "unknown_full.jpg")
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   unknownUUID,
+		"targetPath": targetPath1,
+		"fileName":   "unknown_full.jpg",
+		"fileExt":    ".jpg",
+		"sizeBytes":  1024,
+		"fullHash":   fullHash1,
+	}))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("X-API-Key", routeTestAgentKey)
+	rr1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("rebase unknown status = %d, body = %s", rr1.Code, rr1.Body.String())
+	}
+
+	// 2. Known node with INDEXED_SHALLOW rebased with fullHash -> updated to INDEXED_FULL
+	knownUUID := "018f0000-0000-7000-8000-000000000888"
+	var knownID int64
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          knownUUID,
+			StorageLocationID: 1,
+			FilePath:          filepath.Join(staging, "known_shallow.jpg"),
+			FileName:          "known_shallow.jpg",
+			FileExt:           ".jpg",
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err == nil {
+			knownID = n.ID
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert known node: %v", err)
+	}
+
+	targetPath2 := filepath.Join(exports, "known_rebased_full.jpg")
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
+		"nodeUuid":   knownUUID,
+		"targetPath": targetPath2,
+		"fullHash":   fullHash2,
+	}))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	rr2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("rebase known status = %d, body = %s", rr2.Code, rr2.Body.String())
+	}
+
+	// Verify both nodes in DB have indexing_status = INDEXED_FULL and full_hash set
+	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		node1, err := q.GetMediaNodeByUUID(context.Background(), unknownUUID)
+		if err != nil {
+			return err
+		}
+		if node1.IndexingStatus != "INDEXED_FULL" {
+			t.Errorf("unknown node indexing_status = %q, want INDEXED_FULL", node1.IndexingStatus)
+		}
+		if node1.FullHash == nil || *node1.FullHash != fullHash1 {
+			t.Errorf("unknown node full_hash = %v, want %q", node1.FullHash, fullHash1)
+		}
+
+		node2, err := q.GetMediaNodeByID(context.Background(), knownID)
+		if err != nil {
+			return err
+		}
+		if node2.IndexingStatus != "INDEXED_FULL" {
+			t.Errorf("known node indexing_status = %q, want INDEXED_FULL", node2.IndexingStatus)
+		}
+		if node2.FullHash == nil || *node2.FullHash != fullHash2 {
+			t.Errorf("known node full_hash = %v, want %q", node2.FullHash, fullHash2)
+		}
+		if node2.FilePath != targetPath2 {
+			t.Errorf("known node file_path = %q, want %q", node2.FilePath, targetPath2)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify nodes: %v", err)
+	}
+}
