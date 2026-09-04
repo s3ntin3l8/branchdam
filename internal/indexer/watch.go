@@ -150,6 +150,7 @@ type debouncer struct {
 	delay time.Duration
 
 	mu     sync.Mutex
+	closed bool
 	timers map[string]*time.Timer
 }
 
@@ -160,11 +161,18 @@ func newDebouncer(delay time.Duration) *debouncer {
 func (d *debouncer) trigger(key string, fn func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
 	if t, ok := d.timers[key]; ok {
 		t.Stop()
 	}
 	d.timers[key] = time.AfterFunc(d.delay, func() {
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return
+		}
 		delete(d.timers, key)
 		d.mu.Unlock()
 		fn()
@@ -174,7 +182,9 @@ func (d *debouncer) trigger(key string, fn func()) {
 func (d *debouncer) stopAll() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, t := range d.timers {
+	d.closed = true
+	for k, t := range d.timers {
 		t.Stop()
+		delete(d.timers, k)
 	}
 }
