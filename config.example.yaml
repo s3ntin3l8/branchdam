@@ -100,9 +100,9 @@ storageLocations:
   - name: archive
     rootPath: /storage/archive
     tier: TIER3_MASTER_ARCHIVE
-    readOnly: true                # enforced in the DB CHECK too; Tier 3 is always read-only
+    readOnly: true                # Tier 3 is read-only unless readOnly: false is configured; the :ro mount remains a defense-in-depth default
     # watch and sweep are never honored here: the Tier 3 master archive is
-    # read-only, so nothing on it can ever be ingested
+    # read-only by default, so nothing on it can ever be ingested
 
   - name: staging
     rootPath: /storage/staging

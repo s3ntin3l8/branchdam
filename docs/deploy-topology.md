@@ -31,7 +31,7 @@ for a multi-terabyte archive over NFS this is a multi-hour operation, not a rout
 
 | Tier | Purpose | Mount |
 |---|---|---|
-| `TIER3_MASTER_ARCHIVE` | Camera originals | NAS, over NFS, **read-only** at both the compose layer (`:ro`) and `config.yaml` (`readOnly: true`) |
+| `TIER3_MASTER_ARCHIVE` | Camera originals | NAS, over NFS, **read-only** at both the compose layer (`:ro`) and `config.yaml` (`readOnly: true`) (Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default) |
 | `TIER2_EXPORTS` | Renders/exports, shared with Immich | Local disk on the server host, read-write |
 | `TIER0_LOCAL_STAGING` | Workstation ingest staging root | Server-local mount/directory (`/storage/staging`, `rw`) — empty stub satisfying `storage.Guard.Resolve` for agent offline queue drain; actual bytes remain on workstation NVMe until synced |
 | `TIER1_LOCAL_SCRATCH` | Workstation editing cache | Not mounted into the server at all — see §5 |

@@ -67,7 +67,7 @@ services:
       - /your/real/scratch:/storage/scratch:rw
       - /your/real/exports:/storage/exports:rw
       - /your/real/projects:/storage/projects:rw
-      - /your/real/archive:/storage/archive:ro   # Tier 3 — always :ro
+      - /your/real/archive:/storage/archive:ro   # Tier 3 — :ro by default
 ```
 
 **No `image:` override.** This deployment deliberately stays on `ghcr.io/s3ntin3l8/branchdam:latest`
@@ -77,9 +77,8 @@ so a `docker compose pull` picks up every release automatically — see
 advice is aimed at a production deploy, and is being knowingly declined here.
 
 Only mount the storage tiers you actually have — drop volumes lines (and the corresponding
-`storageLocations` entries in step 4) for tiers that don't apply yet. Tier 3 must always be
-mounted `:ro`; `storage.Guard` also refuses to write to it at the application level regardless of
-the mount, but the mount is the first line of defense.
+`storageLocations` entries in step 4) for tiers that don't apply yet. Tier 3 is read-only unless
+`readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default.
 
 ## 4. `config.yaml`
 
@@ -94,7 +93,7 @@ right-hand side of the volume mount you just wrote, not the host path on the lef
 | `TIER1_LOCAL_SCRATCH` | `/storage/scratch` | your scratch dir | `rw` |
 | `TIER2_EXPORTS` | `/storage/exports` | your exports dir | `rw` |
 | `PROJECTS` | `/storage/projects` | your projects dir | `rw` |
-| `TIER3_MASTER_ARCHIVE` | `/storage/archive` | your archive dir | **`ro`**, and `readOnly: true` in config |
+| `TIER3_MASTER_ARCHIVE` | `/storage/archive` | your archive dir | **`ro`** by default (and `readOnly: true` in config; Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default) |
 
 `database.path` must stay an **absolute** container path (`/data/branchdam.db` is the default and
 is fine as-is) — `storage.Guard`'s `canonicalize` rejects a relative root outright, and the
