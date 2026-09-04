@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
 import Thumbnail from "../components/Thumbnail";
+import NodePickerModal from "../components/NodePickerModal";
 import type { AuditEntry } from "../api/types";
 
 const PAGE_SIZE = 50;
@@ -189,6 +190,8 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   const [targetId, setTargetId] = useState("");
   const [relType, setRelType] = useState<AuditEntry["relationshipType"]>("DERIVED_FROM");
   const [errorMsg, setErrorMsg] = useState("");
+  const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false);
+  const [isTargetPickerOpen, setIsTargetPickerOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
@@ -270,83 +273,125 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
+    <>
       <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="manual-link-modal-title"
-        onKeyDown={(e) => { handleKeyDown(e); handleTrapFocus(e); }}
-        className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
+        onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       >
-        <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-white">Manual Link Edge</h2>
-        {errorMsg && (
-          <div className="mb-4 rounded bg-red-900/60 p-3 text-xs text-red-200 border border-red-800">
-            {errorMsg}
-          </div>
-        )}
-        <form onSubmit={handleSubmit} className="space-y-4 text-sm">
-          <div>
-            <label className="mb-1 block font-medium text-neutral-300">Parent (Source) Node ID</label>
-            <input
-              type="number"
-              value={sourceId}
-              onChange={(e) => setSourceId(e.target.value)}
-              placeholder="e.g. 42"
-              className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              required
-            />
-          </div>
+        <div
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="manual-link-modal-title"
+          onKeyDown={(e) => { handleKeyDown(e); handleTrapFocus(e); }}
+          className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
+        >
+          <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-white">Manual Link Edge</h2>
+          {errorMsg && (
+            <div className="mb-4 rounded bg-red-900/60 p-3 text-xs text-red-200 border border-red-800">
+              {errorMsg}
+            </div>
+          )}
+          <form onSubmit={handleSubmit} className="space-y-4 text-sm">
+            <div>
+              <label className="mb-1 block font-medium text-neutral-300">Parent (Source) Node ID</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  value={sourceId}
+                  onChange={(e) => setSourceId(e.target.value)}
+                  placeholder="e.g. 42"
+                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setIsSourcePickerOpen(true)}
+                  aria-label="Select Parent Node"
+                  className="shrink-0 rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white"
+                >
+                  Pick Node
+                </button>
+              </div>
+            </div>
 
-          <div>
-            <label className="mb-1 block font-medium text-neutral-300">Child (Target) Node ID</label>
-            <input
-              type="number"
-              value={targetId}
-              onChange={(e) => setTargetId(e.target.value)}
-              placeholder="e.g. 108"
-              className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              required
-            />
-          </div>
+            <div>
+              <label className="mb-1 block font-medium text-neutral-300">Child (Target) Node ID</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  value={targetId}
+                  onChange={(e) => setTargetId(e.target.value)}
+                  placeholder="e.g. 108"
+                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setIsTargetPickerOpen(true)}
+                  aria-label="Select Target Asset"
+                  className="shrink-0 rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white"
+                >
+                  Pick Node
+                </button>
+              </div>
+            </div>
 
-          <div>
-            <label className="mb-1 block font-medium text-neutral-300">Relationship Type</label>
-            <select
-              value={relType}
-              onChange={(e) => setRelType(e.target.value as AuditEntry["relationshipType"])}
-              className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            >
-              <option value="DERIVED_FROM">DERIVED_FROM</option>
-              <option value="FINAL_EXPORT">FINAL_EXPORT</option>
-              <option value="PROXY_OF">PROXY_OF</option>
-              <option value="PROJECT_SIDECAR">PROJECT_SIDECAR</option>
-              <option value="DUPLICATE_OF">DUPLICATE_OF</option>
-            </select>
-          </div>
+            <div>
+              <label className="mb-1 block font-medium text-neutral-300">Relationship Type</label>
+              <select
+                value={relType}
+                onChange={(e) => setRelType(e.target.value as AuditEntry["relationshipType"])}
+                className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="DERIVED_FROM">DERIVED_FROM</option>
+                <option value="FINAL_EXPORT">FINAL_EXPORT</option>
+                <option value="PROXY_OF">PROXY_OF</option>
+                <option value="PROJECT_SIDECAR">PROJECT_SIDECAR</option>
+                <option value="DUPLICATE_OF">DUPLICATE_OF</option>
+              </select>
+            </div>
 
-          <div className="flex justify-end gap-2 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded bg-neutral-800 px-4 py-2 text-neutral-300 hover:bg-neutral-700"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={createEdge.isPending}
-              className="rounded bg-indigo-600 px-4 py-2 font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-            >
-              {createEdge.isPending ? "Linking…" : "Create Link"}
-            </button>
-          </div>
-        </form>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded bg-neutral-800 px-4 py-2 text-neutral-300 hover:bg-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={createEdge.isPending}
+                className="rounded bg-indigo-600 px-4 py-2 font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {createEdge.isPending ? "Linking…" : "Create Link"}
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
-    </div>
+
+      <NodePickerModal
+        isOpen={isSourcePickerOpen}
+        onClose={() => setIsSourcePickerOpen(false)}
+        onSelect={(asset) => {
+          setSourceId(String(asset.id));
+        }}
+        selectedAssetId={sourceId}
+        title="Select Parent (Source) Node"
+      />
+
+      <NodePickerModal
+        isOpen={isTargetPickerOpen}
+        onClose={() => setIsTargetPickerOpen(false)}
+        onSelect={(asset) => {
+          setTargetId(String(asset.id));
+        }}
+        selectedAssetId={targetId}
+        title="Select Child (Target) Node"
+      />
+    </>
   );
 }
 

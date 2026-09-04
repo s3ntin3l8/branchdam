@@ -13,6 +13,7 @@ vi.mock("../api/client", () => ({
     confirmEdge: vi.fn(),
     rejectEdge: vi.fn(),
     createEdge: vi.fn(),
+    listAssets: vi.fn().mockResolvedValue({ assets: [], total: 0 }),
     thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
   },
 }));
@@ -290,5 +291,78 @@ describe("AuditQueuePage", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(document.activeElement).toBe(openBtn);
     });
+  });
+
+  it("opens node picker for target node, selects an asset, and submits createEdge", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
+    vi.mocked(api.listAssets).mockResolvedValue({
+      assets: [
+        {
+          id: 55,
+          nodeUuid: "uuid-target-55",
+          filePath: "/exports/final_render.jpg",
+          fileName: "final_render.jpg",
+          fileExt: ".jpg",
+          sizeBytes: 4000000,
+          indexingStatus: "INDEXED_FULL",
+          graphStatus: "UNLINKED",
+          lifecycleState: "ACTIVE",
+          storageLocationId: 1,
+          cameraModel: "Sony A7IV",
+          thumbState: "READY",
+        },
+      ],
+      total: 1,
+    });
+    vi.mocked(api.createEdge).mockResolvedValue({
+      id: 101,
+      sourceNodeId: 42,
+      targetNodeId: 55,
+      relationshipType: "FINAL_EXPORT",
+      confidence: 1.0,
+      reviewState: "CONFIRMED",
+      resolver: "manual",
+    });
+
+    renderWithClient(<AuditQueuePage />);
+    const manualBtn = await screen.findByRole("button", { name: /\+ manual link edge/i });
+    await user.click(manualBtn);
+
+    const inputs = screen.getAllByRole("spinbutton");
+    await user.type(inputs[0], "42");
+
+    // Click "Pick Node" for target node
+    const pickTargetBtn = screen.getByRole("button", { name: "Select Target Asset" });
+    await user.click(pickTargetBtn);
+
+    // NodePickerModal opens
+    expect(await screen.findByRole("dialog", { name: "Select Child (Target) Node" })).toBeInTheDocument();
+    expect(screen.getByText("final_render.jpg")).toBeInTheDocument();
+
+    // Select the asset
+    const assetCard = screen.getByText("final_render.jpg");
+    await user.click(assetCard);
+
+    // NodePickerModal closes and target input is populated
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Select Child (Target) Node" })).not.toBeInTheDocument();
+    });
+    expect(inputs[1]).toHaveValue(55);
+
+    // Select relationship type and submit
+    const relSelect = screen.getByRole("combobox");
+    await user.selectOptions(relSelect, "FINAL_EXPORT");
+
+    const submitBtn = screen.getByRole("button", { name: /create link/i });
+    await user.click(submitBtn);
+
+    await waitFor(() =>
+      expect(api.createEdge).toHaveBeenCalledWith({
+        sourceNodeId: 42,
+        targetNodeId: 55,
+        relationshipType: "FINAL_EXPORT",
+      })
+    );
   });
 });
