@@ -12,8 +12,9 @@ import "sync"
 
 // Hub tracks connected clients and fans out change notifications.
 type Hub struct {
-	mu      sync.Mutex
-	clients map[chan struct{}]struct{}
+	mu         sync.Mutex
+	generation uint64
+	clients    map[chan struct{}]struct{}
 }
 
 // New creates an empty Hub.
@@ -38,9 +39,11 @@ func (h *Hub) Subscribe() (<-chan struct{}, func()) {
 	}
 }
 
-// Broadcast nudges every connected client (non-blocking; coalesces).
+// Broadcast nudges every connected client (non-blocking; coalesces) and
+// increments the broadcast generation counter for subscriber cache invalidation.
 func (h *Hub) Broadcast() {
 	h.mu.Lock()
+	h.generation++
 	defer h.mu.Unlock()
 	for ch := range h.clients {
 		select {
@@ -48,6 +51,13 @@ func (h *Hub) Broadcast() {
 		default: // a nudge is already pending
 		}
 	}
+}
+
+// Generation returns the current broadcast generation counter.
+func (h *Hub) Generation() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.generation
 }
 
 // Count returns the number of connected clients (for diagnostics/tests).

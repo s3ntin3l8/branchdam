@@ -1534,3 +1534,47 @@ func (q *Queries) GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHa
 	)
 	return i, err
 }
+
+const listMediaNodeStatusesByUUIDs = `-- name: ListMediaNodeStatusesByUUIDs :many
+SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
+FROM media_nodes n
+LEFT JOIN storage_locations s ON s.id = n.storage_location_id
+WHERE n.node_uuid IN (SELECT value FROM json_each(?1))
+`
+
+type ListMediaNodeStatusesByUUIDsRow struct {
+	NodeUuid       string
+	LifecycleState string
+	FullHash       *string
+	Tier           sql.NullString
+}
+
+// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
+// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
+func (q *Queries) ListMediaNodeStatusesByUUIDs(ctx context.Context, dollar1 string) ([]ListMediaNodeStatusesByUUIDsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listMediaNodeStatusesByUUIDs, dollar1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMediaNodeStatusesByUUIDsRow{}
+	for rows.Next() {
+		var i ListMediaNodeStatusesByUUIDsRow
+		if err := rows.Scan(
+			&i.NodeUuid,
+			&i.LifecycleState,
+			&i.FullHash,
+			&i.Tier,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

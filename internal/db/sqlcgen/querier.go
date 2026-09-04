@@ -198,6 +198,9 @@ type Querier interface {
 	// the main asset list.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
 	ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error)
+	// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
+	// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
+	ListMediaNodeStatusesByUUIDs(ctx context.Context, dollar1 string) ([]ListMediaNodeStatusesByUUIDsRow, error)
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
