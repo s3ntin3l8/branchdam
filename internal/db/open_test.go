@@ -469,3 +469,268 @@ func TestGetMediaNodeByFullHash(t *testing.T) {
 		t.Fatalf("transaction failed: %v", err)
 	}
 }
+
+// TestDedupExistingHashesMigration verifies migration 00013's survivor selection
+// logic: among duplicate non-empty full_hash rows in live states (ACTIVE, HIDDEN),
+// the lowest ID (MIN(id)) is preserved as the survivor while other duplicate live
+// rows are updated to ARCHIVED. Nodes in MISSING or ARCHIVED states, as well as
+// rows with NULL full_hash, are handled properly without erroneous transitions,
+// enabling migration 00014's partial unique index creation to succeed.
+func TestDedupExistingHashesMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dedup_migration.db")
+	writerDB := openRawWriter(t, path)
+
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("SetDialect: %v", err)
+	}
+	// Migrate up to version 12 (pre-dedup state)
+	if err := goose.UpTo(writerDB, migrationsDir, 12); err != nil {
+		t.Fatalf("goose UpTo 12: %v", err)
+	}
+
+	// Insert storage location fixture
+	res, err := writerDB.ExecContext(ctx, `INSERT INTO storage_locations (
+		name, root_path, tier, read_only, prunable, is_active, created_at, updated_at
+	) VALUES ('dedup_test', '/tmp/dedup_test', 'TIER3_MASTER_ARCHIVE', 0, 0, 1, unixepoch(), unixepoch())`)
+	if err != nil {
+		t.Fatalf("insert storage_locations fixture: %v", err)
+	}
+	locID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId for storage_locations: %v", err)
+	}
+
+	insertRawNode := func(id int64, uuidSuffix, filePath, state, fullHash string) {
+		t.Helper()
+		var hashVal any
+		if fullHash == "<NULL>" {
+			hashVal = nil
+		} else {
+			hashVal = fullHash
+		}
+		_, err := writerDB.ExecContext(ctx, `INSERT INTO media_nodes (
+			id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+			indexing_status, graph_status, lifecycle_state, full_hash,
+			first_seen_at, last_seen_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, 'file.jpg', 'jpg', 'INDEXED_FULL', 'UNLINKED', ?, ?,
+			unixepoch(), unixepoch(), unixepoch(), unixepoch())`,
+			id, "00000000-0000-7000-8000-00000000"+uuidSuffix, locID, filePath, state, hashVal)
+		if err != nil {
+			t.Fatalf("insert media_node id=%d (%s): %v", id, filePath, err)
+		}
+	}
+
+	hashA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	hashB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	hashC := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	hashD := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+	// Scenario A: Multiple ACTIVE duplicates -> lowest ID (10) survives, others (11, 12) archived
+	insertRawNode(10, "0010", "/tmp/dedup_test/a1.jpg", "ACTIVE", hashA)
+	insertRawNode(11, "0011", "/tmp/dedup_test/a2.jpg", "ACTIVE", hashA)
+	insertRawNode(12, "0012", "/tmp/dedup_test/a3.jpg", "ACTIVE", hashA)
+
+	// Scenario B: MISSING node (id 20) with live duplicates (ACTIVE id 21, HIDDEN id 22) ->
+	// survivor among live is id 21 (MIN(id)), id 22 archived, id 20 remains MISSING
+	insertRawNode(20, "0020", "/tmp/dedup_test/b1.jpg", "MISSING", hashB)
+	insertRawNode(21, "0021", "/tmp/dedup_test/b2.jpg", "ACTIVE", hashB)
+	insertRawNode(22, "0022", "/tmp/dedup_test/b3.jpg", "HIDDEN", hashB)
+
+	// Scenario C: Already ARCHIVED node (id 30) + single ACTIVE node (id 31) -> id 31 stays ACTIVE, id 30 stays ARCHIVED
+	insertRawNode(30, "0030", "/tmp/dedup_test/c1.jpg", "ARCHIVED", hashC)
+	insertRawNode(31, "0031", "/tmp/dedup_test/c2.jpg", "ACTIVE", hashC)
+
+	// Scenario D: Unique ACTIVE node -> stays ACTIVE
+	insertRawNode(40, "0040", "/tmp/dedup_test/d1.jpg", "ACTIVE", hashD)
+
+	// Scenario E: Multiple ACTIVE nodes with NULL full_hash -> both stay ACTIVE (NULLs ignored by dedup)
+	insertRawNode(50, "0050", "/tmp/dedup_test/e1.jpg", "ACTIVE", "<NULL>")
+	insertRawNode(51, "0051", "/tmp/dedup_test/e2.jpg", "ACTIVE", "<NULL>")
+
+	// Run migration 00013
+	if err := goose.UpTo(writerDB, migrationsDir, 13); err != nil {
+		t.Fatalf("goose UpTo 13: %v", err)
+	}
+
+	getState := func(id int64) string {
+		t.Helper()
+		var state string
+		if err := writerDB.QueryRowContext(ctx, "SELECT lifecycle_state FROM media_nodes WHERE id = ?", id).Scan(&state); err != nil {
+			t.Fatalf("get lifecycle_state for id=%d: %v", id, err)
+		}
+		return state
+	}
+
+	// Verify Scenario A:
+	if got := getState(10); got != "ACTIVE" {
+		t.Errorf("node 10 (survivor) state = %q, want ACTIVE", got)
+	}
+	if got := getState(11); got != "ARCHIVED" {
+		t.Errorf("node 11 (duplicate) state = %q, want ARCHIVED", got)
+	}
+	if got := getState(12); got != "ARCHIVED" {
+		t.Errorf("node 12 (duplicate) state = %q, want ARCHIVED", got)
+	}
+
+	// Verify Scenario B:
+	if got := getState(20); got != "MISSING" {
+		t.Errorf("node 20 (missing) state = %q, want MISSING", got)
+	}
+	if got := getState(21); got != "ACTIVE" {
+		t.Errorf("node 21 (survivor) state = %q, want ACTIVE", got)
+	}
+	if got := getState(22); got != "ARCHIVED" {
+		t.Errorf("node 22 (duplicate) state = %q, want ARCHIVED", got)
+	}
+
+	// Verify Scenario C:
+	if got := getState(30); got != "ARCHIVED" {
+		t.Errorf("node 30 state = %q, want ARCHIVED", got)
+	}
+	if got := getState(31); got != "ACTIVE" {
+		t.Errorf("node 31 state = %q, want ACTIVE", got)
+	}
+
+	// Verify Scenario D:
+	if got := getState(40); got != "ACTIVE" {
+		t.Errorf("node 40 state = %q, want ACTIVE", got)
+	}
+
+	// Verify Scenario E (NULLs):
+	if got := getState(50); got != "ACTIVE" {
+		t.Errorf("node 50 state = %q, want ACTIVE", got)
+	}
+	if got := getState(51); got != "ACTIVE" {
+		t.Errorf("node 51 state = %q, want ACTIVE", got)
+	}
+
+	// Run migration 00014 to prove the partial unique index applies cleanly without constraint errors
+	if err := goose.UpTo(writerDB, migrationsDir, 14); err != nil {
+		t.Fatalf("goose UpTo 14 failed after migration 00013 dedup: %v", err)
+	}
+
+	// Verify unique index exists in sqlite_master
+	var indexName string
+	err = writerDB.QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='index' AND name='ux_media_nodes_live_full_hash'",
+	).Scan(&indexName)
+	if err != nil {
+		t.Fatalf("ux_media_nodes_live_full_hash index missing: %v", err)
+	}
+
+	// Verify inserting duplicate live node with hashA now violates unique constraint
+	_, insertErr := writerDB.ExecContext(ctx, `INSERT INTO media_nodes (
+		node_uuid, storage_location_id, file_path, file_name, file_ext,
+		indexing_status, graph_status, lifecycle_state, full_hash,
+		first_seen_at, last_seen_at, created_at, updated_at
+	) VALUES ('00000000-0000-7000-8000-000000000099', ?, '/tmp/dedup_test/dup.jpg', 'file.jpg', 'jpg',
+		'INDEXED_FULL', 'UNLINKED', 'ACTIVE', ?, unixepoch(), unixepoch(), unixepoch(), unixepoch())`,
+		locID, hashA)
+	if insertErr == nil {
+		t.Fatal("insert of duplicate live full_hash succeeded, want UNIQUE constraint failure")
+	}
+	if !strings.Contains(insertErr.Error(), "UNIQUE constraint failed") {
+		t.Errorf("error = %q, want UNIQUE constraint failure", insertErr)
+	}
+}
+
+// TestSourcePathHashIndexAndQueryPlan verifies that the partial index on
+// (source_path_hash, id DESC) exists and that queries filtering on
+// source_path_hash utilize the index without performing full table scans.
+func TestSourcePathHashIndexAndQueryPlan(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	// 1. Verify index exists in sqlite_master
+	var indexName string
+	err := database.reader.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+		"idx_media_nodes_source_path_hash_id",
+	).Scan(&indexName)
+	if err != nil {
+		t.Fatalf("idx_media_nodes_source_path_hash_id index not found in schema: %v", err)
+	}
+
+	// 2. Seed some media nodes with source_path_hash
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		sl, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name:     "sph_loc",
+			RootPath: "/tmp/sph_test",
+			Tier:     "PROJECTS",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+
+		sph1 := "1111111111111111111111111111111111111111111111111111111111111111"
+		sph2 := "2222222222222222222222222222222222222222222222222222222222222222"
+
+		for i := 0; i < 5; i++ {
+			h := sph1
+			if i%2 == 1 {
+				h = sph2
+			}
+			_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+				NodeUuid:          fmt.Sprintf("00000000-0000-7000-8000-%012d", i+1),
+				StorageLocationID: sl.ID,
+				FilePath:          fmt.Sprintf("/tmp/sph_test/file%d.jpg", i),
+				FileName:          fmt.Sprintf("file%d.jpg", i),
+				FileExt:           "jpg",
+				SourcePathHash:    &h,
+				IndexingStatus:    "INDEXED_SHALLOW",
+				GraphStatus:       "UNLINKED",
+				LifecycleState:    "ACTIVE",
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed media nodes: %v", err)
+	}
+
+	// 3. Explain query plan for GetMediaNodeBySourcePathHash (actual query in queries/media_nodes.sql)
+	query := `EXPLAIN QUERY PLAN
+		SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+		FROM media_nodes
+		WHERE source_path_hash = '1111111111111111111111111111111111111111111111111111111111111111'
+		  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+		ORDER BY id DESC
+		LIMIT 1;`
+
+	rows, err := database.reader.Query(query)
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		plan.WriteString(detail)
+		plan.WriteString("; ")
+	}
+
+	gotPlan := plan.String()
+	t.Logf("Query plan: %s", gotPlan)
+	if !strings.Contains(gotPlan, "idx_media_nodes_source_path_hash_id") {
+		t.Errorf("query plan does not use idx_media_nodes_source_path_hash_id: %s", gotPlan)
+	}
+	if strings.Contains(gotPlan, "SCAN media_nodes") {
+		t.Errorf("query plan falls back to a full table scan: %s", gotPlan)
+	}
+	if strings.Contains(gotPlan, "TEMP B-TREE") {
+		t.Errorf("query plan requires a temporary sort: %s", gotPlan)
+	}
+}
