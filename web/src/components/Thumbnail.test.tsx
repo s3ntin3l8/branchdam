@@ -58,4 +58,21 @@ describe("Thumbnail", () => {
     expect(newImg).toBeInTheDocument();
     expect(newImg).toHaveAttribute("src", "/api/v1/assets/8/thumbnail");
   });
+
+  it("resets error state when thumbState transitions through regeneration", () => {
+    const { rerender } = render(<Thumbnail assetId={7} thumbState="READY" alt="photo.jpg" />);
+    const img = screen.getByAltText("photo.jpg");
+    fireEvent.error(img);
+    expect(screen.getByLabelText("No thumbnail available")).toBeInTheDocument();
+
+    // State flips to PENDING on regeneration trigger
+    rerender(<Thumbnail assetId={7} thumbState="PENDING" alt="photo.jpg" />);
+    expect(screen.getByRole("status", { name: "Thumbnail generating" })).toBeInTheDocument();
+
+    // Worker completes and flips back to READY
+    rerender(<Thumbnail assetId={7} thumbState="READY" alt="photo.jpg" />);
+    const retriedImg = screen.getByAltText("photo.jpg");
+    expect(retriedImg).toBeInTheDocument();
+    expect(retriedImg).toHaveAttribute("src", "/api/v1/assets/7/thumbnail");
+  });
 });

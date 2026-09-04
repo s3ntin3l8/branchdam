@@ -65,8 +65,6 @@ export function useEventStream(): { disconnected: boolean } {
     source.addEventListener("error", onError);
     source.addEventListener("progress", onProgress);
 
-    source.onerror = onError;
-    source.onopen = onOpen;
 
     return () => {
       if (debounceTimer) {

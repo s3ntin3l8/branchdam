@@ -26,9 +26,16 @@ interface ThumbnailProps {
 // When a thumbnail image fails to load (broken/corrupted preview), onError
 // gracefully falls back to the placeholder rather than displaying a broken img.
 export default function Thumbnail({ assetId, thumbState, alt, className }: ThumbnailProps) {
-  const [failedAssetId, setFailedAssetId] = useState<number | null>(null);
+  const [hasError, setHasError] = useState(false);
+  const [prevAssetId, setPrevAssetId] = useState(assetId);
+  const [prevThumbState, setPrevThumbState] = useState(thumbState);
   const base = className ?? "h-12 w-12 rounded object-cover";
-  const hasError = failedAssetId === assetId;
+
+  if (prevAssetId !== assetId || prevThumbState !== thumbState) {
+    setPrevAssetId(assetId);
+    setPrevThumbState(thumbState);
+    setHasError(false);
+  }
 
   if (thumbState === "READY" && !hasError) {
     return (
@@ -37,7 +44,7 @@ export default function Thumbnail({ assetId, thumbState, alt, className }: Thumb
         alt={alt}
         loading="lazy"
         className={base}
-        onError={() => setFailedAssetId(assetId)}
+        onError={() => setHasError(true)}
       />
     );
   }
