@@ -248,7 +248,47 @@ describe("AuditQueuePage", () => {
     });
 
     renderWithClient(<AuditQueuePage />);
-    const nextBtn = await screen.findByRole("button", { name: /next/i });
+    const nextBtn = await screen.findByRole("button", { name: "Next page" });
     expect(nextBtn).toBeDisabled();
+  });
+
+  it("renders pagination buttons with aria-label attributes", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 200, sourceNodeId: 1, targetNodeId: 2, relationshipType: "DERIVED_FROM",
+          confidence: 0.9, tier: 2, resolver: "x", evidenceJson: "{}",
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 1, nodeUuid: "u-1", fileName: "s.arw", filePath: "/s.arw", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "u-2", fileName: "t.jpg", filePath: "/t.jpg", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+
+    renderWithClient(<AuditQueuePage />);
+    expect(await screen.findByRole("button", { name: "First page" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument();
+  });
+
+  it("restores focus to trigger button after closing manual link modal", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [], total: 0 });
+
+    renderWithClient(<AuditQueuePage />);
+    const openBtn = await screen.findByRole("button", { name: "+ Manual Link Edge" });
+    openBtn.focus();
+    expect(document.activeElement).toBe(openBtn);
+
+    await user.click(openBtn);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+
+    const cancelBtn = screen.getByRole("button", { name: "Cancel" });
+    await user.click(cancelBtn);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(document.activeElement).toBe(openBtn);
+    });
   });
 });

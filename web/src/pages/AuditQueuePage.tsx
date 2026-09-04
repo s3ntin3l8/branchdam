@@ -191,18 +191,28 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   const [errorMsg, setErrorMsg] = useState("");
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
 
   const createEdge = useCreateEdge();
 
   useEffect(() => {
     if (isOpen) {
-      previousFocusRef.current = document.activeElement as HTMLElement;
-      const timer = setTimeout(() => {
-        dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
-      }, 50);
-      return () => clearTimeout(timer);
-    } else if (previousFocusRef.current) {
-      previousFocusRef.current.focus();
+      if (!wasOpenRef.current) {
+        previousFocusRef.current = document.activeElement as HTMLElement;
+        wasOpenRef.current = true;
+        const timer = setTimeout(() => {
+          dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+        }, 50);
+        return () => clearTimeout(timer);
+      }
+    } else {
+      if (wasOpenRef.current) {
+        wasOpenRef.current = false;
+        if (previousFocusRef.current) {
+          previousFocusRef.current.focus();
+          previousFocusRef.current = null;
+        }
+      }
     }
   }, [isOpen]);
 
@@ -404,6 +414,7 @@ export default function AuditQueuePage() {
             <div>{total} item{total === 1 ? "" : "s"} awaiting review</div>
             <div className="flex items-center space-x-2">
               <button
+                aria-label="First page"
                 disabled={beforeId === 0}
                 onClick={handleFirst}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
@@ -411,6 +422,7 @@ export default function AuditQueuePage() {
                 First
               </button>
               <button
+                aria-label="Next page"
                 disabled={!hasMore}
                 onClick={handleNext}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
