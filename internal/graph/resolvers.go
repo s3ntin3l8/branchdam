@@ -343,9 +343,16 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 		// few lines above for other #132 violations.
 		childNode, parentNode := child, parent
 		proxySwapped := false
-		if isProxyExt(parent.FileExt) && !isProxyExt(child.FileExt) {
+
+		isProxy := func(n Node) bool {
+			return isProxyExt(n.FileExt) || strings.Contains(strings.ToLower(n.FileName), "_proxy")
+		}
+
+		if isProxy(parent) && !isProxy(child) {
 			childNode, parentNode = parent, child
 			proxySwapped = true
+		} else if !isProxy(parent) && !isProxy(child) && parentKind == naming.SuffixRole && childKind == naming.SuffixNone {
+			childNode, parentNode = parent, child
 		}
 		if proxySwapped && indexGated {
 			continue
