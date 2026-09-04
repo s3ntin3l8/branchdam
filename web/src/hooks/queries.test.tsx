@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useConfirmEdge, useCreateEdge, useRejectEdge } from "./queries";
+import { useConfirmEdge, useCreateEdge, useRejectEdge, useUnlinkedCount } from "./queries";
 import { api } from "../api/client";
 
 vi.mock("../api/client", () => ({
@@ -10,6 +10,7 @@ vi.mock("../api/client", () => ({
     confirmEdge: vi.fn(),
     rejectEdge: vi.fn(),
     createEdge: vi.fn(),
+    listAssets: vi.fn(),
   },
 }));
 
@@ -84,5 +85,18 @@ describe("edge review mutations invalidate every graph_status-dependent query", 
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(invalidatedKeys(queryClient)).toEqual(expect.arrayContaining(EXPECTED_EDGE_REVIEW_KEYS));
+  });
+});
+
+describe("useUnlinkedCount", () => {
+  it("fetches server-side unlinked count via listAssets with unlinkedOnly: true and limit: 1", async () => {
+    vi.mocked(api.listAssets).mockResolvedValue({ assets: [], total: 42 });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const { result } = renderHook(() => useUnlinkedCount(), { wrapper: wrapper(queryClient) });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBe(42);
+    expect(api.listAssets).toHaveBeenCalledWith({ unlinkedOnly: true, limit: 1 });
   });
 });

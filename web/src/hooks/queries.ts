@@ -144,8 +144,8 @@ export function useUnlinkedCount() {
   return useQuery({
     queryKey: ["unlinked-count"],
     queryFn: async () => {
-      const res = await api.listAssets({ limit: 500 });
-      return res.assets.filter((a) => a.graphStatus === "UNLINKED").length;
+      const res = await api.listAssets({ unlinkedOnly: true, limit: 1 });
+      return res.total;
     },
   });
 }

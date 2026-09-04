@@ -198,4 +198,37 @@ describe("ManualUploadZone", () => {
     await userEvent.click(dismissBtn);
     expect(screen.queryByText("This file is already in your library.")).not.toBeInTheDocument();
   });
+
+  it("links to nodeUuid if asset id is not present on dedup response", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
+
+    const mockDedupResponse: WebUploadResponse = {
+      asset: undefined as unknown as WebUploadResponse["asset"],
+      nodeUuid: "018f-uuid-fallback",
+      status: "DEDUPLICATED",
+      isDedup: true,
+      bytesWritten: 1024,
+      blake3Hash: "blake3hash-fallback",
+      relativePath: "fallback.JPG",
+    };
+
+    vi.mocked(api.uploadFile).mockResolvedValueOnce(mockDedupResponse);
+
+    renderWithClient(<ManualUploadZone />);
+    await screen.findByRole("combobox");
+
+    const file = new File(["duplicate content"], "fallback.JPG", { type: "image/jpeg" });
+    const hiddenFileInput = document.querySelector('input[type="file"]:not([webkitdirectory])') as HTMLInputElement;
+    await userEvent.upload(hiddenFileInput, file);
+
+    const startButton = await screen.findByRole("button", { name: /start upload/i });
+    await userEvent.click(startButton);
+
+    expect(await screen.findAllByText(/fallback\.JPG/)).toHaveLength(2);
+    expect(screen.getByText("Already in library")).toBeInTheDocument();
+
+    const links = screen.getAllByRole("link", { name: /view existing node/i });
+    expect(links.length).toBeGreaterThanOrEqual(1);
+    expect(links[0]).toHaveAttribute("href", "/assets/018f-uuid-fallback");
+  });
 });

@@ -152,6 +152,38 @@ describe("api client", () => {
     expect(res.status).toBe("DEDUPLICATED");
   });
 
+  it("uploadFile detects case-insensitive X-Dedup header value (e.g. True)", async () => {
+    const mockXHR = {
+      open: vi.fn(),
+      send: vi.fn(),
+      status: 200,
+      responseText: JSON.stringify({
+        asset: { id: 100, nodeUuid: "u-100" },
+        nodeUuid: "u-100",
+        status: "OK",
+        bytesWritten: 500,
+        blake3Hash: "hash100",
+        relativePath: "test2.jpg",
+      }),
+      getResponseHeader: vi.fn((header: string) => (header === "X-Dedup" ? "True" : null)),
+      onload: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      upload: {},
+    };
+
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function () {
+      setTimeout(() => {
+        if (mockXHR.onload) mockXHR.onload();
+      }, 0);
+      return mockXHR;
+    }));
+
+    const file = new File(["test data"], "test2.jpg", { type: "image/jpeg" });
+    const res = await api.uploadFile(file);
+    expect(res.isDedup).toBe(true);
+    expect(res.nodeUuid).toBe("u-100");
+  });
+
   it("uploadFile cleans up signal abort listener on success", async () => {
     let xhrInstance: {
       open: ReturnType<typeof vi.fn>;

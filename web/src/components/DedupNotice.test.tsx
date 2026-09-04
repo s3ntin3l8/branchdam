@@ -47,6 +47,23 @@ describe("DedupNotice", () => {
     expect(link).toHaveAttribute("href", "/assets/42");
   });
 
+  it("renders link with nodeUuid when assetId is not provided", () => {
+    const onDismiss = vi.fn();
+    render(
+      <MemoryRouter>
+        <DedupNotice
+          fileName="sample.raw"
+          nodeUuid="018f-uuid-99"
+          onDismiss={onDismiss}
+        />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText(/sample\.raw/)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /view existing node/i });
+    expect(link).toHaveAttribute("href", "/assets/018f-uuid-99");
+  });
+
   it("dismisses on click of close button", async () => {
     vi.useRealTimers();
     const onDismiss = vi.fn();
