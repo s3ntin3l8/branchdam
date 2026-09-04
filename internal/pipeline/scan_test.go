@@ -1361,11 +1361,9 @@ func TestQueueFullBackpressureStillCompletes(t *testing.T) {
 }
 
 // TestCleanScanCompletesEvenIfShutdownSignalsAtTheEnd pins the
-// filesFailed>0 conjunct in runScan's terminalization predicate: shutdown
+// clean-completion semantics when filesFailed == 0: shutdown
 // signaling AFTER a scan has already finished all its work (files_failed
-// still 0) must not retroactively mark it CANCELLED. isClosed(deps.Shutdown)
-// alone can't distinguish "shutdown happened" from "shutdown happened after
-// we were already done" -- this is what the conjunct is for.
+// still 0) must not mark it CANCELLED.
 func TestCleanScanCompletesEvenIfShutdownSignalsAtTheEnd(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "clean.txt"), "no failures here")
@@ -1391,10 +1389,165 @@ func TestCleanScanCompletesEvenIfShutdownSignalsAtTheEnd(t *testing.T) {
 	job := waitJobDone(t, database, jobID)
 
 	if job.State != "COMPLETED" {
-		t.Fatalf("scan job state = %q, want COMPLETED (files_failed=0 despite deps.Shutdown being closed -- the conjunct must keep this from reading as CANCELLED)", job.State)
+		t.Fatalf("scan job state = %q, want COMPLETED (files_failed=0 despite deps.Shutdown being closed -- must read as COMPLETED)", job.State)
 	}
 	if job.FilesFailed != 0 {
 		t.Fatalf("FilesFailed = %d, want 0", job.FilesFailed)
+	}
+}
+
+// TestScanWithFailedFileCompletesEvenIfShutdownSignalsAtTheEnd is #353's
+// primary discriminator: a scan that completed all its batches and finished
+// all in-flight work with genuine file failures (files_failed > 0) must
+// terminalize COMPLETED, not CANCELLED, even if deps.Shutdown is signaled
+// around the same time. Only scans that were actually interrupted mid-flight
+// before completion should be CANCELLED.
+func TestScanWithFailedFileCompletesEvenIfShutdownSignalsAtTheEnd(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "good.txt"), "good content")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+
+	deps.WalkFn = func(_ context.Context, _ string, onFile func(indexer.Record) error) error {
+		// Emit a good file that succeeds
+		goodPath := filepath.Join(resolvedRoot, "good.txt")
+		info, err := os.Lstat(goodPath)
+		if err != nil {
+			return err
+		}
+		if err := onFile(indexer.Record{Path: goodPath, Size: info.Size(), ModTime: info.ModTime()}); err != nil {
+			return err
+		}
+		// Emit a missing file that fails during processFile (Guard.OpenRead)
+		if err := onFile(indexer.Record{Path: filepath.Join(resolvedRoot, "missing.txt"), Size: 10, ModTime: time.Now()}); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	shutdown := make(chan struct{})
+	close(shutdown) // shutdown already signaled, but the pool is live and all batches run to completion
+	deps.Shutdown = shutdown
+
+	location := storage.Location{ID: locationID, Name: "test-failed-file-despite-shutdown-signal", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+	job := waitJobDone(t, database, jobID)
+
+	if job.State != "COMPLETED" {
+		t.Fatalf("scan job state = %q, want COMPLETED (files_failed > 0 but scan ran to completion; must not be marked CANCELLED)", job.State)
+	}
+	if job.FilesFailed != 1 {
+		t.Fatalf("FilesFailed = %d, want 1", job.FilesFailed)
+	}
+	if job.FilesHashed != 1 {
+		t.Fatalf("FilesHashed = %d, want 1", job.FilesHashed)
+	}
+}
+
+// TestScanInterruptedMidScanWithPriorFailedFileCancels verifies that if a
+// scan encounters a failed file and is THEN interrupted mid-scan by shutdown,
+// the state is CANCELLED (not COMPLETED).
+func TestScanInterruptedMidScanWithPriorFailedFileCancels(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "good1.txt"), "first good")
+	writeFile(t, filepath.Join(root, "good2.txt"), "second good")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	pool := workers.New[string](2, 16)
+	pool.Run(poolCtx)
+	t.Cleanup(func() {
+		cancelPool()
+		pool.Drain()
+	})
+
+	shutdown := make(chan struct{})
+	tracker := &ScanTracker{}
+	deps := ScanDeps{
+		DB:             database,
+		Guard:          storage.NewGuard([]storage.Location{{ID: locationID, Name: "test-failed-then-shutdown", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}}),
+		Prober:         probe.New(),
+		Pool:           pool,
+		FullHashPolicy: "never",
+		Tracker:        tracker,
+		Shutdown:       shutdown,
+	}
+
+	deps.WalkFn = func(_ context.Context, _ string, onFile func(indexer.Record) error) error {
+		// 1. A missing file that fails indexing
+		if err := onFile(indexer.Record{Path: filepath.Join(resolvedRoot, "missing.txt"), Size: 10, ModTime: time.Now()}); err != nil {
+			return err
+		}
+		// 2. A good file
+		good1Path := filepath.Join(resolvedRoot, "good1.txt")
+		info1, err := os.Lstat(good1Path)
+		if err != nil {
+			return err
+		}
+		if err := onFile(indexer.Record{Path: good1Path, Size: info1.Size(), ModTime: info1.ModTime()}); err != nil {
+			return err
+		}
+		// 3. Trigger shutdown mid-scan
+		cancelPool()
+		close(shutdown)
+
+		// 4. A file submitted after shutdown started
+		good2Path := filepath.Join(resolvedRoot, "good2.txt")
+		info2, err := os.Lstat(good2Path)
+		if err != nil {
+			return err
+		}
+		if err := onFile(indexer.Record{Path: good2Path, Size: info2.Size(), ModTime: info2.ModTime()}); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	location := storage.Location{ID: locationID, Name: "test-failed-then-shutdown", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
+	jobID, err := RunScan(ctx, deps, location)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+
+	trackerDone := make(chan struct{})
+	go func() {
+		tracker.Wait()
+		close(trackerDone)
+	}()
+	select {
+	case <-trackerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ScanTracker.Wait() timed out")
+	}
+
+	pool.Drain()
+
+	job, err := database.Reader.GetScanJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("GetScanJob: %v", err)
+	}
+	if job.State != "CANCELLED" {
+		t.Fatalf("scan job state = %q, want CANCELLED (interrupted mid-scan by shutdown)", job.State)
+	}
+	if job.FilesFailed < 2 {
+		t.Fatalf("FilesFailed = %d, want >= 2 (1 failed file + at least 1 interrupted/refused file)", job.FilesFailed)
 	}
 }
 
