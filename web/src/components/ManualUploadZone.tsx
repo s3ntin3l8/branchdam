@@ -57,7 +57,7 @@ export default function ManualUploadZone() {
 
   const addFilesToQueue = useCallback((files: { file: File; relativePath?: string }[]) => {
     const newItems: QueueItem[] = files.map(({ file, relativePath }) => ({
-      id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 7)}`,
+      id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
       file,
       relativePath: relativePath || file.name,
       status: "queued",
