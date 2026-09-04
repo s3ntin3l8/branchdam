@@ -353,6 +353,15 @@ func TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch(t *testin
 	if node1AfterTouch.LifecycleState != "ARCHIVED" {
 		t.Errorf("node1 lifecycle_state = %q after the deferred touch, want still ARCHIVED (must not be resurrected)", node1AfterTouch.LifecycleState)
 	}
+	if node1AfterTouch.MtimeUnix != archivedBeforeTouch.MtimeUnix {
+		t.Errorf("node1 mtime_unix = %d, want unchanged %d", node1AfterTouch.MtimeUnix, archivedBeforeTouch.MtimeUnix)
+	}
+	if node1AfterTouch.LastSeenAt != archivedBeforeTouch.LastSeenAt {
+		t.Errorf("node1 last_seen_at = %d, want unchanged %d", node1AfterTouch.LastSeenAt, archivedBeforeTouch.LastSeenAt)
+	}
+	if node1AfterTouch.UpdatedAt != archivedBeforeTouch.UpdatedAt {
+		t.Errorf("node1 updated_at = %d, want unchanged %d", node1AfterTouch.UpdatedAt, archivedBeforeTouch.UpdatedAt)
+	}
 
 	// And no live duplicate exists at the path: the live row must still be
 	// node2, the FULL_SCAN's successor, exactly one of it.
