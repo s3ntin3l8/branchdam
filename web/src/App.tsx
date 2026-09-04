@@ -33,7 +33,7 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 // nav sidebar. useEventStream must run here (not in App's body) so it's
 // inside the Router context that useNavigation/useBlocker require.
 export function Layout() {
-  useEventStream();
+  const { disconnected } = useEventStream();
   const { data: me } = useMe();
   const { data: unlinkedCount } = useUnlinkedCount();
 
@@ -62,6 +62,16 @@ export function Layout() {
           <NavItem to="/storage-health">Storage Health</NavItem>
           <NavItem to="/settings">Settings</NavItem>
         </div>
+        {disconnected && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mt-4 flex items-center gap-2 rounded border border-amber-800/60 bg-amber-950/60 px-2.5 py-1.5 text-xs text-amber-300"
+          >
+            <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400 animate-pulse" />
+            <span>Reconnecting…</span>
+          </div>
+        )}
         {me && me.kind === "user" && me.name && (
           <div className="absolute bottom-4 text-xs text-neutral-500">Signed in as {me.name}</div>
         )}

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api } from "../api/client";
 import type { ThumbState } from "../api/types";
 
@@ -21,14 +22,34 @@ interface ThumbnailProps {
 // new <img> element (rather than reusing one whose src never changed) --
 // see internal/thumbs.Worker's nudge-once-per-batch behavior on the Go
 // side for why that transition reliably fires shortly after generation.
+//
+// When a thumbnail image fails to load (broken/corrupted preview), onError
+// gracefully falls back to the placeholder rather than displaying a broken img.
 export default function Thumbnail({ assetId, thumbState, alt, className }: ThumbnailProps) {
+  const [hasError, setHasError] = useState(false);
+  const [prevAssetId, setPrevAssetId] = useState(assetId);
+  const [prevThumbState, setPrevThumbState] = useState(thumbState);
   const base = className ?? "h-12 w-12 rounded object-cover";
 
-  if (thumbState === "READY") {
-    return <img src={api.thumbnailUrl(assetId)} alt={alt} loading="lazy" className={base} />;
+  if (prevAssetId !== assetId || prevThumbState !== thumbState) {
+    setPrevAssetId(assetId);
+    setPrevThumbState(thumbState);
+    setHasError(false);
   }
 
-  if (thumbState === "PENDING") {
+  if (thumbState === "READY" && !hasError) {
+    return (
+      <img
+        src={api.thumbnailUrl(assetId)}
+        alt={alt}
+        loading="lazy"
+        className={base}
+        onError={() => setHasError(true)}
+      />
+    );
+  }
+
+  if (thumbState === "PENDING" && !hasError) {
     return (
       <div
         className={`${base} animate-pulse bg-neutral-800`}
@@ -38,9 +59,10 @@ export default function Thumbnail({ assetId, thumbState, alt, className }: Thumb
     );
   }
 
-  // UNSUPPORTED (no embedded preview, expected for some formats) and FAILED
-  // (retries exhausted) both render the same static placeholder -- neither
-  // is worth distinguishing to a user scanning a list of files.
+  // UNSUPPORTED (no embedded preview, expected for some formats), FAILED
+  // (retries exhausted), and broken images (onError triggered) all render
+  // the same static placeholder -- neither is worth distinguishing to a user
+  // scanning a list of files.
   return (
     <div
       className={`${base} flex items-center justify-center bg-neutral-800 text-neutral-600`}
