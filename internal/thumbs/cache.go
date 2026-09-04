@@ -7,7 +7,7 @@
 // cache writes through it isn't merely unnecessary, it's impossible. The
 // cache directory is app state, exactly like branchdam.db, and is the one
 // sanctioned os.* write path outside Guard for that reason -- see
-// CLAUDE.md's Key invariants. Reading the SOURCE media a thumbnail is
+// AGENTS.md's Key invariants. Reading the SOURCE media a thumbnail is
 // generated from still goes through Guard.OpenRead, since that's a
 // storage-location path.
 package thumbs

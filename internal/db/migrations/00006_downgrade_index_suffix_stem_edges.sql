@@ -15,7 +15,7 @@
 -- migration is the one-time correction for data already on disk.
 --
 -- The predicate below identifies exactly the index-suffix case without
--- GLOB (sqlc's SQLite grammar rejects it -- see CLAUDE.md's sqlc risk
+-- GLOB (sqlc's SQLite grammar rejects it -- see AGENTS.md's sqlc risk
 -- notes) and without LIKE (filename_stem routinely contains literal '_',
 -- LIKE's own single-character wildcard, which would make an unescaped
 -- LIKE pattern match unintended rows): an index marker ("-N", "(N)") is

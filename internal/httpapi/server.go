@@ -377,7 +377,7 @@ func (s *Server) spaHandler() http.Handler {
 // serveIndexHTML serves the SPA shell with __BRANCHDAM_ORIGIN__ substituted
 // for the request's own scheme+host, computed per request rather than baked
 // in at build time: branchDAM is self-hosted behind an operator-chosen
-// reverse proxy (CLAUDE.md: Traefik v3 + Authentik ForwardAuth) with no
+// reverse proxy (AGENTS.md: Traefik v3 + Authentik ForwardAuth) with no
 // fixed public domain, so the Open Graph/Twitter card image and url tags
 // can only be made absolute -- as the OG/Twitter spec requires -- from the
 // incoming request's Host/X-Forwarded-* headers.

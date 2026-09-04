@@ -676,7 +676,7 @@ export default function StorageHealthPage() {
   const { locations, queues, agents = [] } = health;
   // Store.PendingRestart() (SettingsPage's banner) never covers
   // storage-location overrides -- they live outside the settings Field
-  // registry by design (see CLAUDE.md's storageLocation.<rootPath>.*
+  // registry by design (see AGENTS.md's storageLocation.<rootPath>.*
   // invariant) -- so this page needs its own restart affordance rather than
   // relying on that banner to ever appear for a location-only edit.
   const hasPendingLocationOverride = locations.some((loc) => loc.overriddenFields.length > 0);

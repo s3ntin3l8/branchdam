@@ -62,7 +62,7 @@ import (
 // is exactly what ReaderQueriesForTest did.
 //
 // Scoped to internal/db's own directory (not internal/db/sqlcgen, generated
-// and never hand-edited per CLAUDE.md, and not recursive): sqlcgen.New's own
+// and never hand-edited per AGENTS.md, and not recursive): sqlcgen.New's own
 // `func New(dbtx DBTX) *Queries` is the intended low-level building block
 // InTx/Reader are built from, referenced unqualified (*Queries, not
 // *sqlcgen.Queries) from inside its own package, so it never matches this

@@ -41,7 +41,7 @@ const cancelButtonClass =
 // unlike the pendingRestart banner it sits next to, it is not gated on
 // Store.PendingRestart() being non-empty, since that diff never covers
 // storage-location overrides (see StorageHealthPage's own restart button
-// and CLAUDE.md's storageLocation.<rootPath>.* invariant).
+// and AGENTS.md's storageLocation.<rootPath>.* invariant).
 export function RestartServerCard({ className = "" }: { className?: string }) {
   const { restart, confirming, setConfirming, justRestarted, handleConfirm } = useRestartConfirm();
 

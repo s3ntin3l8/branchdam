@@ -81,7 +81,7 @@ var errLastEnabledStorageLocation = errors.New("cannot disable the last enabled 
 // own write inside the same db.InTx block specifically so two concurrent
 // "disable a different location" requests can't both observe n>=1 against
 // the read pool and both proceed, leaving zero enabled locations -- the
-// writer's single connection (db.DB's SetMaxOpenConns(1), see CLAUDE.md)
+// writer's single connection (db.DB's SetMaxOpenConns(1), see AGENTS.md)
 // serializes InTx bodies, so reading via the transaction's own q closes that
 // TOCTOU window instead of merely narrowing it.
 func (s *Server) countEnabledStorageLocationsTx(ctx context.Context, q *sqlcgen.Queries, excludeRootPath string) (int, error) {

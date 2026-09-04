@@ -752,7 +752,7 @@ func warnOverlappingWatchAndSweep(log *slog.Logger, watched, swept []config.Stor
 	}
 	for _, c := range watched {
 		if sweptPaths[c.RootPath] {
-			log.Warn("pipeline: location has both watch and sweep enabled -- wasteful but not corrupting for a quiescent file (see CLAUDE.md)",
+			log.Warn("pipeline: location has both watch and sweep enabled -- wasteful but not corrupting for a quiescent file (see AGENTS.md)",
 				"location", c.Name, "rootPath", c.RootPath)
 		}
 	}
