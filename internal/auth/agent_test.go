@@ -1,9 +1,16 @@
 package auth
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 const testKey = "01234567890123456789012345678901" // 33 chars, >= minAgentKeyLength
@@ -183,4 +190,327 @@ func TestConstantTimeEqual(t *testing.T) {
 	if constantTimeEqual("short", "longer-string") {
 		t.Error("different-length strings compared equal")
 	}
+}
+
+func computeSignature(apiKey, method, path, nonce, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(apiKey))
+	mac.Write([]byte(method + "\n" + path + "\n" + nonce + "\n" + timestamp + "\n"))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestAgentChainSignedRequests(t *testing.T) {
+	fixedNow := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return fixedNow }
+
+	t.Run("valid signed request with body", func(t *testing.T) {
+		var got Principal
+		var authHeader string
+		var capturedBody []byte
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, ok := From(r.Context())
+			if !ok {
+				t.Error("no principal in context")
+			}
+			got = p
+			authHeader = r.Header.Get(authentikUsernameHeader)
+			var err error
+			capturedBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read body: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(handler)
+
+		body := []byte(`{"agentId":"test-agent"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
+		ts := strconv.FormatInt(fixedNow.UnixNano(), 10)
+		nonce := "0123456789abcdef0123456789abcdef"
+		sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, body)
+
+		req.Header.Set("X-API-Key", testKey)
+		req.Header.Set("X-Timestamp", ts)
+		req.Header.Set("X-Nonce", nonce)
+		req.Header.Set("X-Signature", sig)
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+		}
+		if authHeader != "" {
+			t.Errorf("authHeader = %q, want empty", authHeader)
+		}
+		if got.Kind != KindMachine {
+			t.Errorf("got kind %v, want %v", got.Kind, KindMachine)
+		}
+		if string(capturedBody) != string(body) {
+			t.Errorf("handler received body %q, want %q", string(capturedBody), string(body))
+		}
+	})
+
+	t.Run("valid signed GET request with query string", func(t *testing.T) {
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(handler)
+
+		path := "/api/v1/agent/check-content?fastHash=abcdef1234567890"
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		ts := strconv.FormatInt(fixedNow.UnixNano(), 10)
+		nonce := "nonce-get-test-12345"
+		sig := computeSignature(testKey, http.MethodGet, path, nonce, ts, nil)
+
+		req.Header.Set("X-API-Key", testKey)
+		req.Header.Set("X-Timestamp", ts)
+		req.Header.Set("X-Nonce", nonce)
+		req.Header.Set("X-Signature", sig)
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("missing signature headers when signedRequests=true", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			setTs  bool
+			setNon bool
+			setSig bool
+		}{
+			{"all missing", false, false, false},
+			{"missing timestamp", false, true, true},
+			{"missing nonce", true, false, true},
+			{"missing signature", true, true, false},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := AgentConfig{
+					APIKey:         testKey,
+					SignedRequests: true,
+					ReplayWindow:   5 * time.Minute,
+					Now:            nowFn,
+				}
+				chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+				req.Header.Set("X-API-Key", testKey)
+				if tc.setTs {
+					req.Header.Set("X-Timestamp", strconv.FormatInt(fixedNow.UnixNano(), 10))
+				}
+				if tc.setNon {
+					req.Header.Set("X-Nonce", "nonce-1")
+				}
+				if tc.setSig {
+					req.Header.Set("X-Signature", "sig-1")
+				}
+
+				rr := httptest.NewRecorder()
+				chain.ServeHTTP(rr, req)
+
+				if rr.Code != http.StatusUnauthorized {
+					t.Fatalf("status = %d, want 401", rr.Code)
+				}
+				if !bytes.Contains(rr.Body.Bytes(), []byte("invalid or missing signature")) {
+					t.Errorf("body %q does not contain 'invalid or missing signature'", rr.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("tampered body rejected", func(t *testing.T) {
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		origBody := []byte(`{"agentId":"agent-1"}`)
+		ts := strconv.FormatInt(fixedNow.UnixNano(), 10)
+		nonce := "nonce-tamper-1"
+		sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, origBody)
+
+		tamperedBody := []byte(`{"agentId":"agent-tampered"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(tamperedBody))
+		req.Header.Set("X-API-Key", testKey)
+		req.Header.Set("X-Timestamp", ts)
+		req.Header.Set("X-Nonce", nonce)
+		req.Header.Set("X-Signature", sig)
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rr.Code)
+		}
+	})
+
+	t.Run("replayed nonce within window rejected", func(t *testing.T) {
+		cache := NewReplayCache()
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+			Cache:          cache,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		ts := strconv.FormatInt(fixedNow.UnixNano(), 10)
+		nonce := "nonce-replay-unique-123"
+		sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, nil)
+
+		// First request: OK
+		req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req1.Header.Set("X-API-Key", testKey)
+		req1.Header.Set("X-Timestamp", ts)
+		req1.Header.Set("X-Nonce", nonce)
+		req1.Header.Set("X-Signature", sig)
+
+		rr1 := httptest.NewRecorder()
+		chain.ServeHTTP(rr1, req1)
+		if rr1.Code != http.StatusOK {
+			t.Fatalf("first request status = %d, want 200", rr1.Code)
+		}
+
+		// Second request with same nonce: Replayed -> 401
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req2.Header.Set("X-API-Key", testKey)
+		req2.Header.Set("X-Timestamp", ts)
+		req2.Header.Set("X-Nonce", nonce)
+		req2.Header.Set("X-Signature", sig)
+
+		rr2 := httptest.NewRecorder()
+		chain.ServeHTTP(rr2, req2)
+		if rr2.Code != http.StatusUnauthorized {
+			t.Fatalf("replayed request status = %d, want 401", rr2.Code)
+		}
+	})
+
+	t.Run("clock skew tolerance", func(t *testing.T) {
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// 1. Within window in past (4m ago) -> OK
+		tsPast4m := strconv.FormatInt(fixedNow.Add(-4*time.Minute).UnixNano(), 10)
+		nonce1 := "nonce-past-4m"
+		sig1 := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce1, tsPast4m, nil)
+
+		req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req1.Header.Set("X-API-Key", testKey)
+		req1.Header.Set("X-Timestamp", tsPast4m)
+		req1.Header.Set("X-Nonce", nonce1)
+		req1.Header.Set("X-Signature", sig1)
+
+		rr1 := httptest.NewRecorder()
+		chain.ServeHTTP(rr1, req1)
+		if rr1.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr1.Code)
+		}
+
+		// 2. Within window in future (4m ahead) -> OK
+		tsFut4m := strconv.FormatInt(fixedNow.Add(4*time.Minute).UnixNano(), 10)
+		nonce2 := "nonce-fut-4m"
+		sig2 := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce2, tsFut4m, nil)
+
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req2.Header.Set("X-API-Key", testKey)
+		req2.Header.Set("X-Timestamp", tsFut4m)
+		req2.Header.Set("X-Nonce", nonce2)
+		req2.Header.Set("X-Signature", sig2)
+
+		rr2 := httptest.NewRecorder()
+		chain.ServeHTTP(rr2, req2)
+		if rr2.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr2.Code)
+		}
+
+		// 3. Past window (> 5m ago) -> 401
+		tsPast6m := strconv.FormatInt(fixedNow.Add(-6*time.Minute).UnixNano(), 10)
+		nonce3 := "nonce-past-6m"
+		sig3 := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce3, tsPast6m, nil)
+
+		req3 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req3.Header.Set("X-API-Key", testKey)
+		req3.Header.Set("X-Timestamp", tsPast6m)
+		req3.Header.Set("X-Nonce", nonce3)
+		req3.Header.Set("X-Signature", sig3)
+
+		rr3 := httptest.NewRecorder()
+		chain.ServeHTTP(rr3, req3)
+		if rr3.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rr3.Code)
+		}
+
+		// 4. Future window (> 5m ahead) -> 401
+		tsFut6m := strconv.FormatInt(fixedNow.Add(6*time.Minute).UnixNano(), 10)
+		nonce4 := "nonce-fut-6m"
+		sig4 := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce4, tsFut6m, nil)
+
+		req4 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req4.Header.Set("X-API-Key", testKey)
+		req4.Header.Set("X-Timestamp", tsFut6m)
+		req4.Header.Set("X-Nonce", nonce4)
+		req4.Header.Set("X-Signature", sig4)
+
+		rr4 := httptest.NewRecorder()
+		chain.ServeHTTP(rr4, req4)
+		if rr4.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rr4.Code)
+		}
+	})
+
+	t.Run("signedRequests=false ignores missing or present signature", func(t *testing.T) {
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: false,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// Without signature headers
+		req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req1.Header.Set("X-API-Key", testKey)
+		rr1 := httptest.NewRecorder()
+		chain.ServeHTTP(rr1, req1)
+		if rr1.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr1.Code)
+		}
+	})
 }

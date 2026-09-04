@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -146,7 +147,18 @@ type Workers struct {
 // injected via ${BRANCHDAM_AGENT_API_KEY} from a gitignored .env, per
 // docs/forward-auth.md.
 type Agent struct {
-	APIKey string `yaml:"apiKey"`
+	APIKey           string `yaml:"apiKey"`
+	SignedRequests   bool   `yaml:"signedRequests"`
+	ReplayWindowSecs int    `yaml:"replayWindowSecs"`
+}
+
+// ReplayWindow returns the configured replay window as a time.Duration.
+// If ReplayWindowSecs is <= 0, it defaults to 5 minutes (300s).
+func (a Agent) ReplayWindow() time.Duration {
+	if a.ReplayWindowSecs <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(a.ReplayWindowSecs) * time.Second
 }
 
 // Immich configures the Immich external-library scan trigger (internal/immich,
@@ -230,6 +242,10 @@ func defaultConfig() Config {
 		},
 		Ingest: Ingest{
 			NamingTemplate: naming.DefaultPathTemplate,
+		},
+		Agent: Agent{
+			SignedRequests:   false,
+			ReplayWindowSecs: 300,
 		},
 		Trash: Trash{
 			RetentionDays: 30,

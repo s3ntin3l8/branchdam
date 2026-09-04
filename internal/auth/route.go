@@ -16,7 +16,12 @@ const AgentPathPrefix = "/api/v1/agent"
 // request: AgentChain for AgentPathPrefix, BrowserChain
 // for everything else. next is the shared handler both chains eventually call.
 func Route(apiKey string, log *slog.Logger, next http.Handler) http.Handler {
-	agent := AgentChain(apiKey, log)(next)
+	return RouteWithConfig(AgentConfig{APIKey: apiKey}, log, next)
+}
+
+// RouteWithConfig routes requests using the provided AgentConfig.
+func RouteWithConfig(cfg AgentConfig, log *slog.Logger, next http.Handler) http.Handler {
+	agent := AgentChainWithConfig(cfg, log)(next)
 	browser := BrowserChain(next)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

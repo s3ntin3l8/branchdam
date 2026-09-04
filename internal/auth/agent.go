@@ -1,10 +1,17 @@
 package auth
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // minAgentKeyLength matches config.example.yaml's documented requirement.
@@ -12,35 +19,51 @@ import (
 // accepting a weak or empty secret.
 const minAgentKeyLength = 32
 
-const apiKeyHeader = "X-API-Key"
+const (
+	apiKeyHeader    = "X-API-Key"
+	timestampHeader = "X-Timestamp"
+	nonceHeader     = "X-Nonce"
+	signatureHeader = "X-Signature"
+)
+
+// AgentConfig bundles the configuration options for the agent authentication chain.
+type AgentConfig struct {
+	APIKey         string
+	SignedRequests bool
+	ReplayWindow   time.Duration
+	Now            func() time.Time // optional clock override for testing clock skew
+	Cache          *ReplayCache     // optional in-memory replay cache
+}
 
 // AgentChain authenticates /api/v1/agent/* requests against a static
-// shared secret (spec §5) and attaches a machine Principal. Two properties
-// hold regardless of what happens downstream:
-//
-//  1. Every X-Authentik-* header is deleted from the request BEFORE the key
-//     is even checked -- unconditionally, not just on success. The agent
-//     router bypasses Traefik's ForwardAuth middleware by design (spec
-//     §5), so nothing upstream strips a client-supplied
-//     X-Authentik-Username; if this chain didn't, a request straight to
-//     this router could forge one. Stripping first, regardless of outcome,
-//     means the observable behavior of this middleware never depends on
-//     whether those headers were present -- there's no timing or
-//     error-branch difference to distinguish "stripped because valid" from
-//     "stripped because rejected."
-//  2. The resulting Principal (on success) has Kind: KindMachine and
-//     empty Name/Email/Groups -- see principal.go's doc comment for why.
-//
-// keyConfigured reports whether apiKey met minAgentKeyLength at
-// construction time; log records that fact ONCE here, at chain-build time
-// (server startup), rather than on every rejected request.
+// shared secret (spec §5) and attaches a machine Principal.
 func AgentChain(apiKey string, log *slog.Logger) func(http.Handler) http.Handler {
+	return AgentChainWithConfig(AgentConfig{APIKey: apiKey}, log)
+}
+
+// AgentChainWithConfig builds the agent auth middleware using the supplied AgentConfig.
+// When SignedRequests is true, it verifies X-Timestamp, X-Nonce, and X-Signature
+// (HMAC-SHA256 over method\npath\nnonce\ntimestamp\nbody) within the replay window.
+func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) http.Handler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	keyConfigured := len(apiKey) >= minAgentKeyLength
+	keyConfigured := len(cfg.APIKey) >= minAgentKeyLength
 	if !keyConfigured {
 		log.Warn("auth: BRANCHDAM_AGENT_API_KEY is unset or shorter than the minimum length -- agent routes will fail closed with 503 until it is fixed", "minLength", minAgentKeyLength)
+	}
+
+	window := cfg.ReplayWindow
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	cache := cfg.Cache
+	if cache == nil {
+		cache = NewReplayCache()
+	}
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = time.Now
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -53,9 +76,61 @@ func AgentChain(apiKey string, log *slog.Logger) func(http.Handler) http.Handler
 			}
 
 			provided := r.Header.Get(apiKeyHeader)
-			if provided == "" || !constantTimeEqual(provided, apiKey) {
+			if provided == "" || !constantTimeEqual(provided, cfg.APIKey) {
 				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
 				return
+			}
+
+			if cfg.SignedRequests {
+				tsStr := r.Header.Get(timestampHeader)
+				nonce := r.Header.Get(nonceHeader)
+				sig := r.Header.Get(signatureHeader)
+
+				if tsStr == "" || nonce == "" || sig == "" {
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				tsNano, err := strconv.ParseInt(tsStr, 10, 64)
+				if err != nil {
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				now := nowFn()
+				reqTime := time.Unix(0, tsNano)
+				skew := now.Sub(reqTime)
+				if skew > window || skew < -window {
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				var bodyBytes []byte
+				if r.Body != nil {
+					var readErr error
+					bodyBytes, readErr = io.ReadAll(r.Body)
+					if readErr != nil {
+						http.Error(w, "failed to read request body", http.StatusBadRequest)
+						return
+					}
+					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+
+				mac := hmac.New(sha256.New, []byte(cfg.APIKey))
+				mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + nonce + "\n" + tsStr + "\n"))
+				mac.Write(bodyBytes)
+				expectedSig := hex.EncodeToString(mac.Sum(nil))
+
+				if !constantTimeEqual(sig, expectedSig) {
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				expiresAt := reqTime.Add(window)
+				if !cache.CheckAndRecord(nonce, expiresAt, now) {
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
 			}
 
 			principal := Principal{Kind: KindMachine}

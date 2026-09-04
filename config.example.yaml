@@ -61,6 +61,8 @@ agent:
   # ForwardAuth at the Traefik layer (see docs/forward-auth.md). Must be at
   # least 32 characters or agent routes fail closed with 503.
   apiKey: ${BRANCHDAM_AGENT_API_KEY}
+  signedRequests: false           # require HMAC-SHA256 signature and replay protection (default false)
+  replayWindowSecs: 300           # maximum allowed clock drift / nonce replay window in seconds (default 300)
 
 authz:
   # Groups permitted admin (write) access on browser-routed endpoints.
