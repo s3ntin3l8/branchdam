@@ -58,5 +58,7 @@ describe("AssetListPage", () => {
     expect(screen.getAllByText("Sony A7IV").length).toBeGreaterThan(0);
     expect(screen.getByText("Unlinked Only")).toBeInTheDocument();
     expect(screen.getByText("Showing 1 to 1 of 1 items")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument();
   });
 });

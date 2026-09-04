@@ -212,6 +212,7 @@ export default function AssetListPage() {
             </div>
             <div className="flex items-center space-x-2">
               <button
+                aria-label="Previous page"
                 disabled={page <= 1}
                 onClick={() => handlePageChange(page - 1)}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
@@ -222,6 +223,7 @@ export default function AssetListPage() {
                 Page {page} of {totalPages}
               </span>
               <button
+                aria-label="Next page"
                 disabled={page >= totalPages}
                 onClick={() => handlePageChange(page + 1)}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"

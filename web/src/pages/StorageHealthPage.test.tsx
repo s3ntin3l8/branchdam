@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import StorageHealthPage from "./StorageHealthPage";
 import { api } from "../api/client";
@@ -68,12 +68,16 @@ function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  const router = createMemoryRouter(
+    [{ path: "*", element: ui }],
+    { initialEntries: ["/storage-health"] },
+  );
   const result = render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <RouterProvider router={router} />
     </QueryClientProvider>
   );
-  return { ...result, queryClient };
+  return { ...result, queryClient, router };
 }
 
 describe("StorageHealthPage", () => {
@@ -499,5 +503,31 @@ describe("StorageHealthPage", () => {
 
     expect(screen.getByText("MOBILE_COMPANION")).toBeInTheDocument();
     expect(screen.getByText("v2.0.0")).toBeInTheDocument();
+  });
+
+  it("guards against accidental navigation when a storage location has unsaved edits", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getStorageHealth).mockResolvedValueOnce({
+      locations: [baseLocation({ id: 1, name: "Scratch Mount" })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [],
+    });
+
+    const { router } = renderWithClient(<StorageHealthPage />);
+    expect(await screen.findByText("Scratch Mount")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const nameInput = screen.getByDisplayValue("Scratch Mount");
+    await user.type(nameInput, " Modified");
+
+    await router.navigate("/other-page");
+
+    expect(await screen.findByText("Unsaved Changes")).toBeInTheDocument();
+    expect(screen.getByText("You have unsaved changes. Leave without saving?")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Stay" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument();
+    });
   });
 });

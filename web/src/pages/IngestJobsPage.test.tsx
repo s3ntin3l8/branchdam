@@ -48,5 +48,7 @@ describe("IngestJobsPage", () => {
     expect(screen.getAllByText("FULL_SCAN").length).toBeGreaterThan(0);
     expect(screen.getAllByText("COMPLETED").length).toBeGreaterThan(0);
     expect(screen.getAllByText("1,200").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument();
   });
 });

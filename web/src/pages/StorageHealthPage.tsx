@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { useDeleteAgentTelemetry, usePruneCache, usePutStorageLocation, useStorageHealth } from "../hooks/queries";
 import type { AgentScratchHealth, PruneCandidate, StorageLocationHealth, StorageLocationSafeField } from "../api/types";
 import { FieldRow } from "../components/form/FieldRow";
@@ -6,14 +6,8 @@ import { NumberField } from "../components/form/NumberField";
 import { TextField } from "../components/form/TextField";
 import { ToggleField } from "../components/form/ToggleField";
 import { RestartToApplyButton } from "../components/RestartServerButton";
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
+import { DirtyFormContext, useDirtyFormProvider, useDirtyGuard } from "../hooks/useDirtyFormGuard";
+import { formatBytes } from "../lib/formatBytes";
 
 function formatRelativeTime(unixSecs: number): string {
   if (unixSecs <= 0) return "never";
@@ -182,6 +176,8 @@ function isOverridden(loc: StorageLocationHealth, field: StorageLocationSafeFiel
 // pattern as SettingsFieldEditor (SettingsPage.tsx), applied to the whole
 // draft object at once via a JSON key rather than per field.
 function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth; onClose: () => void }) {
+  const { register } = useContext(DirtyFormContext);
+  const { markDirty, markClean } = useMemo(() => register(`storage-location-${loc.id}`), [register, loc.id]);
   const putLocation = usePutStorageLocation();
   const baseline = draftFromLoc(loc);
   const baselineKey = JSON.stringify(baseline);
@@ -189,6 +185,12 @@ function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth;
   const [draft, setDraft] = useState<StorageLocationDraft>(baseline);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      markClean();
+    };
+  }, [markClean]);
 
   if (baselineKey !== prevBaselineKey) {
     setPrevBaselineKey(baselineKey);
@@ -200,6 +202,7 @@ function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth;
   const update = <K extends keyof StorageLocationDraft>(key: K, value: StorageLocationDraft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
     setDirty(true);
+    markDirty();
     setError(null);
   };
 
@@ -217,13 +220,17 @@ function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth;
     if (loc.prunable && draft.cacheTtlHours !== baseline.cacheTtlHours) set.cacheTtlHours = draft.cacheTtlHours;
     if (Object.keys(set).length === 0) {
       setDirty(false);
+      markClean();
       return;
     }
     setError(null);
     putLocation.mutate(
       { id: loc.id, input: { set } },
       {
-        onSuccess: () => setDirty(false),
+        onSuccess: () => {
+          setDirty(false);
+          markClean();
+        },
         onError: (err: unknown) => setError((err as { message?: string }).message || "Failed to save"),
       }
     );
@@ -234,7 +241,10 @@ function StorageLocationEditForm({ loc, onClose }: { loc: StorageLocationHealth;
     putLocation.mutate(
       { id: loc.id, input: { unset: loc.overriddenFields } },
       {
-        onSuccess: () => setDirty(false),
+        onSuccess: () => {
+          setDirty(false);
+          markClean();
+        },
         onError: (err: unknown) => setError((err as { message?: string }).message || "Failed to reset to config"),
       }
     );
@@ -651,6 +661,8 @@ function AgentScratchGaugeCard({ agent }: { agent: AgentScratchHealth }) {
 }
 
 export default function StorageHealthPage() {
+  const dirtyContextValue = useDirtyFormProvider();
+  const blocker = useDirtyGuard(dirtyContextValue.dirtyCount);
   const { data: health, isLoading, isError } = useStorageHealth();
 
   if (isLoading) {
@@ -670,7 +682,8 @@ export default function StorageHealthPage() {
   const hasPendingLocationOverride = locations.some((loc) => loc.overriddenFields.length > 0);
 
   return (
-    <div className="p-6 space-y-8 max-w-6xl">
+    <DirtyFormContext.Provider value={dirtyContextValue}>
+      <div className="p-6 space-y-8 max-w-6xl">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-neutral-100">Storage Health</h1>
@@ -769,5 +782,32 @@ export default function StorageHealthPage() {
         </div>
       </section>
     </div>
+    {blocker.state === "blocked" && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-w-sm">
+          <h2 className="text-lg font-semibold text-white mb-2">Unsaved Changes</h2>
+          <p className="text-sm text-neutral-400 mb-4">
+            You have unsaved changes. Leave without saving?
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => blocker.reset()}
+              className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700"
+            >
+              Stay
+            </button>
+            <button
+              type="button"
+              onClick={() => blocker.proceed()}
+              className="rounded bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600"
+            >
+              Leave
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </DirtyFormContext.Provider>
   );
 }
