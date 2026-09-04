@@ -359,7 +359,7 @@ describe("StorageHealthPage", () => {
   });
 
   // Store.PendingRestart() (SettingsPage's banner) never sees
-  // storage-location overrides -- see CLAUDE.md's storageLocation.<rootPath>.*
+  // storage-location overrides -- see AGENTS.md's storageLocation.<rootPath>.*
   // invariant -- so this page's own restart button is the only affordance
   // an operator gets after a location-only edit. It must therefore be
   // gated on overriddenFields, not always shown.

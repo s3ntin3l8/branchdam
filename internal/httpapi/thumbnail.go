@@ -51,7 +51,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		// missing and must not trigger a reset -> regenerate storm across
 		// the library; same "gone on its own is not an error, anything
 		// else is" distinction internal/prune.Execute draws around
-		// os.Lstat (see CLAUDE.md).
+		// os.Lstat (see AGENTS.md).
 		//
 		// Also gated on lifecycle_state IN ('ACTIVE', 'HIDDEN') to match
 		// ListPendingThumbnails' own claim-query filter exactly

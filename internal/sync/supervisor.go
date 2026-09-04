@@ -119,7 +119,7 @@ func (sv *Supervisor) startLocked(cfg *config.Config) {
 	// hazard dbUnsafeToClose exists to guard against. This narrows the
 	// race window to the gap between this check and worker.Start below,
 	// rather than eliminating it -- the same "bounded, not zero" posture
-	// prune.Execute's own TOCTOU checks take (see CLAUDE.md).
+	// prune.Execute's own TOCTOU checks take (see AGENTS.md).
 	if sv.rootCtx.Err() != nil {
 		return
 	}

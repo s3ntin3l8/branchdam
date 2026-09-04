@@ -13,7 +13,7 @@ import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
 // aren't part of the wire DTO -- there's no generated client here (see
-// CLAUDE.md), so this mirrors the server's two oneOf(...) validators by
+// AGENTS.md), so this mirrors the server's two oneOf(...) validators by
 // hand, same as api/types.ts itself. If a validator's allowed values ever
 // change, this map needs updating alongside it; a mismatch only means a
 // stale dropdown, since the server is still the one that enforces the rule.

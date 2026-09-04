@@ -375,7 +375,7 @@ func (p *Prober) Exif(ctx context.Context, path string) (*ExifResult, error) {
 //     its own row into itself on every sidecar node, doubling the subprocess
 //     cost for no effect.
 //   - os.Lstat, deliberately not os.Stat -- same non-following stat used by
-//     internal/prune.Execute's pre-delete check (see CLAUDE.md's key
+//     internal/prune.Execute's pre-delete check (see AGENTS.md's key
 //     invariants): reject a symlink outright rather than following it, so
 //     a sidecar path that's actually a symlink escape can't get read.
 //     (storage.Guard.CheckWrite's own canonicalize step is the opposite

@@ -4486,7 +4486,7 @@ func TestAgentNodeStatus_ReportsLifecycleAndVerification(t *testing.T) {
 
 		// 3. Found, no full_hash at all (the schema's own length CHECK makes
 		// writing anything shorter than 64 hex chars structurally
-		// impossible -- see CLAUDE.md), lifecycle ARCHIVED (superseded) --
+		// impossible -- see AGENTS.md), lifecycle ARCHIVED (superseded) --
 		// must report Found=true, LifecycleState=ARCHIVED, Verified=false.
 		_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:          archivedLifecycleUUID,
