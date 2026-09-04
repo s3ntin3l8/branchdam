@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,47 @@ import (
 
 // DefaultMaxUploadSizeBytes defines the default upper limit for uploaded files (50 GiB).
 const DefaultMaxUploadSizeBytes int64 = 50 * 1024 * 1024 * 1024
+
+func (s *Server) removeFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if s.guard != nil {
+		err := s.guard.Remove(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		var unknownErr *storage.ErrUnknownLocation
+		if errors.As(err, &unknownErr) {
+			rmErr := os.Remove(path)
+			if rmErr != nil && (errors.Is(rmErr, os.ErrNotExist) || errors.Is(rmErr, fs.ErrNotExist)) {
+				return nil
+			}
+			return rmErr
+		}
+		return err
+	}
+	err := os.Remove(path)
+	if err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist)) {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) mkdirAll(path string, perm os.FileMode) error {
+	if s.guard != nil {
+		err := s.guard.MkdirAll(path, perm)
+		if err == nil {
+			return nil
+		}
+		var unknownErr *storage.ErrUnknownLocation
+		if errors.As(err, &unknownErr) {
+			return os.MkdirAll(path, perm)
+		}
+		return err
+	}
+	return os.MkdirAll(path, perm)
+}
 
 // UploadParams contains parameters for ingesting an uploaded file stream.
 type UploadParams struct {
@@ -61,7 +103,11 @@ type UploadResult struct {
 // resolveTargetStorageLocation finds the target storage location for uploads.
 func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID int64) (*storage.StorageLocationRow, *storage.StorageLocationRow, error) {
 	if s.db == nil {
-		return nil, nil, errors.New("database not available")
+		return nil, nil, ErrDatabaseUnavailable
+	}
+
+	if locationID < 0 {
+		return nil, nil, fmt.Errorf("%w: location id %d cannot be negative", ErrInvalidStorageLocation, locationID)
 	}
 
 	locs, err := s.db.Reader.ListStorageLocations(ctx)
@@ -71,6 +117,7 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 
 	var targetLoc *storage.StorageLocationRow
 	var exportLoc *storage.StorageLocationRow
+	var foundSpecified bool
 
 	for _, loc := range locs {
 		locCopy := loc
@@ -81,14 +128,21 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 			Tier:     locCopy.Tier,
 			ReadOnly: locCopy.ReadOnly != 0,
 		}
-		if locCopy.Tier == "TIER2_EXPORTS" && locCopy.ReadOnly == 0 {
+		if locCopy.Tier == "TIER2_EXPORTS" && locCopy.ReadOnly == 0 && locCopy.IsActive != 0 {
 			exp := row
 			exportLoc = &exp
 		}
 		if locationID > 0 && locCopy.ID == locationID {
+			foundSpecified = true
+			if locCopy.IsActive == 0 {
+				return nil, nil, fmt.Errorf("%w: location %q (id %d) is inactive", ErrStorageLocationInactive, locCopy.Name, locationID)
+			}
+			if locCopy.ReadOnly != 0 {
+				return nil, nil, &StorageLocationReadOnlyError{Location: locCopy.Name, Tier: locCopy.Tier}
+			}
 			tgt := row
 			targetLoc = &tgt
-		} else if locationID <= 0 && locCopy.ReadOnly == 0 {
+		} else if locationID == 0 && locCopy.ReadOnly == 0 && locCopy.IsActive != 0 {
 			if targetLoc == nil || locCopy.Tier == "TIER3_MASTER_ARCHIVE" {
 				tgt := row
 				targetLoc = &tgt
@@ -96,11 +150,15 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 		}
 	}
 
+	if locationID > 0 && !foundSpecified {
+		return nil, nil, fmt.Errorf("%w: location with id %d not found", ErrStorageLocationNotFound, locationID)
+	}
+
 	if targetLoc == nil {
-		return nil, nil, errors.New("no writable storage location configured for upload")
+		return nil, nil, ErrNoWritableLocation
 	}
 	if targetLoc.ReadOnly {
-		return nil, nil, fmt.Errorf("storage location %q is read-only (tier %s)", targetLoc.Name, targetLoc.Tier)
+		return nil, nil, &StorageLocationReadOnlyError{Location: targetLoc.Name, Tier: targetLoc.Tier}
 	}
 
 	return targetLoc, exportLoc, nil
@@ -154,12 +212,16 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		return nil, err
 	}
 
-	cleanFilename := filepath.Base(filepath.Clean(params.Filename))
+	rawFilename := strings.TrimSpace(params.Filename)
+	if strings.Contains(rawFilename, "/") || strings.Contains(rawFilename, "\\") || strings.Contains(rawFilename, "..") {
+		return nil, ErrInvalidFilename
+	}
+	cleanFilename := filepath.Base(filepath.Clean(rawFilename))
 	if cleanFilename == "" || cleanFilename == "." || cleanFilename == "/" || cleanFilename == "\\" {
 		cleanFilename = "upload_" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".bin"
 	}
 	if strings.Contains(cleanFilename, "/") || strings.Contains(cleanFilename, "\\") || strings.Contains(cleanFilename, "..") {
-		return nil, errors.New("invalid filename")
+		return nil, ErrInvalidFilename
 	}
 
 	cameraModel := strings.TrimSpace(params.CameraModel)
@@ -167,7 +229,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		cameraModel = "unknown_camera"
 	}
 	if strings.Contains(cameraModel, "/") || strings.Contains(cameraModel, "\\") || strings.Contains(cameraModel, "..") {
-		return nil, errors.New("invalid camera model")
+		return nil, ErrInvalidCameraModel
 	}
 
 	capturedAtUnix := params.CapturedAtUnix
@@ -193,7 +255,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		cleanedRel = strings.TrimPrefix(cleanedRel, "/")
 		cleanedRel = strings.TrimPrefix(cleanedRel, "\\")
 		if !filepath.IsLocal(cleanedRel) {
-			return nil, errors.New("invalid relative path: cannot escape root")
+			return nil, fmt.Errorf("%w: cannot escape root", ErrInvalidPath)
 		}
 		if filepath.Base(cleanedRel) == cleanFilename {
 			relPath = cleanedRel
@@ -206,7 +268,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 
 	cleanRel := filepath.Clean(relPath)
 	if !filepath.IsLocal(cleanRel) {
-		return nil, errors.New("invalid rendered path")
+		return nil, fmt.Errorf("%w: invalid rendered path", ErrInvalidPath)
 	}
 
 	safeArchiveDir, err := filepath.Abs(targetLoc.RootPath)
@@ -217,11 +279,11 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	targetPath := filepath.Join(safeArchiveDir, cleanRel)
 	rel, err := filepath.Rel(safeArchiveDir, targetPath)
 	if err != nil || !filepath.IsLocal(rel) {
-		return nil, errors.New("path escapes storage location")
+		return nil, ErrPathEscapes
 	}
 	targetPath = filepath.Join(safeArchiveDir, rel)
 
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+	if err := s.mkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -244,12 +306,12 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		suffixedName := fmt.Sprintf("%s_%d%s", stem, collisionCount, ext)
 		nextCleanRel := filepath.Clean(filepath.Join(filepath.Dir(cleanRel), suffixedName))
 		if !filepath.IsLocal(nextCleanRel) {
-			return nil, errors.New("path escapes storage location")
+			return nil, ErrPathEscapes
 		}
 		nextTargetPath := filepath.Join(safeArchiveDir, nextCleanRel)
 		nextRel, relErr := filepath.Rel(safeArchiveDir, nextTargetPath)
 		if relErr != nil || !filepath.IsLocal(nextRel) {
-			return nil, errors.New("path escapes storage location")
+			return nil, ErrPathEscapes
 		}
 		cleanRel = nextCleanRel
 		targetPath = filepath.Join(safeArchiveDir, nextRel)
@@ -259,7 +321,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	nodeID, err := uuid.NewV7()
 	if err != nil {
 		_ = outFile.Close()
-		_ = os.Remove(targetPath)
+		_ = s.removeFile(targetPath)
 		return nil, fmt.Errorf("failed to mint node uuid: %w", err)
 	}
 	nodeUUIDStr := nodeID.String()
@@ -276,21 +338,21 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	bytesWritten, err := io.Copy(multiWriter, limitReader)
 	if err != nil {
 		_ = outFile.Close()
-		_ = os.Remove(targetPath)
+		_ = s.removeFile(targetPath)
 		return nil, fmt.Errorf("failed to write stream: %w", err)
 	}
 	if bytesWritten > maxAllowed {
 		_ = outFile.Close()
-		_ = os.Remove(targetPath)
-		return nil, errors.New("upload exceeds maximum allowed file size (50 GB)")
+		_ = s.removeFile(targetPath)
+		return nil, ErrFileTooLarge
 	}
 
 	computedBlake3 := hex.EncodeToString(hasher.Sum(nil))
 	expectedBlake3 := strings.ToLower(strings.TrimSpace(params.ExpectedBlake3))
 	if expectedBlake3 != "" && computedBlake3 != expectedBlake3 {
 		_ = outFile.Close()
-		_ = os.Remove(targetPath)
-		return nil, fmt.Errorf("checksum mismatch: expected %s, got %s", expectedBlake3, computedBlake3)
+		_ = s.removeFile(targetPath)
+		return nil, &ChecksumMismatchError{Expected: expectedBlake3, Got: computedBlake3}
 	}
 
 	var nullFast *string
@@ -301,7 +363,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 
 	if s.db != nil {
 		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); err == nil {
-			_ = os.Remove(targetPath)
+			_ = s.removeFile(targetPath)
 			return dedupUploadResult(existing, computedBlake3, bytesWritten), nil
 		}
 	}
@@ -388,7 +450,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				if rel, err := filepath.Rel(safeExportDir, dest); err == nil && filepath.IsLocal(rel) {
 					exportDest = filepath.Join(safeExportDir, rel)
 					exportDir := filepath.Dir(exportDest)
-					if err := os.MkdirAll(exportDir, 0o755); err != nil {
+					if err := s.mkdirAll(exportDir, 0o755); err != nil {
 						if s.log != nil {
 							s.log.Warn("failed to create Immich export directory", "err", err)
 						}
@@ -508,9 +570,9 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	})
 
 	if err != nil {
-		_ = os.Remove(targetPath)
+		_ = s.removeFile(targetPath)
 		if exportCreated && exportDest != "" {
-			_ = os.Remove(exportDest)
+			_ = s.removeFile(exportDest)
 		}
 		if s.db != nil && computedBlake3 != "" {
 			if existing, lookupErr := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); lookupErr == nil {

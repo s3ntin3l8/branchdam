@@ -190,7 +190,6 @@ export const api = {
       };
 
       const formData = new FormData();
-      formData.append("file", file, file.name);
       if (options.storageLocationId) {
         formData.append("storageLocationId", String(options.storageLocationId));
       }
@@ -206,6 +205,7 @@ export const api = {
       if (options.overrideCapturedAt) {
         formData.append("overrideCapturedAt", String(options.overrideCapturedAt));
       }
+      formData.append("file", file, file.name);
 
       xhr.send(formData);
     });

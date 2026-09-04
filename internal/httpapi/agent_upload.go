@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 )
@@ -50,40 +49,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		SourcePathHash:      sourcePathHash,
 	})
 	if err != nil {
-		status := http.StatusInternalServerError
-		userMsg := "upload processing failed"
-		errMsg := err.Error()
-
-		if strings.Contains(errMsg, "invalid filename") {
-			status = http.StatusBadRequest
-			userMsg = "invalid filename"
-		} else if strings.Contains(errMsg, "invalid camera model") {
-			status = http.StatusBadRequest
-			userMsg = "invalid camera model"
-		} else if strings.Contains(errMsg, "invalid rendered path") || strings.Contains(errMsg, "invalid relative path") {
-			status = http.StatusBadRequest
-			userMsg = "invalid path"
-		} else if strings.Contains(errMsg, "path escapes storage location") {
-			status = http.StatusBadRequest
-			userMsg = "path escapes storage location"
-		} else if strings.Contains(errMsg, "checksum mismatch") {
-			status = http.StatusBadRequest
-			userMsg = "checksum mismatch"
-		} else if strings.Contains(errMsg, "upload exceeds maximum allowed file size") {
-			status = http.StatusRequestEntityTooLarge
-			userMsg = "upload exceeds maximum allowed file size (50 GB)"
-		} else if strings.Contains(errMsg, "read-only") {
-			status = http.StatusConflict
-			userMsg = "storage location is read-only"
-		} else if strings.Contains(errMsg, "no writable storage location configured") || strings.Contains(errMsg, "not configured") || strings.Contains(errMsg, "not found") {
-			status = http.StatusServiceUnavailable
-			userMsg = "no writable storage location configured"
-		}
-
-		if s.log != nil && status == http.StatusInternalServerError {
-			s.log.Error("agent upload internal processing failure")
-		}
-		s.writeJSONError(w, status, userMsg)
+		s.writeUploadError(w, err)
 		return
 	}
 
