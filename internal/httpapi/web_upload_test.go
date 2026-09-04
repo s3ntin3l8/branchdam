@@ -248,8 +248,8 @@ func TestWebUpload_ReadOnlyLocationConflict(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	// Should be refused as read-only conflict or not configured
-	assert.True(t, rec.Code == http.StatusConflict || rec.Code == http.StatusServiceUnavailable)
+	// Should be refused as read-only (403 Forbidden)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestWebUpload_PathTraversalRejection(t *testing.T) {
@@ -449,4 +449,141 @@ func TestWebUpload_ContentDedup_PreFlightHash(t *testing.T) {
 	assert.Equal(t, resp1.Asset.SizeBytes, resp2.Asset.SizeBytes)
 	assert.Positive(t, resp2.Asset.SizeBytes)
 	assert.Equal(t, int64(len(payload)), resp2.Asset.SizeBytes)
+}
+
+func TestWebUpload_InvalidStorageLocation(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+
+	// Non-existent storage location ID
+	reqNonExistent, _ := createMultipartUploadRequest(t, "test.jpg", []byte("sample"), map[string]string{
+		"storageLocationId": "99999",
+	})
+	recNonExistent := httptest.NewRecorder()
+	handler.ServeHTTP(recNonExistent, reqNonExistent)
+	assert.Equal(t, http.StatusBadRequest, recNonExistent.Code)
+
+	// Negative storage location ID
+	reqNegative, _ := createMultipartUploadRequest(t, "test.jpg", []byte("sample"), map[string]string{
+		"storageLocationId": "-5",
+	})
+	recNegative := httptest.NewRecorder()
+	handler.ServeHTTP(recNegative, reqNegative)
+	assert.Equal(t, http.StatusBadRequest, recNegative.Code)
+
+	// Non-numeric storage location ID
+	reqInvalid, _ := createMultipartUploadRequest(t, "test.jpg", []byte("sample"), map[string]string{
+		"storageLocationId": "not-a-number",
+	})
+	recInvalid := httptest.NewRecorder()
+	handler.ServeHTTP(recInvalid, reqInvalid)
+	assert.Equal(t, http.StatusBadRequest, recInvalid.Code)
+}
+
+func TestWebUpload_InactiveStorageLocation(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	var inactiveLoc sqlcgen.StorageLocation
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		var err error
+		inactiveLoc, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "InactiveLocation",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		return q.SetStorageLocationActive(context.Background(), sqlcgen.SetStorageLocationActiveParams{
+			ID:       inactiveLoc.ID,
+			IsActive: 0,
+		})
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+
+	req, _ := createMultipartUploadRequest(t, "test.jpg", []byte("sample"), map[string]string{
+		"storageLocationId": strconv.FormatInt(inactiveLoc.ID, 10),
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestWebUpload_DedupRaceOrphanCleanup(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	payload := []byte("distinct payload for dedup race orphan cleanup test")
+
+	// First upload
+	req1, _ := createMultipartUploadRequest(t, "first.jpg", payload, map[string]string{
+		"relativePath":        "orphan_test",
+		"applyNamingTemplate": "false",
+	})
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 WebUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	firstFilePath := filepath.Join(archiveDir, resp1.RelativePath)
+	_, err = os.Stat(firstFilePath)
+	require.NoError(t, err, "first upload file must exist on disk")
+
+	// Second upload without preflight hash: streams bytes to disk (as first_1.jpg),
+	// then detects dedup match post-write, removes first_1.jpg, and returns DEDUPLICATED
+	req2, _ := createMultipartUploadRequest(t, "first.jpg", payload, map[string]string{
+		"relativePath":        "orphan_test",
+		"applyNamingTemplate": "false",
+	})
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "true", rec2.Header().Get("X-Dedup"))
+
+	// Verify only first.jpg exists on disk and no orphan first_1.jpg exists
+	orphanPath := filepath.Join(archiveDir, "orphan_test", "first_1.jpg")
+	_, orphanErr := os.Stat(orphanPath)
+	assert.True(t, os.IsNotExist(orphanErr), "orphan file must be cleaned up on dedup match")
 }

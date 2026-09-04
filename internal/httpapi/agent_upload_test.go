@@ -464,3 +464,91 @@ func TestAgentUploadContentDedup_AllowsReingestAfterMissing(t *testing.T) {
 	assert.Equal(t, "UPLOADED", resp2.Status)
 	assert.NotEqual(t, resp1.NodeUUID, resp2.NodeUUID)
 }
+
+func TestAgentUpload_InvalidFilename(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader([]byte("test")))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "../../../etc/passwd")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAgentUpload_DedupRaceOrphanCleanup(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "MasterArchive",
+			RootPath: archiveDir,
+			Tier:     "TIER3_MASTER_ARCHIVE",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	data := []byte("agent upload bytes for orphan cleanup test")
+
+	// Upload 1
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req1.Header.Set("X-API-Key", routeTestAgentKey)
+	req1.Header.Set("X-Filename", "TEST_ORPHAN.JPG")
+	req1.Header.Set("X-Camera-Model", "TestCam")
+	req1.Header.Set("X-Capture-Timestamp", "1787998200")
+
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusCreated, rec1.Code)
+
+	var resp1 AgentUploadResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	firstFile := filepath.Join(archiveDir, resp1.RelativePath)
+	_, err = os.Stat(firstFile)
+	require.NoError(t, err)
+
+	// Upload 2 without X-Blake3-Hash: writes to TEST_ORPHAN_1.JPG then cleans it up upon dedup match
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "TEST_ORPHAN.JPG")
+	req2.Header.Set("X-Camera-Model", "TestCam")
+	req2.Header.Set("X-Capture-Timestamp", "1787998200")
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "true", rec2.Header().Get("X-Dedup"))
+
+	// Check orphan file is not present
+	dir := filepath.Dir(firstFile)
+	orphanFile := filepath.Join(dir, "TEST_ORPHAN_1.JPG")
+	_, statErr := os.Stat(orphanFile)
+	assert.True(t, os.IsNotExist(statErr), "orphan file must be cleaned up on dedup match")
+}

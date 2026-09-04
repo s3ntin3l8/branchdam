@@ -2,15 +2,15 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 )
-
-const maxFormMemory = 32 << 20 // 32 MB in-memory buffer for small parts; large parts stream to disk
 
 // WebUploadResponse is the JSON structure returned upon successful web upload.
 type WebUploadResponse struct {
@@ -22,7 +22,7 @@ type WebUploadResponse struct {
 	RelativePath string   `json:"relativePath"`
 }
 
-// handleWebUpload processes browser multipart/form-data uploads.
+// handleWebUpload processes browser multipart/form-data uploads via direct streaming.
 func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	p, ok := auth.From(r.Context())
 	if !ok || !p.Authenticated {
@@ -40,94 +40,128 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(maxFormMemory); err != nil {
+	mr, err := r.MultipartReader()
+	if err != nil {
 		s.writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("failed to parse multipart form: %v", err))
 		return
 	}
-	if r.MultipartForm != nil {
-		defer func() { _ = r.MultipartForm.RemoveAll() }()
+
+	var (
+		storageLocationID   int64
+		relativePath        = r.URL.Query().Get("relativePath")
+		cameraModel         = r.URL.Query().Get("overrideCameraModel")
+		capturedAtUnix      int64
+		applyNamingTemplate = true
+		expectedBlake3      = r.Header.Get("X-Blake3-Hash")
+		sourcePathHash      = r.Header.Get("X-Source-Path-Hash")
+		result              *UploadResult
+		fileProcessed       bool
+	)
+
+	if locIDStr := r.URL.Query().Get("storageLocationId"); locIDStr != "" {
+		if parsed, parseErr := strconv.ParseInt(locIDStr, 10, 64); parseErr == nil {
+			storageLocationID = parsed
+		} else {
+			s.writeUploadError(w, ErrInvalidStorageLocation)
+			return
+		}
 	}
-
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		s.writeJSONError(w, http.StatusBadRequest, "file field is required")
-		return
-	}
-	defer func() { _ = file.Close() }()
-
-	var storageLocationID int64
-	if locIDStr := r.FormValue("storageLocationId"); locIDStr != "" {
-		storageLocationID, _ = strconv.ParseInt(locIDStr, 10, 64)
-	}
-
-	relativePath := r.FormValue("relativePath")
-	cameraModel := r.FormValue("overrideCameraModel")
-
-	var capturedAtUnix int64
-	if capStr := r.FormValue("overrideCapturedAt"); capStr != "" {
+	if capStr := r.URL.Query().Get("overrideCapturedAt"); capStr != "" {
 		capturedAtUnix, _ = strconv.ParseInt(capStr, 10, 64)
 	}
-
-	applyNamingTemplate := true
-	if applyStr := r.FormValue("applyNamingTemplate"); applyStr != "" {
+	if applyStr := r.URL.Query().Get("applyNamingTemplate"); applyStr != "" {
 		applyNamingTemplate = strings.ToLower(applyStr) == "true" || applyStr == "1"
 	}
-
-	filename := header.Filename
-	if filename == "" {
-		filename = "uploaded_media.bin"
-	}
-
-	expectedBlake3 := r.Header.Get("X-Blake3-Hash")
 	if expectedBlake3 == "" {
-		expectedBlake3 = r.FormValue("expectedBlake3")
+		expectedBlake3 = r.URL.Query().Get("expectedBlake3")
+	}
+	if sourcePathHash == "" {
+		sourcePathHash = r.URL.Query().Get("sourcePathHash")
 	}
 
-	result, err := s.processUploadedStream(r.Context(), UploadParams{
-		Filename:            filename,
-		Body:                file,
-		StorageLocationID:   storageLocationID,
-		RelativePath:        relativePath,
-		ApplyNamingTemplate: applyNamingTemplate,
-		CameraModel:         cameraModel,
-		CapturedAtUnix:      capturedAtUnix,
-		ExpectedBlake3:      expectedBlake3,
-	})
-	if err != nil {
-		status := http.StatusInternalServerError
-		userMsg := "upload processing failed"
-		errMsg := err.Error()
-
-		if strings.Contains(errMsg, "invalid filename") {
-			status = http.StatusBadRequest
-			userMsg = "invalid filename"
-		} else if strings.Contains(errMsg, "invalid camera model") {
-			status = http.StatusBadRequest
-			userMsg = "invalid camera model"
-		} else if strings.Contains(errMsg, "invalid rendered path") || strings.Contains(errMsg, "invalid relative path") {
-			status = http.StatusBadRequest
-			userMsg = "invalid path"
-		} else if strings.Contains(errMsg, "path escapes storage location") {
-			status = http.StatusBadRequest
-			userMsg = "path escapes storage location"
-		} else if strings.Contains(errMsg, "checksum mismatch") {
-			status = http.StatusBadRequest
-			userMsg = "checksum mismatch"
-		} else if strings.Contains(errMsg, "upload exceeds maximum allowed file size") {
-			status = http.StatusRequestEntityTooLarge
-			userMsg = "upload exceeds maximum allowed file size (50 GB)"
-		} else if strings.Contains(errMsg, "read-only") {
-			status = http.StatusConflict
-			userMsg = "storage location is read-only"
-		} else if strings.Contains(errMsg, "no writable storage location configured") || strings.Contains(errMsg, "not configured") || strings.Contains(errMsg, "not found") {
-			status = http.StatusServiceUnavailable
-			userMsg = "no writable storage location configured"
+	for {
+		part, partErr := mr.NextPart()
+		if errors.Is(partErr, io.EOF) {
+			break
+		}
+		if partErr != nil {
+			s.writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("failed to read multipart part: %v", partErr))
+			return
 		}
 
-		if s.log != nil && status == http.StatusInternalServerError {
-			s.log.Error("web upload internal processing failure")
+		formName := part.FormName()
+		if formName == "file" || (formName == "" && part.FileName() != "") {
+			filename := part.FileName()
+			if filename == "" {
+				filename = "uploaded_media.bin"
+			}
+
+			fileProcessed = true
+			res, procErr := s.processUploadedStream(r.Context(), UploadParams{
+				Filename:            filename,
+				Body:                part,
+				StorageLocationID:   storageLocationID,
+				RelativePath:        relativePath,
+				ApplyNamingTemplate: applyNamingTemplate,
+				CameraModel:         cameraModel,
+				CapturedAtUnix:      capturedAtUnix,
+				ExpectedBlake3:      expectedBlake3,
+				SourcePathHash:      sourcePathHash,
+			})
+			_ = part.Close()
+			if procErr != nil {
+				s.writeUploadError(w, procErr)
+				return
+			}
+			result = res
+			break
 		}
-		s.writeJSONError(w, status, userMsg)
+
+		// Non-file form fields: read their value (limit to 64KB per field)
+		buf, readErr := io.ReadAll(io.LimitReader(part, 64*1024))
+		_ = part.Close()
+		if readErr != nil {
+			s.writeJSONError(w, http.StatusBadRequest, "failed to read form field")
+			return
+		}
+		val := string(buf)
+		switch formName {
+		case "storageLocationId":
+			if val != "" {
+				if locID, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
+					storageLocationID = locID
+				} else {
+					s.writeUploadError(w, ErrInvalidStorageLocation)
+					return
+				}
+			}
+		case "relativePath":
+			relativePath = val
+		case "overrideCameraModel":
+			cameraModel = val
+		case "overrideCapturedAt":
+			if val != "" {
+				if capUnix, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
+					capturedAtUnix = capUnix
+				}
+			}
+		case "applyNamingTemplate":
+			if val != "" {
+				applyNamingTemplate = strings.ToLower(val) == "true" || val == "1"
+			}
+		case "expectedBlake3":
+			if expectedBlake3 == "" {
+				expectedBlake3 = val
+			}
+		case "sourcePathHash":
+			if sourcePathHash == "" {
+				sourcePathHash = val
+			}
+		}
+	}
+
+	if !fileProcessed || result == nil {
+		s.writeJSONError(w, http.StatusBadRequest, "file field is required")
 		return
 	}
 
