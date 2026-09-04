@@ -63,6 +63,19 @@ agent:
   apiKey: ${BRANCHDAM_AGENT_API_KEY}
   signedRequests: false           # require HMAC-SHA256 signature and replay protection (default false)
   replayWindowSecs: 300           # maximum allowed clock drift / nonce replay window in seconds (default 300)
+  # Body cap for signed JSON endpoints. /api/v1/agent/upload streams up to
+  # 50 GiB of binary and is exempt from signing entirely (see
+  # skipSignaturePaths below), so this cap only applies to JSON agent
+  # endpoints and exists to bound memory before signature verification.
+  signedMaxBodyBytes: 16777216    # 16 MiB (default 16777216)
+  # Paths where signature validation is skipped even when signedRequests is
+  # true. The agent client (s3ntin3l8/branchdam-agent) signs JSON requests
+  # but cannot sign the streaming upload body, which is the binary payload
+  # itself -- so the upload route is exempt by default. Add entries ending
+  # in '/' to skip a path prefix; other entries match exactly. The API key
+  # check still runs on these routes.
+  skipSignaturePaths:
+    - /api/v1/agent/upload
 
 authz:
   # Groups permitted admin (write) access on browser-routed endpoints.

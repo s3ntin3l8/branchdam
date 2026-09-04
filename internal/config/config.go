@@ -145,11 +145,17 @@ type Workers struct {
 // Agent configures the machine-principal auth chain (internal/auth, PR 8).
 // The key itself is never set directly in config.yaml -- it is meant to be
 // injected via ${BRANCHDAM_AGENT_API_KEY} from a gitignored .env, per
-// docs/forward-auth.md.
+// docs/forward-auth.md. signedRequests and replayWindowSecs live under
+// `agent:` (not `server:`) because they are agent-route-specific; issue
+// #376's spec used `server.signedRequests`/`server.replayWindow` and
+// the keys were deliberately renamed during implementation so the config
+// mirrors the code path (internal/auth.AgentConfig) that consumes them.
 type Agent struct {
-	APIKey           string `yaml:"apiKey"`
-	SignedRequests   bool   `yaml:"signedRequests"`
-	ReplayWindowSecs int    `yaml:"replayWindowSecs"`
+	APIKey             string   `yaml:"apiKey"`
+	SignedRequests     bool     `yaml:"signedRequests"`
+	ReplayWindowSecs   int      `yaml:"replayWindowSecs"`
+	SignedMaxBodyBytes int64    `yaml:"signedMaxBodyBytes"`
+	SkipSignaturePaths []string `yaml:"skipSignaturePaths"`
 }
 
 // ReplayWindow returns the configured replay window as a time.Duration.

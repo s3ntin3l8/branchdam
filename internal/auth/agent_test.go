@@ -512,5 +512,207 @@ func TestAgentChainSignedRequests(t *testing.T) {
 		if rr1.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rr1.Code)
 		}
+
+		// With garbage signature headers -- signedRequests=false must
+		// ignore these entirely, not reject them as invalid.
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req2.Header.Set("X-API-Key", testKey)
+		req2.Header.Set("X-Timestamp", "not-a-number")
+		req2.Header.Set("X-Nonce", "garbage-nonce")
+		req2.Header.Set("X-Signature", "deadbeef")
+		rr2 := httptest.NewRecorder()
+		chain.ServeHTTP(rr2, req2)
+		if rr2.Code != http.StatusOK {
+			t.Fatalf("status with garbage signature headers = %d, want 200 (signedRequests=false must ignore present signatures)", rr2.Code)
+		}
 	})
+
+	t.Run("clock skew at exact window boundary is accepted", func(t *testing.T) {
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// skew == -window (exactly at the past boundary) -> accepted (strict >)
+		tsPastExact := strconv.FormatInt(fixedNow.Add(-5*time.Minute).UnixNano(), 10)
+		nonce1 := "nonce-past-exact-boundary"
+		sig1 := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce1, tsPastExact, nil)
+		req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req1.Header.Set("X-API-Key", testKey)
+		req1.Header.Set("X-Timestamp", tsPastExact)
+		req1.Header.Set("X-Nonce", nonce1)
+		req1.Header.Set("X-Signature", sig1)
+		rr1 := httptest.NewRecorder()
+		chain.ServeHTTP(rr1, req1)
+		if rr1.Code != http.StatusOK {
+			t.Fatalf("status at skew == -window = %d, want 200 (boundary inclusive: condition is skew > window, not >=)", rr1.Code)
+		}
+
+		// skew == +window (exactly at the future boundary) -> accepted
+		tsFutExact := strconv.FormatInt(fixedNow.Add(5*time.Minute).UnixNano(), 10)
+		nonce2 := "nonce-fut-exact-boundary"
+		sig2 := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce2, tsFutExact, nil)
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", nil)
+		req2.Header.Set("X-API-Key", testKey)
+		req2.Header.Set("X-Timestamp", tsFutExact)
+		req2.Header.Set("X-Nonce", nonce2)
+		req2.Header.Set("X-Signature", sig2)
+		rr2 := httptest.NewRecorder()
+		chain.ServeHTTP(rr2, req2)
+		if rr2.Code != http.StatusOK {
+			t.Fatalf("status at skew == +window = %d, want 200 (boundary inclusive: condition is skew > window, not >=)", rr2.Code)
+		}
+	})
+
+	t.Run("signedRequests=true + skip path bypasses signature validation", func(t *testing.T) {
+		// /api/v1/agent/upload streams up to 50 GiB; the agent client cannot
+		// sign over a body that large, so the route is in the default skip
+		// list. Signature headers must not be required.
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+			Now:            nowFn,
+		}
+		handlerCalled := false
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// 50 KiB body -- far above SignedMaxBodyBytes but the route is exempt,
+		// so MaxBytesReader never wraps r.Body and the read below succeeds.
+		body := bytes.Repeat([]byte{0x42}, 50*1024)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", testKey)
+		// No X-Timestamp / X-Nonce / X-Signature at all.
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (skip path must bypass signature validation, even when signedRequests=true). body=%s", rr.Code, rr.Body.String())
+		}
+		if !handlerCalled {
+			t.Fatal("handler was not called for an upload-route request")
+		}
+	})
+
+	t.Run("signedRequests=true + skip path still enforces API key", func(t *testing.T) {
+		// Skipping signature validation does NOT skip the API key check --
+		// the upload route still needs a valid key, otherwise anyone who
+		// can reach /api/v1/agent/upload (Traefik strips ForwardAuth for
+		// this prefix) could push 50 GiB to disk.
+		cfg := AgentConfig{
+			APIKey:         testKey,
+			SignedRequests: true,
+			ReplayWindow:   5 * time.Minute,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("handler must not be called without a valid API key")
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", nil)
+		// No X-API-Key set at all.
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401 (skip path must still enforce X-API-Key)", rr.Code)
+		}
+	})
+
+	t.Run("body exceeding SignedMaxBodyBytes is rejected with 413", func(t *testing.T) {
+		const cap = 1024
+		cfg := AgentConfig{
+			APIKey:             testKey,
+			SignedRequests:     true,
+			ReplayWindow:       5 * time.Minute,
+			Now:                nowFn,
+			SignedMaxBodyBytes: cap,
+		}
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("handler must not be called for an oversize body")
+		}))
+
+		body := bytes.Repeat([]byte{0x42}, cap+1)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
+		// No signature headers -- the body cap must be enforced before
+		// signature validation runs, so we should see 401 for missing
+		// headers only if signature validation ran; here we expect 413
+		// because MaxBytesReader triggers during the read.
+		ts := strconv.FormatInt(fixedNow.UnixNano(), 10)
+		nonce := "nonce-oversize-body"
+		sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, nil)
+		req.Header.Set("X-API-Key", testKey)
+		req.Header.Set("X-Timestamp", ts)
+		req.Header.Set("X-Nonce", nonce)
+		req.Header.Set("X-Signature", sig)
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		if rr.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413 (SignedMaxBodyBytes exceeded)", rr.Code)
+		}
+	})
+
+	t.Run("prefix-match skip path bypasses signature validation", func(t *testing.T) {
+		// Operators may add a path ending in '/' to skip a whole subtree;
+		// exact-match and prefix-match must both work.
+		cfg := AgentConfig{
+			APIKey:             testKey,
+			SignedRequests:     true,
+			ReplayWindow:       5 * time.Minute,
+			Now:                nowFn,
+			SkipSignaturePaths: []string{"/api/v1/agent/internal/"},
+		}
+		handlerCalled := false
+		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/internal/health", nil)
+		req.Header.Set("X-API-Key", testKey)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (prefix-match skip path must bypass signing)", rr.Code)
+		}
+		if !handlerCalled {
+			t.Fatal("handler was not called")
+		}
+	})
+}
+
+// TestMatchesAnyPath locks in the simple prefix/exact semantics used by
+// the SkipSignaturePaths list -- a regression here would silently start
+// signing the upload route again.
+func TestMatchesAnyPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string
+		patterns []string
+		want     bool
+	}{
+		{"empty patterns", "/anything", nil, false},
+		{"exact match", "/api/v1/agent/upload", []string{"/api/v1/agent/upload"}, true},
+		{"exact non-match", "/api/v1/agent/events", []string{"/api/v1/agent/upload"}, false},
+		{"prefix match", "/api/v1/agent/upload/foo", []string{"/api/v1/agent/upload/"}, true},
+		{"prefix doesn't match longer exact", "/api/v1/agent/uploadevilly", []string{"/api/v1/agent/upload"}, false},
+		{"empty pattern is skipped", "/anything", []string{""}, false},
+		{"multiple patterns, second matches", "/x", []string{"/a", "/x"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := matchesAnyPath(c.path, c.patterns)
+			if got != c.want {
+				t.Errorf("matchesAnyPath(%q, %v) = %v, want %v", c.path, c.patterns, got, c.want)
+			}
+		})
+	}
 }

@@ -229,9 +229,11 @@ func (s *Server) Handler() http.Handler {
 	var agentCfg auth.AgentConfig
 	if cfg := s.cfg(); cfg != nil {
 		agentCfg = auth.AgentConfig{
-			APIKey:         cfg.Agent.APIKey,
-			SignedRequests: cfg.Agent.SignedRequests,
-			ReplayWindow:   cfg.Agent.ReplayWindow(),
+			APIKey:             cfg.Agent.APIKey,
+			SignedRequests:     cfg.Agent.SignedRequests,
+			ReplayWindow:       cfg.Agent.ReplayWindow(),
+			SignedMaxBodyBytes: cfg.Agent.SignedMaxBodyBytes,
+			SkipSignaturePaths: cfg.Agent.SkipSignaturePaths,
 		}
 	}
 
