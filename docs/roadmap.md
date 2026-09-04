@@ -55,7 +55,7 @@ promoting an issue to `ready` is a deliberate act, done in dependency order, one
   generated client yet.
 - Recursive CTEs must alias every column in the anchor `SELECT` or sqlc fails with
   `*ast.ResTarget has nil name`.
-- All filesystem writes go through `storage.Guard` and must never target Tier 3.
+- All filesystem writes go through `storage.Guard`. Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default.
 - Branch off `origin/main`; one issue = one PR.
 
 ## Phases

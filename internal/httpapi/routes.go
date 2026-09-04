@@ -737,7 +737,8 @@ type InheritMetadataOutput struct {
 // from a node's winning parent edge into the child's file on disk, on demand.
 // This is the project's first real filesystem writer: storage.Guard.CheckWrite
 // is called BEFORE any exiftool subprocess, and a read-only location (Tier 3
-// is always read-only) or a Tier-3-resolved parent edge is refused with 409.
+// is read-only unless readOnly: false is configured; the :ro mount remains a
+// defense-in-depth default) or a Tier-3-resolved parent edge is refused with 409.
 func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataInput) (*InheritMetadataOutput, error) {
 	child, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
 	if errors.Is(err, sql.ErrNoRows) {

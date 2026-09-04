@@ -1,9 +1,9 @@
 // Package storage is the single chokepoint every filesystem write in
-// branchDAM must pass through. Tier 3 (the master archive) is mounted
-// read-only in production, which surfaces as EROFS at whatever call depth
-// first happens to touch it -- Guard turns that into a typed error, returned
-// before any syscall, by resolving the write's target to a storage tier and
-// checking its read-only flag first.
+// branchDAM must pass through. Tier 3 is read-only unless `readOnly: false`
+// is configured; the `:ro` mount remains a defense-in-depth default. Guard
+// turns write attempts against read-only locations into a typed error,
+// returned before any syscall, by resolving the write's target to a storage
+// tier and checking its read-only flag first.
 package storage
 
 import (

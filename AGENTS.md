@@ -36,7 +36,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 |---|---|
 | `internal/config` | Load + expand `config.yaml`; `${VAR}` resolved at load time |
 | `internal/db` | SQLite pools (single writer, multi reader), `ConnectHook` pragmas, goose migrations |
-| `internal/storage` | `Guard`: strictly resolves tiers from `storage_locations`, refuses Tier 3 writes before syscall |
+| `internal/storage` | `Guard`: strictly resolves tiers from `storage_locations`, refuses writes to read-only tiers before syscall |
 | `internal/hashing` | `FastHash` (xxHash64), `FullHash` (BLAKE3-256), `PerceptualHash` (DCT). No I/O |
 | `internal/probe` | `exiftool`/`ffprobe`/`ffmpeg` subprocess wrappers; graceful `ErrToolUnavailable` fallback |
 | `internal/indexer` | `Walk` (directory scan) and `Watch` (fsnotify), both `Lstat`-only |
@@ -53,7 +53,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 
 1. **No Triggers, No CASCADE**: Every FK is `RESTRICT`. `PRAGMA foreign_keys = ON` is set on every connection in `ConnectHook`. Missing files set `lifecycle_state = 'MISSING'`; rows are never deleted.
 2. **Single-Connection Writer Pool**: `db.DB` writer has `SetMaxOpenConns(1)` to eliminate race conditions during cycle checks and edge insertions.
-3. **Filesystem Write Guarding**: All storage writes route through `storage.Guard`. Tier 3 (`TIER3_MASTER_ARCHIVE`) is strictly immutable.
+3. **Filesystem Write Guarding**: All storage writes route through `storage.Guard`. Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default.
 4. **Header Isolation**: `internal/auth.BrowserChain` is the ONLY code permitted to read `X-Authentik-*` headers (`TestNoDirectAuthentikHeaderReads`). Agent routes unconditionally strip them.
 5. **Agent Paths Untrusted**: `storage_location_id` on agent DTOs is ignored and re-derived from `storage.Guard.Resolve(filePath)`.
 6. **Audit Priority**: Human `CONFIRMED`/`REJECTED` edge review states permanently outrank automated resolvers.

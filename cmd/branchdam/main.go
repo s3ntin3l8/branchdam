@@ -698,10 +698,10 @@ func validatePruneConfig(cfgs []config.StorageLocation) error {
 // sweptFromConfig returns the config locations to sweep: opt-in via config
 // (`sweep: true`) and never Tier 3, regardless of config. Unlike
 // watchedFromConfig's rationale (continuous ingest is for working tiers),
-// the reason here is structural: Tier 3 is read_only=1 by schema CHECK, so
-// nothing on it can ever be ingested, and a differential sweep there would
-// only ever drive the MISSING sweep -- which a manual POST /api/v1/scan
-// already covers.
+// Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount
+// remains a defense-in-depth default, so nothing on it can ever be ingested,
+// and a differential sweep there would only ever drive the MISSING sweep --
+// which a manual POST /api/v1/scan already covers.
 func sweptFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
 	out := make([]config.StorageLocation, 0, len(cfgs))
 	for _, c := range cfgs {
