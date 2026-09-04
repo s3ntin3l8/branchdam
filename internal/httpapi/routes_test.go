@@ -4419,8 +4419,8 @@ func TestAgentNodeStatus_EmptyAndOversizedBatch_BadRequest(t *testing.T) {
 		t.Fatalf("empty batch status = %d, want 400", rrEmpty.Code)
 	}
 
-	// Over the 200-item cap -> 400
-	uuids := make([]string, 201)
+	// Over the 400-item cap -> 400
+	uuids := make([]string, 401)
 	for i := range uuids {
 		uuids[i] = fmt.Sprintf("018f0000-0000-7000-8000-%012d", i)
 	}
@@ -4553,5 +4553,73 @@ func TestAgentNodeStatus_ReportsLifecycleAndVerification(t *testing.T) {
 	}
 	if v := byUUID[unknownUUID]; v.Found {
 		t.Errorf("unknown node status = %+v, want Found=false", v)
+	}
+}
+
+// TestAgentNodeStatus_400NodeBatch_Performance backs #366: tests that querying
+// a full batch of 400 node UUIDs completes well under 100ms using the bulk query.
+func TestAgentNodeStatus_400NodeBatch_Performance(t *testing.T) {
+	srv, database, _, _, _, archive := serverWithGuard(t)
+	ctx := context.Background()
+
+	uuids := make([]string, 400)
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for i := range uuids {
+			uuids[i] = fmt.Sprintf("018f0000-0000-7000-8000-%012d", i+1)
+			fullHash := fmt.Sprintf("%064x", i+1)
+			if _, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+				NodeUuid:          uuids[i],
+				StorageLocationID: 3, // archive
+				FilePath:          filepath.Join(archive, fmt.Sprintf("node-%04d.mov", i+1)),
+				FileName:          fmt.Sprintf("node-%04d.mov", i+1),
+				FullHash:          &fullHash,
+				LifecycleState:    "ACTIVE",
+				GraphStatus:       "UNLINKED",
+				IndexingStatus:    "INDEXED_SHALLOW",
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed 400 nodes: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/node-status", bytesOfJSON(t, map[string]any{
+		"nodeUuids": uuids,
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+
+	start := time.Now()
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("400-node batch took %v, want <100ms", elapsed)
+	}
+
+	var res struct {
+		Statuses []AgentNodeStatusEntry `json:"statuses"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(res.Statuses) != 400 {
+		t.Fatalf("got %d statuses, want 400", len(res.Statuses))
+	}
+	for i, entry := range res.Statuses {
+		if entry.NodeUUID != uuids[i] {
+			t.Errorf("[%d] NodeUUID = %q, want %q", i, entry.NodeUUID, uuids[i])
+		}
+		if !entry.Found || !entry.Verified || entry.LifecycleState != "ACTIVE" || entry.Tier != "TIER3_MASTER_ARCHIVE" {
+			t.Errorf("[%d] status = %+v, want found+verified ACTIVE on TIER3_MASTER_ARCHIVE", i, entry)
+		}
 	}
 }

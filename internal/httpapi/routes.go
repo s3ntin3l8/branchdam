@@ -1882,9 +1882,8 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 
 // agentNodeStatusMaxUUIDs bounds one request's batch size -- large enough for
 // an agent's prune pass to check a whole queue.db worth of candidates in a
-// handful of calls, small enough that a single request can't force an
-// unbounded number of GetMediaNodeByUUID/GetStorageLocationByID round trips.
-const agentNodeStatusMaxUUIDs = 200
+// single call, small enough that a single request can't force unbounded database load.
+const agentNodeStatusMaxUUIDs = 400
 
 type AgentNodeStatusInput struct {
 	Body struct {
@@ -1934,48 +1933,57 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 	if len(in.Body.NodeUUIDs) > agentNodeStatusMaxUUIDs {
 		return nil, huma.Error400BadRequest(fmt.Sprintf("nodeUuids must not exceed %d per request", agentNodeStatusMaxUUIDs), nil)
 	}
+	if s.db == nil || s.db.Reader == nil {
+		return nil, huma.Error500InternalServerError("database not available", nil)
+	}
 
-	out := &AgentNodeStatusOutput{}
-	out.Body.Statuses = make([]AgentNodeStatusEntry, 0, len(in.Body.NodeUUIDs))
-	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		for _, uuid := range in.Body.NodeUUIDs {
-			entry := AgentNodeStatusEntry{NodeUUID: uuid}
-			node, err := q.GetMediaNodeByUUID(ctx, uuid)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					out.Body.Statuses = append(out.Body.Statuses, entry)
-					continue
-				}
-				return err
-			}
-			entry.Found = true
-			entry.LifecycleState = node.LifecycleState
+	uuidsJSON, err := json.Marshal(in.Body.NodeUUIDs)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid nodeUuids", err)
+	}
+
+	rows, err := s.db.Reader.ListMediaNodeStatusesByUUIDs(ctx, string(uuidsJSON))
+	if err != nil {
+		return nil, huma.Error500InternalServerError("node status query failed", err)
+	}
+
+	type nodeInfo struct {
+		lifecycleState string
+		tier           string
+		verified       bool
+	}
+	byUUID := make(map[string]nodeInfo, len(rows))
+	for _, row := range rows {
+		var tier string
+		if row.Tier.Valid {
+			tier = row.Tier.String
+		}
+		byUUID[row.NodeUuid] = nodeInfo{
+			lifecycleState: row.LifecycleState,
+			tier:           tier,
 			// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
 			// exactly rather than additionally validating hex charset (the schema's own
 			// full_hash CHECK also enforces length only, not charset) -- this endpoint's
 			// contract is to answer identically to that predicate, not a stricter one,
 			// so a caller can't observe a divergence between the two. Low residual risk:
 			// hashing.FullHash (the only writer) always emits lowercase hex.
-			entry.Verified = node.FullHash != nil && len(*node.FullHash) == 64
-			loc, err := q.GetStorageLocationByID(ctx, node.StorageLocationID)
-			if err != nil {
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
-				}
-				// Storage location vanished out from under an otherwise-found
-				// node -- shouldn't happen (RESTRICT FKs), but report the node
-				// as found/unverified-of-tier rather than erroring the whole
-				// batch over it.
-			} else {
-				entry.Tier = loc.Tier
-			}
-			out.Body.Statuses = append(out.Body.Statuses, entry)
+			verified: row.FullHash != nil && len(*row.FullHash) == 64,
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, huma.Error500InternalServerError("node status query failed", err)
 	}
+
+	out := &AgentNodeStatusOutput{}
+	out.Body.Statuses = make([]AgentNodeStatusEntry, 0, len(in.Body.NodeUUIDs))
+	for _, uuid := range in.Body.NodeUUIDs {
+		entry := AgentNodeStatusEntry{NodeUUID: uuid}
+		if info, ok := byUUID[uuid]; ok {
+			entry.Found = true
+			entry.LifecycleState = info.lifecycleState
+			entry.Tier = info.tier
+			entry.Verified = info.verified
+		}
+		out.Body.Statuses = append(out.Body.Statuses, entry)
+	}
+
 	return out, nil
 }
 

@@ -3,15 +3,20 @@ package httpapi
 import (
 	"bufio"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
@@ -159,5 +164,169 @@ func TestHandleEventsIgnoresServerWriteTimeout(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not receive the post-timeout nudge within 2s")
+	}
+}
+
+// TestHandleEventsCachesQueryAcrossClientsAndInvalidatesOnBroadcast backs #365:
+// verifies that multiple connected SSE clients receive the same cached payload
+// without triggering redundant DB queries per client, and that broadcasting
+// a new event invalidates the cache so updated scan job state is served.
+func TestHandleEventsCachesQueryAcrossClientsAndInvalidatesOnBroadcast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events-cache.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	ctx := context.Background()
+
+	// Seed an initial storage location and scan job
+	var locID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name:     "cache-test-loc",
+			RootPath: t.TempDir(),
+			Tier:     "TIER1_LOCAL_SCRATCH",
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+		_, err = q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: loc.ID, Valid: true},
+			Kind:              "FULL_SCAN",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	hub := sse.New()
+	srv := New(Deps{
+		Config: &config.Config{}, Log: slog.New(slog.DiscardHandler), DB: database,
+		Prober: probe.New(), Pool: workers.New[string](1, 4),
+		Engine: graph.NewEngine(database, nil), Hub: hub,
+		Version: "test",
+	})
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	const numClients = 5
+	clients := make([]*http.Response, numClients)
+	readers := make([]*bufio.Reader, numClients)
+
+	for i := 0; i < numClients; i++ {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/events", nil)
+		if err != nil {
+			t.Fatalf("build request [%d]: %v", i, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /api/v1/events [%d]: %v", i, err)
+		}
+		clients[i] = resp
+		defer func(r *http.Response) { _ = r.Body.Close() }(resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status [%d] = %d, want 200", i, resp.StatusCode)
+		}
+		readers[i] = bufio.NewReader(resp.Body)
+
+		// Read initial payload (3 lines: event, data, blank)
+		eventLine, err := readers[i].ReadString('\n')
+		if err != nil {
+			t.Fatalf("read event line [%d]: %v", i, err)
+		}
+		if !strings.HasPrefix(eventLine, "event: progress") {
+			t.Fatalf("got %q, want event: progress", eventLine)
+		}
+		dataLine, err := readers[i].ReadString('\n')
+		if err != nil {
+			t.Fatalf("read data line [%d]: %v", i, err)
+		}
+		_, _ = readers[i].ReadString('\n') // blank separator
+
+		var jobs []sqlcgen.ScanJob
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(dataLine, "data: ")), &jobs); err != nil {
+			t.Fatalf("unmarshal scan jobs [%d]: %v", i, err)
+		}
+		if len(jobs) != 1 {
+			t.Fatalf("got %d jobs on connect [%d], want 1", len(jobs), i)
+		}
+	}
+
+	// Verify that getSSEPayload returns the cached payload on matching generation
+	cached1, err := srv.getSSEPayload(ctx)
+	if err != nil {
+		t.Fatalf("getSSEPayload: %v", err)
+	}
+
+	// Insert a second scan job
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: locID, Valid: true},
+			Kind:              "INCREMENTAL",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create second scan job: %v", err)
+	}
+
+	// Before broadcast, getSSEPayload still returns cached payload (generation 0)
+	cached2, err := srv.getSSEPayload(ctx)
+	if err != nil {
+		t.Fatalf("getSSEPayload before broadcast: %v", err)
+	}
+	if string(cached1) != string(cached2) {
+		t.Error("expected cached payload before broadcast to match initial cached payload")
+	}
+
+	// Broadcast nudge -> increments generation to 1
+	hub.Broadcast()
+
+	// All connected clients should receive the updated progress event with 2 jobs
+	var wg sync.WaitGroup
+	for i := 0; i < numClients; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			eventLine, err := readers[idx].ReadString('\n')
+			if err != nil {
+				t.Errorf("read event line after broadcast [%d]: %v", idx, err)
+				return
+			}
+			if !strings.HasPrefix(eventLine, "event: progress") {
+				t.Errorf("[%d] got %q, want event: progress", idx, eventLine)
+				return
+			}
+			dataLine, err := readers[idx].ReadString('\n')
+			if err != nil {
+				t.Errorf("read data line after broadcast [%d]: %v", idx, err)
+				return
+			}
+			_, _ = readers[idx].ReadString('\n') // blank separator
+
+			var jobs []sqlcgen.ScanJob
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(dataLine, "data: ")), &jobs); err != nil {
+				t.Errorf("unmarshal jobs after broadcast [%d]: %v", idx, err)
+				return
+			}
+			if len(jobs) != 2 {
+				t.Errorf("[%d] got %d jobs after broadcast, want 2", idx, len(jobs))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// After broadcast, cache has updated payload (generation 1)
+	cached3, err := srv.getSSEPayload(ctx)
+	if err != nil {
+		t.Fatalf("getSSEPayload after broadcast: %v", err)
+	}
+	if string(cached1) == string(cached3) {
+		t.Error("expected cached payload after broadcast to be updated, but was identical to initial")
 	}
 }

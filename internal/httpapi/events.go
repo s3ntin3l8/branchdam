@@ -1,19 +1,63 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
+
+type ssePayloadCache struct {
+	mu         sync.Mutex
+	generation uint64
+	payload    []byte
+	hasValue   bool
+}
+
+// getSSEPayload returns the cached serialized recent scan jobs JSON payload,
+// re-querying the database only when the SSE broadcast generation counter has
+// changed or when the cache is uninitialized. This prevents N connected clients
+// from issuing N redundant DB queries on the same broadcast tick (#365).
+func (s *Server) getSSEPayload(ctx context.Context) ([]byte, error) {
+	var currentGen uint64
+	if s.hub != nil {
+		currentGen = s.hub.Generation()
+	}
+
+	s.sseCache.mu.Lock()
+	defer s.sseCache.mu.Unlock()
+
+	if s.sseCache.hasValue && s.sseCache.generation == currentGen {
+		return s.sseCache.payload, nil
+	}
+
+	if s.db == nil || s.db.Reader == nil {
+		return nil, errors.New("database not available")
+	}
+
+	rows, err := s.db.Reader.ListRecentScanJobs(ctx, 5)
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	s.sseCache.payload = b
+	s.sseCache.generation = currentGen
+	s.sseCache.hasValue = true
+	return b, nil
+}
 
 // handleEvents streams a progress nudge over SSE: once on connect, then on
 // every change (a scan batch committed, an edge resolved), with periodic
 // heartbeats so proxies don't drop the idle connection. The payload is
-// re-fetched from the database on each nudge, not carried on the hub's
-// channel -- see internal/sse's package doc for why that's what keeps this
-// cheap under a large scan.
+// re-fetched from the database on each nudge, cached across connected clients
+// on the same broadcast tick (#365).
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.sseSlot.acquire() {
 		http.Error(w, "too many streaming clients", http.StatusServiceUnavailable)
@@ -75,18 +119,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	var errClientGone = errors.New("sse: client gone")
 
 	send := func() error {
-		rows, err := s.db.Reader.ListRecentScanJobs(r.Context(), 5)
+		b, err := s.getSSEPayload(r.Context())
 		if err != nil {
 			// Transient -- log and let the next tick retry.
-			s.log.Warn("sse: list recent scan jobs", "err", err)
-			return nil
-		}
-		b, err := json.Marshal(rows)
-		if err != nil {
-			// Marshal on a fixed struct shape can't realistically fail
-			// at runtime, but if it ever does, log and skip this tick
-			// rather than tearing the connection down.
-			s.log.Warn("sse: marshal scan jobs", "err", err)
+			s.log.Warn("sse: get payload", "err", err)
 			return nil
 		}
 		if _, err := w.Write([]byte("event: progress\ndata: ")); err != nil {

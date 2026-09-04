@@ -112,6 +112,7 @@ type Server struct {
 	engine         *graph.Engine
 	hub            *sse.Hub
 	sseSlot        *limiter
+	sseCache       ssePayloadCache
 	spa            fs.FS
 	version        string
 	tracker        *pipeline.ScanTracker

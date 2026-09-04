@@ -44,3 +44,18 @@ func TestHubDoubleUnsubscribe(t *testing.T) {
 	unsub()
 	unsub()
 }
+
+func TestHubGeneration(t *testing.T) {
+	h := New()
+	if gen := h.Generation(); gen != 0 {
+		t.Fatalf("initial Generation = %d, want 0", gen)
+	}
+	h.Broadcast()
+	if gen := h.Generation(); gen != 1 {
+		t.Fatalf("after 1 Broadcast Generation = %d, want 1", gen)
+	}
+	h.Broadcast()
+	if gen := h.Generation(); gen != 2 {
+		t.Fatalf("after 2 Broadcasts Generation = %d, want 2", gen)
+	}
+}

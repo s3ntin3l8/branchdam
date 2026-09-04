@@ -508,3 +508,11 @@ WHERE source_path_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 ORDER BY id DESC
 LIMIT 1;
+
+-- name: ListMediaNodeStatusesByUUIDs :many
+-- Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
+-- Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
+SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
+FROM media_nodes n
+LEFT JOIN storage_locations s ON s.id = n.storage_location_id
+WHERE n.node_uuid IN (SELECT value FROM json_each(?1));
