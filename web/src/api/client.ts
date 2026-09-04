@@ -167,7 +167,7 @@ export const api = {
           try {
             const data = JSON.parse(xhr.responseText) as WebUploadResponse;
             const dedupHeader = xhr.getResponseHeader("X-Dedup") || xhr.getResponseHeader("x-dedup");
-            data.isDedup = dedupHeader === "true" || data.status === "DEDUPLICATED";
+            data.isDedup = dedupHeader?.toLowerCase() === "true" || data.status === "DEDUPLICATED";
             resolve(data);
           } catch {
             reject(new ApiError(xhr.status, "Invalid JSON response"));
@@ -190,7 +190,6 @@ export const api = {
       };
 
       const formData = new FormData();
-      formData.append("file", file, file.name);
       if (options.storageLocationId) {
         formData.append("storageLocationId", String(options.storageLocationId));
       }
@@ -206,6 +205,7 @@ export const api = {
       if (options.overrideCapturedAt) {
         formData.append("overrideCapturedAt", String(options.overrideCapturedAt));
       }
+      formData.append("file", file, file.name);
 
       xhr.send(formData);
     });

@@ -4,6 +4,7 @@ import { Link } from "react-router";
 export interface DedupNoticeProps {
   fileName?: string;
   assetId?: number;
+  nodeUuid?: string;
   onDismiss: () => void;
   autoDismissMs?: number;
 }
@@ -11,6 +12,7 @@ export interface DedupNoticeProps {
 export default function DedupNotice({
   fileName,
   assetId,
+  nodeUuid,
   onDismiss,
   autoDismissMs = 10000,
 }: DedupNoticeProps) {
@@ -27,7 +29,7 @@ export default function DedupNotice({
     return () => clearTimeout(timer);
   }, [autoDismissMs]);
 
-  const targetLink = assetId ? `/assets/${assetId}` : "/assets";
+  const targetLink = assetId ? `/assets/${assetId}` : nodeUuid ? `/assets/${nodeUuid}` : "/assets";
 
   return (
     <div

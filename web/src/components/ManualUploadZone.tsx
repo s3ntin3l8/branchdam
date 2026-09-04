@@ -19,6 +19,7 @@ export interface DedupNoticeItem {
   id: string;
   fileName: string;
   assetId?: number;
+  nodeUuid?: string;
 }
 
 function formatBytes(bytes: number): string {
@@ -209,6 +210,7 @@ export default function ManualUploadZone() {
               id: item.id,
               fileName: item.file.name,
               assetId: res.asset?.id,
+              nodeUuid: res.nodeUuid,
             },
           ]);
         }
@@ -341,6 +343,7 @@ export default function ManualUploadZone() {
               key={notice.id}
               fileName={notice.fileName}
               assetId={notice.assetId}
+              nodeUuid={notice.nodeUuid}
               onDismiss={() => dismissDedupNotice(notice.id)}
             />
           ))}
@@ -501,14 +504,21 @@ export default function ManualUploadZone() {
                           <span className="rounded bg-amber-950 border border-amber-800/60 px-2 py-0.5 text-[11px] text-amber-300 font-medium">
                             Already in library
                           </span>
-                          {item.response?.asset?.id && (
+                          {item.response?.asset?.id ? (
                             <Link
                               to={`/assets/${item.response.asset.id}`}
                               className="text-sky-400 underline hover:text-sky-300"
                             >
                               View existing node →
                             </Link>
-                          )}
+                          ) : item.response?.nodeUuid ? (
+                            <Link
+                              to={`/assets/${item.response.nodeUuid}`}
+                              className="text-sky-400 underline hover:text-sky-300"
+                            >
+                              View existing node →
+                            </Link>
+                          ) : null}
                         </>
                       ) : (
                         <>
