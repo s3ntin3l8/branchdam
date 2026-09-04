@@ -704,6 +704,72 @@ func TestFilenameStemProxyExtAlwaysChildRegardlessOfEvalOrder(t *testing.T) {
 	})
 }
 
+// TestFilenameStemRoleSuffixProxy proves issue #346: a role-suffixed proxy
+// like DSC_0001_edit.LRF paired with DSC_0001.MP4 emits PROXY_OF with the
+// real video as the parent and the proxy as the child, regardless of
+// evaluation order.
+func TestFilenameStemRoleSuffixProxy(t *testing.T) {
+	capturedAt := time.Date(2026, time.July, 15, 10, 0, 0, 0, time.UTC)
+
+	assertProxyEdge := func(t *testing.T, edges []sqlcgen.MediaEdge, video, proxy sqlcgen.MediaNode) {
+		t.Helper()
+		if len(edges) != 1 {
+			t.Fatalf("got %d edges, want 1: %+v", len(edges), edges)
+		}
+		if edges[0].SourceNodeID != video.ID || edges[0].TargetNodeID != proxy.ID {
+			t.Errorf("edge = %d->%d, want video(%d)->proxy(%d) (proxy must always be the child)",
+				edges[0].SourceNodeID, edges[0].TargetNodeID, video.ID, proxy.ID)
+		}
+		if edges[0].RelationshipType != "PROXY_OF" {
+			t.Errorf("relationship_type = %q, want PROXY_OF", edges[0].RelationshipType)
+		}
+	}
+
+	t.Run("resolver evaluates the role-suffixed proxy as its child input", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DSC_0001.MP4", FileName: "DSC_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("1", 16),
+		})
+		proxy := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DSC_0001_edit.LRF", FileName: "DSC_0001_edit.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("2", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(proxy))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit: %v", err)
+		}
+		assertProxyEdge(t, edges, video, proxy)
+	})
+
+	t.Run("resolver evaluates the real video as its child input", func(t *testing.T) {
+		database := openTestDB(t)
+		ctx := context.Background()
+		locationID := seedLocation(t, database)
+
+		video := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DSC_0001.MP4", FileName: "DSC_0001.MP4", FileExt: "mp4",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("3", 16),
+		})
+		proxy := seedNode(t, database, locationID, nodeFixture{
+			Path: "/dcim/DSC_0001_edit.LRF", FileName: "DSC_0001_edit.LRF", FileExt: "lrf",
+			CapturedAt: &capturedAt, FastHash: strings.Repeat("4", 16),
+		})
+
+		engine := newEngine(database)
+		edges, _, err := engine.ResolveAndCommit(ctx, asGraphNode(video))
+		if err != nil {
+			t.Fatalf("ResolveAndCommit: %v", err)
+		}
+		assertProxyEdge(t, edges, video, proxy)
+	})
+}
+
 // TestFilenameStemProxyExtNeverOverridesIndexAnchorInvariant is a
 // regression test for a bug in the original #228 fix: the proxy-ext
 // direction swap ran unconditionally, even for a pair that had ALREADY
