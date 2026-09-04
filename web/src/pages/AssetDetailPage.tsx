@@ -260,12 +260,20 @@ export default function AssetDetailPage() {
               {sync.sync.map((s) => (
                 <div key={s.remote} className="flex items-start justify-between gap-4 text-sm">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-neutral-200">{s.remote}</span>
                       <span className="rounded bg-neutral-800 px-2 py-0.5 font-mono text-xs text-neutral-300">
                         {s.syncStatus}
                       </span>
+                      {s.exhausted && (
+                        <span className="rounded border border-red-800 bg-red-950 px-2 py-0.5 text-xs font-medium text-red-300">
+                          Exhausted (max retries reached)
+                        </span>
+                      )}
                     </div>
+                    {s.retryCount !== undefined && s.retryCount > 0 && (
+                      <p className="mt-1 text-xs text-neutral-400">Retries: {s.retryCount}</p>
+                    )}
                     {s.lastError && <p className="mt-1 break-all text-xs text-red-400">Error: {s.lastError}</p>}
                     {s.lastAttemptAt !== undefined && (
                       <p className="mt-1 text-xs text-neutral-500">
@@ -273,7 +281,7 @@ export default function AssetDetailPage() {
                       </p>
                     )}
                   </div>
-                  {s.syncStatus === "PUSH_FAILED" && asset.lifecycleState !== "ARCHIVED" && (
+                  {(s.syncStatus === "PUSH_FAILED" || s.exhausted) && asset.lifecycleState !== "ARCHIVED" && (
                     <button
                       onClick={() => retrySync.mutate(asset.id)}
                       disabled={retrySync.isPending}

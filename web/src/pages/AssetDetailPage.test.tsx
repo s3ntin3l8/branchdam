@@ -209,3 +209,153 @@ describe("AssetDetailPage inherit-metadata control", () => {
     expect(screen.queryByRole("button", { name: /inherit metadata/i })).not.toBeInTheDocument();
   });
 });
+
+describe("AssetDetailPage sync status", () => {
+  it("surfaces exhausted badge and retry count when sync is exhausted", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.getAssetSyncStatus).mockResolvedValue({
+      sync: [
+        {
+          remote: "immich",
+          syncStatus: "PUSH_FAILED",
+          retryCount: 3,
+          exhausted: true,
+          lastError: "connection refused",
+        },
+      ],
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    expect(screen.getByText("immich")).toBeInTheDocument();
+    expect(screen.getByText("PUSH_FAILED")).toBeInTheDocument();
+    expect(screen.getByText("Exhausted (max retries reached)")).toBeInTheDocument();
+    expect(screen.getByText("Retries: 3")).toBeInTheDocument();
+    expect(screen.getByText("Error: connection refused")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("surfaces retry count without exhausted badge when retry count > 0 but not exhausted", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.getAssetSyncStatus).mockResolvedValue({
+      sync: [
+        {
+          remote: "immich",
+          syncStatus: "PUSH_FAILED",
+          retryCount: 2,
+          exhausted: false,
+        },
+      ],
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    expect(screen.getByText("Retries: 2")).toBeInTheDocument();
+    expect(screen.queryByText("Exhausted (max retries reached)")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("omits retry count when retryCount is 0", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.getAssetSyncStatus).mockResolvedValue({
+      sync: [
+        {
+          remote: "immich",
+          syncStatus: "PUSHED",
+          retryCount: 0,
+          exhausted: false,
+        },
+      ],
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    expect(screen.getByText("PUSHED")).toBeInTheDocument();
+    expect(screen.queryByText(/retries:/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+
+  it("clicking retry triggers api.retrySync", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.getAssetSyncStatus).mockResolvedValue({
+      sync: [
+        {
+          remote: "immich",
+          syncStatus: "PUSH_FAILED",
+          retryCount: 3,
+          exhausted: true,
+        },
+      ],
+    });
+    vi.mocked(api.retrySync).mockResolvedValue({ requeued: 1 });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    const retryButton = screen.getByRole("button", { name: /retry/i });
+    await userEvent.click(retryButton);
+
+    await waitFor(() => expect(api.retrySync).toHaveBeenCalledWith(42));
+  });
+
+  it("surfaces error message when retrySync fails", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.getAssetSyncStatus).mockResolvedValue({
+      sync: [
+        {
+          remote: "immich",
+          syncStatus: "PUSH_FAILED",
+          retryCount: 3,
+          exhausted: true,
+        },
+      ],
+    });
+    vi.mocked(api.retrySync).mockRejectedValueOnce(new Error("server unavailable"));
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    const retryButton = screen.getByRole("button", { name: /retry/i });
+    await userEvent.click(retryButton);
+
+    await waitFor(() =>
+      expect(screen.getByText(/failed to retry sync: error: server unavailable/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("hides retry button for an ARCHIVED asset even if sync failed", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue({ ...asset, lifecycleState: "ARCHIVED" });
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.getAssetSyncStatus).mockResolvedValue({
+      sync: [
+        {
+          remote: "immich",
+          syncStatus: "PUSH_FAILED",
+          retryCount: 3,
+          exhausted: true,
+        },
+      ],
+    });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    expect(screen.getByText("immich")).toBeInTheDocument();
+    expect(screen.getByText("Exhausted (max retries reached)")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+});
