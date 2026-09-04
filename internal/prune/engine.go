@@ -22,8 +22,9 @@ import (
 var ErrNoLongerEligible = errors.New("node is no longer eligible for pruning: verified Tier-3 ancestor lost since Plan")
 
 // ErrAncestorUnreachable is returned for a candidate whose verified Tier-3
-// ancestor file on disk cannot be reached at Execute time -- see Execute's
-// own doc comment for why this check exists (#246).
+// ancestor file on disk cannot be reached or no longer matches its stored
+// mtime/size at Execute time -- see Execute's own doc comment for why this
+// check exists (#246, #352).
 var ErrAncestorUnreachable = errors.New("verified Tier-3 ancestor file on disk is unreachable: refusing to delete candidate")
 
 // ErrFileChangedSincePlan is returned for a candidate whose on-disk file no
@@ -73,9 +74,10 @@ type Result struct {
 }
 
 // Execute purges every candidate: re-verifies DB eligibility, re-verifies
-// every verified Tier-3 ancestor file is reachable on disk (os.Lstat,
-// aborting with ErrAncestorUnreachable if unreachable -- #246), re-verifies
-// the on-disk file hasn't changed since Plan, then storage.Guard.Remove
+// every verified Tier-3 ancestor file is reachable on disk and matches its
+// stored (mtime, size) (os.Lstat, aborting with ErrAncestorUnreachable if
+// unreachable or modified -- #246, #352), re-verifies the on-disk candidate file
+// hasn't changed since Plan, then storage.Guard.Remove
 // (so a read-only tier or a symlink escape is refused before any DB write
 // -- resolved and defeated by Guard.CheckWrite's own canonicalize step,
 // the same defense TestSymlinkEscapeRefused proves for every other Guard
@@ -187,9 +189,13 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 				return ErrNoLongerEligible
 			}
 
-			// Pre-delete re-verification of the Tier-3 ancestor's file on disk (#246):
-			// stat every verified Tier-3 ancestor. If any ancestor is unreachable,
-			// refuse to delete the Tier-1 candidate.
+			// Pre-delete re-verification of the Tier-3 ancestor's file on disk (#246, #352):
+			// stat every verified Tier-3 ancestor. If any ancestor is unreachable or has changed
+			// (mtime/size mismatch against stored DB row), refuse to delete the Tier-1 candidate.
+			// Re-verifying mtime and size ensures the on-disk master hasn't been rewritten or
+			// replaced since its verified full_hash was recorded; if it was modified, the
+			// stored full_hash cannot be trusted to represent the current file on disk, so we
+			// treat it as an unverified/unreachable master and skip deletion.
 			ancestors, err := q.ListVerifiedTier3Ancestors(ctx, c.NodeID)
 			if err != nil {
 				return err
@@ -198,7 +204,14 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 				return ErrNoLongerEligible
 			}
 			for _, a := range ancestors {
-				if _, statErr := os.Lstat(a.FilePath); statErr != nil {
+				aInfo, statErr := os.Lstat(a.FilePath)
+				if statErr != nil {
+					return ErrAncestorUnreachable
+				}
+				if aInfo.ModTime().Unix() != a.MtimeUnix || aInfo.Size() != a.SizeBytes {
+					// Second-granularity check matching mtime_unix's column type.
+					// A modified ancestor means the DB's verified full_hash is stale
+					// relative to the on-disk master file.
 					return ErrAncestorUnreachable
 				}
 			}

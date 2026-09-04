@@ -69,6 +69,13 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	if err != nil {
 		t.Fatalf("lstat proxy file: %v", err)
 	}
+	if err := os.Chtimes(masterPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes master file: %v", err)
+	}
+	masterInfo, err := os.Lstat(masterPath)
+	if err != nil {
+		t.Fatalf("lstat master file: %v", err)
+	}
 
 	var tier1ID, tier3ID int64
 	var candidate sqlcgen.MediaNode
@@ -93,7 +100,7 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 		master, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
 			NodeUuid: "uuid-master", StorageLocationID: tier3ID,
 			FilePath: filepath.Join(resolvedTier3, "master.jpg"), FileName: "master.jpg", FileExt: "jpg",
-			SizeBytes: 100, MtimeUnix: pruneOldMtime, FullHash: &fullHash,
+			SizeBytes: masterInfo.Size(), MtimeUnix: masterInfo.ModTime().Unix(), FullHash: &fullHash,
 			IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
 		})
 		if err != nil {
