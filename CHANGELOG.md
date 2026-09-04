@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.14.0](https://github.com/s3ntin3l8/branchdam/compare/v0.13.0...v0.14.0) (2026-09-04)
+
+
+### Features
+
+* **api:** GET /api/v1/agent/check-content pre-flight hash check ([#335](https://github.com/s3ntin3l8/branchdam/issues/335)) ([#340](https://github.com/s3ntin3l8/branchdam/issues/340)) ([53511b6](https://github.com/s3ntin3l8/branchdam/commit/53511b69b481fc22ef0febdd89922b20b8a26c4d))
+* **api:** GET /api/v1/agent/source-status endpoint for source file dedup check ([#331](https://github.com/s3ntin3l8/branchdam/issues/331)) ([#343](https://github.com/s3ntin3l8/branchdam/issues/343)) ([968981d](https://github.com/s3ntin3l8/branchdam/commit/968981d2544c497010436801f473b0be6abf43b6))
+* **auth:** server-side replay protection and HMAC-SHA256 signature validation ([#376](https://github.com/s3ntin3l8/branchdam/issues/376)) ([#395](https://github.com/s3ntin3l8/branchdam/issues/395)) ([bbba83e](https://github.com/s3ntin3l8/branchdam/commit/bbba83e349032919ed34ba36c697b5a0f587f140))
+* **ingest:** strict server-side BLAKE3 content deduplication gate ([#334](https://github.com/s3ntin3l8/branchdam/issues/334)) ([#339](https://github.com/s3ntin3l8/branchdam/issues/339)) ([23f03fc](https://github.com/s3ntin3l8/branchdam/commit/23f03fc8a4d939b587c5df9689617e085e2e75fb))
+* **storage:** runtime Guard reload on storage_locations change ([#332](https://github.com/s3ntin3l8/branchdam/issues/332)) ([e8fdd89](https://github.com/s3ntin3l8/branchdam/commit/e8fdd897290b483bb651b46629849c67694795a3))
+* **web:** "already in library" dedup UX on file upload ([#336](https://github.com/s3ntin3l8/branchdam/issues/336)) ([#372](https://github.com/s3ntin3l8/branchdam/issues/372)) ([9932383](https://github.com/s3ntin3l8/branchdam/commit/9932383a269847a4a5841b8da1a0e935cf495b77))
+* **web:** audit queue manual link node picker UI ([#359](https://github.com/s3ntin3l8/branchdam/issues/359)) ([#392](https://github.com/s3ntin3l8/branchdam/issues/392)) ([68e9db7](https://github.com/s3ntin3l8/branchdam/commit/68e9db7273818481ce62a2036f050b015aef7a83))
+* **web:** sync status UI surface retryCount and exhausted state with manual retry ([#358](https://github.com/s3ntin3l8/branchdam/issues/358)) ([#393](https://github.com/s3ntin3l8/branchdam/issues/393)) ([5386069](https://github.com/s3ntin3l8/branchdam/commit/53860696937772c70601b439fe3437a230bb4eee))
+
+
+### Bug Fixes
+
+* **agent:** route drainer deletions through Guard and set INDEXED on rebase ([#351](https://github.com/s3ntin3l8/branchdam/issues/351), [#367](https://github.com/s3ntin3l8/branchdam/issues/367)) ([#391](https://github.com/s3ntin3l8/branchdam/issues/391)) ([798da44](https://github.com/s3ntin3l8/branchdam/commit/798da4448e44c02db36c1e517f2f87b602b614a4))
+* **auth:** Make IsAdmin self-contained and add test coverage ([#360](https://github.com/s3ntin3l8/branchdam/issues/360)) ([#379](https://github.com/s3ntin3l8/branchdam/issues/379)) ([332e3b6](https://github.com/s3ntin3l8/branchdam/commit/332e3b6a931a92741ecf10a25e4d645320e2dbf0))
+* **db:** tighten TouchMediaNode CAS to exclude ARCHIVED rows ([#347](https://github.com/s3ntin3l8/branchdam/issues/347)) ([#381](https://github.com/s3ntin3l8/branchdam/issues/381)) ([70b1cf2](https://github.com/s3ntin3l8/branchdam/commit/70b1cf20295da418fcf39984c7abc40e0cbcd3b1))
+* **graph:** FilenameStemResolver proxy-swap for role-suffix proxies ([#346](https://github.com/s3ntin3l8/branchdam/issues/346)) ([#377](https://github.com/s3ntin3l8/branchdam/issues/377)) ([a1ec1ba](https://github.com/s3ntin3l8/branchdam/commit/a1ec1baf51103a10979934241915ff544cf99a27))
+* **httpapi:** populate Asset DTO on deduplicated upload responses ([#373](https://github.com/s3ntin3l8/branchdam/issues/373)) ([d75a53e](https://github.com/s3ntin3l8/branchdam/commit/d75a53e15d1c0f89d075d38361bdbc1d3b40b711))
+* **perf:** batch edge queries in lineage traversal and prune.Execute ([#333](https://github.com/s3ntin3l8/branchdam/issues/333)) ([1257010](https://github.com/s3ntin3l8/branchdam/commit/1257010ff6e1815f300c6e9c1aca4676d81fd74e))
+* **prune:** re-verify Tier-3 ancestor mtime and size in prune.Execute ([#352](https://github.com/s3ntin3l8/branchdam/issues/352)) ([#384](https://github.com/s3ntin3l8/branchdam/issues/384)) ([2a65ab1](https://github.com/s3ntin3l8/branchdam/commit/2a65ab1ecdfdb22047055974a10351a3b2049735))
+* **scan:** distinguish shutdown-cancelled from completed-with-failures ([#353](https://github.com/s3ntin3l8/branchdam/issues/353)) ([#386](https://github.com/s3ntin3l8/branchdam/issues/386)) ([561494c](https://github.com/s3ntin3l8/branchdam/commit/561494c70f5eaed8a305725faa3b5bb2f2686eb0))
+* **security:** backend security hardening — origin validation, config permissions, secret expansion ([#326](https://github.com/s3ntin3l8/branchdam/issues/326)) ([778c669](https://github.com/s3ntin3l8/branchdam/commit/778c669eaf068fb953c7f81029fb7e0e496a7cd8))
+* **upload:** stream multipart uploads, use typed errors, clean up dedup orphans, validate storage location ([#364](https://github.com/s3ntin3l8/branchdam/issues/364), [#368](https://github.com/s3ntin3l8/branchdam/issues/368), [#363](https://github.com/s3ntin3l8/branchdam/issues/363), [#356](https://github.com/s3ntin3l8/branchdam/issues/356)) ([#390](https://github.com/s3ntin3l8/branchdam/issues/390)) ([2b4084a](https://github.com/s3ntin3l8/branchdam/commit/2b4084a1c7b5efce53de504f81d4d3acca3df8b2))
+* **watch:** Guard debouncer callback against fire-after-cancel race ([#354](https://github.com/s3ntin3l8/branchdam/issues/354)) ([#378](https://github.com/s3ntin3l8/branchdam/issues/378)) ([c1f2177](https://github.com/s3ntin3l8/branchdam/commit/c1f21776e47b28855f02014c54694aa196f05d2c))
+* **web:** a11y/pagination/guards, keyset audit queue with total ([#341](https://github.com/s3ntin3l8/branchdam/issues/341)) ([06a8c8b](https://github.com/s3ntin3l8/branchdam/commit/06a8c8b2653aac85e91e8b0f7a17ec7254cda150))
+* **web:** frontend UX bugs — memory leak, SSE disconnect, thumbnail fallback, re-render ([#325](https://github.com/s3ntin3l8/branchdam/issues/325)) ([9dcae37](https://github.com/s3ntin3l8/branchdam/commit/9dcae37fa3f99b1d0ec8c02f280107a2fcbd1283))
+* **web:** Replace 5-char random upload-queue IDs with crypto.randomUUID() ([#350](https://github.com/s3ntin3l8/branchdam/issues/350)) ([#380](https://github.com/s3ntin3l8/branchdam/issues/380)) ([d322ee9](https://github.com/s3ntin3l8/branchdam/commit/d322ee9ae26bec5469989bb1ce33dd8e933dd9a9))
+* **web:** server-side unlinked count and X-Dedup upload notice ([#348](https://github.com/s3ntin3l8/branchdam/issues/348), [#336](https://github.com/s3ntin3l8/branchdam/issues/336)) ([#388](https://github.com/s3ntin3l8/branchdam/issues/388)) ([cace7bc](https://github.com/s3ntin3l8/branchdam/commit/cace7bcaa1cf9a97e11b950a06b991bb43189ec0))
+* **web:** SSE reconnect state, XHR cleanup, and thumbnail error fallback ([#349](https://github.com/s3ntin3l8/branchdam/issues/349), [#357](https://github.com/s3ntin3l8/branchdam/issues/357)) ([#383](https://github.com/s3ntin3l8/branchdam/issues/383)) ([8db7e9b](https://github.com/s3ntin3l8/branchdam/commit/8db7e9b6c2602a007987e657f7ab02e3c631f588))
+
+
+### Performance Improvements
+
+* **httpapi:** cache SSE broadcast query and batch agent node status queries ([#365](https://github.com/s3ntin3l8/branchdam/issues/365), [#366](https://github.com/s3ntin3l8/branchdam/issues/366)) ([#385](https://github.com/s3ntin3l8/branchdam/issues/385)) ([c8fc955](https://github.com/s3ntin3l8/branchdam/commit/c8fc955ecf82cca38cd2fdf5cf2ccbcbac6241a3))
+
 ## [0.13.0](https://github.com/s3ntin3l8/branchdam/compare/v0.12.0...v0.13.0) (2026-08-29)
 
 
