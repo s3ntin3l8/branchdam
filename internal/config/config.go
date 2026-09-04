@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -144,9 +145,26 @@ type Workers struct {
 // Agent configures the machine-principal auth chain (internal/auth, PR 8).
 // The key itself is never set directly in config.yaml -- it is meant to be
 // injected via ${BRANCHDAM_AGENT_API_KEY} from a gitignored .env, per
-// docs/forward-auth.md.
+// docs/forward-auth.md. signedRequests and replayWindowSecs live under
+// `agent:` (not `server:`) because they are agent-route-specific; issue
+// #376's spec used `server.signedRequests`/`server.replayWindow` and
+// the keys were deliberately renamed during implementation so the config
+// mirrors the code path (internal/auth.AgentConfig) that consumes them.
 type Agent struct {
-	APIKey string `yaml:"apiKey"`
+	APIKey             string   `yaml:"apiKey"`
+	SignedRequests     bool     `yaml:"signedRequests"`
+	ReplayWindowSecs   int      `yaml:"replayWindowSecs"`
+	SignedMaxBodyBytes int64    `yaml:"signedMaxBodyBytes"`
+	SkipSignaturePaths []string `yaml:"skipSignaturePaths"`
+}
+
+// ReplayWindow returns the configured replay window as a time.Duration.
+// If ReplayWindowSecs is <= 0, it defaults to 5 minutes (300s).
+func (a Agent) ReplayWindow() time.Duration {
+	if a.ReplayWindowSecs <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(a.ReplayWindowSecs) * time.Second
 }
 
 // Immich configures the Immich external-library scan trigger (internal/immich,
@@ -230,6 +248,10 @@ func defaultConfig() Config {
 		},
 		Ingest: Ingest{
 			NamingTemplate: naming.DefaultPathTemplate,
+		},
+		Agent: Agent{
+			SignedRequests:   false,
+			ReplayWindowSecs: 300,
 		},
 		Trash: Trash{
 			RetentionDays: 30,

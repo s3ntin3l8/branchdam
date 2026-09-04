@@ -226,13 +226,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/upload", s.handleWebUpload)
 	mux.Handle("GET /", s.spaHandler())
 
-	var apiKey string
+	var agentCfg auth.AgentConfig
 	if cfg := s.cfg(); cfg != nil {
-		apiKey = cfg.Agent.APIKey
+		agentCfg = auth.AgentConfig{
+			APIKey:             cfg.Agent.APIKey,
+			SignedRequests:     cfg.Agent.SignedRequests,
+			ReplayWindow:       cfg.Agent.ReplayWindow(),
+			SignedMaxBodyBytes: cfg.Agent.SignedMaxBodyBytes,
+			SkipSignaturePaths: cfg.Agent.SkipSignaturePaths,
+		}
 	}
 
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
-	routed := auth.Route(apiKey, s.log, authzHandler)
+	routed := auth.RouteWithConfig(agentCfg, s.log, authzHandler)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))
 }

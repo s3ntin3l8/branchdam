@@ -1,10 +1,18 @@
 package auth
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // minAgentKeyLength matches config.example.yaml's documented requirement.
@@ -12,35 +20,85 @@ import (
 // accepting a weak or empty secret.
 const minAgentKeyLength = 32
 
-const apiKeyHeader = "X-API-Key"
+// defaultSignedMaxBodyBytes caps the request body the signature validator is
+// willing to buffer in memory. Every signed agent endpoint other than the
+// upload stream is JSON; 16 MiB is comfortably above any realistic JSON
+// payload (handshake + node-status are KiB-sized) and bounded well below
+// the 50 GiB upload engine default that the streaming upload route streams
+// through -- the upload route is exempt from signature validation entirely
+// (see defaultSkipSignaturePaths) precisely because of this asymmetry.
+const defaultSignedMaxBodyBytes int64 = 16 * 1024 * 1024
+
+// defaultSkipSignaturePaths lists the agent endpoints that do NOT require
+// request signature validation. /api/v1/agent/upload is exempt because the
+// agent client (s3ntin3l8/branchdam-agent) never signs the streaming
+// upload -- it fully buffers its JSON-bound post/get but the upload body
+// is the binary stream itself, and the canonical-string contract
+// (method\npath\nnonce\ntimestamp\nbody) was never defined for it.
+// Forcing signature validation on upload would either regress the
+// streaming optimization (PR #390) by demanding full in-memory buffering
+// of up to 50 GiB, or fail every legitimate upload. Operators may add
+// additional paths via agent.skipSignaturePaths in config.yaml; matching
+// is by exact path or strings.HasPrefix when the entry ends in '/'.
+var defaultSkipSignaturePaths = []string{
+	"/api/v1/agent/upload",
+}
+
+const (
+	apiKeyHeader    = "X-API-Key"
+	timestampHeader = "X-Timestamp"
+	nonceHeader     = "X-Nonce"
+	signatureHeader = "X-Signature"
+)
+
+// AgentConfig bundles the configuration options for the agent authentication chain.
+type AgentConfig struct {
+	APIKey             string
+	SignedRequests     bool
+	ReplayWindow       time.Duration
+	SignedMaxBodyBytes int64            // max body bytes the signature validator buffers (0 = defaultSignedMaxBodyBytes)
+	SkipSignaturePaths []string         // paths that bypass signature validation (default defaultSkipSignaturePaths)
+	Now                func() time.Time // optional clock override for testing clock skew
+	Cache              *ReplayCache     // optional in-memory replay cache
+}
 
 // AgentChain authenticates /api/v1/agent/* requests against a static
-// shared secret (spec §5) and attaches a machine Principal. Two properties
-// hold regardless of what happens downstream:
-//
-//  1. Every X-Authentik-* header is deleted from the request BEFORE the key
-//     is even checked -- unconditionally, not just on success. The agent
-//     router bypasses Traefik's ForwardAuth middleware by design (spec
-//     §5), so nothing upstream strips a client-supplied
-//     X-Authentik-Username; if this chain didn't, a request straight to
-//     this router could forge one. Stripping first, regardless of outcome,
-//     means the observable behavior of this middleware never depends on
-//     whether those headers were present -- there's no timing or
-//     error-branch difference to distinguish "stripped because valid" from
-//     "stripped because rejected."
-//  2. The resulting Principal (on success) has Kind: KindMachine and
-//     empty Name/Email/Groups -- see principal.go's doc comment for why.
-//
-// keyConfigured reports whether apiKey met minAgentKeyLength at
-// construction time; log records that fact ONCE here, at chain-build time
-// (server startup), rather than on every rejected request.
+// shared secret (spec §5) and attaches a machine Principal.
 func AgentChain(apiKey string, log *slog.Logger) func(http.Handler) http.Handler {
+	return AgentChainWithConfig(AgentConfig{APIKey: apiKey}, log)
+}
+
+// AgentChainWithConfig builds the agent auth middleware using the supplied AgentConfig.
+// When SignedRequests is true, it verifies X-Timestamp, X-Nonce, and X-Signature
+// (HMAC-SHA256 over method\npath\nnonce\ntimestamp\nbody) within the replay window.
+func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) http.Handler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	keyConfigured := len(apiKey) >= minAgentKeyLength
+	keyConfigured := len(cfg.APIKey) >= minAgentKeyLength
 	if !keyConfigured {
 		log.Warn("auth: BRANCHDAM_AGENT_API_KEY is unset or shorter than the minimum length -- agent routes will fail closed with 503 until it is fixed", "minLength", minAgentKeyLength)
+	}
+
+	window := cfg.ReplayWindow
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	cache := cfg.Cache
+	if cache == nil {
+		cache = NewReplayCache()
+	}
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	maxBody := cfg.SignedMaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = defaultSignedMaxBodyBytes
+	}
+	skipPaths := cfg.SkipSignaturePaths
+	if skipPaths == nil {
+		skipPaths = defaultSkipSignaturePaths
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -53,15 +111,121 @@ func AgentChain(apiKey string, log *slog.Logger) func(http.Handler) http.Handler
 			}
 
 			provided := r.Header.Get(apiKeyHeader)
-			if provided == "" || !constantTimeEqual(provided, apiKey) {
+			if provided == "" || !constantTimeEqual(provided, cfg.APIKey) {
 				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
 				return
+			}
+
+			// The API key check above always runs. Signature validation is
+			// skipped only for endpoints the agent client cannot satisfy the
+			// canonical-string contract for (see defaultSkipSignaturePaths).
+			requireSignature := cfg.SignedRequests && !matchesAnyPath(r.URL.Path, skipPaths)
+
+			if requireSignature {
+				tsStr := r.Header.Get(timestampHeader)
+				nonce := r.Header.Get(nonceHeader)
+				sig := r.Header.Get(signatureHeader)
+
+				if tsStr == "" || nonce == "" || sig == "" {
+					log.Warn("auth: agent signature rejected", "reason", "missing_header", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				tsNano, err := strconv.ParseInt(tsStr, 10, 64)
+				if err != nil {
+					log.Warn("auth: agent signature rejected", "reason", "bad_timestamp_format", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				now := nowFn()
+				reqTime := time.Unix(0, tsNano)
+				skew := now.Sub(reqTime)
+				if skew > window || skew < -window {
+					log.Warn("auth: agent signature rejected", "reason", "clock_skew", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "skew", skew.String(), "window", window.String())
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				var bodyBytes []byte
+				if r.Body != nil {
+					// http.MaxBytesReader caps the body the signature
+					// validator is willing to buffer in memory; any read
+					// past the cap returns *http.MaxBytesError so the
+					// generic ReadAll error path below can return 413
+					// instead of an arbitrary 400.
+					r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+					var readErr error
+					bodyBytes, readErr = io.ReadAll(r.Body)
+					if readErr != nil {
+						var maxBytesErr *http.MaxBytesError
+						if errors.As(readErr, &maxBytesErr) {
+							log.Warn("auth: agent signature rejected", "reason", "body_too_large", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "limitBytes", maxBody)
+							http.Error(w, "request body exceeds signed body limit", http.StatusRequestEntityTooLarge)
+							return
+						}
+						log.Warn("auth: agent signature rejected", "reason", "body_read_error", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "err", readErr.Error())
+						http.Error(w, "failed to read request body", http.StatusBadRequest)
+						return
+					}
+					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+
+				// r.URL.RequestURI() returns the raw path + query string as
+				// it appeared on the wire (decoded by Go's HTTP parser but
+				// not re-encoded), matching the agent client's signing
+				// contract in internal/branchdam.Client.signRequest. Using
+				// r.URL.Path here would silently drop the query and break
+				// signed-query endpoints (e.g. /agent/check-content?fastHash=...)
+				// without any error.
+				mac := hmac.New(sha256.New, []byte(cfg.APIKey))
+				mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + nonce + "\n" + tsStr + "\n"))
+				mac.Write(bodyBytes)
+				expectedSig := hex.EncodeToString(mac.Sum(nil))
+
+				if !constantTimeEqual(sig, expectedSig) {
+					log.Warn("auth: agent signature rejected", "reason", "signature_mismatch", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
+
+				expiresAt := reqTime.Add(window)
+				if !cache.CheckAndRecord(nonce, expiresAt, now) {
+					log.Warn("auth: agent signature rejected", "reason", "replayed_nonce", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
+				}
 			}
 
 			principal := Principal{Kind: KindMachine}
 			next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), principal)))
 		})
 	}
+}
+
+// matchesAnyPath reports whether path matches any prefix in patterns. An
+// entry ending in '/' is treated as a path prefix (e.g. "/api/v1/agent/"
+// matches "/api/v1/agent/upload/foo"); all other entries are matched by
+// exact equality. This is intentionally simpler than http.ServeMux's
+// pattern grammar -- the agent endpoint set is small and adding an exotic
+// glob language is more risk than reward.
+func matchesAnyPath(path string, patterns []string) bool {
+	for _, p := range patterns {
+		if p == "" {
+			continue
+		}
+		if strings.HasSuffix(p, "/") {
+			if strings.HasPrefix(path, p) {
+				return true
+			}
+			continue
+		}
+		if path == p {
+			return true
+		}
+	}
+	return false
 }
 
 // stripAuthentikHeaders deletes every header whose canonical name starts
