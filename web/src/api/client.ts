@@ -128,15 +128,28 @@ export const api = {
     onProgress?: (event: UploadProgressEvent) => void,
     signal?: AbortSignal
   ): Promise<WebUploadResponse> => {
+    if (signal?.aborted) {
+      return Promise.reject(new DOMException("Upload aborted", "AbortError"));
+    }
+
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/v1/upload");
 
+      const onAbort = () => {
+        cleanup();
+        xhr.abort();
+        reject(new DOMException("Upload aborted", "AbortError"));
+      };
+
+      const cleanup = () => {
+        if (signal) {
+          signal.removeEventListener("abort", onAbort);
+        }
+      };
+
       if (signal) {
-        signal.addEventListener("abort", () => {
-          xhr.abort();
-          reject(new DOMException("Upload aborted", "AbortError"));
-        });
+        signal.addEventListener("abort", onAbort, { once: true });
       }
 
       if (onProgress && xhr.upload) {
@@ -149,6 +162,7 @@ export const api = {
       }
 
       xhr.onload = () => {
+        cleanup();
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText) as WebUploadResponse;
@@ -171,6 +185,7 @@ export const api = {
       };
 
       xhr.onerror = () => {
+        cleanup();
         reject(new ApiError(xhr.status || 0, "Network error during upload"));
       };
 

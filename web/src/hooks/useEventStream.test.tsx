@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useEventStream } from "./useEventStream";
 
 // jsdom doesn't implement EventSource -- a minimal fake is enough to drive
-// the "progress" listener this hook registers, mirroring the ResizeObserver
-// stub pattern in test/setup.ts.
+// the "progress", "error", and "open" listeners this hook registers.
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
   private listeners: Record<string, Array<() => void>> = {};
   url: string;
+  onerror: (() => void) | null = null;
+  onopen: (() => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
@@ -29,6 +30,8 @@ class FakeEventSource {
 
   emit(type: string) {
     for (const cb of this.listeners[type] ?? []) cb();
+    if (type === "error" && this.onerror) this.onerror();
+    if (type === "open" && this.onopen) this.onopen();
   }
 }
 
@@ -42,43 +45,36 @@ describe("useEventStream", () => {
   const originalEventSource = globalThis.EventSource;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     FakeEventSource.instances = [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     globalThis.EventSource = FakeEventSource as any;
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     globalThis.EventSource = originalEventSource;
   });
 
-  // L4: the ingest jobs page (#52) and storage-health page (#51) were both
-  // added after this hook and never wired into its "progress" nudge --
-  // they previously only updated on their own poll interval instead of
-  // reacting live like assets/audit-queue/progress already did.
-  //
-  // #153: a background scan or graph-resolver pass changing a node's
-  // graph_status -- not a manual confirm/reject/create action -- must also
-  // refresh a mounted AssetDetailPage. "asset" (singular) is a different key
-  // namespace from "assets" (plural) and prefix matching doesn't bridge them
-  // (see the same note in queries.ts's invalidateEdgeReviewQueries), so the
-  // detail query, lineage, and graph need their own entries here.
-  //
-  // "settings" was added once the Settings page (SettingsPage.tsx) started
-  // consuming useSettings() -- a second browser session's PUT broadcasts
-  // this same coarse nudge, since the hub has no per-topic channel.
-  it("invalidates the graph_status-dependent asset queries on a progress nudge, alongside every other key", () => {
+  it("invalidates the graph_status-dependent asset queries on a progress nudge after 200ms debounce", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const spy = vi.spyOn(queryClient, "invalidateQueries");
 
     renderHook(() => useEventStream(), { wrapper: wrapper(queryClient) });
 
     expect(FakeEventSource.instances).toHaveLength(1);
-    FakeEventSource.instances[0].emit("progress");
+    act(() => {
+      FakeEventSource.instances[0].emit("progress");
+    });
 
-    // Exact match, not arrayContaining -- this hook invalidates a fixed,
-    // known set of keys on every nudge, so a future omission (e.g. dropping
-    // one of ASSET_DETAIL_QUERY_KEYS by accident) should fail this test
-    // instead of passing silently.
+    // Before debounce fires
+    expect(spy).not.toHaveBeenCalled();
+
+    // Advance 200ms
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
     const keys = spy.mock.calls.map(([filters]) => filters?.queryKey);
     expect(keys).toEqual([
       ["progress"],
@@ -91,5 +87,72 @@ describe("useEventStream", () => {
       ["asset-lineage"],
       ["asset-graph"],
     ]);
+  });
+
+  it("debounces rapid-fire progress nudges to avoid refetch churn (#357)", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+
+    renderHook(() => useEventStream(), { wrapper: wrapper(queryClient) });
+
+    const es = FakeEventSource.instances[0];
+
+    // Emit 3 progress events in quick succession
+    act(() => {
+      es.emit("progress");
+    });
+    act(() => {
+      vi.advanceTimersByTime(50);
+      es.emit("progress");
+    });
+    act(() => {
+      vi.advanceTimersByTime(50);
+      es.emit("progress");
+    });
+
+    // 100ms passed total, debounce timer was reset twice, no invalidation yet
+    expect(spy).not.toHaveBeenCalled();
+
+    // Wait full 200ms from last event
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
+    // Only 9 invalidation calls (one batch for the 9 query keys)
+    expect(spy).toHaveBeenCalledTimes(9);
+  });
+
+  it("tracks disconnected state on error and clears it on open or progress (#349)", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const { result } = renderHook(() => useEventStream(), { wrapper: wrapper(queryClient) });
+
+    expect(result.current.disconnected).toBe(false);
+
+    const es = FakeEventSource.instances[0];
+
+    // Server drops connection / triggers error
+    act(() => {
+      es.emit("error");
+    });
+    expect(result.current.disconnected).toBe(true);
+
+    // Browser reconnects and fires open
+    act(() => {
+      es.emit("open");
+    });
+    expect(result.current.disconnected).toBe(false);
+
+    // Error again
+    act(() => {
+      es.emit("error");
+    });
+    expect(result.current.disconnected).toBe(true);
+
+    // Nudge arrives
+    act(() => {
+      es.emit("progress");
+    });
+    expect(result.current.disconnected).toBe(false);
   });
 });

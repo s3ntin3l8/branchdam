@@ -151,4 +151,145 @@ describe("api client", () => {
     expect(res.nodeUuid).toBe("u-99");
     expect(res.status).toBe("DEDUPLICATED");
   });
+
+  it("uploadFile cleans up signal abort listener on success", async () => {
+    let xhrInstance: {
+      open: ReturnType<typeof vi.fn>;
+      send: ReturnType<typeof vi.fn>;
+      status: number;
+      responseText: string;
+      getResponseHeader: ReturnType<typeof vi.fn>;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      upload: Record<string, unknown>;
+    };
+
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function () {
+      xhrInstance = {
+        open: vi.fn(),
+        send: vi.fn(() => {
+          setTimeout(() => {
+            if (xhrInstance.onload) xhrInstance.onload();
+          }, 0);
+        }),
+        status: 200,
+        responseText: JSON.stringify({
+          asset: { id: 1, nodeUuid: "u-1" },
+          nodeUuid: "u-1",
+          status: "OK",
+          bytesWritten: 100,
+          blake3Hash: "hash1",
+          relativePath: "test.jpg",
+        }),
+        getResponseHeader: vi.fn(() => null),
+        onload: null,
+        onerror: null,
+        upload: {},
+      };
+      return xhrInstance;
+    }));
+
+    const controller = new AbortController();
+    const origRemove = controller.signal.removeEventListener.bind(controller.signal);
+    const removeSpy = vi.fn(origRemove);
+    controller.signal.removeEventListener = removeSpy;
+
+    const file = new File(["test data"], "test.jpg", { type: "image/jpeg" });
+    await api.uploadFile(file, {}, undefined, controller.signal);
+
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  it("uploadFile cleans up signal abort listener on error", async () => {
+    let xhrInstance: {
+      open: ReturnType<typeof vi.fn>;
+      send: ReturnType<typeof vi.fn>;
+      status: number;
+      responseText: string;
+      getResponseHeader: ReturnType<typeof vi.fn>;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      upload: Record<string, unknown>;
+    };
+
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function () {
+      xhrInstance = {
+        open: vi.fn(),
+        send: vi.fn(() => {
+          setTimeout(() => {
+            if (xhrInstance.onerror) xhrInstance.onerror();
+          }, 0);
+        }),
+        status: 500,
+        responseText: JSON.stringify({ detail: "server error" }),
+        getResponseHeader: vi.fn(() => null),
+        onload: null,
+        onerror: null,
+        upload: {},
+      };
+      return xhrInstance;
+    }));
+
+    const controller = new AbortController();
+    const origRemove = controller.signal.removeEventListener.bind(controller.signal);
+    const removeSpy = vi.fn(origRemove);
+    controller.signal.removeEventListener = removeSpy;
+
+    const file = new File(["test data"], "test.jpg", { type: "image/jpeg" });
+    await expect(api.uploadFile(file, {}, undefined, controller.signal)).rejects.toThrow();
+
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  it("uploadFile aborts XHR and cleans up listener when signal aborts", async () => {
+    const abortSpy = vi.fn();
+    let xhrInstance: {
+      open: ReturnType<typeof vi.fn>;
+      send: ReturnType<typeof vi.fn>;
+      abort: ReturnType<typeof vi.fn>;
+      status: number;
+      responseText: string;
+      getResponseHeader: ReturnType<typeof vi.fn>;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      upload: Record<string, unknown>;
+    };
+
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function () {
+      xhrInstance = {
+        open: vi.fn(),
+        send: vi.fn(),
+        abort: abortSpy,
+        status: 0,
+        responseText: "",
+        getResponseHeader: vi.fn(() => null),
+        onload: null,
+        onerror: null,
+        upload: {},
+      };
+      return xhrInstance;
+    }));
+
+    const controller = new AbortController();
+    const origRemove = controller.signal.removeEventListener.bind(controller.signal);
+    const removeSpy = vi.fn(origRemove);
+    controller.signal.removeEventListener = removeSpy;
+
+    const file = new File(["test data"], "test.jpg", { type: "image/jpeg" });
+    const uploadPromise = api.uploadFile(file, {}, undefined, controller.signal);
+
+    controller.abort();
+
+    await expect(uploadPromise).rejects.toThrow("Upload aborted");
+    expect(abortSpy).toHaveBeenCalled();
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  it("uploadFile rejects immediately when signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const file = new File(["test data"], "test.jpg", { type: "image/jpeg" });
+    await expect(api.uploadFile(file, {}, undefined, controller.signal)).rejects.toThrow("Upload aborted");
+  });
 });
