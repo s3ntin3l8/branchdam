@@ -233,3 +233,46 @@ func TestLogWatcherErrorDistinguishesOverflow(t *testing.T) {
 		t.Error("overflow and non-overflow errors produced identical log lines -- not distinguishable")
 	}
 }
+
+func TestDebouncerStopAllPreventsPendingCallbacks(t *testing.T) {
+	d := newDebouncer(20 * time.Millisecond)
+
+	var mu sync.Mutex
+	called := false
+
+	d.trigger("key", func() {
+		mu.Lock()
+		called = true
+		mu.Unlock()
+	})
+
+	// Stop before timer fires
+	d.stopAll()
+
+	// Wait past delay
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	got := called
+	mu.Unlock()
+
+	if got {
+		t.Errorf("callback was executed after stopAll")
+	}
+
+	// Triggering on a stopped debouncer should also be a no-op
+	d.trigger("key2", func() {
+		mu.Lock()
+		called = true
+		mu.Unlock()
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	got2 := called
+	mu.Unlock()
+
+	if got2 {
+		t.Errorf("callback was executed on closed debouncer")
+	}
+}
