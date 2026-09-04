@@ -60,7 +60,8 @@ WITH RECURSIVE ancestors(ancestor_id) AS (
     WHERE e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
-SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id
+SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id,
+       media_nodes.mtime_unix, media_nodes.size_bytes
 FROM media_nodes
 WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
   AND media_nodes.id <> ?1
@@ -74,13 +75,15 @@ type ListVerifiedTier3AncestorsRow struct {
 	ID                int64
 	FilePath          string
 	StorageLocationID int64
+	MtimeUnix         int64
+	SizeBytes         int64
 }
 
 // Walks ancestor lineage target->source for node ?1 (REJECTED edges and
 // ARCHIVED nodes excluded) and returns every live ancestor on a
 // TIER3_MASTER_ARCHIVE location with a verified full_hash.
 // Used by internal/prune.Execute to re-verify the ancestor file on disk (via
-// os.Lstat) immediately before deleting the candidate (#246).
+// os.Lstat) immediately before deleting the candidate (#246, #352).
 func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listVerifiedTier3Ancestors, id)
 	if err != nil {
@@ -90,7 +93,13 @@ func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]L
 	items := []ListVerifiedTier3AncestorsRow{}
 	for rows.Next() {
 		var i ListVerifiedTier3AncestorsRow
-		if err := rows.Scan(&i.ID, &i.FilePath, &i.StorageLocationID); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.FilePath,
+			&i.StorageLocationID,
+			&i.MtimeUnix,
+			&i.SizeBytes,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

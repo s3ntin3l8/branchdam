@@ -104,7 +104,7 @@ SELECT ancestors.id FROM ancestors;
 -- ARCHIVED nodes excluded) and returns every live ancestor on a
 -- TIER3_MASTER_ARCHIVE location with a verified full_hash.
 -- Used by internal/prune.Execute to re-verify the ancestor file on disk (via
--- os.Lstat) immediately before deleting the candidate (#246).
+-- os.Lstat) immediately before deleting the candidate (#246, #352).
 WITH RECURSIVE ancestors(ancestor_id) AS (
     SELECT ?1 AS ancestor_id
     UNION
@@ -115,7 +115,8 @@ WITH RECURSIVE ancestors(ancestor_id) AS (
     WHERE e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
-SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id
+SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id,
+       media_nodes.mtime_unix, media_nodes.size_bytes
 FROM media_nodes
 WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
   AND media_nodes.id <> ?1

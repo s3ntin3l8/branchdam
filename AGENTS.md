@@ -57,7 +57,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 4. **Header Isolation**: `internal/auth.BrowserChain` is the ONLY code permitted to read `X-Authentik-*` headers (`TestNoDirectAuthentikHeaderReads`). Agent routes unconditionally strip them.
 5. **Agent Paths Untrusted**: `storage_location_id` on agent DTOs is ignored and re-derived from `storage.Guard.Resolve(filePath)`.
 6. **Audit Priority**: Human `CONFIRMED`/`REJECTED` edge review states permanently outrank automated resolvers.
-7. **Pruning TOCTOU Protections**: Tier-1 pruning requires a verified, live Tier-3 master with a 64-character `full_hash`. `prune.Execute` re-verifies disk presence (`os.Lstat`) and mtime/size immediately before calling `Guard.Remove`.
+7. **Pruning TOCTOU Protections**: Tier-1 pruning requires a verified, live Tier-3 master with a 64-character `full_hash`. `prune.Execute` re-verifies disk presence (`os.Lstat`) and mtime/size for both candidates and Tier-3 ancestors immediately before calling `Guard.Remove`.
 8. **Immich Supervisor**: Immich sync worker joins on graceful shutdown and refuses to start new workers once shutdown begins.
 9. **Process Re-exec on Restart**: `POST /api/v1/restart` re-execs the binary (`syscall.Exec`) after graceful HTTP drain, gated to admin groups.
 
