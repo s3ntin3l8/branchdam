@@ -809,34 +809,37 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	// Move physical master file to .trash/<rel_path> buffer inside storage location
 	if d.guard != nil && node.FilePath != "" {
 		if loc, err := d.guard.Resolve(node.FilePath); err == nil {
-			if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
-				trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
-				// Guard against overwriting pre-existing trashed files if the same relPath is trashed again
-				trashExt := filepath.Ext(trashPath)
-				trashStem := strings.TrimSuffix(trashPath, trashExt)
-				uniqueTrashPath := trashPath
-				collisionIdx := 0
-				for {
-					if _, err := os.Stat(uniqueTrashPath); os.IsNotExist(err) {
-						break
+			// Ensure Tier 3 and read-only locations are never targeted for deletion or trashing
+			if !loc.ReadOnly && loc.Tier != "TIER3_MASTER_ARCHIVE" {
+				if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
+					trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
+					// Guard against overwriting pre-existing trashed files if the same relPath is trashed again
+					trashExt := filepath.Ext(trashPath)
+					trashStem := strings.TrimSuffix(trashPath, trashExt)
+					uniqueTrashPath := trashPath
+					collisionIdx := 0
+					for {
+						if _, err := os.Stat(uniqueTrashPath); os.IsNotExist(err) {
+							break
+						}
+						collisionIdx++
+						uniqueTrashPath = fmt.Sprintf("%s_%d%s", trashStem, collisionIdx, trashExt)
 					}
-					collisionIdx++
-					uniqueTrashPath = fmt.Sprintf("%s_%d%s", trashStem, collisionIdx, trashExt)
-				}
-				trashPath = uniqueTrashPath
+					trashPath = uniqueTrashPath
 
-				now := time.Now().UTC()
-				if err := os.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
-					d.log.Warn("agent: failed to create trash directory", "err", err)
-				} else if _, statErr := os.Stat(node.FilePath); statErr == nil {
-					if err := os.Rename(node.FilePath, trashPath); err != nil {
-						if copyErr := moveFile(node.FilePath, trashPath); copyErr != nil {
-							d.log.Warn("agent: failed to move file to trash", "err", copyErr)
+					now := time.Now().UTC()
+					if err := d.guard.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
+						d.log.Warn("agent: failed to create trash directory", "err", err)
+					} else if _, statErr := os.Stat(node.FilePath); statErr == nil {
+						if err := os.Rename(node.FilePath, trashPath); err != nil {
+							if copyErr := d.moveFile(node.FilePath, trashPath); copyErr != nil {
+								d.log.Warn("agent: failed to move file to trash", "err", copyErr)
+							} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
+								d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
+							}
 						} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
 							d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
 						}
-					} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
-						d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
 					}
 				}
 			}
@@ -850,7 +853,13 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 			if edge.RelationshipType == "FINAL_EXPORT" || edge.Resolver == "immich_export" {
 				expNode, expErr := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
 				if expErr == nil {
-					if rmErr := os.Remove(expNode.FilePath); rmErr != nil && !os.IsNotExist(rmErr) {
+					var rmErr error
+					if d.guard != nil {
+						rmErr = d.guard.Remove(expNode.FilePath)
+					} else {
+						rmErr = os.Remove(expNode.FilePath)
+					}
+					if rmErr != nil && !os.IsNotExist(rmErr) {
 						d.log.Warn("agent: failed to unlink immich export file", "nodeID", expNode.ID, "err", rmErr)
 					} else {
 						if markErr := q.MarkNodeMissing(ctx, expNode.ID); markErr != nil {
@@ -875,25 +884,43 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	return nil
 }
 
-func moveFile(src, dst string) error {
-	in, err := os.Open(src)
+func (d *Drainer) moveFile(src, dst string) error {
+	var in *os.File
+	var err error
+	if d.guard != nil {
+		in, err = d.guard.OpenRead(src)
+	} else {
+		in, err = os.Open(src)
+	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	var out *os.File
+	if d.guard != nil {
+		out, err = d.guard.Create(dst)
+	} else {
+		out, err = os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = out.Close() }()
 
 	if _, err := io.Copy(out, in); err != nil {
-		_ = os.Remove(dst)
+		if d.guard != nil {
+			_ = d.guard.Remove(dst)
+		} else {
+			_ = os.Remove(dst)
+		}
 		return err
 	}
 	_ = in.Close()
 	_ = out.Close()
+	if d.guard != nil {
+		return d.guard.Remove(src)
+	}
 	return os.Remove(src)
 }
 
@@ -943,13 +970,31 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		if existing.LifecycleState == "ARCHIVED" {
 			return 0, fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
 		}
-		return 0, q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
+		if err := q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
 			NodeUuid:          p.NodeUUID,
 			FilePath:          p.TargetFilePath,
 			FileName:          fileName,
 			StorageLocationID: locID,
 			MtimeUnix:         mtime,
-		})
+		}); err != nil {
+			return 0, err
+		}
+		if p.FullHash != nil && *p.FullHash != "" {
+			if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+				ID:       existing.ID,
+				FullHash: p.FullHash,
+			}); err != nil {
+				return 0, err
+			}
+		} else if existing.FullHash != nil && *existing.FullHash != "" && existing.IndexingStatus != "INDEXED_FULL" {
+			if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+				ID:       existing.ID,
+				FullHash: existing.FullHash,
+			}); err != nil {
+				return 0, err
+			}
+		}
+		return 0, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("lookup node for rebase: %w", err)
@@ -958,6 +1003,11 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	// Unknown node_uuid: agent is the source of truth for an offline staged file; create node!
 	fileExt := filepath.Ext(p.TargetFilePath)
 	indexingStatus := "INDEXED_SHALLOW"
+	var nullFullHash *string
+	if p.FullHash != nil && *p.FullHash != "" {
+		nullFullHash = p.FullHash
+		indexingStatus = "INDEXED_FULL"
+	}
 
 	inserted, insertErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           p.NodeUUID,
@@ -968,7 +1018,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		SizeBytes:          p.SizeBytes,
 		MtimeUnix:          mtime,
 		FastHash:           p.FastHash,
-		FullHash:           nil,
+		FullHash:           nullFullHash,
 		Phash:              sql.NullInt64{},
 		IndexingStatus:     indexingStatus,
 		GraphStatus:        "UNLINKED",

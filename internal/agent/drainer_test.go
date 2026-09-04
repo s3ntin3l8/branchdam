@@ -1619,3 +1619,199 @@ func TestDrainer_NodeCreated_ContentDedup_AllowsReingestAfterMissing(t *testing.
 		return nil
 	})
 }
+
+func TestDrainer_NodeDeleted_Tier3MasterNeverTargetedForDeletion(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default())
+
+	// Create a master file inside Tier 3 archive
+	tier3File := filepath.Join(env.archive, "2026", "09", "RAW_0099.ARW")
+	require.NoError(t, os.MkdirAll(filepath.Dir(tier3File), 0o755))
+	require.NoError(t, os.WriteFile(tier3File, []byte("tier 3 protected raw bytes"), 0o644))
+
+	tier3UUID := uuid.New().String()
+	var nodeID int64
+	err := env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		n, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          tier3UUID,
+			StorageLocationID: env.locID3,
+			FilePath:          tier3File,
+			FileName:          "RAW_0099.ARW",
+			FileExt:           ".ARW",
+			SizeBytes:         26,
+			MtimeUnix:         time.Now().Unix(),
+			IndexingStatus:    "INDEXED_FULL",
+			GraphStatus:       "UNLINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err == nil {
+			nodeID = n.ID
+		}
+		return err
+	})
+	require.NoError(t, err)
+
+	// Delete node via event queue
+	enqueueEvent(t, env.db, agent.EventNodeDeleted, agent.NodeDeletedPayload{
+		NodeUUID: tier3UUID,
+	})
+
+	stats, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+
+	// DB row is marked MISSING
+	node, err := env.db.Reader.GetMediaNodeByID(context.Background(), nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "MISSING", node.LifecycleState)
+
+	// Tier 3 physical file must remain completely untouched (NOT moved to .trash, NOT removed)
+	data, err := os.ReadFile(tier3File)
+	require.NoError(t, err, "Tier 3 physical file must remain on disk untouched")
+	require.Equal(t, []byte("tier 3 protected raw bytes"), data)
+
+	// No .trash directory created inside archive
+	trashDir := filepath.Join(env.archive, ".trash")
+	_, statErr := os.Stat(trashDir)
+	require.True(t, os.IsNotExist(statErr), "no .trash directory should be created in read-only Tier 3")
+}
+
+func TestDrainer_NodeDeleted_ImmichExportInReadOnlyTier_RefusedByGuard(t *testing.T) {
+	env := setupTestDB(t)
+
+	// Setup a master in writable staging, and an export located in read-only archive
+	masterFile := filepath.Join(env.staging, "master.jpg")
+	exportFile := filepath.Join(env.archive, "export_in_readonly.jpg")
+	require.NoError(t, os.WriteFile(masterFile, []byte("master"), 0o644))
+	require.NoError(t, os.WriteFile(exportFile, []byte("export in ro"), 0o644))
+
+	masterUUID := uuid.New().String()
+	exportUUID := uuid.New().String()
+	var masterID, exportID int64
+
+	err := env.db.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		mn, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          masterUUID,
+			StorageLocationID: env.locID1,
+			FilePath:          masterFile,
+			FileName:          "master.jpg",
+			FileExt:           ".jpg",
+			LifecycleState:    "ACTIVE",
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "UNLINKED",
+		})
+		if err != nil {
+			return err
+		}
+		masterID = mn.ID
+
+		en, err := q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          exportUUID,
+			StorageLocationID: env.locID3, // ReadOnly tier
+			FilePath:          exportFile,
+			FileName:          "export_in_readonly.jpg",
+			FileExt:           ".jpg",
+			LifecycleState:    "ACTIVE",
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "LINKED",
+		})
+		if err != nil {
+			return err
+		}
+		exportID = en.ID
+
+		_, err = q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID:     masterID,
+			TargetNodeID:     exportID,
+			RelationshipType: "FINAL_EXPORT",
+			Confidence:       1.0,
+			Tier:             1,
+			Resolver:         "immich_export",
+			EvidenceJson:     `{}`,
+			ReviewState:      "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	drainer := agent.NewDrainer(env.db, env.guard, slog.Default())
+
+	enqueueEvent(t, env.db, agent.EventNodeDeleted, agent.NodeDeletedPayload{
+		NodeUUID: masterUUID,
+	})
+
+	stats, err := drainer.ProcessPending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+
+	// Master was trashed and marked MISSING
+	mNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), masterID)
+	require.NoError(t, err)
+	require.Equal(t, "MISSING", mNode.LifecycleState)
+
+	// Read-only export file is preserved on disk because Guard rejected the deletion
+	data, err := os.ReadFile(exportFile)
+	require.NoError(t, err, "export file in read-only tier must not be deleted by Guard")
+	require.Equal(t, []byte("export in ro"), data)
+
+	// Export node in DB remains ACTIVE
+	eNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), exportID)
+	require.NoError(t, err)
+	require.Equal(t, "ACTIVE", eNode.LifecycleState)
+}
+
+func TestDrainer_PathRebased_KnownAndUnknown_SetsIndexedFullWhenFullHashKnown(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	fullHash1 := "1111111111111111111111111111111111111111111111111111111111111111"
+	fullHash2 := "2222222222222222222222222222222222222222222222222222222222222222"
+
+	// 1. Unknown node rebased with FullHash -> inserted as INDEXED_FULL
+	unknownUUID := uuid.New().String()
+	unknownPath := filepath.Join(env.exports, "unknown_with_hash.arw")
+	enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       unknownUUID,
+		TargetFilePath: unknownPath,
+		FullHash:       &fullHash1,
+		SizeBytes:      1024,
+	})
+
+	// 2. Known node with INDEXED_SHALLOW rebased with FullHash -> updated to INDEXED_FULL
+	knownUUID := uuid.New().String()
+	knownPath := filepath.Join(env.staging, "known_shallow.arw")
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: knownUUID,
+		FilePath: knownPath,
+	})
+
+	rebasedPath := filepath.Join(env.exports, "known_rebased_full.arw")
+	enqueueEvent(t, env.db, agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID:       knownUUID,
+		TargetFilePath: rebasedPath,
+		FullHash:       &fullHash2,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 3, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node1, err := q.GetMediaNodeByUUID(ctx, unknownUUID)
+		require.NoError(t, err)
+		require.Equal(t, "INDEXED_FULL", node1.IndexingStatus)
+		require.NotNil(t, node1.FullHash)
+		require.Equal(t, fullHash1, *node1.FullHash)
+
+		node2, err := q.GetMediaNodeByUUID(ctx, knownUUID)
+		require.NoError(t, err)
+		require.Equal(t, "INDEXED_FULL", node2.IndexingStatus)
+		require.NotNil(t, node2.FullHash)
+		require.Equal(t, fullHash2, *node2.FullHash)
+		require.Equal(t, rebasedPath, node2.FilePath)
+		return nil
+	})
+	require.NoError(t, err)
+}

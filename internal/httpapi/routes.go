@@ -1822,6 +1822,21 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			}); err != nil {
 				return err
 			}
+			if in.Body.FullHash != nil && *in.Body.FullHash != "" {
+				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+					ID:       existing.ID,
+					FullHash: in.Body.FullHash,
+				}); err != nil {
+					return err
+				}
+			} else if existing.FullHash != nil && *existing.FullHash != "" && existing.IndexingStatus != "INDEXED_FULL" {
+				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+					ID:       existing.ID,
+					FullHash: existing.FullHash,
+				}); err != nil {
+					return err
+				}
+			}
 			out.Body.ID = existing.ID
 			out.Body.NodeUUID = existing.NodeUuid
 			out.Body.StorageLocationID = loc.ID
@@ -1834,6 +1849,12 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		}
 
 		// Unknown node: agent is the source of truth for an offline staged file; create node!
+		indexingStatus := "INDEXED_SHALLOW"
+		var nullFullHash *string
+		if in.Body.FullHash != nil && *in.Body.FullHash != "" {
+			nullFullHash = in.Body.FullHash
+			indexingStatus = "INDEXED_FULL"
+		}
 		newNode, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:           in.Body.NodeUUID,
 			StorageLocationID:  loc.ID,
@@ -1843,9 +1864,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			SizeBytes:          in.Body.SizeBytes,
 			MtimeUnix:          mtime,
 			FastHash:           in.Body.FastHash,
-			FullHash:           in.Body.FullHash,
+			FullHash:           nullFullHash,
 			Phash:              sql.NullInt64{},
-			IndexingStatus:     "INDEXED_SHALLOW",
+			IndexingStatus:     indexingStatus,
 			GraphStatus:        "UNLINKED",
 			LifecycleState:     "ACTIVE",
 			OriginalDocumentID: sql.NullString{},

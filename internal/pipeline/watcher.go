@@ -486,6 +486,21 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 			}); err != nil {
 				return err
 			}
+			if result.FullHash != "" {
+				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+					ID:       n.ID,
+					FullHash: &result.FullHash,
+				}); err != nil {
+					return err
+				}
+			} else if n.FullHash != nil && *n.FullHash != "" && n.IndexingStatus != "INDEXED_FULL" {
+				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+					ID:       n.ID,
+					FullHash: n.FullHash,
+				}); err != nil {
+					return err
+				}
+			}
 			// Same backfill as Commit's own touched/rebase branches -- see
 			// commit.go's reconcileAllMetadata doc comment, #86, and #105.
 			// No *Stats in scope here (inside an InTx closure returning bare

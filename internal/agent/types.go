@@ -130,6 +130,7 @@ type PathRebasedPayload struct {
 	TargetStorageLocationID int64   `json:"targetStorageLocationId,omitempty"`
 	MtimeUnix               int64   `json:"mtimeUnix,omitempty"`
 	FastHash                *string `json:"fastHash,omitempty"`
+	FullHash                *string `json:"fullHash,omitempty"`
 	SizeBytes               int64   `json:"sizeBytes,omitempty"`
 }
 
