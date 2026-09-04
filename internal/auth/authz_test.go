@@ -190,3 +190,82 @@ func TestRequireAdmin(t *testing.T) {
 		})
 	}
 }
+
+func TestIsAdmin(t *testing.T) {
+	tests := []struct {
+		name          string
+		p             Principal
+		allowedGroups []string
+		want          bool
+	}{
+		{
+			name: "kind machine is not admin",
+			p: Principal{
+				Kind:          KindMachine,
+				Authenticated: true,
+			},
+			allowedGroups: nil,
+			want:          false,
+		},
+		{
+			name: "unauthenticated user with empty allowedGroups is not admin",
+			p: Principal{
+				Kind:          KindUser,
+				Authenticated: false,
+			},
+			allowedGroups: nil,
+			want:          false,
+		},
+		{
+			name: "unauthenticated user with specified groups is not admin",
+			p: Principal{
+				Kind:          KindUser,
+				Authenticated: false,
+				Groups:        []string{"admin"},
+			},
+			allowedGroups: []string{"admin"},
+			want:          false,
+		},
+		{
+			name: "authenticated user with empty allowedGroups is admin",
+			p: Principal{
+				Kind:          KindUser,
+				Authenticated: true,
+				Name:          "alice",
+			},
+			allowedGroups: nil,
+			want:          true,
+		},
+		{
+			name: "authenticated user with matching group is admin",
+			p: Principal{
+				Kind:          KindUser,
+				Authenticated: true,
+				Name:          "bob",
+				Groups:        []string{"users", "dam-admins"},
+			},
+			allowedGroups: []string{"dam-admins"},
+			want:          true,
+		},
+		{
+			name: "authenticated user without matching group is not admin",
+			p: Principal{
+				Kind:          KindUser,
+				Authenticated: true,
+				Name:          "charlie",
+				Groups:        []string{"users"},
+			},
+			allowedGroups: []string{"dam-admins"},
+			want:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsAdmin(tt.p, tt.allowedGroups)
+			if got != tt.want {
+				t.Errorf("IsAdmin() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
