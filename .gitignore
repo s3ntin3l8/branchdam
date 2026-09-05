@@ -62,5 +62,8 @@ compose.override.yml
 # Claude Code project state (plans, worktrees, local settings)
 .claude/
 
+# Git worktrees (feature isolation)
+.worktrees/
+
 # Agent workspace (superpowers plans, scratch)
 /docs/superpowers/
