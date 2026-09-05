@@ -212,6 +212,21 @@ func (q *Queries) GetDevicePairingKeyByID(ctx context.Context, id int64) (Device
 	return i, err
 }
 
+const getDevicePairingQRSVG = `-- name: GetDevicePairingQRSVG :one
+SELECT qr_svg
+FROM device_pairings
+WHERE id = ?1
+`
+
+// Returns just the qr_svg column for the ActiveQRSVG hot path. Skips
+// the row-wide scan if all the caller wants is the bytes.
+func (q *Queries) GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getDevicePairingQRSVG, id)
+	var qr_svg []byte
+	err := row.Scan(&qr_svg)
+	return qr_svg, err
+}
+
 const insertPairingAudit = `-- name: InsertPairingAudit :exec
 INSERT INTO companion_pairing_audit (
     pairing_id, actor, event, details, created_at
@@ -430,8 +445,11 @@ type NewestActiveKeyForPairingParams struct {
 }
 
 // Used by /agent/handshake to find the device's newest unexpired key that
-// isn't the one the request used. If the caller is already on the newest
-// key, this returns no rows (sqlc will surface sql.ErrNoRows).
+// the caller hasn't been told about yet. ?2 is the caller's current
+// key_id; we filter strictly newer (created_at, id) so the caller is
+// never told about an older key they already missed or were using before.
+// Returns no rows (sql.ErrNoRows) when the caller is already on the
+// newest active key.
 func (q *Queries) NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error) {
 	row := q.db.QueryRowContext(ctx, newestActiveKeyForPairing, arg.PairingID, arg.ID)
 	var i DevicePairingKey
@@ -452,6 +470,7 @@ UPDATE device_pairing_keys
 SET revoked_at = ?2
 WHERE pairing_id = ?1
   AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > ?2)
 `
 
 type RevokeAllKeysForPairingParams struct {
@@ -515,20 +534,10 @@ type UpdateDevicePairingQRSVGParams struct {
 	QrSvg []byte
 }
 
+// Refresh the cached QR SVG after a key rotation. The SVG is computed
+// outside the transaction (in pairing.Service) so this UPDATE is a
+// pure byte-write with no rendering dependency.
 func (q *Queries) UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error {
 	_, err := q.db.ExecContext(ctx, updateDevicePairingQRSVG, arg.ID, arg.QrSvg)
 	return err
-}
-
-const getDevicePairingQRSVG = `-- name: GetDevicePairingQRSVG :one
-SELECT qr_svg
-FROM device_pairings
-WHERE id = ?1
-`
-
-func (q *Queries) GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error) {
-	row := q.db.QueryRowContext(ctx, getDevicePairingQRSVG, id)
-	var qrSvg []byte
-	err := row.Scan(&qrSvg)
-	return qrSvg, err
 }

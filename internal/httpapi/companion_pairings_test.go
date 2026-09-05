@@ -189,19 +189,15 @@ func TestCompanionPairings_QRSVGReturns410WhenNoActiveKey(t *testing.T) {
 		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
 	})
 	require.NoError(t, err)
-	require.NoError(t, pairSvc.RevokePairing(ctx, p.ID, "test"))
+	_, err = pairSvc.RevokePairing(ctx, p.ID, "test")
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/companion/pairings/"+pairingIDStr(p.ID)+"/qr.svg", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	// Revoked pairings get the no-active-key branch -- we map that to
-	// 404 today (handled by ErrPairingNotFound path), not 410. The
-	// contract is "the route never serves a revoked pairing's QR"; the
-	// status code distinction (404 vs 410) is a polish item, not a
-	// functional gap.
-	assert.True(t, rec.Code == http.StatusNotFound || rec.Code == http.StatusGone,
-		"got %d, want 404 or 410", rec.Code)
+	// Revoked pairings get the no-active-key branch (ErrNoActiveKey → 410).
+	assert.Equal(t, http.StatusGone, rec.Code, "revoked pairing QR should return 410 Gone")
 }
 
 func TestCompanionPairings_AuditLogsEveryLifecycleEvent(t *testing.T) {

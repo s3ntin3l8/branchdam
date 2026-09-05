@@ -3,11 +3,9 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
-	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -192,6 +190,9 @@ func (s *Server) handleListPairings(ctx context.Context, _ *struct{}) (*ListPair
 	if err != nil {
 		return nil, err
 	}
+	// Soft cap for the SPA's unpaginated list. Homelab deployments rarely
+	// exceed a dozen devices; this avoids unbounded reads without needing
+	// a full pagination UX for an admin-only diagnostic page.
 	const limit int64 = 200
 	rows, err := svc.ListPairings(ctx, limit, 0)
 	if err != nil {
@@ -312,14 +313,15 @@ func (s *Server) handleRevokePairing(ctx context.Context, in *RevokePairingInput
 	if err != nil {
 		return nil, err
 	}
-	if err := svc.RevokePairing(ctx, in.ID, actorFromCtx(ctx)); err != nil {
+	revokedAt, err := svc.RevokePairing(ctx, in.ID, actorFromCtx(ctx))
+	if err != nil {
 		if errors.Is(err, pairing.ErrPairingNotFound) {
 			return nil, huma.Error404NotFound("pairing not found")
 		}
 		return nil, huma.Error500InternalServerError("revoke pairing", err)
 	}
 	out := &RevokePairingOutput{}
-	out.Body.RevokedAtUnix = time.Now().Unix()
+	out.Body.RevokedAtUnix = revokedAt
 	return out, nil
 }
 
@@ -379,7 +381,7 @@ func (s *Server) handlePairingQRSVG(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pairing has no active key (revoked or expired)", http.StatusGone)
 			return
 		}
-		http.Error(w, fmt.Sprintf("internal error: %v", err), http.StatusInternalServerError)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/svg+xml")

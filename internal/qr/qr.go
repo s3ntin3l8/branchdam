@@ -59,22 +59,19 @@ func RenderSVG(payload string, size int) ([]byte, error) {
 	if size <= 0 {
 		size = DefaultSize
 	}
-	if _, err := qrc.New(payload, RecoveryLevel); err != nil {
+	code, err := qrc.New(payload, RecoveryLevel)
+	if err != nil {
 		return nil, fmt.Errorf("qr: new code: %w", err)
 	}
-	return renderSVGFromBitmap(payload, size)
+	return renderSVGFromBitmap(code, size)
 }
 
-// renderSVGFromBitmap constructs an SVG document from the QR bitmap.
+// renderSVGFromBitmap constructs an SVG document from a pre-built QR code.
 // The version of skip2/go-qrcode vendored here predates the upstream
 // SVG() method, so we read Bitmap() (a [][]bool of module on/off
 // states) and rasterize it to an inline SVG <path>. See qr_test.go for
 // the rendered-shape assertions.
-func renderSVGFromBitmap(payload string, size int) ([]byte, error) {
-	code, err := qrc.New(payload, RecoveryLevel)
-	if err != nil {
-		return nil, err
-	}
+func renderSVGFromBitmap(code *qrc.QRCode, size int) ([]byte, error) {
 	bitmap := code.Bitmap()
 
 	// Each row of the bitmap is one side of the QR code; quiet zone

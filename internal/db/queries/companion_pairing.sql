@@ -141,7 +141,8 @@ WHERE pairing_id = ?1
 UPDATE device_pairing_keys
 SET revoked_at = ?2
 WHERE pairing_id = ?1
-  AND revoked_at IS NULL;
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > ?2);
 
 -- name: InsertPairingAudit :exec
 INSERT INTO companion_pairing_audit (

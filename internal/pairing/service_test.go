@@ -125,7 +125,7 @@ func TestKeyLookup_RevokedPairingReturnsEmpty(t *testing.T) {
 	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
 	require.NoError(t, err)
 
-	err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
+	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
 	require.NoError(t, err)
 
 	agentID, err := svc.KeyLookup(ctx, key.Plaintext)
@@ -220,7 +220,7 @@ func TestRevokePairing_TerminatesAllKeys(t *testing.T) {
 	k2, _, err := svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
 	require.NoError(t, err)
 
-	err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
+	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
 	require.NoError(t, err)
 
 	for _, plaintext := range []string{k1.Plaintext, k2.Plaintext} {
@@ -258,7 +258,7 @@ func TestLatestActiveKey_RevokedPairingReturnsNoRows(t *testing.T) {
 	_, _, err = svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
 	require.NoError(t, err)
 
-	err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
+	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
 	require.NoError(t, err)
 
 	_, err = svc.LatestActiveKey(ctx, pairing.AgentID, k1.ID)

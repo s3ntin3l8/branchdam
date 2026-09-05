@@ -356,10 +356,11 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 }
 
 // RevokePairing terminates pairingID: sets revoked_at on the pairing row
-// AND on every (still-active) key for the pairing. Idempotent.
-func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor string) error {
+// AND on every (still-active) key for the pairing. Returns the timestamp
+// used for revoked_at. Idempotent.
+func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor string) (int64, error) {
 	now := s.nowFn()
-	return s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		if err := q.RevokeAllKeysForPairing(ctx, sqlcgen.RevokeAllKeysForPairingParams{
 			PairingID: pairingID,
 			RevokedAt: sql.NullInt64{Int64: now, Valid: true},
@@ -380,6 +381,7 @@ func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor stri
 			CreatedAt: now,
 		})
 	})
+	return now, err
 }
 
 // LatestActiveKey returns the device's newest key that isn't the one
