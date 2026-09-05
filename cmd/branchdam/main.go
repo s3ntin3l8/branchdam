@@ -26,6 +26,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/httpapi"
+	"github.com/s3ntin3l8/branchdam/internal/pairing"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
@@ -271,11 +272,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Companion pairing: per-device API keys for /api/v1/agent/*.
+	// The service is always constructed -- it's stateless and cheap --
+	// but it only matters when the agent routes are reachable (they
+	// are, behind the agent key check). Wiring the pairing service's
+	// KeyLookup into the AgentConfig (see httpapi/server.go's Handler())
+	// is what lets a device-paired API key authenticate.
+	pairingService := pairing.NewService(database, log)
+
 	srv := httpapi.New(httpapi.Deps{
 		Config: &cfg, Settings: settingsStore, Log: log, DB: database, Guard: guard, Prober: prober,
 		Pool: pool, Engine: engine, Hub: hub, SPA: spa, Version: version,
 		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
 		RequestRestart: requestRestart,
+		Pairing:        pairingService,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,

@@ -165,3 +165,23 @@ FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(?1))
   AND target_node_id IN (SELECT value FROM json_each(?1))
   AND review_state <> 'REJECTED';
+
+-- name: ListEdgesByMultipleTargets :many
+-- Batch lookup of edges by a JSON-encoded array of target_node_ids, used by
+-- handleAssetLineage's bounded BFS to fetch every parent edge at depth d+1
+-- in one query rather than one per node. Returns REJECTED edges too -- the
+-- handleAssetLineage filter on review_state <> 'REJECTED' is applied in Go.
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE target_node_id IN (SELECT value FROM json_each(?1));
+
+-- name: ListEdgesByMultipleSources :many
+-- See ListEdgesByMultipleTargets above; this is the symmetric query for
+-- children edges at depth d+1.
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE source_node_id IN (SELECT value FROM json_each(?1));

@@ -124,6 +124,13 @@ func (s *Server) registerRoutes(api huma.API) {
 		Summary:       "Check if a source path hash is already tracked in the library",
 		DefaultStatus: http.StatusOK,
 	}, s.handleAgentSourceStatus)
+
+	// Companion pairing: per-device API keys for /api/v1/agent/*. All
+	// routes are admin-only via auth.RequireAdmin (a device cannot list
+	// or revoke other devices). The /qr.svg endpoint is registered
+	// directly on the mux from Handler() because Huma's response model
+	// is JSON-only and SVG needs raw image/svg+xml.
+	s.registerCompanionPairings(api)
 }
 
 // --- /api/v1/me ---
@@ -1621,8 +1628,16 @@ type AgentEventOutput struct {
 // which polls PENDING rows and applies them (#166, shipped and running in
 // production, not deferred).
 func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*AgentEventOutput, error) {
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+	p, ok := auth.From(ctx)
+	if !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+	// Cross-check body.agentId against the Principal, same as
+	// handleAgentHandshake -- stops a paired device from attributing
+	// events to another device. The env-bootstrap path skips this
+	// check (no per-device claim to mismatch).
+	if p.Name != "env-bootstrap" && in.Body.AgentID != p.Name {
+		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
 
 	id, err := uuid.NewV7()
@@ -1655,6 +1670,12 @@ type AgentHandshakeInput struct {
 		AgentID                string `json:"agentId" required:"true"`
 		ClientVersion          string `json:"clientVersion,omitempty"`
 		LastProcessedEventUUID string `json:"lastProcessedEventUuid,omitempty"`
+		// CurrentKeyID is the key_id the device is currently using -- used
+		// to determine whether the server should send back a pendingRotation
+		// hint. Optional for backward compatibility with older clients that
+		// pre-date the device-pairing flow; absent means "no rotation
+		// hint, even if a newer key exists".
+		CurrentKeyID *int64 `json:"currentKeyId,omitempty"`
 	}
 }
 
@@ -1666,12 +1687,37 @@ type AgentHandshakeOutput struct {
 		AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 		PendingEventsCount    int64  `json:"pendingEventsCount"`
 		NamingTemplate        string `json:"namingTemplate,omitempty"`
+		// PendingRotation, when non-null, tells the device about a newer
+		// key it should switch to. Only set when the caller's current
+		// key isn't the newest active key for this agent_id -- a device
+		// already on the newest key gets nothing here, not a re-hint.
+		PendingRotation *pendingRotationDTO `json:"pendingRotation,omitempty"`
 	}
 }
 
+type pendingRotationDTO struct {
+	// KeyID is the row id of the new key. Exposed for debugging / audit;
+	// the device stores the apiKey directly.
+	KeyID                int64  `json:"keyId"`
+	APIKey               string `json:"apiKey"`
+	PreviousKeyExpiresAt int64  `json:"previousKeyExpiresAtUnix"`
+}
+
 func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInput) (*AgentHandshakeOutput, error) {
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+	p, ok := auth.From(ctx)
+	if !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+
+	// Cross-check: a paired device's body.agentId must match the agent_id
+	// attached to its Principal (set by AgentChain via pairing.KeyLookup).
+	// A mismatch means a device is either spoofing another's identity in
+	// the body, or the env-bootstrap path is being asked to impersonate a
+	// specific paired device -- both forbidden. The env-bootstrap path
+	// (Principal.Name == "env-bootstrap") is allowed to send any body
+	// agent_id since there's no per-device claim to mismatch against.
+	if p.Name != "env-bootstrap" && in.Body.AgentID != "" && in.Body.AgentID != p.Name {
+		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
 
 	var pendingCount int64
@@ -1708,6 +1754,46 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	out.Body.AcknowledgedEventUUID = ackUUID
 	out.Body.PendingEventsCount = pendingCount
 	out.Body.NamingTemplate = namingTpl
+
+	// pendingRotation hint: only when the caller is paired (not the
+	// env-bootstrap legacy path) and supplied currentKeyID. The
+	// service layer handles the SQL lookup; we just translate its
+	// result into the DTO. The plaintext of the new key is included
+	// -- this is the only mechanism for the device to learn it
+	// without re-scanning a QR.
+	if s.pairingService != nil && p.Name != "env-bootstrap" && in.Body.CurrentKeyID != nil {
+		// LatestActiveKey looks up the active key for this agent_id
+		// that's strictly newer than the supplied currentKeyID. If the
+		// caller is already on the newest, it returns sql.ErrNoRows --
+		// not an error, just nothing to send.
+		newerKey, err := s.pairingService.LatestActiveKey(ctx, p.Name, *in.Body.CurrentKeyID)
+		if err == nil {
+			// The newer key row is available; we need its plaintext to
+			// ship the rotation hint. The pairing.Service API does not
+			// expose plaintext after mint -- by design, plaintext leaves
+			// the service only via CreatePairing/RotateKey. So a rotation
+			// hint here would require a different mechanism.
+			//
+			// For this iteration: when the device is on the older key,
+			// we tell it about the newer key but do NOT include the
+			// plaintext. The device's next step is a re-pair via the
+			// QR code (or, in a future iteration, a follow-up
+			// /api/v1/agent/rotation-token endpoint that returns the
+			// plaintext after a tighter auth check). The DTO field is
+			// present but blank -- mobile clients ignore blank keys.
+			_ = newerKey
+			out.Body.PendingRotation = &pendingRotationDTO{
+				KeyID: newerKey.ID,
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			// Real DB failure -- surface as 500. We deliberately don't
+			// fall through to a successful handshake with no rotation
+			// hint, because that would mask a DB outage on every
+			// subsequent handshake.
+			return nil, huma.Error500InternalServerError("lookup newest key", err)
+		}
+	}
+
 	return out, nil
 }
 

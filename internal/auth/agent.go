@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -60,6 +61,17 @@ type AgentConfig struct {
 	SkipSignaturePaths []string         // paths that bypass signature validation (default defaultSkipSignaturePaths)
 	Now                func() time.Time // optional clock override for testing clock skew
 	Cache              *ReplayCache     // optional in-memory replay cache
+
+	// LookupKey resolves a presented X-API-Key value to the agent_id of the
+	// paired device it authenticates, or empty string + nil when no active
+	// key matches. Wired at server startup from internal/pairing.Service's
+	// KeyLookup method -- see cmd/branchdam/main.go. When LookupKey is nil,
+	// ONLY the env-var APIKey authenticates agent routes (legacy behavior
+	// before #companion-pairing). When LookupKey is non-nil, both paths
+	// authenticate independently: env-var authenticates as
+	// Principal{Name: "env-bootstrap"}; LookupKey hit authenticates as
+	// Principal{Name: <agent_id>}. Both attach KindMachine.
+	LookupKey func(ctx context.Context, presented string) (agentID string, err error)
 }
 
 // AgentChain authenticates /api/v1/agent/* requests against a static
@@ -111,7 +123,35 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 			}
 
 			provided := r.Header.Get(apiKeyHeader)
-			if provided == "" || !constantTimeEqual(provided, cfg.APIKey) {
+			var principal Principal
+			switch {
+			case provided == "":
+				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+				return
+			case cfg.APIKey != "" && constantTimeEqual(provided, cfg.APIKey):
+				// Env-var bootstrap path (legacy and current operator-migrating
+				// install). Authenticates as "env-bootstrap" so audit trails can
+				// distinguish a key that was server-wide rotated from a
+				// device-scoped key (the env-var key rotates every device at
+				// once, by definition).
+				principal = Principal{Kind: KindMachine, Name: "env-bootstrap"}
+			case cfg.LookupKey != nil:
+				// Device-pairing path. The callback returns the agent_id for
+				// any active (non-expired, non-revoked, parent-pairing-non-revoked)
+				// key, or empty string when no match. A non-nil error is a
+				// genuine DB failure and propagates as 500.
+				agentID, lookupErr := cfg.LookupKey(r.Context(), provided)
+				if lookupErr != nil {
+					log.Error("auth: agent key lookup failed", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "err", lookupErr.Error())
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+				if agentID == "" {
+					http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+					return
+				}
+				principal = Principal{Kind: KindMachine, Name: agentID}
+			default:
 				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
 				return
 			}
@@ -198,7 +238,6 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				}
 			}
 
-			principal := Principal{Kind: KindMachine}
 			next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), principal)))
 		})
 	}
