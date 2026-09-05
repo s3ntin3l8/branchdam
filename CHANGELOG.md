@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/s3ntin3l8/branchdam/compare/v0.14.0...v0.15.0) (2026-09-05)
+
+
+### Features
+
+* **companion:** per-device pairing keys + QR + handshake rotation ([#396](https://github.com/s3ntin3l8/branchdam/issues/396)) ([b38fb2f](https://github.com/s3ntin3l8/branchdam/commit/b38fb2f88b199751ca9191f2676caf83efd98903))
+
 ## [0.14.0](https://github.com/s3ntin3l8/branchdam/compare/v0.13.0...v0.14.0) (2026-09-04)
 
 
