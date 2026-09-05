@@ -47,7 +47,9 @@ type Querier interface {
 	// 200. The returned target_node_id is what the caller re-derives
 	// graph_status from -- see routes.go's recomputeGraphStatus.
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
+	CountDevicePairings(ctx context.Context) (int64, error)
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
+	CountPairingAudit(ctx context.Context, pairingID int64) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
 	// Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
 	// for this remote have a retry_count at or past the bound, so
@@ -58,6 +60,8 @@ type Querier interface {
 	// visible in logs instead of only discoverable via a direct SQLite query.
 	CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
+	CreateDevicePairing(ctx context.Context, arg CreateDevicePairingParams) (DevicePairing, error)
+	CreateDevicePairingKey(ctx context.Context, arg CreateDevicePairingKeyParams) (DevicePairingKey, error)
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// #163/#226: called inside the same transaction as CreateScanJob (see
@@ -104,6 +108,11 @@ type Querier interface {
 	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
+	GetDevicePairingByAgentID(ctx context.Context, agentID string) (DevicePairing, error)
+	GetDevicePairingByID(ctx context.Context, id int64) (DevicePairing, error)
+	GetDevicePairingKeyByHash(ctx context.Context, keyLookupHash string) (DevicePairingKey, error)
+	GetDevicePairingKeyByID(ctx context.Context, id int64) (DevicePairingKey, error)
+	GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error)
 	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
@@ -139,6 +148,7 @@ type Querier interface {
 	// Phase 1 (#33): EXIF/ffprobe overflow. Upsert on the table's natural key so
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
+	InsertPairingAudit(ctx context.Context, arg InsertPairingAuditParams) error
 	// Resets a node's thumbnail generation state to PENDING with attempts
 	// zeroed, so internal/thumbs.Worker regenerates it on its next pass.
 	// Called from internal/pipeline's reconcilePromotedColumns call site when
@@ -170,6 +180,9 @@ type Querier interface {
 	ListEdgesByMultipleSources(ctx context.Context, jsonEach string) ([]MediaEdge, error)
 	ListEdgesByMultipleTargets(ctx context.Context, jsonEach string) ([]MediaEdge, error)
 	ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error)
+	ListDevicePairings(ctx context.Context, arg ListDevicePairingsParams) ([]ListDevicePairingsRow, error)
+	ListKeysByPairing(ctx context.Context, pairingID int64) ([]DevicePairingKey, error)
+	ListPairingAudit(ctx context.Context, arg ListPairingAuditParams) ([]CompanionPairingAudit, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
@@ -328,6 +341,7 @@ type Querier interface {
 	// to end in the SAME wall-clock second as this scan's start may survive one
 	// extra scan -- it is swept the next round, which is delayed-not-wrong.
 	MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error)
+	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
 	// Checked before UpsertMediaEdge so the caller can tell a genuinely new
 	// edge apart from an existing one whose confidence/evidence was merely
 	// refreshed -- UpsertMediaEdge's RETURNING row looks the same either way.
@@ -374,6 +388,8 @@ type Querier interface {
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
 	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
+	RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeysForPairingParams) error
+	RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairingParams) error
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound
 	// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --
@@ -395,7 +411,9 @@ type Querier interface {
 	// root_path can't be resolved at startup (mount vanished) rather than
 	// treating that as a fatal error that prevents the whole server from
 	// booting -- see LoadGuard's doc comment.
+	SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyExpirationsParams) error
 	SetStorageLocationActive(ctx context.Context, arg SetStorageLocationActiveParams) error
+	UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error

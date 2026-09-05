@@ -439,6 +439,23 @@ export default function SettingsPage() {
         </p>
       </div>
 
+      {/* Companion Pairing dashboard entry -- mirrors the layout of the
+          other "section" cards (Path Rewrites, Server Info, etc.) so
+          the Settings page stays a top-level overview; the dedicated
+          /companion page is where operators do actual pairing work. */}
+      <div className="mb-8 rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">Companion Pairing</h2>
+        <p className="mb-3 text-sm text-neutral-200">
+          Manage paired mobile devices (Android, iOS), rotate keys, and revoke lost devices.
+        </p>
+        <a
+          href="/companion"
+          className="inline-block rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+        >
+          Open Companion Pairing
+        </a>
+      </div>
+
       <RestartServerCard className="mb-8" />
 
       {settingsLoading ? (

@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, Config, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, Me, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, ScanJob, SettingsResponse, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, ListPairingsResponse, Me, PairingAuditResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -107,6 +107,34 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+
+  // Companion pairing API. /qr.svg is registered directly on the mux
+  // (Huma is JSON-only), so it lives outside request<T> -- the SPA
+  // renders the SVG via <img src> with the browser's same-origin
+  // session cookie carrying auth.
+  listPairings: () => request<ListPairingsResponse>("/api/v1/companion/pairings"),
+  getPairing: (id: number) => request<CompanionPairingDetail>(`/api/v1/companion/pairings/${id}`),
+  createPairing: (input: CreateCompanionPairingRequest) =>
+    request<CreateCompanionPairingResponse>("/api/v1/companion/pairings", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  rotatePairing: (id: number, input: RotateCompanionPairingRequest) =>
+    request<RotateCompanionPairingResponse>(`/api/v1/companion/pairings/${id}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  revokePairing: (id: number) =>
+    request<RevokeCompanionPairingResponse>(`/api/v1/companion/pairings/${id}/revoke`, {
+      method: "POST",
+    }),
+  pairingAudit: (id: number, params: { limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    return request<PairingAuditResponse>(`/api/v1/companion/pairings/${id}/audit?${qs}`);
+  },
+  pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
 
   pruneCache: (input: PruneRequest) =>
     request<PruneResponse>("/api/v1/prune", {

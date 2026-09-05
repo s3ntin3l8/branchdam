@@ -12,6 +12,7 @@ const IngestPage = lazy(() => import("./pages/IngestPage"));
 const IngestJobsPage = lazy(() => import("./pages/IngestJobsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const StorageHealthPage = lazy(() => import("./pages/StorageHealthPage"));
+const CompanionPairingsPage = lazy(() => import("./pages/CompanionPairingsPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -60,6 +61,7 @@ const router = createBrowserRouter([
       { path: "jobs", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading jobs…</div>}><IngestJobsPage /></Suspense> },
       { path: "storage-health", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading storage health…</div>}><StorageHealthPage /></Suspense> },
       { path: "settings", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading settings…</div>}><SettingsPage /></Suspense> },
+      { path: "companion", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading pairings…</div>}><CompanionPairingsPage /></Suspense> },
     ],
   },
 ]);

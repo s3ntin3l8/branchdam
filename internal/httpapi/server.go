@@ -24,6 +24,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/pairing"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
@@ -98,6 +99,12 @@ type Deps struct {
 	// existing test, and any Server built without it) makes the route
 	// return 503 rather than silently doing nothing -- see restart.go.
 	RequestRestart func()
+
+	// Pairing, if set, is the companion pairing service. The pairing
+	// routes (and the /qr.svg endpoint) return 503 when this is nil --
+	// every existing test, plus a deploy that explicitly disables
+	// pairing. cmd/branchdam sets this from internal/pairing.NewService.
+	Pairing *pairing.Service
 }
 
 // Server bundles the dependencies handlers need.
@@ -119,6 +126,7 @@ type Server struct {
 	shutdown       <-chan struct{}
 	thumbs         *thumbs.Cache
 	requestRestart func()
+	pairingService *pairing.Service
 }
 
 // cfg returns the current effective config -- config.yaml/.env as loaded,
@@ -175,6 +183,7 @@ func New(d Deps) *Server {
 		shutdown:       d.Shutdown,
 		thumbs:         d.ThumbCache,
 		requestRestart: d.RequestRestart,
+		pairingService: d.Pairing,
 	}
 }
 
@@ -211,6 +220,13 @@ func (s *Server) Handler() http.Handler {
 
 	api := humago.New(mux, humaConfig)
 	s.registerRoutes(api)
+	// Wrap the entire mux with the X-Forwarded-* context injector so
+	// Huma handlers (which only see context.Context) can read the
+	// externally-reachable URL for QR-payload generation. The mux is
+	// wrapped AFTER the Huma routes register themselves on it, so
+	// every handler (Huma + direct) inherits the forwarded values.
+	wrappedMux := pairingForwardedMiddleware(mux)
+	_ = wrappedMux // referenced by auth.RouteWithConfig below
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	// SSE is registered directly on the mux, not through Huma -- Huma's
@@ -220,6 +236,10 @@ func (s *Server) Handler() http.Handler {
 	// reason -- Huma's response model expects a JSON body, not a raw
 	// image/jpeg byte stream.
 	mux.HandleFunc("GET /api/v1/assets/{id}/thumbnail", s.handleThumbnail)
+	// Companion pairing /qr.svg is registered directly on the mux, for
+	// the same reason -- Huma's response model is JSON-only and SVG
+	// needs raw image/svg+xml.
+	s.registerPairingDirectRoutes(mux)
 	// Agent streaming upload accepts raw octet stream with custom headers
 	mux.HandleFunc("POST /api/v1/agent/upload", s.handleAgentUpload)
 	// Web browser multipart upload
@@ -236,9 +256,18 @@ func (s *Server) Handler() http.Handler {
 			SkipSignaturePaths: cfg.Agent.SkipSignaturePaths,
 		}
 	}
+	// Wire the pairing service's KeyLookup into the agent auth chain
+	// when it's configured. Without this, paired devices (whose
+	// keys live in device_pairing_keys) get 401'd as "unknown key" --
+	// every existing test that doesn't construct a pairing service
+	// still passes because AgentConfig.LookupKey defaults to nil.
+	if s.pairingService != nil {
+		agentCfg.LookupKey = s.pairingService.KeyLookup
+	}
 
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
 	routed := auth.RouteWithConfig(agentCfg, s.log, authzHandler)
+	routed = pairingForwardedMiddleware(routed)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))
 }
