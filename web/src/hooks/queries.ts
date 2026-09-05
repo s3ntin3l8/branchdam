@@ -303,3 +303,70 @@ export function useJobs(params: import("../api/types").JobsQueryParams = {}) {
     refetchInterval: 15_000,
   });
 }
+
+// Companion pairing hooks. All four mutations invalidate the list query
+// on success so the SPA's pairings table stays in sync without manual
+// refetch. Detail-view reads aren't auto-invalidated -- those are only
+// pulled on a direct /companion/pairings/{id} navigation.
+
+export function usePairings() {
+  return useQuery({
+    queryKey: ["companion-pairings"],
+    queryFn: api.listPairings,
+  });
+}
+
+export function usePairing(id: number | undefined) {
+  return useQuery({
+    queryKey: ["companion-pairing", id],
+    queryFn: () => api.getPairing(id as number),
+    enabled: id !== undefined,
+  });
+}
+
+export function useCreatePairing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: import("../api/types").CreateCompanionPairingRequest) =>
+      api.createPairing(input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
+    },
+  });
+}
+
+export function useRotatePairing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      input,
+    }: {
+      id: number;
+      input: import("../api/types").RotateCompanionPairingRequest;
+    }) => api.rotatePairing(id, input),
+    onSuccess: (_data, vars) => {
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairing", vars.id] });
+    },
+  });
+}
+
+export function useRevokePairing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.revokePairing(id),
+    onSuccess: (_data, id) => {
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairing", id] });
+    },
+  });
+}
+
+export function usePairingAudit(id: number | undefined, params: { limit?: number; offset?: number } = {}) {
+  return useQuery({
+    queryKey: ["companion-pairing-audit", id, params],
+    queryFn: () => api.pairingAudit(id as number, params),
+    enabled: id !== undefined,
+  });
+}

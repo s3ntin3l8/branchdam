@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -60,6 +61,17 @@ type AgentConfig struct {
 	SkipSignaturePaths []string         // paths that bypass signature validation (default defaultSkipSignaturePaths)
 	Now                func() time.Time // optional clock override for testing clock skew
 	Cache              *ReplayCache     // optional in-memory replay cache
+
+	// LookupKey resolves a presented X-API-Key value to the agent_id of the
+	// paired device it authenticates, or empty string + nil when no active
+	// key matches. Wired at server startup from internal/pairing.Service's
+	// KeyLookup method -- see cmd/branchdam/main.go. When LookupKey is nil,
+	// ONLY the env-var APIKey authenticates agent routes (legacy behavior
+	// before #companion-pairing). When LookupKey is non-nil, both paths
+	// authenticate independently: env-var authenticates as
+	// Principal{Name: "env-bootstrap"}; LookupKey hit authenticates as
+	// Principal{Name: <agent_id>}. Both attach KindMachine.
+	LookupKey func(ctx context.Context, presented string) (agentID string, err error)
 }
 
 // AgentChain authenticates /api/v1/agent/* requests against a static
@@ -111,7 +123,35 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 			}
 
 			provided := r.Header.Get(apiKeyHeader)
-			if provided == "" || !constantTimeEqual(provided, cfg.APIKey) {
+			var principal Principal
+			switch {
+			case provided == "":
+				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+				return
+			case cfg.APIKey != "" && constantTimeEqual(provided, cfg.APIKey):
+				// Env-var bootstrap path (legacy and current operator-migrating
+				// install). Authenticates as "env-bootstrap" so audit trails can
+				// distinguish a key that was server-wide rotated from a
+				// device-scoped key (the env-var key rotates every device at
+				// once, by definition).
+				principal = Principal{Kind: KindMachine, Name: "env-bootstrap"}
+			case cfg.LookupKey != nil:
+				// Device-pairing path. The callback returns the agent_id for
+				// any active (non-expired, non-revoked, parent-pairing-non-revoked)
+				// key, or empty string when no match. A non-nil error is a
+				// genuine DB failure and propagates as 500.
+				agentID, lookupErr := cfg.LookupKey(r.Context(), provided)
+				if lookupErr != nil {
+					log.Error("auth: agent key lookup failed", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", lookupErr.Error())
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+				if agentID == "" {
+					http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+					return
+				}
+				principal = Principal{Kind: KindMachine, Name: agentID}
+			default:
 				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
 				return
 			}
@@ -127,14 +167,14 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				sig := r.Header.Get(signatureHeader)
 
 				if tsStr == "" || nonce == "" || sig == "" {
-					log.Warn("auth: agent signature rejected", "reason", "missing_header", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					log.Warn("auth: agent signature rejected", "reason", "missing_header", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
 					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
 					return
 				}
 
 				tsNano, err := strconv.ParseInt(tsStr, 10, 64)
 				if err != nil {
-					log.Warn("auth: agent signature rejected", "reason", "bad_timestamp_format", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					log.Warn("auth: agent signature rejected", "reason", "bad_timestamp_format", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
 					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
 					return
 				}
@@ -143,7 +183,7 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				reqTime := time.Unix(0, tsNano)
 				skew := now.Sub(reqTime)
 				if skew > window || skew < -window {
-					log.Warn("auth: agent signature rejected", "reason", "clock_skew", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "skew", skew.String(), "window", window.String())
+					log.Warn("auth: agent signature rejected", "reason", "clock_skew", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "skew", skew.String(), "window", window.String())
 					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
 					return
 				}
@@ -161,11 +201,11 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 					if readErr != nil {
 						var maxBytesErr *http.MaxBytesError
 						if errors.As(readErr, &maxBytesErr) {
-							log.Warn("auth: agent signature rejected", "reason", "body_too_large", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "limitBytes", maxBody)
+							log.Warn("auth: agent signature rejected", "reason", "body_too_large", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "limitBytes", maxBody)
 							http.Error(w, "request body exceeds signed body limit", http.StatusRequestEntityTooLarge)
 							return
 						}
-						log.Warn("auth: agent signature rejected", "reason", "body_read_error", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "err", readErr.Error())
+						log.Warn("auth: agent signature rejected", "reason", "body_read_error", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", readErr.Error())
 						http.Error(w, "failed to read request body", http.StatusBadRequest)
 						return
 					}
@@ -185,20 +225,19 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				expectedSig := hex.EncodeToString(mac.Sum(nil))
 
 				if !constantTimeEqual(sig, expectedSig) {
-					log.Warn("auth: agent signature rejected", "reason", "signature_mismatch", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					log.Warn("auth: agent signature rejected", "reason", "signature_mismatch", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
 					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
 					return
 				}
 
 				expiresAt := reqTime.Add(window)
 				if !cache.CheckAndRecord(nonce, expiresAt, now) {
-					log.Warn("auth: agent signature rejected", "reason", "replayed_nonce", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
+					log.Warn("auth: agent signature rejected", "reason", "replayed_nonce", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
 					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
 					return
 				}
 			}
 
-			principal := Principal{Kind: KindMachine}
 			next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), principal)))
 		})
 	}
@@ -253,4 +292,16 @@ func constantTimeEqual(a, b string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// sanitizeForLog replaces CR/LF in a user-controlled value (here,
+// r.URL.Path) with their visible escape sequences before it's written to a
+// log record. A percent-encoded CR/LF (%0d%0a) is decoded back by
+// net/url into r.URL.Path, so this is a real client-controlled
+// forged-log-entry vector. Replacing rather than deleting keeps the
+// injection visible as literal `\r`/`\n` instead of silently concatenating
+// the forged suffix (CWE-117).
+func sanitizeForLog(s string) string {
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	return strings.ReplaceAll(s, "\n", `\n`)
 }

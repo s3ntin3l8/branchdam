@@ -80,6 +80,64 @@ When a user deletes a photo or video:
 
 ## 4. Pairing & Authentication
 
-1. In the branchDAM web UI, navigate to **Settings** → **Machine API Keys** (or generate via CLI).
-2. Open the mobile companion app and scan the QR code or enter the server URL and API key.
-3. The app authenticates as `KindMachine` via `X-API-Key` or `Authorization: Bearer <key>`.
+### 4.1. Overview
+
+Per-device pairing keys (`device_pairings` / `device_pairing_keys`) replaced the
+single shared `BRANCHDAM_AGENT_API_KEY` as of #companion-pairing. The
+env-var key remains valid indefinitely as a bootstrap path so legacy
+workstation agents and previously-paired mobile apps continue to work
+without re-pairing. Operators can migrate at their own pace; once no
+device or workstation agent depends on the env-var key, it can be unset
+in `.env` (no in-server flag — operator-driven).
+
+Authentication as a paired device attaches `Principal{Name: <agent_id>, Kind: KindMachine}`.
+The env-var bootstrap path attaches `Principal{Name: "env-bootstrap", Kind: KindMachine}`.
+Cross-checks against body.agent_id in `/agent/handshake` and `/agent/events`
+block a paired device from impersonating another device's identity in
+either direction.
+
+### 4.2. Pairing flow
+
+1. Open the branchDAM web UI at **Companion Pairing** (sidebar link under "Storage Health" and "Settings"; also reachable from the Settings page's "Companion Pairing" card).
+2. Click **Pair new device**, enter a friendly label (e.g. "Björn's iPhone 16 Pro"), submit.
+3. The server mints a unique `agent_id` (e.g. `dev-abc12345`) and an initial API key. Both are shown exactly once in the modal: a QR code (scannable by the mobile app) and the plaintext key as a copy-to-clipboard widget.
+4. In the mobile app, scan the QR or enter the server URL, agent ID, and API key manually. The app stores them in the OS keychain (iOS `AppleKeychain` / Android `EncryptedSharedPreferences`).
+5. The app calls `POST /api/v1/agent/handshake` with the new key. The server authenticates via the device-pairing path, returns the naming template, and (if a rotation is pending) a `pendingRotation` hint the mobile app reads on its next handshake.
+
+### 4.3. Key rotation
+
+Operators rotate keys from the same **Companion Pairing** page, per-pairing:
+
+1. Click **Rotate** on the pairing row, choose a grace period (default 24h, max 7d).
+2. The server mints a new key, sets `expires_at = now + graceMinutes` on every currently-active key for the pairing, returns the new plaintext once.
+3. Both the old and new keys authenticate for the grace window. The mobile app's next `/agent/handshake` is told about the new key via `pendingRotation` in the response; the app stores it in the OS keychain and uses it for subsequent requests.
+4. After the grace window, the old key stops authenticating. The pairing's detail panel shows the `expires_at` countdown for in-progress rotations.
+
+This means rotation is non-disruptive: a rotating phone never sees an outage as long as it picks up the new key within the grace window. If it doesn't (e.g. the device is powered off for two weeks), the operator can shorten or extend the grace window per rotation, or revoke the device and re-pair from scratch.
+
+### 4.4. Revocation
+
+**Revoke** on a pairing row terminates the pairing and every key for it.
+The mobile app's next request returns 401; the keychain entry is
+cleared on the device, the operator re-pairs via QR.
+
+The env-var key can be rotated (or unset) separately from any paired
+device. Rotating the env-var key forces every device or workstation
+agent that authenticates with it to update simultaneously — useful
+when a workstation is decommissioned but the operator hasn't yet
+deployed paired devices.
+
+### 4.5. QR payload format
+
+The QR encodes the standard `branchdam://?server=…&key=…&agent=…` URL.
+The mobile app's existing `QrParser` accepts both `branchdam://?…` and
+`branchdam://…` forms, so old and new QR codes are backward-compatible.
+
+### 4.6. CLI generation (advanced)
+
+Programmatic pairing is via the same HTTP API the SPA uses:
+`POST /api/v1/companion/pairings` with `{ "friendlyLabel": "..." }`. The
+response includes the plaintext API key in `apiKey`, the rendered QR
+SVG in `qrSvg`, and the device's `agentId`. Standard `X-Authentik-*`
+headers (admin via Traefik ForwardAuth) are required, same as the
+SPA.

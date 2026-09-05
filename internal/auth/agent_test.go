@@ -45,8 +45,16 @@ func TestAgentChainValidKey(t *testing.T) {
 	if got.Kind != KindMachine {
 		t.Errorf("Kind = %q, want %q", got.Kind, KindMachine)
 	}
-	if got.Name != "" || got.Email != "" || len(got.Groups) != 0 {
-		t.Errorf("Principal = %+v, want empty Name/Email/Groups", got)
+	// The env-var bootstrap path attaches Principal.Name = "env-bootstrap"
+	// (#companion-pairing): machine principals do carry Name now, set to
+	// either the agent_id (device-paired path) or "env-bootstrap" (legacy
+	// path). Email/Groups remain empty for machine principals -- the
+	// BrowserChain-attached human Principal is the only one with identity.
+	if got.Name != "env-bootstrap" {
+		t.Errorf("Principal.Name = %q, want %q", got.Name, "env-bootstrap")
+	}
+	if got.Email != "" || len(got.Groups) != 0 {
+		t.Errorf("Principal = %+v, want empty Email/Groups", got)
 	}
 }
 
@@ -140,8 +148,14 @@ func TestAgentChainStripsForgedIdentityHeaders(t *testing.T) {
 	if got.Kind != KindMachine {
 		t.Errorf("Kind = %q, want %q", got.Kind, KindMachine)
 	}
-	if got.Name != "" {
-		t.Errorf("Principal.Name = %q, want empty -- the forged X-Authentik-Username must not reach the Principal", got.Name)
+	// Env-var bootstrap path: Principal.Name is "env-bootstrap", the
+	// X-Authentik-Username header (forged to "admin") must NOT have leaked
+	// through. The strip-X-Authentik-* step runs before the key check, so
+	// even the Authentik headers set on this request are gone by the time
+	// the principal is constructed -- this assertion is the negative
+	// control that proves it.
+	if got.Name != "env-bootstrap" {
+		t.Errorf("Principal.Name = %q, want %q (forged X-Authentik-Username must not reach the Principal)", got.Name, "env-bootstrap")
 	}
 	if len(got.Groups) != 0 {
 		t.Errorf("Principal.Groups = %v, want empty", got.Groups)

@@ -280,6 +280,87 @@ export interface PruneResponse {
   candidates: PruneCandidate[];
 }
 
+// Companion pairing: per-device API keys for /api/v1/agent/*.
+// Pairings are admin-managed via the SPA's /companion page. The
+// pairing model has one row per device (server-minted unique agent_id)
+// with N rows in device_pairing_keys (multi-key per device so rotation
+// can have a grace window).
+export interface CompanionPairingListItem {
+  id: number;
+  agentId: string;
+  friendlyLabel: string;
+  createdAtUnix: number;
+  createdBy: string;
+  revokedAtUnix?: number;
+  activeKeyCount: number;
+}
+
+export interface CompanionPairingDetail {
+  id: number;
+  agentId: string;
+  friendlyLabel: string;
+  createdAtUnix: number;
+  createdBy: string;
+  revokedAtUnix?: number;
+  keys: CompanionPairingKey[];
+  auditTail: CompanionPairingAuditItem[];
+}
+
+export interface CompanionPairingKey {
+  id: number;
+  keyPreview: string;
+  createdAtUnix: number;
+  expiresAtUnix?: number;
+  revokedAtUnix?: number;
+}
+
+export interface CompanionPairingAuditItem {
+  id: number;
+  actor: string;
+  event: string;
+  detailsJson: string;
+  createdAtUnix: number;
+}
+
+export interface CreateCompanionPairingRequest {
+  friendlyLabel: string;
+}
+
+export interface CreateCompanionPairingResponse {
+  pairingId: number;
+  agentId: string;
+  apiKey: string;
+  keyPreview: string;
+  qrSvg: string;
+  createdAtUnix: number;
+}
+
+export interface RotateCompanionPairingRequest {
+  graceMinutes?: number;
+}
+
+export interface RotateCompanionPairingResponse {
+  keyId: number;
+  apiKey: string;
+  keyPreview: string;
+  qrSvg: string;
+  previousKeyExpiresAtUnix: number;
+}
+
+export interface RevokeCompanionPairingResponse {
+  revokedAtUnix: number;
+}
+
+export interface ListPairingsResponse {
+  pairings: CompanionPairingListItem[];
+  total: number;
+}
+
+export interface PairingAuditResponse {
+  events: CompanionPairingAuditItem[];
+  total: number;
+}
+
 export interface AssetQueryParams {
   limit?: number;
   offset?: number;

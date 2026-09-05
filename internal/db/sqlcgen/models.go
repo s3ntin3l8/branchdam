@@ -35,6 +35,35 @@ type AppSetting struct {
 	UpdatedBy string
 }
 
+type CompanionPairingAudit struct {
+	ID        int64
+	PairingID int64
+	Actor     string
+	Event     string
+	Details   string
+	CreatedAt int64
+}
+
+type DevicePairing struct {
+	ID            int64
+	AgentID       string
+	FriendlyLabel string
+	CreatedAt     int64
+	CreatedBy     string
+	RevokedAt     sql.NullInt64
+	QrSvg         []byte
+}
+
+type DevicePairingKey struct {
+	ID            int64
+	PairingID     int64
+	KeyLookupHash string
+	KeyPreview    string
+	CreatedAt     int64
+	ExpiresAt     sql.NullInt64
+	RevokedAt     sql.NullInt64
+}
+
 type EventQueue struct {
 	ID          int64
 	EventUuid   string
