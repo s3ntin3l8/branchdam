@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -86,6 +87,18 @@ func main() {
 	}
 	if secretBox == nil {
 		log.Warn("BRANCHDAM_SECRET_KEY not set -- UI-configured secrets (e.g. Immich API key) are unavailable until it is")
+	}
+
+	// Derive the HMAC pepper for companion pairing key lookup hashes from
+	// the same 32-byte secret. This is the defense-in-depth layer that
+	// makes a leaked database alone insufficient to match presented API
+	// keys. When BRANCHDAM_SECRET_KEY is unset, the pairing service uses
+	// a fixed fallback pepper (fine for dev, not for production).
+	var pairingPepper []byte
+	if rawKey := os.Getenv("BRANCHDAM_SECRET_KEY"); rawKey != "" {
+		if k, err := base64.StdEncoding.DecodeString(rawKey); err == nil && len(k) == 32 {
+			pairingPepper = k
+		}
 	}
 
 	settingsStore, err := settings.NewStore(ctx, database, cfg, secretBox, log)
@@ -278,7 +291,7 @@ func main() {
 	// are, behind the agent key check). Wiring the pairing service's
 	// KeyLookup into the AgentConfig (see httpapi/server.go's Handler())
 	// is what lets a device-paired API key authenticate.
-	pairingService := pairing.NewService(database, log)
+	pairingService := pairing.NewService(database, log, pairingPepper)
 
 	srv := httpapi.New(httpapi.Deps{
 		Config: &cfg, Settings: settingsStore, Log: log, DB: database, Guard: guard, Prober: prober,

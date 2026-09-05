@@ -2,6 +2,7 @@ package pairing
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -15,6 +16,10 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
+// testPepper is the HMAC key used by the test helper and newTestService.
+// Must match the pepper passed to NewService in newTestService.
+var testPepper = sha256.Sum256([]byte("test-pepper"))
+
 func newTestService(t *testing.T) (*Service, *db.DB) {
 	t.Helper()
 	root := t.TempDir()
@@ -22,7 +27,7 @@ func newTestService(t *testing.T) (*Service, *db.DB) {
 	database, err := db.Open(context.Background(), dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = database.Close() })
-	return NewService(database, nil), database
+	return NewService(database, nil, testPepper[:]), database
 }
 
 // stubQRPayload returns a stable closure so tests don't depend on the
@@ -32,8 +37,9 @@ func stubQRPayload(agentID, apiKey string) []byte {
 }
 
 func hashKeyForTest(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, testPepper[:])
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func TestCreatePairing_HappyPath(t *testing.T) {

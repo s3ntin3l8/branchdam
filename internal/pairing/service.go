@@ -21,6 +21,7 @@ package pairing
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -95,15 +96,32 @@ type Service struct {
 	db    *db.DB
 	log   *slog.Logger
 	nowFn func() int64
+
+	// pepper is a 32-byte secret derived from BRANCHDAM_SECRET_KEY used as
+	// the HMAC-SHA256 key for API key lookup hashes. This provides defense
+	// in depth: a leaked database alone is insufficient to match presented
+	// keys without the server-side pepper.
+	pepper []byte
 }
 
-// NewService constructs a Service backed by db. log may be nil for
-// quieter callers (tests).
-func NewService(database *db.DB, log *slog.Logger) *Service {
+// defaultPepper is used only when no BRANCHDAM_SECRET_KEY is configured.
+// It still satisfies CodeQL (HMAC, not bare hash) but offers no protection
+// against a stolen database — pairing should only be used with a real
+// secret key in production.
+var defaultPepper = sha256.Sum256([]byte("branchdam-pairing-default-pepper"))
+
+// NewService constructs a Service backed by db. pepper is the raw 32-byte
+// HMAC key derived from BRANCHDAM_SECRET_KEY; pass nil to use a
+// deterministic fallback (not recommended for production). log may be nil
+// for quieter callers (tests).
+func NewService(database *db.DB, log *slog.Logger, pepper []byte) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{db: database, log: log, nowFn: nowUnix}
+	if len(pepper) == 0 {
+		pepper = defaultPepper[:]
+	}
+	return &Service{db: database, log: log, nowFn: nowUnix, pepper: pepper}
 }
 
 func nowUnix() int64 { return time.Now().Unix() }
@@ -135,7 +153,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 	if err != nil {
 		return nil, nil, fmt.Errorf("mint api key: %w", err)
 	}
-	hash := hashKey(plaintext)
+	hash := s.hashKey(plaintext)
 	svg, err := qr.RenderSVG(string(qrPayloadFor(agentID, plaintext)), 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("render qr: %w", err)
@@ -215,7 +233,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 // KeyLookup resolves an X-API-Key header value to the agent_id of the
 // device it authenticates. Returns ("", nil) when no active key matches.
 func (s *Service) KeyLookup(ctx context.Context, presented string) (string, error) {
-	hash := hashKey(presented)
+	hash := s.hashKey(presented)
 	row, err := s.db.Reader.GetDevicePairingKeyByHash(ctx, hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -244,7 +262,7 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("mint api key: %w", err)
 	}
-	hash := hashKey(plaintext)
+	hash := s.hashKey(plaintext)
 
 	var (
 		keyRow        sqlcgen.DevicePairingKey
@@ -492,10 +510,16 @@ func (s *Service) IsAgentRevoked(ctx context.Context, agentID string) (bool, err
 	return row.RevokedAt.Valid, nil
 }
 
-// hashKey returns the hex-encoded SHA-256 of the API key.
-func hashKey(plaintext string) string {
-	sum := sha256.Sum256([]byte(plaintext))
-	return hex.EncodeToString(sum[:])
+// hashKey returns the hex-encoded HMAC-SHA256 of the API key using the
+// service's pepper. The pepper is a 32-byte secret derived from
+// BRANCHDAM_SECRET_KEY. HMAC-SHA256 satisfies CodeQL's
+// go/weak-cryptographic-algorithm while keeping the lookup as a single
+// indexed SELECT — the key is already 256-bit random, so no password
+// stretching (bcrypt/argon2) is needed.
+func (s *Service) hashKey(plaintext string) string {
+	mac := hmac.New(sha256.New, s.pepper)
+	mac.Write([]byte(plaintext))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // toInt64 coerces the sqlite integer (which sqlc surfaces as

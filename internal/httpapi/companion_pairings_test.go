@@ -34,7 +34,7 @@ func newPairingTestServer(t *testing.T) (*Server, *db.DB, *pairing.Service) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = database.Close() })
 
-	pairSvc := pairing.NewService(database, nil)
+	pairSvc := pairing.NewService(database, nil, nil)
 	srv := New(Deps{
 		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
 		DB:      database,
