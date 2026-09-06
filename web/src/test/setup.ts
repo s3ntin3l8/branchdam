@@ -16,8 +16,8 @@ class ResizeObserverStub {
 // the callback immediately is sufficient for tests.
 class IntersectionObserverStub {
   callback: IntersectionObserverCallback;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+    void options;
     this.callback = callback;
   }
   observe() {}
