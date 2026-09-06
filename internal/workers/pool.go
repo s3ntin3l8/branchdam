@@ -7,7 +7,6 @@ package workers
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 )
 
 // Job is one unit of work. Key identifies it for in-flight deduplication --
@@ -39,8 +38,8 @@ type Pool[K comparable] struct {
 
 	mu       sync.Mutex
 	inflight map[K]struct{}
-	closed   bool        // set under mu by closeOnDone; see Submit and closeOnDone
-	closing  atomic.Bool // set when ctx.Done fires, before closeOnDone takes mu; closes the Submit/closeOnDone race window
+	closed   bool            // set under mu by closeOnDone; see Submit and closeOnDone
+	ctx      context.Context // stored by Run; checked synchronously by Submit
 
 	wg sync.WaitGroup
 }
@@ -67,6 +66,7 @@ func New[K comparable](workerCount, queueDepth int) *Pool[K] {
 // does not block until ctx is done. Call Drain (after cancelling ctx) to
 // wait for in-flight work to finish during shutdown.
 func (p *Pool[K]) Run(ctx context.Context) {
+	p.ctx = ctx
 	p.wg.Add(1)
 	go p.closeOnDone(ctx)
 	for i := 0; i < p.workerCount; i++ {
@@ -96,12 +96,11 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 // dequeued before shutdown still gets its completion bookkeeping released,
 // instead of leaving a caller's wg.Wait() blocked forever.
 //
-// The atomic `closing` flag is set immediately after ctx.Done(), before
-// taking p.mu, so that concurrent Submit calls see the flag before they
-// take the lock -- closing the race window between ctx cancellation and
-// p.closed being set. Without this, a Submit that lands between
-// ctx.Done() firing and closeOnDone acquiring p.mu could enqueue a job
-// that a worker picks up and processes normally.
+// Submit checks p.ctx.Err() synchronously before taking p.mu, so any
+// Submit call that arrives after ctx cancellation is refused immediately
+// without waiting for this goroutine to run. The `closed` flag under p.mu
+// is the final guard for the drain: Submit's channel send and this drain
+// are strictly ordered by the same lock.
 //
 // This runs as a single dedicated goroutine, tracked by Run alongside the
 // workers, rather than each worker independently racing ctx.Done() against
@@ -122,7 +121,6 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 func (p *Pool[K]) closeOnDone(ctx context.Context) {
 	defer p.wg.Done()
 	<-ctx.Done()
-	p.closing.Store(true)
 
 	p.mu.Lock()
 	p.closed = true
@@ -174,19 +172,18 @@ func (p *Pool[K]) runJob(ctx context.Context, job Job[K]) {
 // cancelled at call time also returns false without enqueuing -- callers
 // should not keep submitting new work after shutdown has begun.
 //
-// Submit also refuses once the Pool's own Run context is done: the atomic
-// `closing` flag is checked first (set by closeOnDone immediately after
-// ctx.Done(), before taking p.mu) to close the race window between ctx
-// cancellation and closeOnDone acquiring the lock. The `closed` flag under
-// p.mu is the final guard -- see closeOnDone's doc comment for why these
-// two checks are strictly ordered: an earlier version only had `closed`
-// under the lock, which left a window where Submit could enqueue a job
-// after every worker had already given up on draining it.
+// Submit also refuses once the Pool's own Run context is done: p.ctx.Err()
+// is checked synchronously before taking p.mu, closing the race window
+// between ctx cancellation and closeOnDone acquiring the lock. The `closed`
+// flag under p.mu is the final guard -- see closeOnDone's doc comment for
+// why these two checks are strictly ordered: an earlier version only had
+// `closed` under the lock, which left a window where Submit could enqueue a
+// job after every worker had already given up on draining it.
 func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	if p.closing.Load() {
+	if p.ctx != nil && p.ctx.Err() != nil {
 		return false
 	}
 
