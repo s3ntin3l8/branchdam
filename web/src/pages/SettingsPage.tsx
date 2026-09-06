@@ -11,6 +11,7 @@ import { ToggleField } from "../components/form/ToggleField";
 import { RestartServerCard } from "../components/RestartServerButton";
 import { SettingsLayout } from "../components/settings/SettingsLayout";
 import type { SettingsCategory } from "../components/settings/SettingsLayout";
+import { AppearanceSettings } from "../components/settings/AppearanceSettings";
 import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
@@ -30,6 +31,7 @@ const CATEGORIES: SettingsCategory[] = [
   { id: "integrations", label: "Integrations" },
   { id: "security", label: "Security & Access" },
   { id: "maintenance", label: "Maintenance" },
+  { id: "appearance", label: "Appearance" },
 ];
 
 // Maps each settings group name to its parent category id.
@@ -586,6 +588,12 @@ export default function SettingsPage() {
             </div>
           ))}
           <RestartServerCard />
+        </section>
+
+        {/* Appearance */}
+        <section id="appearance" data-settings-section="appearance" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Appearance</h2>
+          <AppearanceSettings />
         </section>
 
         {/* Loading / error states */}

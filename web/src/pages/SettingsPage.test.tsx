@@ -186,6 +186,24 @@ describe("SettingsPage", () => {
     expect(screen.getByText(":8080")).toBeInTheDocument();
   });
 
+  it("renders the Appearance category with a theme switcher (no server round-trip)", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    // Sidebar nav entry
+    expect(await screen.findByRole("link", { name: "Appearance" })).toBeInTheDocument();
+    // Section heading
+    expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
+    // Theme switcher
+    expect(screen.getByRole("group", { name: /color theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^System theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Light theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Dark theme/i })).toBeInTheDocument();
+  });
+
   it("saves an edited field via PUT {set} and refetches on success", async () => {
     const user = userEvent.setup();
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
