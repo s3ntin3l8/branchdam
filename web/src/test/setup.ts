@@ -11,6 +11,22 @@ class ResizeObserverStub {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).ResizeObserver = ResizeObserverStub;
 
+// jsdom doesn't implement IntersectionObserver, which the SettingsLayout
+// uses for scroll-spy active-state tracking. A minimal stub that fires
+// the callback immediately is sufficient for tests.
+class IntersectionObserverStub {
+  callback: IntersectionObserverCallback;
+  constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+    void options;
+    this.callback = callback;
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(globalThis as any).IntersectionObserver = IntersectionObserverStub;
+
 // Mock HTMLElement offset dimensions for ReactFlow canvas sizing in jsdom
 Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
   configurable: true,
