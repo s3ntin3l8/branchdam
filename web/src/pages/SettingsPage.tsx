@@ -9,6 +9,8 @@ import { SelectField } from "../components/form/SelectField";
 import { TextField } from "../components/form/TextField";
 import { ToggleField } from "../components/form/ToggleField";
 import { RestartServerCard } from "../components/RestartServerButton";
+import { SettingsLayout } from "../components/settings/SettingsLayout";
+import type { SettingsCategory } from "../components/settings/SettingsLayout";
 import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
@@ -20,6 +22,29 @@ import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 const SELECT_OPTIONS: Record<string, string[]> = {
   logLevel: ["debug", "info", "warn", "error"],
   "workers.fullHashPolicy": ["always", "tier3_and_collision", "never"],
+};
+
+const CATEGORIES: SettingsCategory[] = [
+  { id: "server", label: "Server & Storage" },
+  { id: "workers", label: "Workers & Indexing" },
+  { id: "integrations", label: "Integrations" },
+  { id: "security", label: "Security & Access" },
+  { id: "maintenance", label: "Maintenance" },
+];
+
+// Maps each settings group name to its parent category id.
+const GROUP_TO_CATEGORY: Record<string, string> = {
+  Server: "server",
+  HTTP: "server",
+  Workers: "workers",
+  Thumbnails: "workers",
+  Immich: "integrations",
+  "Path Resolution": "integrations",
+  Agent: "security",
+  Authorization: "security",
+  Pruning: "maintenance",
+  "Trash & Retention": "maintenance",
+  "Ingest & Archive": "maintenance",
 };
 
 function ReadOnlyValue({ field }: { field: SettingsField }) {
@@ -45,16 +70,9 @@ function ReadOnlyValue({ field }: { field: SettingsField }) {
 
 function renderInput(field: SettingsField, draft: unknown, onChange: (value: unknown) => void, secretsAvailable: boolean) {
   if (!field.editable || field.type === "stringList") {
-    // No editable stringList field exists today -- authz.groups is the only
-    // one and it's display-only -- so there's nothing to build an editor
-    // for yet; render it the same as any other read-only field.
     return <ReadOnlyValue field={field} />;
   }
   if (field.secret) {
-    // A PUT of a secret field returns 422 when BRANCHDAM_SECRET_KEY isn't
-    // set (Store.Apply's seal-failure branch) -- disable the input rather
-    // than let the operator type a value into a save that's guaranteed to
-    // fail, on top of the page-level banner already saying so.
     return <SecretField hasValue={!!field.hasValue} value={draft as string} onChange={onChange} disabled={!secretsAvailable} />;
   }
   const options = SELECT_OPTIONS[field.key];
@@ -91,19 +109,6 @@ function SettingsFieldEditor({
   const [draft, setDraft] = useState<unknown>(baseline);
   const [dirty, setDirty] = useState(false);
 
-  // A revert, another session's write, or the SSE-driven refetch can all
-  // move field.value out from under a draft. Adjusted during render
-  // (React's documented alternative to an effect for "reset derived state
-  // when a prop changes") rather than in a useEffect, which would call
-  // setState after the initial render and trigger a second one.
-  //
-  // The Save/Revert button handlers below already clear `dirty` optimistically
-  // on click (and restore it on failure), so this is the fallback for the
-  // other ways a field's baseline can move: an untouched draft always
-  // resyncs, and a draft the operator abandoned mid-edit resyncs too, once
-  // the world catches up to whatever they'd typed. A dirty draft that still
-  // disagrees with a freshly changed baseline (a concurrent, unrelated
-  // external edit) is left alone, so a nudge can't clobber in-progress typing.
   if (baseline !== prevBaseline) {
     setPrevBaseline(baseline);
     if (!dirty || draft === baseline) {
@@ -233,9 +238,9 @@ function PathRewritesEditor({
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-400">
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-neutral-400">
             Operator Path Rewrites (Tier-1 Resolution)
-          </h2>
+          </h3>
           {field && (
             <span
               className={`rounded px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase ${
@@ -410,6 +415,21 @@ export default function SettingsPage() {
     );
   };
 
+  // Group the grouped fields by category for rendering.
+  const categoryGroups = useMemo(() => {
+    const byCategory = new Map<string, Array<[string, SettingsField[]]>>();
+    for (const cat of CATEGORIES) {
+      byCategory.set(cat.id, []);
+    }
+    for (const [group, fields] of grouped) {
+      const catId = GROUP_TO_CATEGORY[group];
+      if (catId) {
+        byCategory.get(catId)?.push([group, fields]);
+      }
+    }
+    return byCategory;
+  }, [grouped]);
+
   return (
     <DirtyFormContext.Provider value={dirtyContextValue}>
     <div className="p-6">
@@ -432,66 +452,154 @@ export default function SettingsPage() {
         <div className="mb-6 rounded-lg border border-red-800/60 bg-red-950/30 p-4 text-sm text-red-300">{fieldError}</div>
       )}
 
-      <div className="mb-8 rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">Server Info</h2>
-        <p className="text-sm text-neutral-200">
-          Version: <span className="font-mono text-emerald-400">{configLoading ? "Loading…" : config?.version || "unknown"}</span>
-        </p>
-      </div>
-
-      {/* Companion Pairing dashboard entry -- mirrors the layout of the
-          other "section" cards (Path Rewrites, Server Info, etc.) so
-          the Settings page stays a top-level overview; the dedicated
-          /companion page is where operators do actual pairing work. */}
-      <div className="mb-8 rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">Companion Pairing</h2>
-        <p className="mb-3 text-sm text-neutral-200">
-          Manage paired mobile devices (Android, iOS), rotate keys, and revoke lost devices.
-        </p>
-        <a
-          href="/companion"
-          className="inline-block rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
-        >
-          Open Companion Pairing
-        </a>
-      </div>
-
-      <RestartServerCard className="mb-8" />
-
-      {settingsLoading ? (
-        <p className="mb-8 text-sm text-neutral-400">Loading settings…</p>
-      ) : settingsError ? (
-        <p className="mb-8 text-sm text-red-400">
-          {settingsError instanceof ApiError && settingsError.status === 403
-            ? "Admin access is required to view settings."
-            : "Failed to load settings."}
-        </p>
-      ) : (
-        grouped.map(([group, fields]) => (
-          <div key={group} className="mb-6 rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h2>
-            <div>
-              {fields.map((f) => (
-                <SettingsFieldEditor
-                  key={f.key}
-                  field={f}
-                  saving={putSettings.isPending}
-                  secretsAvailable={settings?.secretsAvailable ?? true}
-                  onSave={handleSave}
-                  onRevert={handleRevert}
-                />
-              ))}
-            </div>
+      <SettingsLayout categories={CATEGORIES}>
+        {/* Server & Storage */}
+        <section id="server" data-settings-section="server" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Server & Storage</h2>
+          <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">Server Info</h3>
+            <p className="text-sm text-neutral-200">
+              Version: <span className="font-mono text-emerald-400">{configLoading ? "Loading…" : config?.version || "unknown"}</span>
+            </p>
           </div>
-        ))
-      )}
+          {categoryGroups.get("server")?.map(([group, fields]) => (
+            <div key={group} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h3>
+              <div>
+                {fields.map((f) => (
+                  <SettingsFieldEditor
+                    key={f.key}
+                    field={f}
+                    saving={putSettings.isPending}
+                    secretsAvailable={settings?.secretsAvailable ?? true}
+                    onSave={handleSave}
+                    onRevert={handleRevert}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
 
-      <PathRewritesEditor
-        field={pathRewritesField}
-        saving={putSettings.isPending}
-        onSave={handleSave}
-        onRevert={handleRevert}
-      />
+        {/* Workers & Indexing */}
+        <section id="workers" data-settings-section="workers" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Workers & Indexing</h2>
+          {categoryGroups.get("workers")?.map(([group, fields]) => (
+            <div key={group} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h3>
+              <div>
+                {fields.map((f) => (
+                  <SettingsFieldEditor
+                    key={f.key}
+                    field={f}
+                    saving={putSettings.isPending}
+                    secretsAvailable={settings?.secretsAvailable ?? true}
+                    onSave={handleSave}
+                    onRevert={handleRevert}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
+
+        {/* Integrations */}
+        <section id="integrations" data-settings-section="integrations" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Integrations</h2>
+          <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">Companion Pairing</h3>
+            <p className="mb-3 text-sm text-neutral-200">
+              Manage paired mobile devices (Android, iOS), rotate keys, and revoke lost devices.
+            </p>
+            <a
+              href="/companion"
+              className="inline-block rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+            >
+              Open Companion Pairing
+            </a>
+          </div>
+          {categoryGroups.get("integrations")?.map(([group, fields]) => (
+            <div key={group} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h3>
+              <div>
+                {fields.map((f) => (
+                  <SettingsFieldEditor
+                    key={f.key}
+                    field={f}
+                    saving={putSettings.isPending}
+                    secretsAvailable={settings?.secretsAvailable ?? true}
+                    onSave={handleSave}
+                    onRevert={handleRevert}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+          <PathRewritesEditor
+            field={pathRewritesField}
+            saving={putSettings.isPending}
+            onSave={handleSave}
+            onRevert={handleRevert}
+          />
+        </section>
+
+        {/* Security & Access */}
+        <section id="security" data-settings-section="security" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Security & Access</h2>
+          {categoryGroups.get("security")?.map(([group, fields]) => (
+            <div key={group} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h3>
+              <div>
+                {fields.map((f) => (
+                  <SettingsFieldEditor
+                    key={f.key}
+                    field={f}
+                    saving={putSettings.isPending}
+                    secretsAvailable={settings?.secretsAvailable ?? true}
+                    onSave={handleSave}
+                    onRevert={handleRevert}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
+
+        {/* Maintenance */}
+        <section id="maintenance" data-settings-section="maintenance" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Maintenance</h2>
+          {categoryGroups.get("maintenance")?.map(([group, fields]) => (
+            <div key={group} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">{group}</h3>
+              <div>
+                {fields.map((f) => (
+                  <SettingsFieldEditor
+                    key={f.key}
+                    field={f}
+                    saving={putSettings.isPending}
+                    secretsAvailable={settings?.secretsAvailable ?? true}
+                    onSave={handleSave}
+                    onRevert={handleRevert}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+          <RestartServerCard />
+        </section>
+
+        {/* Loading / error states */}
+        {settingsLoading && (
+          <p className="text-sm text-neutral-400">Loading settings…</p>
+        )}
+        {settingsError && (
+          <p className="text-sm text-red-400">
+            {settingsError instanceof ApiError && settingsError.status === 403
+              ? "Admin access is required to view settings."
+              : "Failed to load settings."}
+          </p>
+        )}
+      </SettingsLayout>
     </div>
     {blocker.state === "blocked" && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">

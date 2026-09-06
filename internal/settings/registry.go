@@ -425,16 +425,80 @@ var httpFields = []Field{
 
 var agentFields = []Field{
 	{
-		Key:      "agent.apiKey",
-		Type:     KindString,
-		Label:    "Agent API Key",
-		Group:    "Agent",
-		Secret:   true,
-		Apply:    ApplyRestart,
-		Get:      func(cfg *config.Config) any { return cfg.Agent.APIKey },
-		Set:      func(cfg *config.Config, v any) error { cfg.Agent.APIKey = v.(string); return nil },
+		Key:    "agent.apiKey",
+		Type:   KindString,
+		Label:  "Agent API Key",
+		Group:  "Agent",
+		Secret: true,
+		Apply:  ApplyRestart,
+		Get:    func(cfg *config.Config) any { return cfg.Agent.APIKey },
+		Set: func(cfg *config.Config, v any) error {
+			cfg.Agent.APIKey = v.(string)
+			return nil
+		},
 		Editable: true,
 		Doc:      "Machine-principal key for /api/v1/agent/* routes. Changing this breaks every workstation agent until re-keyed with the new value.",
+	},
+	{
+		Key:   "agent.signedRequests",
+		Type:  KindBool,
+		Label: "Signed Requests",
+		Group: "Agent",
+		Apply: ApplyRestart,
+		Get:   func(cfg *config.Config) any { return cfg.Agent.SignedRequests },
+		Set: func(cfg *config.Config, v any) error {
+			cfg.Agent.SignedRequests = v.(bool)
+			return nil
+		},
+		Editable: true,
+		Doc:      "When enabled, agent routes require HMAC signature verification. Disable only for debugging.",
+	},
+	{
+		Key:   "agent.replayWindowSecs",
+		Type:  KindInt,
+		Label: "Replay Window (s)",
+		Group: "Agent",
+		Apply: ApplyRestart,
+		Get:   func(cfg *config.Config) any { return cfg.Agent.ReplayWindowSecs },
+		Set: func(cfg *config.Config, v any) error {
+			cfg.Agent.ReplayWindowSecs = v.(int)
+			return nil
+		},
+		Validate: positiveInt,
+		Editable: true,
+		Doc:      "Duration in seconds for which a signed request remains valid. 0 defaults to 300s (5 minutes).",
+	},
+	{
+		Key:   "agent.signedMaxBodyBytes",
+		Type:  KindInt,
+		Label: "Signed Max Body (bytes)",
+		Group: "Agent",
+		Apply: ApplyRestart,
+		Get:   func(cfg *config.Config) any { return int(cfg.Agent.SignedMaxBodyBytes) },
+		Set: func(cfg *config.Config, v any) error {
+			cfg.Agent.SignedMaxBodyBytes = int64(v.(int))
+			return nil
+		},
+		Editable: true,
+		Doc:      "Maximum request body size in bytes for HMAC-signed agent uploads. 0 means unlimited.",
+	},
+	{
+		Key:   "agent.skipSignaturePaths",
+		Type:  KindStringList,
+		Label: "Skip Signature Paths",
+		Group: "Agent",
+		Apply: ApplyRestart,
+		Get:   func(cfg *config.Config) any { return cfg.Agent.SkipSignaturePaths },
+		Set: func(cfg *config.Config, v any) error {
+			list, ok := v.([]string)
+			if !ok {
+				return fmt.Errorf("must be a string list")
+			}
+			cfg.Agent.SkipSignaturePaths = list
+			return nil
+		},
+		Editable: true,
+		Doc:      "Agent route paths that bypass HMAC signature verification (e.g. /api/v1/agent/hello).",
 	},
 }
 
