@@ -16,7 +16,7 @@ class ResizeObserverStub {
 // the callback immediately is sufficient for tests.
 class IntersectionObserverStub {
   callback: IntersectionObserverCallback;
-  constructor(callback: IntersectionObserverCallback) {
+  constructor(callback: IntersectionObserverCallback, _options?: IntersectionObserverInit) {
     this.callback = callback;
   }
   observe() {}
