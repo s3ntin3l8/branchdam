@@ -191,6 +191,30 @@ the no-key 401 check fires the same with or without it. A bare (`GET`) `curl` ag
 not an error, either -- the SPA's catch-all route (`GET /`) absorbs it and returns `200` with the
 HTML shell, not `405` and not JSON, which makes it easy to mistake for a working call.
 
+## 6. Sign out
+
+branchDAM owns no session state of its own -- the only cookie set on the browser is Authentik
+outpost's own session cookie, which branchDAM never reads or writes (per §2's header isolation).
+That means there is no app-level `/logout` to clear and no backend handler to call: signing out
+is just a navigation to Authentik's own outpost sign-out path.
+
+The SPA's user menu (bottom-left of the sidebar) renders a `Sign out` link that points straight
+at the outpost:
+
+```
+/outpost.goauthentik.io/sign_out
+```
+
+That path is already routed by `compose.yaml`'s `branchdam-outpost` router (§2, priority `200`)
+to the `authentik` service, so the browser hits Authentik directly. Authentik clears its cookie
+and bounces the browser back to the application root. No app code runs on the way out, no cache
+to invalidate: a full page reload is itself the cache reset.
+
+If you have removed the `branchdam-outpost` Traefik labels from your override (some operators
+serve `/outpost.goauthentik.io/` globally via the outpost container's own Traefik labels instead,
+see `compose.override.yaml`), the link still works as long as *something* on this host serves
+that path prefix -- the URL is what matters, not which Traefik router resolves it.
+
 If `/api/v1/me` returns `"kind": "user"` with an empty `name` -- or a write request that used to
 work now returns `403 authentication required` -- confirm:
 

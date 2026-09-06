@@ -1006,15 +1006,132 @@ func TestMeReflectsBrowserPrincipal(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var got struct {
-		Kind   string   `json:"kind"`
-		Name   string   `json:"name"`
-		Groups []string `json:"groups"`
+		Kind          string   `json:"kind"`
+		Name          string   `json:"name"`
+		Groups        []string `json:"groups"`
+		Authenticated bool     `json:"authenticated"`
+		IsAdmin       bool     `json:"isAdmin"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Kind != string(auth.KindUser) || got.Name != "alice" {
 		t.Errorf("got %+v, want user alice", got)
+	}
+	// fullTestServer leaves Authz.Groups empty, which IsAdmin treats as
+	// permit-all -- so any authenticated user must come back as admin.
+	if !got.Authenticated {
+		t.Errorf("authenticated = false, want true (X-Authentik-Username was set)")
+	}
+	if !got.IsAdmin {
+		t.Errorf("isAdmin = false, want true (Authz.Groups empty => permit-all)")
+	}
+}
+
+// meTestServer builds a minimal Server for /me tests with a specific
+// admin-group policy. /me never touches the worker pool, so we skip
+// fullTestServer's pool setup -- it would only add a goroutine per test
+// for no behavioral payoff.
+func meTestServer(t *testing.T, adminGroups []string) *Server {
+	t.Helper()
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "me.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	return New(Deps{
+		Config: &config.Config{Authz: config.Authz{Groups: adminGroups}},
+		DB:     database, Hub: sse.New(), Version: "test",
+	})
+}
+
+func TestMeReportsIsAdminFalseWhenUserGroupExcluded(t *testing.T) {
+	srv := meTestServer(t, []string{"dam-admins"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.Header.Set("X-Authentik-Username", "alice")
+	req.Header.Set("X-Authentik-Groups", "dam-users")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Authenticated bool `json:"authenticated"`
+		IsAdmin       bool `json:"isAdmin"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Authenticated {
+		t.Error("authenticated = false, want true")
+	}
+	if got.IsAdmin {
+		t.Error("isAdmin = true, want false (alice is in dam-users, not dam-admins)")
+	}
+}
+
+func TestMeReportsIsAdminTrueWhenUserInAdminGroup(t *testing.T) {
+	srv := meTestServer(t, []string{"dam-admins"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.Header.Set("X-Authentik-Username", "bob")
+	req.Header.Set("X-Authentik-Groups", "dam-admins|dam-users")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Authenticated bool `json:"authenticated"`
+		IsAdmin       bool `json:"isAdmin"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Authenticated || !got.IsAdmin {
+		t.Errorf("got authenticated=%v isAdmin=%v, want both true", got.Authenticated, got.IsAdmin)
+	}
+}
+
+func TestMeReportsAuthenticatedFalseWhenNoHeaders(t *testing.T) {
+	srv := meTestServer(t, []string{"dam-admins"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	// Decode into a map first so missing keys surface as zero values that
+	// we'd otherwise mistake for a correct "false" answer. Both fields
+	// must be present and explicitly false.
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["authenticated"]; !ok {
+		t.Errorf("response missing %q key: %s", "authenticated", rr.Body.String())
+	}
+	if _, ok := raw["isAdmin"]; !ok {
+		t.Errorf("response missing %q key: %s", "isAdmin", rr.Body.String())
+	}
+	var got struct {
+		Kind          string `json:"kind"`
+		Authenticated bool   `json:"authenticated"`
+		IsAdmin       bool   `json:"isAdmin"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Authenticated {
+		t.Error("authenticated = true, want false (no X-Authentik-* headers)")
+	}
+	if got.IsAdmin {
+		t.Error("isAdmin = true, want false (unauthenticated principal is never admin)")
+	}
+	if got.Kind != string(auth.KindUser) {
+		t.Errorf("kind = %q, want user (BrowserChain always attaches a user principal)", got.Kind)
 	}
 }
 

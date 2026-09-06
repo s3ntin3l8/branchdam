@@ -137,10 +137,12 @@ func (s *Server) registerRoutes(api huma.API) {
 
 type MeOutput struct {
 	Body struct {
-		Kind   string   `json:"kind"`
-		Name   string   `json:"name,omitempty"`
-		Email  string   `json:"email,omitempty"`
-		Groups []string `json:"groups,omitempty"`
+		Kind          string   `json:"kind"`
+		Name          string   `json:"name,omitempty"`
+		Email         string   `json:"email,omitempty"`
+		Groups        []string `json:"groups,omitempty"`
+		Authenticated bool     `json:"authenticated"`
+		IsAdmin       bool     `json:"isAdmin"`
 	}
 }
 
@@ -151,6 +153,12 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 		out.Body.Name = p.Name
 		out.Body.Email = p.Email
 		out.Body.Groups = p.Groups
+		out.Body.Authenticated = p.Authenticated
+		var allowedGroups []string
+		if cfg := s.cfg(); cfg != nil {
+			allowedGroups = cfg.Authz.Groups
+		}
+		out.Body.IsAdmin = auth.IsAdmin(p, allowedGroups)
 	}
 	return out, nil
 }
