@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -264,6 +265,58 @@ func TestCompanionPairings_QRPayloadEncodedCorrectly(t *testing.T) {
 	assert.Contains(t, payload, "server=https%3A%2F%2Fdam.example.com")
 	assert.Contains(t, payload, "key=secret-key-xyz")
 	assert.Contains(t, payload, "agent=iphone-abc")
+}
+
+// TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser pins
+// the contract that the mobile app relies on: the QR payload emitted by
+// qrPayloadFor() must be parseable by a standard `application/x-www-form
+// -urlencoded` parser and yield the exact (unencoded) values that were
+// passed in. Guards against accidental double-encoding in qrPayloadFor()
+// and pins the format the branchdam-mobile clients (Android QrParser /
+// iOS AppleQrParser, see s3ntin3l8/branchdam-mobile#141) decode against.
+func TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/companion/pairings", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "dam.example.com:8443")
+	var capturedCtx context.Context
+	wrapped := pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+	}))
+	wrapped.ServeHTTP(httptest.NewRecorder(), req)
+
+	factory := srv.qrPayloadFor(capturedCtx)
+
+	// Case 1: ASCII-safe inputs exercise that server-with-port (`%3A`)
+	// round-trips through the encoder/parser pair.
+	t.Run("ascii", func(t *testing.T) {
+		payload := string(factory("iphone-abc", "secret-key-xyz"))
+		require.True(t, strings.HasPrefix(payload, "branchdam://?"), "payload must use query-style form: %q", payload)
+
+		values, err := url.ParseQuery(strings.TrimPrefix(payload, "branchdam://?"))
+		require.NoError(t, err, "payload must be standard url-encoded: %q", payload)
+		assert.Equal(t, "https://dam.example.com:8443", values.Get("server"))
+		assert.Equal(t, "secret-key-xyz", values.Get("key"))
+		assert.Equal(t, "iphone-abc", values.Get("agent"))
+	})
+
+	// Case 2: friendly labels and API keys frequently contain reserved
+	// characters (spaces, `+`, `&`, `=`). If qrPayloadFor() ever swapped
+	// url.Values.Encode() for naive string concatenation, this case would
+	// leak unescaped `&` / `=` into the body and ParseQuery would parse
+	// them as additional parameters — a regression the simpler case
+	// would silently miss.
+	t.Run("reserved-chars", func(t *testing.T) {
+		payload := string(factory("Björn's iPhone", "k&y=with+specials"))
+		require.True(t, strings.HasPrefix(payload, "branchdam://?"), "payload must use query-style form: %q", payload)
+
+		values, err := url.ParseQuery(strings.TrimPrefix(payload, "branchdam://?"))
+		require.NoError(t, err, "payload must be standard url-encoded: %q", payload)
+		assert.Equal(t, "https://dam.example.com:8443", values.Get("server"))
+		assert.Equal(t, "k&y=with+specials", values.Get("key"))
+		assert.Equal(t, "Björn's iPhone", values.Get("agent"))
+	})
 }
 
 // pairingIDStr formats a pairing id for use in URL paths without
