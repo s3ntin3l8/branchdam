@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.0](https://github.com/s3ntin3l8/branchdam/compare/v0.15.0...v0.16.0) (2026-09-06)
+
+
+### Features
+
+* **settings:** restructure settings page with left nav and 5 categories ([#398](https://github.com/s3ntin3l8/branchdam/issues/398)) ([95e8889](https://github.com/s3ntin3l8/branchdam/commit/95e88894aabe19eec00a712e15eda145020d2102))
+
+
+### Bug Fixes
+
+* **workers:** close Submit/closeOnDone race with atomic closing flag ([5a4b49b](https://github.com/s3ntin3l8/branchdam/commit/5a4b49b78b4271b86984c235393a1460197102b2))
+* **workers:** close Submit/closeOnDone race with atomic closing flag ([#399](https://github.com/s3ntin3l8/branchdam/issues/399)) ([33c6a78](https://github.com/s3ntin3l8/branchdam/commit/33c6a78512adde95564dc3d7e9aade5dc692717c))
+
 ## [0.15.0](https://github.com/s3ntin3l8/branchdam/compare/v0.14.0...v0.15.0) (2026-09-05)
 
 
