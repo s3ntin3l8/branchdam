@@ -25,23 +25,23 @@ const EXPORT_EXTS = new Set([
 function getNodeCategoryColor(ext: string): { border: string; bg: string } {
   const cleanExt = ext.toLowerCase();
   if (RAW_EXTS.has(cleanExt)) {
-    return { border: "#3b82f6", bg: "#1e3a8a" }; // Blue - Master RAW
+    return { border: "var(--graph-node-border-raw)", bg: "var(--graph-node-bg-raw)" };
   }
   if (SIDECAR_EXTS.has(cleanExt)) {
-    return { border: "#f97316", bg: "#7c2d12" }; // Orange - Project Sidecar
+    return { border: "var(--graph-node-border-sidecar)", bg: "var(--graph-node-bg-sidecar)" };
   }
   if (EXPORT_EXTS.has(cleanExt)) {
-    return { border: "#22c55e", bg: "#14532d" }; // Green - Export
+    return { border: "var(--graph-node-border-export)", bg: "var(--graph-node-bg-export)" };
   }
-  return { border: "#64748b", bg: "#0f172a" }; // Neutral
+  return { border: "var(--graph-node-border-neutral)", bg: "var(--graph-node-bg-neutral)" };
 }
 
 const relColor: Record<string, string> = {
-  DERIVED_FROM: "#38bdf8",
-  FINAL_EXPORT: "#34d399",
-  PROXY_OF: "#a78bfa",
-  PROJECT_SIDECAR: "#fb923c",
-  DUPLICATE_OF: "#f87171",
+  DERIVED_FROM: "var(--graph-edge-derived)",
+  FINAL_EXPORT: "var(--graph-edge-final)",
+  PROXY_OF: "var(--graph-edge-proxy)",
+  PROJECT_SIDECAR: "var(--graph-edge-sidecar)",
+  DUPLICATE_OF: "var(--graph-edge-duplicate)",
 };
 
 export default function AssetGraphCanvas({ assetId, lineage, graph }: AssetGraphCanvasProps) {
@@ -173,8 +173,8 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
         ),
       },
       style: {
-        background: isRoot ? "#1e1b4b" : colors.bg,
-        color: "#f8fafc",
+        background: isRoot ? "var(--graph-node-bg-root)" : colors.bg,
+        color: "var(--graph-text)",
         border: isRoot ? "3px solid var(--color-brand)" : `2px solid ${colors.border}`,
         borderRadius: "6px",
         padding: "8px 12px",
@@ -188,8 +188,8 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
     source: String(e.sourceNodeId),
     target: String(e.targetNodeId),
     label: `${e.relationshipType} (${e.confidence.toFixed(2)})`,
-    style: { stroke: relColor[e.relationshipType] ?? "#64748b", strokeWidth: 2 },
-    labelStyle: { fill: "#cbd5e1", fontSize: 11 },
+    style: { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)", strokeWidth: 2 },
+    labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
   }));
 
   return { nodes, edges, isEmpty: false };
@@ -205,7 +205,7 @@ function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[
       id: String(assetId),
       position: { x: 0, y: 0 },
       data: { label: "This asset" },
-      style: { background: "#1e1b4b", color: "#fff", border: "3px solid var(--color-brand)", borderRadius: "6px", cursor: "pointer" },
+      style: { background: "var(--graph-node-bg-root)", color: "var(--graph-text)", border: "3px solid var(--color-brand)", borderRadius: "6px", cursor: "pointer" },
     },
   ];
   const edges: FlowEdge[] = [];
@@ -215,15 +215,15 @@ function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[
       id: `parent-${e.sourceNodeId}`,
       position: { x: -260, y: (i - (graph.parents.length - 1) / 2) * 90 },
       data: { label: `Node ${e.sourceNodeId}` },
-      style: { background: "#0f172a", color: "#cbd5e1", border: "1px solid #334155", borderRadius: "6px", cursor: "pointer" },
+      style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
     });
     edges.push({
       id: `e-${e.id}`,
       source: `parent-${e.sourceNodeId}`,
       target: String(assetId),
       label: `${e.relationshipType} (${e.confidence.toFixed(2)})`,
-      style: { stroke: relColor[e.relationshipType] ?? "#64748b" },
-      labelStyle: { fill: "#cbd5e1", fontSize: 11 },
+      style: { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)" },
+      labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
     });
   });
 
@@ -232,15 +232,15 @@ function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[
       id: `child-${e.targetNodeId}`,
       position: { x: 260, y: (i - (graph.children.length - 1) / 2) * 90 },
       data: { label: `Node ${e.targetNodeId}` },
-      style: { background: "#0f172a", color: "#cbd5e1", border: "1px solid #334155", borderRadius: "6px", cursor: "pointer" },
+      style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
     });
     edges.push({
       id: `e-${e.id}`,
       source: String(assetId),
       target: `child-${e.targetNodeId}`,
       label: `${e.relationshipType} (${e.confidence.toFixed(2)})`,
-      style: { stroke: relColor[e.relationshipType] ?? "#64748b" },
-      labelStyle: { fill: "#cbd5e1", fontSize: 11 },
+      style: { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)" },
+      labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
     });
   });
 

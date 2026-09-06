@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import SettingsPage from "./SettingsPage";
+import { ThemeProvider } from "../components/theme/ThemeProvider";
 import { api, ApiError } from "../api/client";
 import type { SettingsField, SettingsResponse } from "../api/types";
 
@@ -107,9 +108,11 @@ function renderWithClient(ui: React.ReactElement) {
     { initialEntries: ["/settings"] },
   );
   return render(
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>,
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    </ThemeProvider>,
   );
 }
 
@@ -184,6 +187,24 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText("A running process cannot change its own listen address.")).toBeInTheDocument();
     expect(screen.getByText(":8080")).toBeInTheDocument();
+  });
+
+  it("renders the Appearance category with a theme switcher (no server round-trip)", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    // Sidebar nav entry
+    expect(await screen.findByRole("link", { name: "Appearance" })).toBeInTheDocument();
+    // Section heading
+    expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
+    // Theme switcher
+    expect(screen.getByRole("radiogroup", { name: /color theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^System theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Light theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Dark theme/i })).toBeInTheDocument();
   });
 
   it("saves an edited field via PUT {set} and refetches on success", async () => {

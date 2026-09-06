@@ -32,7 +32,7 @@ export function SecretField({ hasValue, value, onChange, disabled }: SecretField
         type="button"
         onClick={() => setReveal((r) => !r)}
         disabled={disabled}
-        className="shrink-0 rounded border border-neutral-800 px-2 text-xs text-neutral-400 hover:text-white disabled:opacity-50"
+        className="shrink-0 rounded border border-neutral-800 px-2 text-xs text-neutral-400 hover:text-neutral-100 disabled:opacity-50"
       >
         {reveal ? "Hide" : "Show"}
       </button>

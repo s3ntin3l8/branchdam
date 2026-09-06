@@ -26,7 +26,7 @@ export default function IngestPage() {
           onClick={() => setActiveTab("upload")}
           className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
             activeTab === "upload"
-              ? "border-brand text-white"
+              ? "border-brand text-neutral-100"
               : "border-transparent text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
           }`}
         >
@@ -37,7 +37,7 @@ export default function IngestPage() {
           onClick={() => setActiveTab("scan")}
           className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
             activeTab === "scan"
-              ? "border-brand text-white"
+              ? "border-brand text-neutral-100"
               : "border-transparent text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
           }`}
         >

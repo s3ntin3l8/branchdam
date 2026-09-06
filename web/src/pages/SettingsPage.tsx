@@ -11,6 +11,7 @@ import { ToggleField } from "../components/form/ToggleField";
 import { RestartServerCard } from "../components/RestartServerButton";
 import { SettingsLayout } from "../components/settings/SettingsLayout";
 import type { SettingsCategory } from "../components/settings/SettingsLayout";
+import { AppearanceSettings } from "../components/settings/AppearanceSettings";
 import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
@@ -30,6 +31,7 @@ const CATEGORIES: SettingsCategory[] = [
   { id: "integrations", label: "Integrations" },
   { id: "security", label: "Security & Access" },
   { id: "maintenance", label: "Maintenance" },
+  { id: "appearance", label: "Appearance" },
 ];
 
 // Maps each settings group name to its parent category id.
@@ -433,7 +435,7 @@ export default function SettingsPage() {
   return (
     <DirtyFormContext.Provider value={dirtyContextValue}>
     <div className="p-6">
-      <h1 className="mb-6 text-2xl font-bold text-white">System Settings</h1>
+      <h1 className="mb-6 text-2xl font-bold text-neutral-100">System Settings</h1>
 
       {settings && (settings.pendingRestart?.length ?? 0) > 0 && (
         <div className="mb-6 rounded-lg border border-amber-800/60 bg-amber-950/30 p-4 text-sm text-amber-300">
@@ -588,6 +590,12 @@ export default function SettingsPage() {
           <RestartServerCard />
         </section>
 
+        {/* Appearance */}
+        <section id="appearance" data-settings-section="appearance" className="mb-8 scroll-mt-6">
+          <h2 className="mb-4 text-lg font-semibold text-neutral-200">Appearance</h2>
+          <AppearanceSettings />
+        </section>
+
         {/* Loading / error states */}
         {settingsLoading && (
           <p className="text-sm text-neutral-400">Loading settings…</p>
@@ -604,7 +612,7 @@ export default function SettingsPage() {
     {blocker.state === "blocked" && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-w-sm">
-          <h2 className="text-lg font-semibold text-white mb-2">Unsaved Changes</h2>
+          <h2 className="text-lg font-semibold text-neutral-100 mb-2">Unsaved Changes</h2>
           <p className="text-sm text-neutral-400 mb-4">
             You have unsaved settings changes. Leave without saving?
           </p>

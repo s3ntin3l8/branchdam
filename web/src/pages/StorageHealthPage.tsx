@@ -785,7 +785,7 @@ export default function StorageHealthPage() {
     {blocker.state === "blocked" && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-w-sm">
-          <h2 className="text-lg font-semibold text-white mb-2">Unsaved Changes</h2>
+          <h2 className="text-lg font-semibold text-neutral-100 mb-2">Unsaved Changes</h2>
           <p className="text-sm text-neutral-400 mb-4">
             You have unsaved changes. Leave without saving?
           </p>

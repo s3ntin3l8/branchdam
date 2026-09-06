@@ -310,7 +310,7 @@ export default function AssetDetailPage() {
             <select
               value={depth}
               onChange={(e) => handleDepthChange(Number(e.target.value))}
-              className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             >
               <option value={1}>1 hop</option>
               <option value={2}>2 hops</option>

@@ -110,14 +110,14 @@ export default function NodePickerModal({
         className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
       >
         <div className="mb-4 flex items-center justify-between border-b border-neutral-800 pb-3">
-          <h2 id="node-picker-modal-title" className="text-lg font-semibold text-white">
+          <h2 id="node-picker-modal-title" className="text-lg font-semibold text-neutral-100">
             {title}
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close dialog"
-            className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-white"
+            className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
           >
             ✕
           </button>
@@ -133,7 +133,7 @@ export default function NodePickerModal({
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search by filename, camera model, path, or UUID…"
               aria-label="Search assets"
-              className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 pr-8 text-sm text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 pr-8 text-sm text-neutral-100 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             {searchQuery && (
               <button
@@ -143,7 +143,7 @@ export default function NodePickerModal({
                   searchInputRef.current?.focus();
                 }}
                 aria-label="Clear search"
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-neutral-400 hover:text-white"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-neutral-400 hover:text-neutral-100"
               >
                 ✕
               </button>
@@ -194,7 +194,7 @@ export default function NodePickerModal({
                   }}
                   className={`group flex w-full items-center gap-3 rounded-lg border p-3 text-left transition-colors ${
                     isSelected
-                      ? "border-indigo-500 bg-indigo-950/40 text-white"
+                      ? "border-indigo-500 bg-indigo-950/40 text-neutral-100"
                       : "border-neutral-800 bg-neutral-950/60 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-800/60"
                   }`}
                 >
@@ -207,7 +207,7 @@ export default function NodePickerModal({
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
                       <span
-                        className="truncate text-sm font-medium text-neutral-100 group-hover:text-white"
+                        className="truncate text-sm font-medium text-neutral-100 group-hover:text-neutral-50"
                         title={asset.fileName}
                       >
                         {asset.fileName}

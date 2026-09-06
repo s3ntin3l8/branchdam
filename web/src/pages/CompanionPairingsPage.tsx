@@ -70,7 +70,7 @@ function QrModal({ open, onClose, title, body }: QrModalProps) {
         className="w-full max-w-lg rounded-lg border border-neutral-700 bg-neutral-900 p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 id="qr-modal-title" className="text-lg font-semibold text-white mb-4">
+        <h2 id="qr-modal-title" className="text-lg font-semibold text-neutral-100 mb-4">
           {title}
         </h2>
         {body}
@@ -183,7 +183,7 @@ export default function CompanionPairingsPage() {
     <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Companion Pairing</h1>
+          <h1 className="text-2xl font-bold text-neutral-100">Companion Pairing</h1>
           <p className="mt-1 text-sm text-neutral-400">
             Pair mobile devices (Android, iOS) with this server. Each device gets its own API key.
           </p>
@@ -317,7 +317,7 @@ export default function CompanionPairingsPage() {
                 onChange={(e) => setCreateLabel(e.target.value)}
                 placeholder="e.g. Björn's iPhone 16 Pro"
                 maxLength={120}
-                className="w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-white placeholder:text-neutral-600 focus:border-indigo-500 focus:outline-none"
+                className="w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-indigo-500 focus:outline-none"
               />
               {create.error && (
                 <p className="text-xs text-red-400">Failed: {create.error.message}</p>
@@ -385,7 +385,7 @@ export default function CompanionPairingsPage() {
                   max="10080"
                   value={rotateGrace}
                   onChange={(e) => setRotateGrace(Number(e.target.value))}
-                  className="mt-1 w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-white"
+                  className="mt-1 w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100"
                 />
               </label>
               {rotate.error && (

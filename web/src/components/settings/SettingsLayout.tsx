@@ -65,7 +65,7 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
               }}
               className={`block rounded px-3 py-1.5 text-sm font-medium ${
                 activeId === cat.id
-                  ? "bg-neutral-800 text-white"
+                  ? "bg-neutral-800 text-neutral-100"
                   : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
               }`}
             >

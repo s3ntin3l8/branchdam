@@ -46,3 +46,59 @@ console.error = (...args: unknown[]) => {
   }
   originalConsoleError(...args);
 };
+
+/*
+ * In-memory localStorage polyfill. The configured jsdom environment in this
+ * project doesn't expose window.localStorage, but useThemeState() (and any
+ * future browser-storage-backed feature) reads/writes it on mount. Tests
+ * that exercise storage behavior install this stub -- production code hits
+ * a real localStorage in the browser. The shape mirrors the spec for
+ * string keys/values; QuotaExceededError is NOT thrown on `setItem` because
+ * the in-memory backing store doesn't fill up. If a future test needs that
+ * failure path, install a quota-aware stub at that call site.
+ */
+class MemoryStorage implements Storage {
+  private store = new Map<string, string>();
+
+  get length(): number {
+    return this.store.size;
+  }
+
+  key(index: number): string | null {
+    return Array.from(this.store.keys())[index] ?? null;
+  }
+
+  getItem(key: string): string | null {
+    return this.store.has(key) ? this.store.get(key)! : null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.store.set(key, String(value));
+  }
+
+  removeItem(key: string): void {
+    this.store.delete(key);
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+}
+
+const memoryStorage = new MemoryStorage();
+try {
+  if (typeof window !== "undefined" && typeof window.localStorage === "undefined") {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      writable: true,
+      value: memoryStorage,
+    });
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeof (globalThis as any).localStorage === "undefined") {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).localStorage = memoryStorage;
+  }
+} catch {
+  /* setup is best-effort -- individual tests may need to install their own */
+}

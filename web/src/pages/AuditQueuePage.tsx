@@ -286,7 +286,7 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
           onKeyDown={(e) => { handleKeyDown(e); handleTrapFocus(e); }}
           className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
         >
-          <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-white">Manual Link Edge</h2>
+          <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-neutral-100">Manual Link Edge</h2>
           {errorMsg && (
             <div className="mb-4 rounded bg-red-900/60 p-3 text-xs text-red-200 border border-red-800">
               {errorMsg}
@@ -301,14 +301,14 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
                   value={sourceId}
                   onChange={(e) => setSourceId(e.target.value)}
                   placeholder="e.g. 42"
-                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   required
                 />
                 <button
                   type="button"
                   onClick={() => setIsSourcePickerOpen(true)}
                   aria-label="Select Parent Node"
-                  className="shrink-0 rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white"
+                  className="shrink-0 rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-neutral-100"
                 >
                   Pick Node
                 </button>
@@ -323,14 +323,14 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
                   value={targetId}
                   onChange={(e) => setTargetId(e.target.value)}
                   placeholder="e.g. 108"
-                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   required
                 />
                 <button
                   type="button"
                   onClick={() => setIsTargetPickerOpen(true)}
                   aria-label="Select Target Asset"
-                  className="shrink-0 rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-white"
+                  className="shrink-0 rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 hover:text-neutral-100"
                 >
                   Pick Node
                 </button>
@@ -342,7 +342,7 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
               <select
                 value={relType}
                 onChange={(e) => setRelType(e.target.value as AuditEntry["relationshipType"])}
-                className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
                 <option value="DERIVED_FROM">DERIVED_FROM</option>
                 <option value="FINAL_EXPORT">FINAL_EXPORT</option>
@@ -433,7 +433,7 @@ export default function AuditQueuePage() {
     <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-white">Audit Queue</h1>
+          <h1 className="text-xl font-semibold text-neutral-100">Audit Queue</h1>
           <p className="text-sm text-neutral-400">Review edge resolution candidates or manually link assets.</p>
         </div>
         <button

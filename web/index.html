@@ -32,6 +32,33 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      /*
+       * Apply the persisted color theme to <html data-theme> before React
+       * mounts, so first paint already matches the user's choice and there
+       * is no flash of the wrong theme. Runs synchronously, no external
+       * dependencies. The branchdam.theme localStorage key is the same one
+       * useTheme() writes; the inline script just does it earlier so the
+       * initial stylesheet resolves with the right tokens.
+       *
+       * Anything that throws here (missing storage, opaque-origin iframe)
+       * leaves the data-theme attribute unset and the :root default (dark)
+       * applies -- matching what the app shipped before this commit.
+       */
+      (function () {
+        try {
+          var raw = localStorage.getItem("branchdam.theme");
+          var mode = raw ? JSON.parse(raw) : "system";
+          var resolved = mode === "light" || mode === "dark"
+            ? mode
+            : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme", resolved);
+          document.documentElement.style.colorScheme = resolved;
+        } catch (e) {
+          /* fall back to :root default */
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
