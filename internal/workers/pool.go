@@ -7,6 +7,7 @@ package workers
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // Job is one unit of work. Key identifies it for in-flight deduplication --
@@ -38,7 +39,8 @@ type Pool[K comparable] struct {
 
 	mu       sync.Mutex
 	inflight map[K]struct{}
-	closed   bool // set under mu by closeOnDone; see Submit and closeOnDone
+	closed   bool        // set under mu by closeOnDone; see Submit and closeOnDone
+	closing  atomic.Bool // set when ctx.Done fires, before closeOnDone takes mu; closes the Submit/closeOnDone race window
 
 	wg sync.WaitGroup
 }
@@ -94,6 +96,13 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 // dequeued before shutdown still gets its completion bookkeeping released,
 // instead of leaving a caller's wg.Wait() blocked forever.
 //
+// The atomic `closing` flag is set immediately after ctx.Done(), before
+// taking p.mu, so that concurrent Submit calls see the flag before they
+// take the lock -- closing the race window between ctx cancellation and
+// p.closed being set. Without this, a Submit that lands between
+// ctx.Done() firing and closeOnDone acquiring p.mu could enqueue a job
+// that a worker picks up and processes normally.
+//
 // This runs as a single dedicated goroutine, tracked by Run alongside the
 // workers, rather than each worker independently racing ctx.Done() against
 // p.jobs and draining redundantly (an earlier version of this method did
@@ -113,6 +122,7 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 func (p *Pool[K]) closeOnDone(ctx context.Context) {
 	defer p.wg.Done()
 	<-ctx.Done()
+	p.closing.Store(true)
 
 	p.mu.Lock()
 	p.closed = true
@@ -164,20 +174,19 @@ func (p *Pool[K]) runJob(ctx context.Context, job Job[K]) {
 // cancelled at call time also returns false without enqueuing -- callers
 // should not keep submitting new work after shutdown has begun.
 //
-// Submit also refuses once the Pool's own Run context is done, regardless
-// of ctx's state -- checked and enqueued in one critical section together
-// with closeOnDone's own close-and-drain, so the two can never interleave
-// (see closeOnDone's doc comment for why that matters: an earlier version
-// checked closed and sent to p.jobs as two separate, unlocked steps, which
-// could let a job land in the queue after every worker had already given
-// up on draining it). Without the closed check at all, a caller whose own
-// ctx deliberately survives shutdown (e.g. a background scan using
-// context.WithoutCancel) could keep enqueuing jobs after every worker has
-// already exited -- nothing would ever dequeue or abandon them, and
-// anything waiting on that job's completion (e.g. a sync.WaitGroup token
-// released by Run or OnAbandon) would block forever.
+// Submit also refuses once the Pool's own Run context is done: the atomic
+// `closing` flag is checked first (set by closeOnDone immediately after
+// ctx.Done(), before taking p.mu) to close the race window between ctx
+// cancellation and closeOnDone acquiring the lock. The `closed` flag under
+// p.mu is the final guard -- see closeOnDone's doc comment for why these
+// two checks are strictly ordered: an earlier version only had `closed`
+// under the lock, which left a window where Submit could enqueue a job
+// after every worker had already given up on draining it.
 func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 	if ctx.Err() != nil {
+		return false
+	}
+	if p.closing.Load() {
 		return false
 	}
 
