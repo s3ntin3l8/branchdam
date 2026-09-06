@@ -207,8 +207,10 @@ at the outpost:
 
 That path is already routed by `compose.yaml`'s `branchdam-outpost` router (§2, priority `200`)
 to the `authentik` service, so the browser hits Authentik directly. Authentik clears its cookie
-and bounces the browser back to the application root. No app code runs on the way out, no cache
-to invalidate: a full page reload is itself the cache reset.
+and bounces the browser back to the application root (the post-logout redirect target is
+configurable in the Authentik application's settings, but defaults to the application's own URL).
+No app code runs on the way out, no cache to invalidate: a full page reload is itself the cache
+reset.
 
 If you have removed the `branchdam-outpost` Traefik labels from your override (some operators
 serve `/outpost.goauthentik.io/` globally via the outpost container's own Traefik labels instead,
