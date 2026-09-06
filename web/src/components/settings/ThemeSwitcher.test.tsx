@@ -1,14 +1,22 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { ThemeContext } from "../../hooks/themeContext";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import type { ThemeMode, ThemeResolved } from "../../hooks/useTheme";
 
 /*
  * Component-level tests for the segmented theme control. The hook
  * (`useTheme.test.tsx`) already covers localStorage persistence and the
  * data-theme side effect; here we assert the visible UI surface -- the
  * three options, their aria-pressed states, and that clicks invoke the
- * hook with the right value.
+ * setMode callback wired through the provider.
+ *
+ * We wrap each render in a ThemeContext.Provider with a stub value rather
+ * than calling the real useThemeState() -- the hook's own tests are the
+ * right place to assert side effects; here we just want to verify the
+ * switcher hands the right value to setMode and reflects the provider's
+ * mode in its aria-pressed state.
  */
 
 beforeEach(() => {
@@ -18,58 +26,63 @@ beforeEach(() => {
     /* jsdom storage may be unavailable in some configurations */
   }
   document.documentElement.removeAttribute("data-theme");
-  // matchMedia isn't implemented in jsdom; the hook handles that path,
-  // but ThemeSwitcher's render calls it through useTheme(), so install a
-  // minimal stub.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (window as any).matchMedia = vi.fn().mockImplementation((query: string) => ({
-    matches: false,
-    media: query,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    addListener: () => {},
-    removeListener: () => {},
-  }));
 });
 
+function renderWithContext(mode: ThemeMode, effective: ThemeResolved, setMode: (m: ThemeMode) => void) {
+  return render(
+    <ThemeContext.Provider value={{ mode, effective, setMode }}>
+      <ThemeSwitcher />
+    </ThemeContext.Provider>,
+  );
+}
+
 describe("ThemeSwitcher", () => {
-  it("renders System / Light / Dark options inside a labelled group", () => {
-    render(<ThemeSwitcher />);
+  it("renders System / Light / Dark options inside a labelled radiogroup", () => {
+    renderWithContext("system", "dark", vi.fn());
 
-    const group = screen.getByRole("group", { name: /color theme/i });
+    const group = screen.getByRole("radiogroup", { name: /color theme/i });
     expect(group).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^System theme/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Light theme/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Dark theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^System theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Light theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Dark theme/i })).toBeInTheDocument();
   });
 
-  it("marks the currently-active option with aria-pressed=true", () => {
-    render(<ThemeSwitcher />);
+  it("marks the currently-active option with aria-checked=true", () => {
+    renderWithContext("system", "dark", vi.fn());
 
-    // Default mode is `system` (no stored preference)
-    expect(screen.getByRole("button", { name: /^System theme/i })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: /^Light theme/i })).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: /^Dark theme/i })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("radio", { name: /^System theme/i })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /^Light theme/i })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("radio", { name: /^Dark theme/i })).toHaveAttribute("aria-checked", "false");
   });
 
-  it("clicking Light marks Light as active and persists", async () => {
+  it("clicking each option invokes setMode with the right value", async () => {
     const user = userEvent.setup();
-    render(<ThemeSwitcher />);
+    const setMode = vi.fn();
+    renderWithContext("system", "light", setMode);
 
-    await user.click(screen.getByRole("button", { name: /^Light theme/i }));
+    await user.click(screen.getByRole("radio", { name: /^Light theme/i }));
+    expect(setMode).toHaveBeenLastCalledWith("light");
 
-    expect(screen.getByRole("button", { name: /^Light theme/i })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: /^System theme/i })).toHaveAttribute("aria-pressed", "false");
-    expect(JSON.parse(localStorage.getItem("branchdam.theme") ?? "null")).toBe("light");
+    await user.click(screen.getByRole("radio", { name: /^Dark theme/i }));
+    expect(setMode).toHaveBeenLastCalledWith("dark");
+
+    await user.click(screen.getByRole("radio", { name: /^System theme/i }));
+    expect(setMode).toHaveBeenLastCalledWith("system");
+
+    expect(setMode).toHaveBeenCalledTimes(3);
   });
 
-  it("clicking Dark marks Dark as active and persists", async () => {
-    const user = userEvent.setup();
-    render(<ThemeSwitcher />);
+  it("reflects the provider's mode across re-renders", () => {
+    const setMode = vi.fn();
+    const { rerender } = renderWithContext("system", "dark", setMode);
+    expect(screen.getByRole("radio", { name: /^System theme/i })).toHaveAttribute("aria-checked", "true");
 
-    await user.click(screen.getByRole("button", { name: /^Dark theme/i }));
-
-    expect(screen.getByRole("button", { name: /^Dark theme/i })).toHaveAttribute("aria-pressed", "true");
-    expect(JSON.parse(localStorage.getItem("branchdam.theme") ?? "null")).toBe("dark");
+    rerender(
+      <ThemeContext.Provider value={{ mode: "light", effective: "light", setMode }}>
+        <ThemeSwitcher />
+      </ThemeContext.Provider>,
+    );
+    expect(screen.getByRole("radio", { name: /^Light theme/i })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /^System theme/i })).toHaveAttribute("aria-checked", "false");
   });
 });

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import SettingsPage from "./SettingsPage";
+import { ThemeProvider } from "../components/theme/ThemeProvider";
 import { api, ApiError } from "../api/client";
 import type { SettingsField, SettingsResponse } from "../api/types";
 
@@ -107,9 +108,11 @@ function renderWithClient(ui: React.ReactElement) {
     { initialEntries: ["/settings"] },
   );
   return render(
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>,
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    </ThemeProvider>,
   );
 }
 
@@ -198,10 +201,10 @@ describe("SettingsPage", () => {
     // Section heading
     expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
     // Theme switcher
-    expect(screen.getByRole("group", { name: /color theme/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^System theme/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Light theme/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Dark theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: /color theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^System theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Light theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Dark theme/i })).toBeInTheDocument();
   });
 
   it("saves an edited field via PUT {set} and refetches on success", async () => {

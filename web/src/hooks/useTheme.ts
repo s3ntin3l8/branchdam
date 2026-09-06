@@ -40,14 +40,18 @@ function applyTheme(resolved: ThemeResolved): void {
   document.documentElement.style.colorScheme = resolved;
 }
 
-interface UseTheme {
+interface UseThemeState {
   mode: ThemeMode;
   effective: ThemeResolved;
   setMode: (mode: ThemeMode) => void;
 }
 
 /*
- * Hook for reading and updating the user's color-theme preference.
+ * Hook owning the theme state, the storage round-trip, and the DOM side
+ * effect. Call this exactly once at the root of the tree (ThemeProvider);
+ * everyone else should read via `useThemeContext()` so there's a single
+ * matchMedia listener / storage writer / DOM mutation per change rather
+ * than one per consumer.
  *
  * `mode` is what the user picked (`system|light|dark`); `effective` is the
  * concrete theme currently applied to <html data-theme> -- `system` mode
@@ -56,11 +60,17 @@ interface UseTheme {
  * needs to show both: the chosen mode AND what's actually being rendered
  * (e.g. "Currently: Light (following system)").
  *
+ * Cross-tab sync: a `storage` event fires in other tabs when one tab writes
+ * `branchdam.theme`, and we re-read the storage key from there so opening
+ * the app in two tabs and changing the theme in one updates the other
+ * without a manual refresh. The event doesn't fire in the originating tab,
+ * so the local write path stays as-is.
+ *
  * Storage key is THEME_STORAGE_KEY ("branchdam.theme"). The matching inline
  * script in index.html reads the same key before React mounts to avoid the
  * first-paint flash of the wrong theme.
  */
-export function useTheme(): UseTheme {
+export function useThemeState(): UseThemeState {
   const [mode, setModeState] = useState<ThemeMode>(() => readStoredMode());
   const [systemDark, setSystemDark] = useState<boolean>(() => systemPrefersDark());
 
@@ -76,6 +86,19 @@ export function useTheme(): UseTheme {
     }
     mql.addListener(handler);
     return () => mql.removeListener(handler);
+  }, []);
+
+  // Cross-tab sync: another tab's localStorage write fires `storage` here
+  // (the originating tab does NOT receive its own event, so this only
+  // affects the other tabs -- which is what we want).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (event: StorageEvent) => {
+      if (event.key !== THEME_STORAGE_KEY) return;
+      setModeState(readStoredMode());
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
   }, []);
 
   const effective: ThemeResolved = mode === "light" || mode === "dark" ? mode : (systemDark ? "dark" : "light");

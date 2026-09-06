@@ -49,11 +49,13 @@ console.error = (...args: unknown[]) => {
 
 /*
  * In-memory localStorage polyfill. The configured jsdom environment in this
- * project doesn't expose window.localStorage, but useTheme() (and any future
- * browser-storage-backed feature) reads/writes it on mount. Tests that
- * exercise storage behavior install this stub -- production code hits a
- * real localStorage in the browser. The shape mirrors the spec:
- * string keys, string values, no expiry, throws on QuotaExceededError.
+ * project doesn't expose window.localStorage, but useThemeState() (and any
+ * future browser-storage-backed feature) reads/writes it on mount. Tests
+ * that exercise storage behavior install this stub -- production code hits
+ * a real localStorage in the browser. The shape mirrors the spec for
+ * string keys/values; QuotaExceededError is NOT thrown on `setItem` because
+ * the in-memory backing store doesn't fill up. If a future test needs that
+ * failure path, install a quota-aware stub at that call site.
  */
 class MemoryStorage implements Storage {
   private store = new Map<string, string>();

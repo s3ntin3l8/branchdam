@@ -1,4 +1,4 @@
-import { useTheme } from "../../hooks/useTheme";
+import { useThemeContext } from "../../hooks/themeContext";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 /*
@@ -15,7 +15,7 @@ import { ThemeSwitcher } from "./ThemeSwitcher";
  * in `system` mode can see what the OS preference currently resolves to.
  */
 export function AppearanceSettings() {
-  const { mode, effective } = useTheme();
+  const { mode, effective } = useThemeContext();
 
   let currentHint: string;
   if (mode === "system") {
@@ -29,7 +29,7 @@ export function AppearanceSettings() {
   }
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
+    <div className="rounded-lg border border-neutral-800 bg-panel p-4 mb-4">
       <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-400">Theme</h3>
       <p className="mb-3 text-sm text-neutral-200">
         Choose how the interface should look. Light, dark, or follow your operating system.

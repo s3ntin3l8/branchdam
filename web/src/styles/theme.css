@@ -93,6 +93,16 @@
   --color-blue-900: #1e3a8a;
   --color-blue-950: #172554;
 
+  /* Violet (proxy edge strokes) */
+  --color-violet-400: #a78bfa;
+
+  /* Orange (sidecar edge strokes) */
+  --color-orange-400: #fb923c;
+
+  /* Slate (graph labels -- readable on dark node fills) */
+  --color-slate-300: #cbd5e1;
+  --color-slate-800: #1e293b;
+
   /* Semantic surface tokens (consumed by graph canvas + xyflow overrides) */
   --surface-canvas: var(--color-neutral-950);
   --surface-raised: var(--color-neutral-900);
@@ -118,13 +128,13 @@
   /* Graph edge strokes (theme-invariant -- category identity) */
   --graph-edge-derived: var(--color-sky-400);
   --graph-edge-final: var(--color-emerald-400);
-  --graph-edge-proxy: #a78bfa; /* violet-400 */
-  --graph-edge-sidecar: #fb923c; /* orange-400 */
+  --graph-edge-proxy: var(--color-violet-400);
+  --graph-edge-sidecar: var(--color-orange-400);
   --graph-edge-duplicate: var(--color-red-400);
   --graph-edge-default: var(--color-neutral-500);
 
   /* Graph text/labels */
-  --graph-text: #cbd5e1; /* slate-300 -- readable on dark node fills */
+  --graph-text: var(--color-slate-300);
 
   color-scheme: dark;
 }
@@ -162,51 +172,69 @@
   --color-indigo-900: #e0e7ff;
   --color-indigo-950: #eef2ff;
 
-  /* Amber */
-  --color-amber-100: #78350f;
-  --color-amber-200: #92400e;
+  /* Amber. The 300/400 stops are text colors used on chip backgrounds
+     (`bg-amber-950 text-amber-300/400`); in light mode the chip bg is pale
+     so the text needs to be the dark variant for contrast. The 500-800
+     stops are saturated button-bg colors and stay constant across themes
+     so `bg-amber-600 text-white` keeps working in both modes. */
+  --color-amber-100: #fef3c7;
+  --color-amber-200: #fde68a;
   --color-amber-300: #b45309;
   --color-amber-400: #d97706;
   --color-amber-500: #f59e0b;
-  --color-amber-600: #f59e0b;
-  --color-amber-700: #fbbf24;
-  --color-amber-800: #fde68a;
-  --color-amber-900: #fef3c7;
+  --color-amber-600: #d97706;
+  --color-amber-700: #b45309;
+  --color-amber-800: #92400e;
+  --color-amber-900: #78350f;
   --color-amber-950: #fffbeb;
 
-  /* Red */
-  --color-red-200: #7f1d1d;
+  /* Red. Same shape: 300/400 are text colors (dark in light mode for
+     contrast on pale chip bg), 500-900 are button bg (constant), 950 is
+     chip bg (pale in light mode). */
+  --color-red-200: #fecaca;
   --color-red-300: #991b1b;
   --color-red-400: #b91c1c;
-  --color-red-500: #dc2626;
+  --color-red-500: #ef4444;
   --color-red-600: #dc2626;
-  --color-red-700: #ef4444;
-  --color-red-800: #fecaca;
-  --color-red-900: #fee2e2;
+  --color-red-700: #b91c1c;
+  --color-red-800: #991b1b;
+  --color-red-900: #7f1d1d;
   --color-red-950: #fef2f2;
 
   /* Emerald */
   --color-emerald-300: #065f46;
   --color-emerald-400: #047857;
-  --color-emerald-600: #10b981;
-  --color-emerald-700: #34d399;
-  --color-emerald-800: #d1fae5;
+  --color-emerald-600: #059669;
+  --color-emerald-700: #047857;
+  --color-emerald-800: #065f46;
   --color-emerald-950: #ecfdf5;
 
-  /* Sky */
+  /* Sky. Used for buttons (bg-sky-700 text-white) and as the link color;
+     the 500-700 stops need to remain saturated in both themes so the
+     `text-white` button pattern keeps working. */
   --color-sky-300: #075985;
   --color-sky-400: #0369a1;
   --color-sky-500: #0ea5e9;
-  --color-sky-600: #38bdf8;
-  --color-sky-700: #bae6fd;
+  --color-sky-600: #0284c7;
+  --color-sky-700: #0369a1;
   --color-sky-950: #f0f9ff;
 
-  /* Blue (raw-master) */
+  /* Blue (raw-master node fill). The 800/900 stops are node backgrounds
+     (dark in dark theme, pale in light); 300/400 are border colors that
+     stay constant for category identity. */
   --color-blue-300: #1e3a8a;
   --color-blue-400: #2563eb;
-  --color-blue-800: #93c5fd;
+  --color-blue-800: #1e40af;
   --color-blue-900: #dbeafe;
   --color-blue-950: #eff6ff;
+
+  /* Violet / orange: theme-invariant edges stay constant across themes */
+  --color-violet-400: #a78bfa;
+  --color-orange-400: #fb923c;
+
+  /* Slate (graph labels) */
+  --color-slate-300: #cbd5e1;
+  --color-slate-800: #1e293b;
 
   /* Semantic surface tokens */
   --surface-canvas: var(--color-neutral-950);
@@ -233,13 +261,13 @@
   /* Graph edge strokes stay invariant -- category identity */
   --graph-edge-derived: var(--color-sky-400);
   --graph-edge-final: var(--color-emerald-400);
-  --graph-edge-proxy: #a78bfa;
-  --graph-edge-sidecar: #fb923c;
+  --graph-edge-proxy: var(--color-violet-400);
+  --graph-edge-sidecar: var(--color-orange-400);
   --graph-edge-duplicate: var(--color-red-400);
   --graph-edge-default: var(--color-neutral-500);
 
   /* Graph text: dark slate for readable labels on pastel fills */
-  --graph-text: #1e293b; /* slate-800 */
+  --graph-text: var(--color-slate-800);
 
   color-scheme: light;
 }
@@ -249,8 +277,13 @@
  * background, controls, minimap, handles, and selection all pick up our
  * theme tokens. The defaults xyflow ships with assume a dark backdrop; this
  * keeps them aligned with whichever theme is active.
+ *
+ * Lives at :root rather than per-theme: every value below references a
+ * --surface-* / --graph-* / --text-* semantic token, and THOSE are defined
+ * per theme. A single declaration block resolves correctly under both
+ * themes and avoids duplicating ~25 lines of overrides.
  */
-:root[data-theme="dark"] {
+:root {
   --xy-background-color-default: var(--surface-canvas);
   --xy-background-pattern-color-default: var(--border-subtle);
   --xy-node-color-default: var(--text-primary);
@@ -276,28 +309,16 @@
   --xy-minimap-node-background-color-default: var(--surface-raised);
 }
 
-:root[data-theme="light"] {
-  --xy-background-color-default: var(--surface-canvas);
-  --xy-background-pattern-color-default: var(--border-subtle);
-  --xy-node-color-default: var(--text-primary);
-  --xy-node-border-default: var(--border-subtle);
-  --xy-node-background-color-default: var(--surface-raised);
-  --xy-edge-stroke-default: var(--graph-edge-default);
-  --xy-edge-stroke-selected-default: var(--color-brand);
-  --xy-connectionline-stroke-default: var(--graph-edge-default);
-  --xy-attribution-background-color-default: transparent;
-  --xy-controls-button-background-color-default: var(--surface-raised);
-  --xy-controls-button-background-color-hover-default: var(--surface-raised);
-  --xy-controls-button-color-default: var(--text-primary);
-  --xy-controls-button-color-hover-default: var(--text-primary);
-  --xy-controls-button-border-default: var(--border-subtle);
-  --xy-controls-box-shadow-default: 0 0 0 1px var(--border-subtle);
-  --xy-handle-background-color-default: var(--surface-raised);
-  --xy-handle-border-color-default: var(--border-subtle);
-  --xy-selection-background-color-default: var(--color-brand);
-  --xy-selection-border-default: 1px dashed var(--color-brand);
-  --xy-minimap-background-color-default: var(--surface-raised);
-  --xy-minimap-mask-background-color-default: var(--text-faint);
-  --xy-minimap-mask-stroke-default: var(--text-faint);
-  --xy-minimap-node-background-color-default: var(--surface-raised);
+/*
+ * Panel utility. The codebase historically used `bg-neutral-900/50` to get
+ * a subtle raised feel against the page background; in dark mode that works
+ * because the page is also `bg-neutral-950` (very close in lightness to
+ * `bg-neutral-900` blended 50%). In light mode the ramp is inverted:
+ * `bg-neutral-900` becomes `#f5f5f5`, blending 50% over the `#fafafa` page
+ * yields nearly-invisible `#f8f8f8`. `bg-panel` reads from --surface-raised
+ * (already theme-aware) so cards stay legible in both modes without an
+ * alpha trick that only works on one side.
+ */
+@utility bg-panel {
+  background-color: var(--surface-raised);
 }
