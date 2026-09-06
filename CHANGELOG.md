@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/s3ntin3l8/branchdam/compare/v0.16.0...v0.16.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **workers:** check pool context synchronously in Submit ([#401](https://github.com/s3ntin3l8/branchdam/issues/401)) ([34eee83](https://github.com/s3ntin3l8/branchdam/commit/34eee837633e71de20ac6414aace8a5fffdda7bf))
+
 ## [0.16.0](https://github.com/s3ntin3l8/branchdam/compare/v0.15.0...v0.16.0) (2026-09-06)
 
 
