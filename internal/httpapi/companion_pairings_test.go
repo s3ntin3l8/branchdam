@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -264,6 +265,38 @@ func TestCompanionPairings_QRPayloadEncodedCorrectly(t *testing.T) {
 	assert.Contains(t, payload, "server=https%3A%2F%2Fdam.example.com")
 	assert.Contains(t, payload, "key=secret-key-xyz")
 	assert.Contains(t, payload, "agent=iphone-abc")
+}
+
+// TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser pins
+// the contract that the mobile app relies on: the QR payload emitted by
+// qrPayloadFor() must be parseable by a standard `application/x-www-form
+// -urlencoded` parser and yield the exact (unencoded) values that were
+// passed in. Guards against accidental double-encoding in qrPayloadFor()
+// and pins the format the Android QrParser and iOS AppleQrParser
+// decode against.
+func TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/companion/pairings", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "dam.example.com:8443")
+	var capturedCtx = req.Context()
+	wrapped := pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+	}))
+	wrapped.ServeHTTP(httptest.NewRecorder(), req)
+
+	factory := srv.qrPayloadFor(capturedCtx)
+	payload := string(factory("iphone-abc", "secret-key-xyz"))
+
+	require.True(t, strings.HasPrefix(payload, "branchdam://?"), "payload must use query-style form: %q", payload)
+	body := strings.TrimPrefix(payload, "branchdam://?")
+
+	values, err := url.ParseQuery(body)
+	require.NoError(t, err, "payload must be standard url-encoded: %q", body)
+	assert.Equal(t, "https://dam.example.com:8443", values.Get("server"))
+	assert.Equal(t, "secret-key-xyz", values.Get("key"))
+	assert.Equal(t, "iphone-abc", values.Get("agent"))
 }
 
 // pairingIDStr formats a pairing id for use in URL paths without
