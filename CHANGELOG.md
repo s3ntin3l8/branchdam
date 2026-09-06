@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0](https://github.com/s3ntin3l8/branchdam/compare/v0.16.1...v0.17.0) (2026-09-06)
+
+
+### Features
+
+* **web:** add light/dark/system color theme + Appearance settings ([#404](https://github.com/s3ntin3l8/branchdam/issues/404)) ([fadd2d4](https://github.com/s3ntin3l8/branchdam/commit/fadd2d437f0676788c1b483a434709292255b4c8))
+* **web:** replace signed-in-as footer with account menu ([#405](https://github.com/s3ntin3l8/branchdam/issues/405)) ([64cd57c](https://github.com/s3ntin3l8/branchdam/commit/64cd57cce4ed0136ad4962b250e36fc4291b20ff))
+
 ## [0.16.1](https://github.com/s3ntin3l8/branchdam/compare/v0.16.0...v0.16.1) (2026-09-06)
 
 
