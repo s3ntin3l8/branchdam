@@ -9,6 +9,17 @@ export interface Me {
   name?: string;
   email?: string;
   groups?: string[];
+  // authenticated is true iff Authentik asserted a username for this
+  // request (X-Authentik-Username non-empty). mirrors Principal.Authenticated
+  // in internal/auth/principal.go. Always false for kind="machine".
+  authenticated: boolean;
+  // isAdmin is the resolved admin verdict for browser principals -- true
+  // for any authenticated user when authz.groups is empty (permit-all),
+  // otherwise true iff one of the user's groups is listed. Machine
+  // principals are never admin; an unauthenticated request is never admin.
+  // Computed server-side via auth.IsAdmin, not derived client-side, so the
+  // SPA doesn't need to know the configured group list.
+  isAdmin: boolean;
 }
 
 export interface PathRewrite {

@@ -4,6 +4,7 @@ import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
 import { AuthErrorBanner } from "./components/AuthErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { UserMenu } from "./components/UserMenu";
 import BrandMark from "./components/BrandMark";
 
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
@@ -41,7 +42,7 @@ export function Layout() {
   return (
     <div className="flex h-screen">
       <AuthErrorBanner />
-      <nav className="w-56 shrink-0 border-r border-neutral-800 p-4">
+      <nav className="relative w-56 shrink-0 border-r border-neutral-800 p-4">
         <div className="mb-6 flex items-center gap-2">
           <BrandMark className="h-5 w-5 text-brand" />
           <span className="text-lg font-semibold">
@@ -75,7 +76,9 @@ export function Layout() {
           </div>
         )}
         {me && me.kind === "user" && me.name && (
-          <div className="absolute bottom-4 text-xs text-neutral-500">Signed in as {me.name}</div>
+          <div className="absolute bottom-4 left-4 right-4">
+            <UserMenu me={me} />
+          </div>
         )}
       </nav>
       <main className="flex-1 overflow-auto">
