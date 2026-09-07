@@ -146,6 +146,20 @@ type AuthLocal struct {
 	Argon Argon2 `yaml:"argon2"`
 	// RateLimit thresholds (per source IP).
 	RateLimit RateLimit `yaml:"rateLimit"`
+	// PasswordReset configures the self-service /api/v1/password-reset/*
+	// endpoints (PR #409). Only meaningful when auth.mode is "local"
+	// or "both"; in forward-only mode the surface is gated off in the
+	// HTTP layer regardless of this config.
+	PasswordReset AuthLocalPasswordReset `yaml:"passwordReset"`
+}
+
+// AuthLocalPasswordReset configures the password-reset flow.
+type AuthLocalPasswordReset struct {
+	// TokenTTL is the lifetime of a self-service reset token. Default
+	// "24h". The admin reset path is a synchronous in-band flow that
+	// returns the new password once; tokens only apply to the
+	// self-service request/confirm endpoints.
+	TokenTTL string `yaml:"tokenTTL"`
 }
 
 // Argon2 mirrors the auth/users.Argon2idParameters YAML shape.

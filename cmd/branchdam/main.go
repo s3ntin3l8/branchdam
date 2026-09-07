@@ -329,10 +329,28 @@ func main() {
 			CookieName: "branchdam_session",
 			Log:        log,
 		})
+		// Password-reset service: PR #409. tokenTTL defaults to 24h;
+		// operators can tighten (homelab) or loosen (1h, with active
+		// monitoring) via auth.local.passwordReset.tokenTTL. The
+		// service is built unconditionally because the rate-limiter
+		// and the admin panel both need access to it regardless of
+		// whether any user has actually minted a token yet.
+		resetTTL, err := time.ParseDuration(cfg.Auth.Local.PasswordReset.TokenTTL)
+		if err != nil {
+			log.Error("auth: invalid auth.local.passwordReset.tokenTTL -- refusing to boot", "value", cfg.Auth.Local.PasswordReset.TokenTTL, "err", err.Error())
+			os.Exit(1)
+		}
+		if resetTTL <= 0 {
+			resetTTL = 24 * time.Hour
+		}
+		passwordResetService := users.NewPasswordResetService(usersService, users.PasswordResetServiceOptions{
+			TokenTTL: resetTTL,
+		})
 		localAuthDeps = &httpapi.LocalAuthDeps{
 			Users:        usersService,
 			LoginLimiter: loginLimiter,
 			SessionMw:    sessionMw,
+			Reset:        passwordResetService,
 			AuthMode:     authMode,
 		}
 		// Pre-build the JIT provisioner closure so httpapi/Handler()

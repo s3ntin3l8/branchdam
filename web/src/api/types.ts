@@ -45,6 +45,49 @@ export interface SetupAdminInput {
   password: string;
 }
 
+// Password-reset (PR #409). /request is no-auth and always 200; the
+// SPA can't tell from the response whether the email had a matching
+// user (enumeration defense). The operator retrieves the token from
+// the slog.WARN log line or the admin-UI pending-resets panel that
+// ships in PR #408.
+export interface PasswordResetRequestInput {
+  email: string;
+}
+export interface PasswordResetRequestResponse {
+  ok: boolean;
+}
+
+export interface PasswordResetConfirmInput {
+  token: string;
+  newPassword: string;
+}
+export interface PasswordResetConfirmResponse {
+  ok: boolean;
+}
+
+// Admin-only. Empty body, the {id} is in the path. The response
+// carries the new plaintext password exactly once -- the SPA must
+// surface a "copy now or we won't show it again" reveal pattern.
+export interface AdminResetPasswordInput {
+  // Empty: the target user id is in the URL path.
+  _placeholder?: never;
+}
+export interface AdminResetPasswordUser {
+  id: number;
+  username: string;
+  email?: string;
+  isAdmin: boolean;
+  source: string;
+  createdAt: number;
+  createdBy: string;
+  disabledAt?: number;
+}
+export interface AdminResetPasswordResponse {
+  user: AdminResetPasswordUser;
+  newPassword: string;
+  shownOnceNotice: string;
+}
+
 export interface PathRewrite {
   from: string;
   to: string;

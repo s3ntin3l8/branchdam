@@ -119,7 +119,12 @@ type LocalAuthDeps struct {
 	Users        *users.Service
 	LoginLimiter *ratelimit.Limiter
 	SessionMw    *session.Middleware
-	AuthMode     auth.AuthMode
+	// Reset, when non-nil, is the password-reset service (PR #409).
+	// Always wired by cmd/branchdam when auth.mode is local/both; nil
+	// only in tests that don't construct a Deps.LocalAuth. The HTTP
+	// handlers short-circuit to 503 when Reset is nil.
+	Reset    *users.PasswordResetService
+	AuthMode auth.AuthMode
 	// JIT, when non-nil, is the forward-JIT provisioner passed to
 	// auth.RouteWithConfigAndJIT. Set by cmd/branchdam when
 	// auth.mode == "both" AND auth.forward.adminGroups is non-empty;
@@ -215,6 +220,7 @@ func New(d Deps) *Server {
 			users:        d.LocalAuth.Users,
 			loginLimiter: d.LocalAuth.LoginLimiter,
 			sessionMw:    d.LocalAuth.SessionMw,
+			reset:        d.LocalAuth.Reset,
 			log:          log,
 			authMode:     d.LocalAuth.AuthMode,
 			jit:          d.LocalAuth.JIT,

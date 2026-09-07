@@ -65,6 +65,14 @@ RETURNING id, username, email, password_hash, is_admin, source, created_at, crea
 -- disable future logins without immediately logging the user out.
 UPDATE users SET disabled_at = ?2 WHERE id = ?1;
 
+-- name: UpdateUserPasswordHash :one
+-- Rotates the password hash. Used by /api/v1/password-reset/confirm
+-- (self-service) and /api/v1/admin/users/{id}/reset-password (admin).
+UPDATE users
+SET password_hash = ?2
+WHERE id = ?1
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at;
+
 -- name: ListUsers :many
 -- Paginated user list for the admin UI. Order by id ASC so paging is
 -- stable across inserts (new users go to the END, not the middle).

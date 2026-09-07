@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -58,6 +58,25 @@ export const api = {
       body: JSON.stringify(input),
     }),
   logout: () => request<void>("/api/v1/session", { method: "DELETE" }),
+
+  // Password-reset endpoints (PR #409). /request is no-auth and always
+  // returns 200; /confirm is no-auth and 200/404; /admin/users/{id}/reset-
+  // password is admin-only and returns the new plaintext once.
+  requestPasswordReset: (input: PasswordResetRequestInput) =>
+    request<PasswordResetRequestResponse>("/api/v1/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  confirmPasswordReset: (input: PasswordResetConfirmInput) =>
+    request<PasswordResetConfirmResponse>("/api/v1/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  adminResetPassword: (userId: number) =>
+    request<AdminResetPasswordResponse>(
+      `/api/v1/admin/users/${userId}/reset-password`,
+      { method: "POST", body: JSON.stringify({} as AdminResetPasswordInput) }
+    ),
 
   listAssets: (params: AssetQueryParams = {}) => {
     const qs = new URLSearchParams();
