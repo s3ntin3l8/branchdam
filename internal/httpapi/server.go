@@ -120,6 +120,11 @@ type LocalAuthDeps struct {
 	LoginLimiter *ratelimit.Limiter
 	SessionMw    *session.Middleware
 	AuthMode     auth.AuthMode
+	// JIT, when non-nil, is the forward-JIT provisioner passed to
+	// auth.RouteWithConfigAndJIT. Set by cmd/branchdam when
+	// auth.mode == "both" AND auth.forward.adminGroups is non-empty;
+	// nil otherwise (no JIT, even in "both" mode).
+	JIT auth.JITProvisioner
 }
 
 // Server bundles the dependencies handlers need.
@@ -212,6 +217,7 @@ func New(d Deps) *Server {
 			sessionMw:    d.LocalAuth.SessionMw,
 			log:          log,
 			authMode:     d.LocalAuth.AuthMode,
+			jit:          d.LocalAuth.JIT,
 		}
 	}
 	return s
@@ -303,8 +309,10 @@ func (s *Server) Handler() http.Handler {
 	// every existing deployment's behavior byte-identical.
 	authMode := auth.AuthModeForward
 	var localBuilder auth.ChainBuilder
+	var jit auth.JITProvisioner
 	if s.localAuth != nil {
 		authMode = s.localAuth.authMode
+		jit = s.localAuth.jit
 		switch authMode {
 		case auth.AuthModeLocal:
 			localBuilder = s.localAuth.sessionMw.Middleware
@@ -314,7 +322,16 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
-	routed := auth.RouteWithConfig(agentCfg, authMode, localBuilder, s.log, authzHandler)
+	// Pass adminGroups + requireEmail only when s.cfg() is non-nil;
+	// tests that build a Server without Config (see routes_test.go's
+	// fullTestServer helper) would otherwise deref a nil cfg here.
+	var adminGroups []string
+	var requireEmailForJIT bool
+	if cfg := s.cfg(); cfg != nil {
+		adminGroups = cfg.Auth.Forward.AdminGroups
+		requireEmailForJIT = cfg.Auth.Forward.RequireEmailForJIT
+	}
+	routed := auth.RouteWithConfigAndJIT(agentCfg, authMode, localBuilder, jit, adminGroups, requireEmailForJIT, s.log, authzHandler)
 	routed = pairingForwardedMiddleware(routed)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))

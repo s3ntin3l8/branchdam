@@ -85,17 +85,33 @@ var ErrSessionNotFound = errors.New("users: session not found")
 // opaque (32 random bytes hex-encoded); the HMAC exists so a tampered
 // cookie -- or one signed by a different deployment's secret -- is
 // detected before any DB lookup.
+//
+// Returns nil when the input is missing/empty/not a 32-byte base64
+// value. Callers (cmd/branchdam/main.go at startup) MUST check for
+// nil and refuse to enable local auth if so -- falling back to a
+// public constant here would mean every session cookie in production
+// is signed with a known key. Tests that need a dev-only key should
+// pass opts.CookieKey explicitly via ServiceOptions, NOT rely on a
+// fallback that no longer exists.
 func CookieKey(secretKeyBase64 string) []byte {
-	if secretKeyBase64 != "" {
-		if k, err := base64.StdEncoding.DecodeString(secretKeyBase64); err == nil && len(k) == 32 {
-			h := sha256.Sum256(k)
-			return h[:]
-		}
+	if secretKeyBase64 == "" {
+		return nil
 	}
-	return defaultCookieKey[:]
+	k, err := base64.StdEncoding.DecodeString(secretKeyBase64)
+	if err != nil || len(k) != 32 {
+		return nil
+	}
+	// codeql[go/weak-cryptographic-algorithm]
+	// SHA-256 here is used to derive a 32-byte HMAC key from the
+	// operator-supplied BRANCHDAM_SECRET_KEY (a 32-byte secret input
+	// is already uniformly distributed; SHA-256 acts as a domain
+	// separator). This is NOT password hashing -- the password hash
+	// is argon2id (see HashPassword above). The cookie HMAC itself
+	// (mac := hmac.New(sha256.New, ...) further down) is a keyed MAC,
+	// not a bare hash.
+	h := sha256.Sum256(k)
+	return h[:]
 }
-
-var defaultCookieKey = sha256.Sum256([]byte("branchdam-local-auth-dev-cookie-key"))
 
 // Service is the only externally-constructed type in this package.
 type Service struct {
@@ -115,6 +131,14 @@ type ServiceOptions struct {
 }
 
 // NewService constructs a Service. secretKeyBase64 is BRANCHDAM_SECRET_KEY.
+//
+// Panics when the caller did NOT supply opts.CookieKey AND the supplied
+// secretKeyBase64 doesn't decode to 32 bytes -- the previous silent
+// fallback to a public constant was a known-key HMAC vulnerability
+// (Hermes #407 review on PR #407). Callers at startup (cmd/branchdam)
+// must check for this case before calling NewService; this panic is
+// the second line of defense for misconfigured callers and for tests
+// that forgot to wire opts.CookieKey.
 func NewService(database *db.DB, secretKeyBase64 string, opts ServiceOptions) *Service {
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)
@@ -126,6 +150,9 @@ func NewService(database *db.DB, secretKeyBase64 string, opts ServiceOptions) *S
 	cookieKey := opts.CookieKey
 	if len(cookieKey) == 0 {
 		cookieKey = CookieKey(secretKeyBase64)
+		if len(cookieKey) == 0 {
+			panic("users.NewService: BRANCHDAM_SECRET_KEY is missing/invalid (must be 32-byte base64) and opts.CookieKey was not supplied. Refusing to construct a Service with a guessable HMAC key.")
+		}
 	}
 	nowFn := opts.Now
 	if nowFn == nil {
@@ -197,10 +224,14 @@ func (s *Service) CreateLocalUser(ctx context.Context, username, email, password
 	return row, nil
 }
 
-// CreateForwardJITUser inserts a source='forward-jit' user.
+// CreateForwardJITUser inserts a source='forward-jit' user. email MAY
+// be empty when requireEmail=false in the JIT config -- the user is
+// then keyed by username. The callers (JITProvisioner in jit.go)
+// enforce the require-email gate; this function just persists what
+// the caller gave it.
 func (s *Service) CreateForwardJITUser(ctx context.Context, username, email string, isAdmin bool, createdAt int64, createdBy string) (sqlcgen.User, error) {
-	if email == "" {
-		return sqlcgen.User{}, errors.New("users: email is required for forward-jit users")
+	if email == "" && username == "" {
+		return sqlcgen.User{}, errors.New("users: forward-jit requires either email or username")
 	}
 	if username == "" {
 		at := strings.IndexByte(email, '@')
@@ -210,12 +241,16 @@ func (s *Service) CreateForwardJITUser(ctx context.Context, username, email stri
 			username = email[:at]
 		}
 	}
+	var emailNS sql.NullString
+	if email != "" {
+		emailNS = sql.NullString{String: email, Valid: true}
+	}
 	var row sqlcgen.User
 	err := s.withTx(ctx, func(q *sqlcgen.Queries) error {
 		var txErr error
 		row, txErr = q.CreateForwardJITUser(ctx, sqlcgen.CreateForwardJITUserParams{
 			Username:  username,
-			Email:     sql.NullString{String: email, Valid: true},
+			Email:     emailNS,
 			IsAdmin:   boolToInt(isAdmin),
 			CreatedAt: createdAt,
 			CreatedBy: createdBy,
@@ -353,6 +388,13 @@ func (s *Service) MintCookieValue() (cookieID, cookieValue string, err error) {
 		return "", "", fmt.Errorf("mint cookie id: %w", err)
 	}
 	cookieID = fmt.Sprintf("%x", id)
+	// codeql[go/weak-cryptographic-algorithm]
+	// HMAC-SHA-256 is the right primitive here: a KEYED MAC over a
+	// 32-byte random secret. Not a password hash. HMAC-SHA-256 is
+	// explicitly in NIST SP 800-107's recommended MAC algorithms
+	// (FIPS 198-1). The pre-image resistance that "use a slow hash"
+	// guidance targets does not apply -- there is no human-typed
+	// secret to brute-force, only the 256-bit random cookie_id.
 	mac := hmac.New(sha256.New, s.cookieKey)
 	mac.Write([]byte(cookieID))
 	tag := mac.Sum(nil)

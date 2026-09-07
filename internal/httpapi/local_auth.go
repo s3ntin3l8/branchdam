@@ -4,19 +4,26 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
+
+// errSetupComplete is the sentinel the setup handler returns when
+// the count-check inside its InTx closure finds users already exist.
+// Translated to 404 at the handler boundary.
+var errSetupComplete = errors.New("setup already complete")
 
 // localAuthHandlers bundles the wiring the local-auth endpoints need.
 // Constructed once at startup in registerLocalAuthRoutes; carries the
@@ -28,7 +35,7 @@ type localAuthHandlers struct {
 	sessionMw    *session.Middleware
 	log          *slog.Logger
 	authMode     auth.AuthMode
-	trustedIPs   []string
+	jit          auth.JITProvisioner
 }
 
 // registerLocalAuthRoutes mounts /api/v1/setup/status,
@@ -92,21 +99,51 @@ func (s *Server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n, err := s.localAuth.users.CountUsers(r.Context())
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "count users: "+err.Error())
-		return
-	}
-	if n > 0 {
+	// TOCTOU-safe setup (Hermes #407 review): wrap the count-check +
+	// create in a single write transaction. The writer pool has
+	// SetMaxOpenConns(1) (AGENTS.md invariant #2), which alone
+	// serializes the two queries, but doing the whole sequence inside
+	// one tx makes the atomicity obvious in the code and survives any
+	// future move to a multi-writer pool. The setup token is implicit:
+	// the count being zero IS the token.
+	var userID int64
+	now := time.Now()
+	err := s.db.InTx(r.Context(), func(q *sqlcgen.Queries) error {
+		count, err := q.CountUsers(r.Context())
+		if err != nil {
+			return fmt.Errorf("count users: %w", err)
+		}
+		if count > 0 {
+			return errSetupComplete
+		}
+		hash, err := s.localAuth.users.HashPassword(body.Password)
+		if err != nil {
+			return fmt.Errorf("hash password: %w", err)
+		}
+		var emailNS sql.NullString
+		if email != "" {
+			emailNS = sql.NullString{String: email, Valid: true}
+		}
+		created, err := q.CreateLocalUser(r.Context(), sqlcgen.CreateLocalUserParams{
+			Username:     username,
+			Email:        emailNS,
+			PasswordHash: hash,
+			IsAdmin:      1,
+			CreatedAt:    now.Unix(),
+			CreatedBy:    "setup",
+		})
+		if err != nil {
+			return fmt.Errorf("create user: %w", err)
+		}
+		userID = created.ID
+		return nil
+	})
+	if errors.Is(err, errSetupComplete) {
 		writeJSONError(w, http.StatusNotFound, "setup already complete")
 		return
 	}
-
-	now := time.Now()
-	user, err := s.localAuth.users.CreateLocalUser(r.Context(), username, email, body.Password, true, now.Unix(), "setup")
 	if err != nil {
-		// Most likely UNIQUE-constraint failure on username; surface as 422.
-		writeJSONError(w, http.StatusUnprocessableEntity, "create user: "+err.Error())
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 
@@ -120,15 +157,15 @@ func (s *Server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "parse cookie: "+err.Error())
 		return
 	}
-	_, err = s.localAuth.users.CreateSession(r.Context(), user.ID, cookieID, clientIP(r), r.UserAgent(), now.Add(s.localAuth.sessionMw.AbsoluteTimeout()), now.Add(s.localAuth.sessionMw.IdleTimeout()))
+	_, err = s.localAuth.users.CreateSession(r.Context(), userID, cookieID, clientIP(s, r), r.UserAgent(), now.Add(s.localAuth.sessionMw.AbsoluteTimeout()), now.Add(s.localAuth.sessionMw.IdleTimeout()))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return
 	}
-	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: user.ID, Valid: true}, username, "local", "ok", clientIP(r), r.UserAgent(), "{}")
+	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: userID, Valid: true}, username, "local", "ok", clientIP(s, r), r.UserAgent(), "{}")
 
 	maxAge := int(s.localAuth.sessionMw.AbsoluteTimeout().Seconds())
-	s.localAuth.sessionMw.SetSessionCookie(w, r, cookieValue, maxAge, s.localAuth.trustedIPs)
+	s.localAuth.sessionMw.SetSessionCookie(w, r, cookieValue, maxAge, s.cfg().HTTP.TrustedProxies)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -141,7 +178,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := clientIP(r)
+	ip := clientIP(s, r)
 	if d := s.localAuth.loginLimiter.Check(ip); !d.Allowed {
 		w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
@@ -209,7 +246,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: user.ID, Valid: true}, username, "local", "ok", ip, r.UserAgent(), "{}")
 
 	maxAge := int(s.localAuth.sessionMw.AbsoluteTimeout().Seconds())
-	s.localAuth.sessionMw.SetSessionCookie(w, r, cookieValue, maxAge, s.localAuth.trustedIPs)
+	s.localAuth.sessionMw.SetSessionCookie(w, r, cookieValue, maxAge, s.cfg().HTTP.TrustedProxies)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -226,7 +263,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.localAuth.sessionMw.ClearSessionCookie(w, r, s.localAuth.trustedIPs)
+	s.localAuth.sessionMw.ClearSessionCookie(w, r, s.cfg().HTTP.TrustedProxies)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -248,10 +285,15 @@ func (s *Server) handleLogoutNoLocal(w http.ResponseWriter, _ *http.Request) {
 // --- helpers ---
 
 // clientIP returns the originating client IP. Honors X-Forwarded-For
-// only from trusted proxies (same logic as httpapi.isTrustedProxy);
-// otherwise falls back to r.RemoteAddr. Keeps the rate limit accurate
-// behind Traefik AND when branchDAM is hit directly in dev.
-func clientIP(r *http.Request) string {
+// ONLY when (a) a non-empty http.trustedProxies list is configured AND
+// (b) the direct connection came from one of those proxies. When no
+// proxies are configured, falls back to r.RemoteAddr verbatim -- the
+// X-Forwarded-For header is meaningless without a proxy in front, and
+// trusting it unconditionally would let a direct client spoof the
+// source IP and bypass the /login rate limiter.
+//
+// Wired through the Server so the live-resolved config is consulted.
+func clientIP(s *Server, r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -260,60 +302,44 @@ func clientIP(r *http.Request) string {
 	if err != nil {
 		return host
 	}
-	if trusted := trustedProxyList(); isTrusted(remoteIP, trusted) {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			// First entry is the original client.
-			if comma := strings.IndexByte(fwd, ','); comma >= 0 {
-				fwd = fwd[:comma]
-			}
-			return strings.TrimSpace(fwd)
+	trusted := currentTrustedProxies(s)
+	// Hermes Critical (#407): when no proxies are configured, the
+	// X-Forwarded-For header MUST be ignored. isTrustedProxy's nil =>
+	// true behavior is a backward-compat default for header-rewriting
+	// features (requestOrigin, Secure-cookie auto-detection) that
+	// degrade gracefully on misconfiguration; the rate limiter cannot
+	// afford that default -- an attacker who sets the header directly
+	// to a rotating IP would otherwise bypass the brute-force control.
+	if len(trusted) == 0 {
+		return remoteIP.String()
+	}
+	if !isTrustedProxy(remoteIP.String(), trusted) {
+		return remoteIP.String()
+	}
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		// First entry is the original client; trailing entries are
+		// additional proxies that received the request, ignored.
+		if comma := strings.IndexByte(fwd, ','); comma >= 0 {
+			fwd = fwd[:comma]
 		}
+		return strings.TrimSpace(fwd)
 	}
 	return remoteIP.String()
 }
 
-// isTrusted duplicates httpapi.isTrustedProxy for this file's local use;
-// both evolve together.
-func isTrusted(ip netip.Addr, trusted []string) bool {
-	if trusted == nil {
-		return true
+// currentTrustedProxies reads s.cfg().HTTP.TrustedProxies through a
+// thin indirection so tests can stub it without exporting a mutable
+// package variable. Nil/empty is intentional: it means "no proxy in
+// front" and triggers the safe default in clientIP (no header trust).
+func currentTrustedProxies(s *Server) []string {
+	if s == nil {
+		return nil
 	}
-	ip = ip.Unmap()
-	for _, entry := range trusted {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if entry == "*" {
-			return true
-		}
-		if strings.Contains(entry, "/") {
-			prefix, err := netip.ParsePrefix(entry)
-			if err != nil {
-				continue
-			}
-			if prefix.Contains(ip) {
-				return true
-			}
-			continue
-		}
-		addr, err := netip.ParseAddr(entry)
-		if err != nil {
-			continue
-		}
-		if addr == ip {
-			return true
-		}
+	cfg := s.cfg()
+	if cfg == nil {
+		return nil
 	}
-	return false
-}
-
-// trustedProxyList returns s.cfg().HTTP.TrustedProxies. Pulled through a
-// method indirection so tests can stub it (the package-level
-// httpConfigProvider is a function variable below).
-var trustedProxyList = func() []string {
-	// populated in New(); default nil = trust all (backward compat).
-	return nil
+	return cfg.HTTP.TrustedProxies
 }
 
 func splitCookieValue(v string) (cookieID, hmacHex string, err error) {
@@ -329,32 +355,7 @@ func formatRetryAfter(d time.Duration) string {
 	if secs < 1 {
 		secs = 1
 	}
-	return strconvItoa(secs)
-}
-
-// strconvItoa avoids pulling strconv into this file's import block
-// for one use; storage_locations_test.go also defines an itoa for
-// its own tests, so this name is package-unique.
-func strconvItoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return strconv.Itoa(secs)
 }
 
 // writeJSON is the localAuth file's small JSON helper. Avoids colliding
@@ -376,10 +377,3 @@ func writeJSONError(w http.ResponseWriter, status int, detail string) {
 		"detail":  detail,
 	})
 }
-
-// Ensure the unused-import linter is happy for ratelimit (used in
-// Decision construction above). Cheap insurance for older Go versions.
-var _ ratelimit.Decision
-
-// sync import guard
-var _ = sync.Mutex{}

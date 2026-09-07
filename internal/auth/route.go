@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -43,22 +44,48 @@ func Route(apiKey string, log *slog.Logger, next http.Handler) http.Handler {
 	return RouteWithConfig(AgentConfig{APIKey: apiKey}, AuthModeForward, nil, log, next)
 }
 
+// JITProvisioner is the function-shape hook RouteWithConfig calls
+// after merging the forward + local Principals but before the real
+// next runs. The hook is the integration point for forward-JIT
+// provisioning (a forward-auth admin user who has no local row yet
+// gets one created on first sight, so the local `is_admin` override
+// fires for them) -- see PLAN.md §5b. Nil disables the hook.
+//
+// Inputs: the merged Principal (may be nil if neither chain
+// authenticated the request), the config-driven allowlist of admin
+// groups, and the requireEmailForJIT knob. Output: a LocalUserView to
+// attach to ctx if a user was created (or already exists).
+type JITProvisioner func(ctx context.Context, merged *Principal, adminGroups []string, requireEmail bool) (LocalUserView, error)
+
 // RouteWithConfig routes requests using the provided AgentConfig.
 //
 //   - mode governs which browser-side chains run.
-//   - forwardBuilder is always set (BrowserChain). localBuilder may be
-//     nil in forward-only mode. When set and mode != AuthModeForward,
-//     it runs alongside the forward chain and the two outputs are
-//     merged.
+//   - localBuilder may be nil in forward-only mode. When set and
+//     mode != AuthModeForward, it runs alongside the forward chain
+//     and the two outputs are merged.
 //
-// The merge strategy is "run each chain against a capture-only next,
-// then run the real next with the unioned Principal attached".
+// No-JIT variant. For JIT-enabled construction (auth.mode == "both"
+// with config.forward.adminGroups), use RouteWithConfigAndJIT -- the
+// no-JIT default keeps the common path's signature short and its
+// semantics obvious.
+func RouteWithConfig(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, log *slog.Logger, next http.Handler) http.Handler {
+	return RouteWithConfigAndJIT(cfg, mode, localBuilder, nil, nil, false, log, next)
+}
+
+// RouteWithConfigAndJIT is the full constructor with JIT support.
+//
+//   - jit, when non-nil, runs after the merge to provision a local
+//     user row for a forward-auth admin who has no local account
+//     yet. Nil = no JIT.
+//   - adminGroups is the allowlist of forward-auth group names that
+//     trigger JIT provisioning (see Config.Auth.Forward.AdminGroups).
+//   - requireEmail is the requireEmailForJIT config knob.
 //
 // IMPORTANT: the agent chain is constructed ONCE here, not per-request.
 // Per-request construction would build a fresh in-memory ReplayCache
 // per call (AgentConfig.Cache defaults to nil -> NewReplayCache() inside
 // AgentChainWithConfig), defeating replay protection.
-func RouteWithConfig(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, log *slog.Logger, next http.Handler) http.Handler {
+func RouteWithConfigAndJIT(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, jit JITProvisioner, adminGroups []string, requireEmail bool, log *slog.Logger, next http.Handler) http.Handler {
 	agentHandler := AgentChainWithConfig(cfg, log)(next)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,8 +111,30 @@ func RouteWithConfig(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, 
 		}
 
 		merged := mergePrincipals(fwdCap.principal, localCap.principal, mode)
+
+		// Forward-JIT: a forward-auth admin with no local row yet gets
+		// one provisioned on first sight, so the local `is_admin`
+		// override (IsAdmin's LocalUserView branch) fires for them.
+		// Only runs when (a) mode is "both" so the local DB is even
+		// active, (b) the merged principal came from the forward chain
+		// alone (no local session), and (c) the forward-auth asserted
+		// groups intersect the configured adminGroups allowlist. The
+		// hook is responsible for the actual DB write.
+		var localView LocalUserView
+		if jit != nil && mode == AuthModeBoth && merged != nil && localCap.principal == nil {
+			view, jitErr := jit(r.Context(), merged, adminGroups, requireEmail)
+			if jitErr != nil {
+				log.Warn("auth: forward-JIT provisioning failed; continuing without local-`is_admin` override", "err", jitErr.Error())
+			} else if view.UserID != 0 {
+				localView = view
+			}
+		}
+
 		if merged != nil {
 			r = r.WithContext(WithPrincipal(r.Context(), *merged))
+		}
+		if localView.UserID != 0 {
+			r = r.WithContext(WithLocalUserView(r.Context(), localView))
 		}
 		next.ServeHTTP(w, r)
 	})

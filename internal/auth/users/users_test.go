@@ -14,7 +14,8 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 )
 
-const testSecretBase64 = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=" // 32 zero bytes, base64
+// testSecretBase64 is 32 zero bytes encoded as base64 (44 chars).
+const testSecretBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
@@ -58,12 +59,30 @@ func TestVerifyCookieValue_RejectsTampered(t *testing.T) {
 	_, cookieValue, err := svc.MintCookieValue()
 	require.NoError(t, err)
 
-	tampered := "a" + cookieValue[1:]
+	// Tamper the cookieID portion: flip the first char to a value
+	// other than the original. Using "flip the first hex char" rather
+	// than "prepend 'a'" because the first byte is random hex and
+	// happens to be 'a' 1/16 of the time, making the previous test
+	// shape flake under parallel codecov runs.
+	first := cookieValue[0]
+	flip := byte('0')
+	if first == '0' {
+		flip = '1'
+	}
+	tampered := string(flip) + cookieValue[1:]
+	require.NotEqual(t, cookieValue, tampered, "test setup invariant: tamper must differ")
 	got, err := svc.VerifyCookieValue(tampered)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 
-	tamperedTag := cookieValue[:len(cookieValue)-1] + "0"
+	// Tamper the HMAC tag: flip the last char to a different value.
+	last := cookieValue[len(cookieValue)-1]
+	flipTag := byte('0')
+	if last == '0' {
+		flipTag = '1'
+	}
+	tamperedTag := cookieValue[:len(cookieValue)-1] + string(flipTag)
+	require.NotEqual(t, cookieValue, tamperedTag, "test setup invariant: tamper must differ")
 	got, err = svc.VerifyCookieValue(tamperedTag)
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -109,10 +128,15 @@ func TestCreateForwardJITUser_FallsBackToEmailLocalPart(t *testing.T) {
 	assert.False(t, user.PasswordHash.Valid, "JIT users never have a password")
 }
 
-func TestCreateForwardJITUser_RequiresEmail(t *testing.T) {
+func TestCreateForwardJITUser_RequiresEitherEmailOrUsername(t *testing.T) {
 	svc := newTestService(t)
-	_, err := svc.CreateForwardJITUser(context.Background(), "bob", "", true, time.Now().Unix(), "forward:bob")
+	// Both empty: must error (caller bug).
+	_, err := svc.CreateForwardJITUser(context.Background(), "", "", true, time.Now().Unix(), "forward:nobody")
 	assert.Error(t, err)
+	// Username only: now allowed (caller is the JIT username-keyed path
+	// that handles the "requireEmail=false" config case).
+	_, err = svc.CreateForwardJITUser(context.Background(), "eve", "", true, time.Now().Unix(), "forward:eve")
+	assert.NoError(t, err)
 }
 
 func TestSessionLifecycle(t *testing.T) {
