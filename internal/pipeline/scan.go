@@ -566,7 +566,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			swept, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
 				StorageLocationID: location.ID,
 				LastSeenAt:        startedAt,
-				JsonEach:          string(jsonKeepActive),
+				KeepActivePaths:   string(jsonKeepActive),
 			})
 			return err
 		}); err != nil {

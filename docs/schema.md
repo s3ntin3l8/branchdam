@@ -103,14 +103,14 @@ See `WouldCreateCycle` in [`internal/db/queries/media_edges.sql`](../internal/db
 for the working pattern. `sqlc.arg(...)` is also strictly nicer than positional `?N` — it
 generates a named Go struct field (`ParentNodeID`) instead of `Column1`.
 
-**Caveat found in #61:** that preference has a real limit. `sqlc.arg(name)` fails to parse
-(cascading "extraneous input" / "no viable alternative" errors that look like they're pointing at
-the *new* query) when the same `.sql` file already has an earlier query using plain positional
-`?N` placeholders — reproduced by bisection with a trivial two-query file, so it's a real sqlc
-v1.31.1 bug against this schema, not a one-off. `internal/db/queries/media_nodes.sql` in
-particular has both styles already (`ListTier3Candidates` etc. use `?N`), so any new query added
-there should use plain `?N` too, not `sqlc.arg`. `GLOB` is also unsupported outright ("no viable
-alternative at input 'GLOB'") — use `length(x)`/other operators.
+**Correction (issue #413):** an earlier version of this note claimed `sqlc.arg(name)` fails to
+parse when the same `.sql` file already has an earlier query using plain positional `?N`
+placeholders, and told new queries to prefer bare `?N` for that reason. That claim was wrong — it
+was a misattribution of the non-ASCII rune/byte-offset bug documented below (issue #413), which
+was corrupting nearby queries regardless of whether they used `sqlc.arg` or `?N`. `sqlc.arg` and
+bare `?N` mix freely in the same file; see `ListAncestors`/`ListDescendants`'s `sqlc.arg(root_id)`
+alongside `ListTier3Candidates`'s `?N` in the same files. `GLOB` is still unsupported outright
+("no viable alternative at input 'GLOB'") — use `length(x)`/other operators.
 
 Partial indexes (`WHERE lifecycle_state <> 'ARCHIVED'`) and `CREATE VIEW` both parsed without
 issue. sqlc's `emit_interface: true` generates a `Querier` interface so `internal/pipeline` and
@@ -120,6 +120,30 @@ One follow-up, not blocking: `v_media_edges_resolved.parent_alive`/`parent_missi
 boolean expressions in a view — generate as Go `interface{}` rather than `bool`, because sqlc
 can't infer a type for a boolean predicate over a view. Add an `overrides:` entry in `sqlc.yaml`
 mapping those two columns to `bool` when `internal/graph` (PR 7) starts consuming them.
+
+## sqlc risk: non-ASCII in query comments (resolved, issue #413)
+
+Issue #413 catalogued 13 apparently-unrelated `sqlc generate` corruption patterns against this
+schema — dropped placeholder digits, truncated `RETURNING` lists, stray `1;`/`L;`/`);` lines,
+phantom `"sql"` imports, and more. All 13 turned out to be one bug: sqlc v1.31.1's SQLite engine
+gets statement spans from its ANTLR parser in **rune** offsets and slices the source with them as
+**byte** offsets. Every statement following a multi-byte UTF-8 character anywhere earlier in the
+file is sliced with both ends shifted left by `bytes − runes` of that character, producing a
+garbage prefix (the tail of the previous statement) and a truncated suffix — exactly the symptoms
+catalogued, at exactly the observed magnitudes.
+
+The fix is a house rule, not a workaround: **`internal/db/queries/*.sql` files must be
+ASCII-only.** Comment prose that needs an em dash, section sign, or similar should spell it out
+(`--`, `sec.`, `+/-`) instead. `internal/db/queries_ascii_test.go`'s `TestQueryFilesAreASCII`
+enforces this under `make check`. Non-ASCII in `internal/db/migrations/*.sql` is unaffected —
+sqlc only parses schema files for column/type info, not statement spans — so the rule is scoped to
+`queries/` only.
+
+Upstream: [sqlc#4372](https://github.com/sqlc-dev/sqlc/issues/4372) and
+[sqlc#4523](https://github.com/sqlc-dev/sqlc/issues/4523) (both closed-completed) name this exact
+bug; [sqlc#4535](https://github.com/sqlc-dev/sqlc/pull/4535) replaced the SQLite engine's ANTLR
+parser on `main` in August 2026, after v1.31.1 (April 2026) shipped — there is no released
+version past v1.31.1 to upgrade to yet. Revisit this rule once one ships.
 
 ## Post-Increment-1 Additions
 
@@ -165,8 +189,8 @@ Every migration after `00001_init.sql`, in order:
   its TTL (`mtime_unix`, not `last_seen_at`) is eligible only if a *live*
   (`lifecycle_state IN ('ACTIVE','HIDDEN')`) ancestor — walked via `media_edges` target→source,
   `REJECTED` edges excluded — on a `TIER3_MASTER_ARCHIVE` location has a non-NULL, 64-length
-  `full_hash`. Uses plain `?1`/`?2` positional params, not `sqlc.arg`, and `length(full_hash) = 64`
-  instead of a `GLOB` hex check — see the sqlc risk caveat above for why.
+  `full_hash`. Uses `length(full_hash) = 64` instead of a `GLOB` hex check — see the sqlc risk
+  section above for why.
 - Added `internal/prune` (`Plan`/`Execute`): `Execute` is `storage.Guard.Remove`'s first real
   production caller, gated by `Guard.CheckWrite` before every deletion. Purged nodes are marked
   `MISSING`, never deleted, matching the "rows are never deleted" invariant.

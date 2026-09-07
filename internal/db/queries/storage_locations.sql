@@ -63,7 +63,7 @@ UPDATE storage_locations SET is_active = ?2, updated_at = unixepoch() WHERE id =
 UPDATE storage_locations
 SET is_active = 0, updated_at = unixepoch()
 WHERE is_active = 1
-  AND root_path NOT IN (SELECT value FROM json_each(?1));
+  AND root_path NOT IN (SELECT value FROM json_each(CAST(sqlc.arg(current_root_paths) AS TEXT)));
 
 -- name: GetStorageLocationByID :one
 -- handlePrune (#61, #238) reads cache_ttl_hours directly off this row --

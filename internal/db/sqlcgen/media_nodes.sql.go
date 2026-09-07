@@ -11,9 +11,7 @@ import (
 )
 
 const archiveMediaNode = `-- name: ArchiveMediaNode :exec
-;
-
-UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?
+UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?1
 `
 
 // Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
@@ -24,6 +22,38 @@ UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WH
 func (q *Queries) ArchiveMediaNode(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, archiveMediaNode, id)
 	return err
+}
+
+const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
+SELECT COUNT(*)
+FROM media_nodes
+WHERE (lifecycle_state = ?1 OR ?1 IS NULL)
+  AND (camera_model = ?2 OR ?2 IS NULL)
+  AND (graph_status = ?3 OR ?3 IS NULL)
+  AND (storage_location_id = ?4 OR ?4 IS NULL)
+`
+
+type CountMediaNodesFilteredParams struct {
+	LifecycleState    sql.NullString
+	CameraModel       sql.NullString
+	GraphStatus       sql.NullString
+	StorageLocationID sql.NullInt64
+}
+
+// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
+// sqlc's SQLite type inference only picks up the column's own (nullable)
+// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
+// makes it fall back to interface{} for every param.
+func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMediaNodesFiltered,
+		arg.LifecycleState,
+		arg.CameraModel,
+		arg.GraphStatus,
+		arg.StorageLocationID,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const getLiveNodeByPath = `-- name: GetLiveNodeByPath :one
@@ -79,6 +109,54 @@ func (q *Queries) GetLiveNodeByPath(ctx context.Context, filePath string) (Media
 	return i, err
 }
 
+const getMediaNodeByFastHash = `-- name: GetMediaNodeByFastHash :one
+SELECT id
+FROM media_nodes
+WHERE fast_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+LIMIT 1
+`
+
+func (q *Queries) GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeByFastHash, fastHash)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const getMediaNodeByFullHash = `-- name: GetMediaNodeByFullHash :one
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status, size_bytes
+FROM media_nodes
+WHERE full_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+LIMIT 1
+`
+
+type GetMediaNodeByFullHashRow struct {
+	ID             int64
+	NodeUuid       string
+	FilePath       string
+	LifecycleState string
+	IndexingStatus string
+	SizeBytes      int64
+}
+
+// Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
+// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
+func (q *Queries) GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeByFullHash, fullHash)
+	var i GetMediaNodeByFullHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.FilePath,
+		&i.LifecycleState,
+		&i.IndexingStatus,
+		&i.SizeBytes,
+	)
+	return i, err
+}
+
 const getMediaNodeByID = `-- name: GetMediaNodeByID :one
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -95,6 +173,88 @@ WHERE id = ?1
 // superseded node's post-archive state (superseded_by, lifecycle_state).
 func (q *Queries) GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, error) {
 	row := q.db.QueryRowContext(ctx, getMediaNodeByID, id)
+	var i MediaNode
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.StorageLocationID,
+		&i.FilePath,
+		&i.FileName,
+		&i.FileExt,
+		&i.SizeBytes,
+		&i.MtimeUnix,
+		&i.FastHash,
+		&i.FullHash,
+		&i.Phash,
+		&i.IndexingStatus,
+		&i.GraphStatus,
+		&i.LifecycleState,
+		&i.SupersededBy,
+		&i.OriginalDocumentID,
+		&i.DocumentID,
+		&i.DerivedFromID,
+		&i.CapturedAtUnix,
+		&i.CameraModel,
+		&i.FilenameStem,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
+		&i.ThumbState,
+		&i.ThumbAttempts,
+		&i.SourcePathHash,
+	)
+	return i, err
+}
+
+const getMediaNodeBySourcePathHash = `-- name: GetMediaNodeBySourcePathHash :one
+SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
+FROM media_nodes
+WHERE source_path_hash = ?1
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+ORDER BY id DESC
+LIMIT 1
+`
+
+type GetMediaNodeBySourcePathHashRow struct {
+	ID             int64
+	NodeUuid       string
+	FilePath       string
+	LifecycleState string
+	IndexingStatus string
+}
+
+// Agent dedup: find an active or hidden node with the given SHA-256 source_path_hash.
+// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
+func (q *Queries) GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHash *string) (GetMediaNodeBySourcePathHashRow, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeBySourcePathHash, sourcePathHash)
+	var i GetMediaNodeBySourcePathHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.FilePath,
+		&i.LifecycleState,
+		&i.IndexingStatus,
+	)
+	return i, err
+}
+
+const getMediaNodeByUUID = `-- name: GetMediaNodeByUUID :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+FROM media_nodes
+WHERE node_uuid = ?1
+`
+
+func (q *Queries) GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeByUUID, nodeUuid)
 	var i MediaNode
 	err := row.Scan(
 		&i.ID,
@@ -185,8 +345,6 @@ func (q *Queries) GetMissingNodeByFastHash(ctx context.Context, fastHash *string
 }
 
 const insertMediaNode = `-- name: InsertMediaNode :one
-;
-
 INSERT INTO media_nodes (
     node_uuid, storage_location_id, file_path, file_name, file_ext,
     size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -296,6 +454,62 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		&i.SourcePathHash,
 	)
 	return i, err
+}
+
+const invalidateThumbnail = `-- name: InvalidateThumbnail :exec
+UPDATE media_nodes SET thumb_state = 'PENDING', thumb_attempts = 0, updated_at = unixepoch() WHERE id = ?1
+`
+
+// Resets a node's thumbnail generation state to PENDING with attempts
+// zeroed, so internal/thumbs.Worker regenerates it on its next pass. The
+// Cache.Write path is os.CreateTemp + os.Rename to the same node_uuid path,
+// so regeneration overwrites the stale file atomically -- no separate
+// Cache.Delete is needed alongside this reset. Called from
+// internal/httpapi's refreshNodeAfterInPlaceWrite, not from
+// internal/pipeline: fast_hash is by construction unchanged on both the
+// Touched branch (its own entry condition) and the rebase branch (it looks
+// the node up BY fast_hash), so neither ever observes a fast_hash change --
+// refreshNodeAfterInPlaceWrite is the one place a node's fast_hash changes
+// while its node_uuid is preserved (the inherit-metadata endpoint's
+// post-write DB sync, #188).
+func (q *Queries) InvalidateThumbnail(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, invalidateThumbnail, id)
+	return err
+}
+
+const listCameraModelFacets = `-- name: ListCameraModelFacets :many
+SELECT DISTINCT COALESCE(camera_model, '') AS camera_model
+FROM media_nodes
+WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state != 'ARCHIVED'
+ORDER BY camera_model ASC
+`
+
+// COALESCE is not a null-guard here -- the WHERE clause already excludes
+// NULL/empty camera_model -- it exists so sqlc infers []string instead of
+// []sql.NullString: camera_model is a nullable column (00001_init.sql), and
+// sqlc's SQLite type inference can't see that this query's own WHERE makes
+// the result always non-NULL.
+func (q *Queries) ListCameraModelFacets(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listCameraModelFacets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var camera_model string
+		if err := rows.Scan(&camera_model); err != nil {
+			return nil, err
+		}
+		items = append(items, camera_model)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listLiveNodesByDocumentID = `-- name: ListLiveNodesByDocumentID :many
@@ -583,6 +797,50 @@ func (q *Queries) ListLiveNodesByFilenameStem(ctx context.Context, arg ListLiveN
 	return items, nil
 }
 
+const listMediaNodeStatusesByUUIDs = `-- name: ListMediaNodeStatusesByUUIDs :many
+SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
+FROM media_nodes n
+LEFT JOIN storage_locations s ON s.id = n.storage_location_id
+WHERE n.node_uuid IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+`
+
+type ListMediaNodeStatusesByUUIDsRow struct {
+	NodeUuid       string
+	LifecycleState string
+	FullHash       *string
+	Tier           sql.NullString
+}
+
+// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
+// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
+func (q *Queries) ListMediaNodeStatusesByUUIDs(ctx context.Context, nodeUuids string) ([]ListMediaNodeStatusesByUUIDsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listMediaNodeStatusesByUUIDs, nodeUuids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMediaNodeStatusesByUUIDsRow{}
+	for rows.Next() {
+		var i ListMediaNodeStatusesByUUIDsRow
+		if err := rows.Scan(
+			&i.NodeUuid,
+			&i.LifecycleState,
+			&i.FullHash,
+			&i.Tier,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMediaNodes = `-- name: ListMediaNodes :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -659,64 +917,6 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 	return items, nil
 }
 
-const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
-SELECT COUNT(*)
-FROM media_nodes
-WHERE (?1 IS NULL OR lifecycle_state = ?1)
-  AND (?2 IS NULL OR camera_model = ?2)
-  AND (?3 IS NULL OR graph_status = ?3)
-  AND (?4 IS NULL OR storage_location_id = ?4)
-`
-
-type CountMediaNodesFilteredParams struct {
-	LifecycleState    sql.NullString
-	CameraModel       sql.NullString
-	GraphStatus       sql.NullString
-	StorageLocationID sql.NullInt64
-}
-
-func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countMediaNodesFiltered,
-		arg.LifecycleState,
-		arg.CameraModel,
-		arg.GraphStatus,
-		arg.StorageLocationID,
-	)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
-const listCameraModelFacets = `-- name: ListCameraModelFacets :many
-SELECT DISTINCT camera_model
-FROM media_nodes
-WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state != 'ARCHIVED'
-ORDER BY camera_model ASC
-`
-
-func (q *Queries) ListCameraModelFacets(ctx context.Context) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listCameraModelFacets)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var camera_model string
-		if err := rows.Scan(&camera_model); err != nil {
-			return nil, err
-		}
-		items = append(items, camera_model)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listMediaNodesFiltered = `-- name: ListMediaNodesFiltered :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -726,10 +926,10 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        first_seen_at, last_seen_at, created_at, updated_at,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
-WHERE (?3 IS NULL OR lifecycle_state = ?3)
-  AND (?4 IS NULL OR camera_model = ?4)
-  AND (?5 IS NULL OR graph_status = ?5)
-  AND (?6 IS NULL OR storage_location_id = ?6)
+WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
+  AND (camera_model = ?4 OR ?4 IS NULL)
+  AND (graph_status = ?5 OR ?5 IS NULL)
+  AND (storage_location_id = ?6 OR ?6 IS NULL)
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2
 `
@@ -743,6 +943,10 @@ type ListMediaNodesFilteredParams struct {
 	StorageLocationID sql.NullInt64
 }
 
+// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
+// sqlc's SQLite type inference only picks up the column's own (nullable)
+// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
+// makes it fall back to interface{} for every param.
 func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listMediaNodesFiltered,
 		arg.Limit,
@@ -804,6 +1008,184 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 	return items, nil
 }
 
+const listPendingThumbnails = `-- name: ListPendingThumbnails :many
+SELECT n.id, n.node_uuid, n.file_path, n.thumb_attempts
+FROM media_nodes n
+JOIN storage_locations s ON s.id = n.storage_location_id
+WHERE n.thumb_state = 'PENDING'
+  AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND n.thumb_attempts < ?1
+  AND s.tier <> 'TIER0_LOCAL_STAGING'
+ORDER BY n.id
+LIMIT ?2
+`
+
+type ListPendingThumbnailsParams struct {
+	ThumbAttempts int64
+	Limit         int64
+}
+
+type ListPendingThumbnailsRow struct {
+	ID            int64
+	NodeUuid      string
+	FilePath      string
+	ThumbAttempts int64
+}
+
+// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
+// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
+// index idx_media_nodes_thumb_pending (WHERE thumb_state = 'PENDING'), so
+// the index stays cheap as the backlog drains rather than scanning every
+// row regardless of state. thumb_attempts < ?1 excludes a node that has
+// already exhausted the worker's retry bound -- a permanently-broken
+// source (corrupt file, unsupported format that errors rather than
+// returning thumbs.ErrUnsupported) stops being retried every pass forever,
+// mirroring remote_sync_state's retry_count bound
+// (ResetRemoteSyncStateFailed). lifecycle_state excludes MISSING/ARCHIVED:
+// there is no live file left to read a thumbnail from.
+//
+// Joined against storage_locations to exclude TIER0_LOCAL_STAGING (#231):
+// workstation-local staging a future offline-ingest agent may record a node
+// for before its bytes have synced anywhere server-visible. Without this,
+// the worker claims a node whose file the server can never open, fails,
+// and burns a retry (and real read I/O against whatever remote/NFS tier it
+// probes) every pass until thumb_attempts hits its bound -- self-limiting
+// but noisy, and never productive. No other tier is excluded here: Tier 1
+// scratch, Tier 2 exports, Tier 3 masters, and PROJECTS are all
+// server-readable.
+func (q *Queries) ListPendingThumbnails(ctx context.Context, arg ListPendingThumbnailsParams) ([]ListPendingThumbnailsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingThumbnails, arg.ThumbAttempts, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingThumbnailsRow{}
+	for rows.Next() {
+		var i ListPendingThumbnailsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.FilePath,
+			&i.ThumbAttempts,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPrunableNodes = `-- name: ListPrunableNodes :many
+WITH RECURSIVE lineage(root, id) AS (
+    SELECT n.id AS root, n.id AS id
+    FROM media_nodes n
+    WHERE n.storage_location_id = ?1
+      AND n.lifecycle_state = 'ACTIVE'
+      AND n.mtime_unix < ?2
+    UNION
+    SELECT l.root AS root, e.source_node_id AS id
+    FROM media_edges e
+    JOIN lineage l ON e.target_node_id = l.id
+    JOIN media_nodes a ON a.id = e.source_node_id
+    WHERE e.review_state <> 'REJECTED'
+      AND a.lifecycle_state <> 'ARCHIVED'
+)
+SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
+       n.mtime_unix, n.storage_location_id
+FROM media_nodes n
+WHERE n.storage_location_id = ?1
+  AND n.lifecycle_state = 'ACTIVE'
+  AND n.mtime_unix < ?2
+  AND EXISTS (
+    SELECT 1
+    FROM lineage l
+    JOIN media_nodes m ON m.id = l.id
+    JOIN storage_locations s ON s.id = m.storage_location_id
+    WHERE l.root = n.id
+      AND l.id <> n.id
+      AND s.tier = 'TIER3_MASTER_ARCHIVE'
+      AND m.lifecycle_state IN ('ACTIVE', 'HIDDEN')
+      AND m.full_hash IS NOT NULL
+      AND length(m.full_hash) = 64
+  )
+ORDER BY n.id
+`
+
+type ListPrunableNodesParams struct {
+	StorageLocationID int64
+	MtimeUnix         int64
+}
+
+type ListPrunableNodesRow struct {
+	ID                int64
+	NodeUuid          string
+	FilePath          string
+	FileName          string
+	SizeBytes         int64
+	MtimeUnix         int64
+	StorageLocationID int64
+}
+
+// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
+// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
+// TIER3_MASTER_ARCHIVE location has a verified (non-NULL, 64-hex) full_hash.
+// "live" matches v_media_edges_resolved's own parent_alive definition --
+// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
+// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
+// Ancestor, not "same full_hash": walks media_edges target->source
+// (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
+// mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
+// exclusion exactly -- a chain that only connects through a superseded
+// version doesn't represent the file currently on disk.
+// Tier-1-only and prunable-only are already schema-enforced
+// (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
+// not re-checked here; the caller only invokes this against a location it
+// already knows is prunable.
+//
+// Every column in each anchor SELECT is explicitly named/aliased -- sqlc's
+// SQLite parser fails with `*ast.ResTarget has nil name` otherwise (see
+// docs/schema.md's sqlc risk note). "64-hex" is enforced here as
+// length(full_hash) = 64 only, matching the schema's own CHECK exactly
+// (docs/schema.md) -- sqlc's SQLite grammar does not support GLOB
+// ("no viable alternative at input 'GLOB'"), and full_hash is only ever
+// written by internal/hashing.FullHash, which always emits lowercase hex.
+func (q *Queries) ListPrunableNodes(ctx context.Context, arg ListPrunableNodesParams) ([]ListPrunableNodesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPrunableNodes, arg.StorageLocationID, arg.MtimeUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPrunableNodesRow{}
+	for rows.Next() {
+		var i ListPrunableNodesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.FilePath,
+			&i.FileName,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.StorageLocationID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTier3Candidates = `-- name: ListTier3Candidates :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -828,7 +1210,7 @@ type ListTier3CandidatesParams struct {
 }
 
 // Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
-// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
+// camera_serial with captured_at_unix within +/-2 seconds of a target timestamp,
 // excluding a given node ID.
 func (q *Queries) ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listTier3Candidates,
@@ -890,8 +1272,6 @@ func (q *Queries) ListTier3Candidates(ctx context.Context, arg ListTier3Candidat
 }
 
 const markNodeMissing = `-- name: MarkNodeMissing :exec
-;
-
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -901,24 +1281,37 @@ func (q *Queries) MarkNodeMissing(ctx context.Context, id int64) error {
 }
 
 const markUnseenNodesMissing = `-- name: MarkUnseenNodesMissing :execrows
-;
-
 UPDATE media_nodes
 SET lifecycle_state = 'MISSING', updated_at = unixepoch()
 WHERE storage_location_id = ?1
   AND lifecycle_state = 'ACTIVE'
   AND last_seen_at < ?2
-  AND file_path NOT IN (SELECT value FROM json_each(?3));
+  AND file_path NOT IN (SELECT value FROM json_each(CAST(?3 AS TEXT)))
 `
 
 type MarkUnseenNodesMissingParams struct {
 	StorageLocationID int64
 	LastSeenAt        int64
-	JsonEach          interface{}
+	KeepActivePaths   string
 }
 
+// Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
+// scanned storage location whose last_seen_at predates the scan's start is
+// gone. TouchMediaNode/InsertMediaNode/RebaseMissingNodePath all bump
+// last_seen_at on every node the walk actually saw and committed, so anything
+// still old here was genuinely unseen this scan. KeepActive is the pass's
+// seen-but-uncertain set -- paths the walk saw but did not reliably commit
+// (processFile error, submit refused, dropped result, batch Commit failure) --
+// and is excluded from the sweep: a file on disk with a stale last_seen_at is
+// not proof it's gone. KeepActive paths are passed as a JSON array string
+// to json_each(sqlc.arg(keep_active_paths)) to remain within SQLite
+// per-statement parameter bounds.
+// Scoped by storage_location_id so a scan of one mount never touches another.
+// unixepoch() is 1s granularity, so a node last seen in a scan that happened
+// to end in the SAME wall-clock second as this scan's start may survive one
+// extra scan -- it is swept the next round, which is delayed-not-wrong.
 func (q *Queries) MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, markUnseenNodesMissing, arg.StorageLocationID, arg.LastSeenAt, arg.JsonEach)
+	result, err := q.db.ExecContext(ctx, markUnseenNodesMissing, arg.StorageLocationID, arg.LastSeenAt, arg.KeepActivePaths)
 	if err != nil {
 		return 0, err
 	}
@@ -926,8 +1319,6 @@ func (q *Queries) MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNode
 }
 
 const rebaseMissingNodePath = `-- name: RebaseMissingNodePath :exec
-;
-
 UPDATE media_nodes
 SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
     lifecycle_state = 'ACTIVE', mtime_unix = ?5,
@@ -957,76 +1348,30 @@ func (q *Queries) RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNo
 	return err
 }
 
-const setSupersededBy = `-- name: SetSupersededBy :exec
-;
-
-UPDATE media_nodes SET superseded_by = ?2, updated_at = unixepoch() WHERE id = ?1
-`
-
-type SetSupersededByParams struct {
-	ID           int64
-	SupersededBy sql.NullInt64
-}
-
-// Step 3 of a version collision: link the archived row to its successor,
-// once the successor's id is known (i.e. after InsertMediaNode).
-func (q *Queries) SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error {
-	_, err := q.db.ExecContext(ctx, setSupersededBy, arg.ID, arg.SupersededBy)
-	return err
-}
-
-const touchMediaNode = `-- name: TouchMediaNode :exec
-;
-
+const rebaseNodePathByUUID = `-- name: RebaseNodePathByUUID :exec
 UPDATE media_nodes
-SET mtime_unix = ?2, last_seen_at = unixepoch(),
-    lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
-    updated_at = unixepoch()
-WHERE lifecycle_state != 'ARCHIVED' AND id = ?1
+SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
+    lifecycle_state = 'ACTIVE', mtime_unix = ?5,
+    last_seen_at = unixepoch(), updated_at = unixepoch()
+WHERE node_uuid = ?1
 `
 
-type TouchMediaNodeParams struct {
-	ID        int64
-	MtimeUnix int64
+type RebaseNodePathByUUIDParams struct {
+	NodeUuid          string
+	FilePath          string
+	FileName          string
+	StorageLocationID int64
+	MtimeUnix         int64
 }
 
-// Same content at the same path, seen again on a later scan. Records that
-// and, if the row was MISSING (a file re-created at its old path), reactivates
-// it in place -- a MISSING row found alive again is not a version collision
-// and must not stay MISSING.
-//
-// The WHERE lifecycle_state != 'ARCHIVED' clause and MISSING-only CASE
-// make #226's now-possible concurrent FULL_SCAN + manual differential
-// INCREMENTAL against the same Tier-3 location safe rather than merely
-// untested: if a concurrent FULL_SCAN archives this node (a version
-// collision on the same path) between the differential sweep's
-// sweepUnchanged check and its deferred touchBatcher flush, this UPDATE
-// matches zero rows against the now-ARCHIVED row id. The touch is a clean
-// no-op, never updating dead audit trail timestamps or resurrecting into
-// a live duplicate alongside the FULL_SCAN's freshly inserted successor
-// row. See TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
-// in internal/pipeline for the regression test.
-func (q *Queries) TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error {
-	_, err := q.db.ExecContext(ctx, touchMediaNode, arg.ID, arg.MtimeUnix)
-	return err
-}
-
-const updateMediaNodeFullHash = `-- name: UpdateMediaNodeFullHash :exec
-;
-
-UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1
-`
-
-type UpdateMediaNodeFullHashParams struct {
-	ID       int64
-	FullHash *string
-}
-
-// Escalation path for T1: computed lazily, only when fast_hash collides
-// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
-// location (docs/schema.md fix #8's full_hash policy).
-func (q *Queries) UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNodeFullHashParams) error {
-	_, err := q.db.ExecContext(ctx, updateMediaNodeFullHash, arg.ID, arg.FullHash)
+func (q *Queries) RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error {
+	_, err := q.db.ExecContext(ctx, rebaseNodePathByUUID,
+		arg.NodeUuid,
+		arg.FilePath,
+		arg.FileName,
+		arg.StorageLocationID,
+		arg.MtimeUnix,
+	)
 	return err
 }
 
@@ -1071,6 +1416,108 @@ func (q *Queries) RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg Ref
 		arg.MtimeUnix,
 		arg.FastHash,
 	)
+	return err
+}
+
+const setSupersededBy = `-- name: SetSupersededBy :exec
+UPDATE media_nodes SET superseded_by = ?2, updated_at = unixepoch() WHERE id = ?1
+`
+
+type SetSupersededByParams struct {
+	ID           int64
+	SupersededBy sql.NullInt64
+}
+
+// Step 3 of a version collision: link the archived row to its successor,
+// once the successor's id is known (i.e. after InsertMediaNode).
+func (q *Queries) SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error {
+	_, err := q.db.ExecContext(ctx, setSupersededBy, arg.ID, arg.SupersededBy)
+	return err
+}
+
+const setThumbState = `-- name: SetThumbState :exec
+UPDATE media_nodes SET thumb_state = ?2, thumb_attempts = ?3, updated_at = unixepoch() WHERE id = ?1
+`
+
+type SetThumbStateParams struct {
+	ID            int64
+	ThumbState    string
+	ThumbAttempts int64
+}
+
+// The caller passes the effective thumb_attempts value itself (0 on a
+// successful READY -- a later invalidation starts the attempt count fresh
+// again; current+1 on a FAILED retry) rather than this query
+// incrementing/resetting on its own, so one statement serves every
+// transition -- same "caller passes effective values" contract as
+// UpdateMediaNodePromotedColumns above.
+func (q *Queries) SetThumbState(ctx context.Context, arg SetThumbStateParams) error {
+	_, err := q.db.ExecContext(ctx, setThumbState, arg.ID, arg.ThumbState, arg.ThumbAttempts)
+	return err
+}
+
+const touchMediaNode = `-- name: TouchMediaNode :exec
+UPDATE media_nodes
+SET mtime_unix = ?2, last_seen_at = unixepoch(),
+    lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
+    updated_at = unixepoch()
+WHERE lifecycle_state != 'ARCHIVED' AND id = ?1
+`
+
+type TouchMediaNodeParams struct {
+	ID        int64
+	MtimeUnix int64
+}
+
+// Same content at the same path, seen again on a later scan. Records that
+// and, if the row was MISSING (a file re-created at its old path), reactivates
+// it in place -- a MISSING row found alive again is not a version collision
+// and must not stay MISSING.
+//
+// The WHERE lifecycle_state != 'ARCHIVED' clause and MISSING-only CASE
+// make #226's now-possible concurrent FULL_SCAN + manual differential
+// INCREMENTAL against the same Tier-3 location safe rather than merely
+// untested: if a concurrent FULL_SCAN archives this node (a version
+// collision on the same path) between the differential sweep's
+// sweepUnchanged check and its deferred touchBatcher flush, this UPDATE
+// matches zero rows against the now-ARCHIVED row id. The touch is a clean
+// no-op, never updating dead audit trail timestamps or resurrecting into
+// a live duplicate alongside the FULL_SCAN's freshly inserted successor
+// row. See TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
+// in internal/pipeline for the regression test.
+func (q *Queries) TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error {
+	_, err := q.db.ExecContext(ctx, touchMediaNode, arg.ID, arg.MtimeUnix)
+	return err
+}
+
+const updateMediaNodeFullHash = `-- name: UpdateMediaNodeFullHash :exec
+UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1
+`
+
+type UpdateMediaNodeFullHashParams struct {
+	ID       int64
+	FullHash *string
+}
+
+// Escalation path for T1: computed lazily, only when fast_hash collides
+// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
+// location (docs/schema.md fix #8's full_hash policy).
+func (q *Queries) UpdateMediaNodeFullHash(ctx context.Context, arg UpdateMediaNodeFullHashParams) error {
+	_, err := q.db.ExecContext(ctx, updateMediaNodeFullHash, arg.ID, arg.FullHash)
+	return err
+}
+
+const updateMediaNodeGraphStatus = `-- name: UpdateMediaNodeGraphStatus :exec
+UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1
+`
+
+type UpdateMediaNodeGraphStatusParams struct {
+	ID          int64
+	GraphStatus string
+}
+
+func (q *Queries) UpdateMediaNodeGraphStatus(ctx context.Context, arg UpdateMediaNodeGraphStatusParams) error {
+	_, err := q.db.ExecContext(ctx, updateMediaNodeGraphStatus, arg.ID, arg.GraphStatus)
 	return err
 }
 
@@ -1124,7 +1571,7 @@ type UpdateMediaNodePromotedColumnsParams struct {
 // edge and never creates a second one.
 //
 // The caller passes effective values: a column whose fresh probe value was
-// empty (or unchanged) is passed through as the node's current value, so this
+// empty or unchanged is passed through as the node's current value, so this
 // query is only ever reached with at least one genuine change.
 func (q *Queries) UpdateMediaNodePromotedColumns(ctx context.Context, arg UpdateMediaNodePromotedColumnsParams) error {
 	_, err := q.db.ExecContext(ctx, updateMediaNodePromotedColumns,
@@ -1138,443 +1585,4 @@ func (q *Queries) UpdateMediaNodePromotedColumns(ctx context.Context, arg Update
 		arg.CapturedAtUnix,
 	)
 	return err
-}
-
-const updateMediaNodeGraphStatus = `-- name: UpdateMediaNodeGraphStatus :exec
-;
-
-UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1
-`
-
-type UpdateMediaNodeGraphStatusParams struct {
-	ID          int64
-	GraphStatus string
-}
-
-func (q *Queries) UpdateMediaNodeGraphStatus(ctx context.Context, arg UpdateMediaNodeGraphStatusParams) error {
-	_, err := q.db.ExecContext(ctx, updateMediaNodeGraphStatus, arg.ID, arg.GraphStatus)
-	return err
-}
-
-const getMediaNodeByUUID = `-- name: GetMediaNodeByUUID :one
-SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
-       size_bytes, mtime_unix, fast_hash, full_hash, phash,
-       indexing_status, graph_status, lifecycle_state, superseded_by,
-       original_document_id, document_id, derived_from_id,
-       captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
-FROM media_nodes
-WHERE node_uuid = ?1
-`
-
-func (q *Queries) GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error) {
-	row := q.db.QueryRowContext(ctx, getMediaNodeByUUID, nodeUuid)
-	var i MediaNode
-	err := row.Scan(
-		&i.ID,
-		&i.NodeUuid,
-		&i.StorageLocationID,
-		&i.FilePath,
-		&i.FileName,
-		&i.FileExt,
-		&i.SizeBytes,
-		&i.MtimeUnix,
-		&i.FastHash,
-		&i.FullHash,
-		&i.Phash,
-		&i.IndexingStatus,
-		&i.GraphStatus,
-		&i.LifecycleState,
-		&i.SupersededBy,
-		&i.OriginalDocumentID,
-		&i.DocumentID,
-		&i.DerivedFromID,
-		&i.CapturedAtUnix,
-		&i.CameraModel,
-		&i.FilenameStem,
-		&i.FirstSeenAt,
-		&i.LastSeenAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.CameraSerial,
-		&i.LensModel,
-		&i.ThumbState,
-		&i.ThumbAttempts,
-		&i.SourcePathHash,
-	)
-	return i, err
-}
-
-const rebaseNodePathByUUID = `-- name: RebaseNodePathByUUID :exec
-UPDATE media_nodes
-SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
-    lifecycle_state = 'ACTIVE', mtime_unix = ?5,
-    last_seen_at = unixepoch(), updated_at = unixepoch()
-WHERE node_uuid = ?1
-`
-
-type RebaseNodePathByUUIDParams struct {
-	NodeUuid          string
-	FilePath          string
-	FileName          string
-	StorageLocationID int64
-	MtimeUnix         int64
-}
-
-func (q *Queries) RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error {
-	_, err := q.db.ExecContext(ctx, rebaseNodePathByUUID,
-		arg.NodeUuid,
-		arg.FilePath,
-		arg.FileName,
-		arg.StorageLocationID,
-		arg.MtimeUnix,
-	)
-	return err
-}
-
-const listPrunableNodes = `-- name: ListPrunableNodes :many
-WITH RECURSIVE lineage(root, id) AS (
-    SELECT n.id AS root, n.id AS id
-    FROM media_nodes n
-    WHERE n.storage_location_id = ?1
-      AND n.lifecycle_state = 'ACTIVE'
-      AND n.mtime_unix < ?2
-    UNION
-    SELECT l.root AS root, e.source_node_id AS id
-    FROM media_edges e
-    JOIN lineage l ON e.target_node_id = l.id
-    JOIN media_nodes a ON a.id = e.source_node_id
-    WHERE e.review_state <> 'REJECTED'
-      AND a.lifecycle_state <> 'ARCHIVED'
-)
-SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
-       n.mtime_unix, n.storage_location_id
-FROM media_nodes n
-WHERE n.storage_location_id = ?1
-  AND n.lifecycle_state = 'ACTIVE'
-  AND n.mtime_unix < ?2
-  AND EXISTS (
-    SELECT 1
-    FROM lineage l
-    JOIN media_nodes m ON m.id = l.id
-    JOIN storage_locations s ON s.id = m.storage_location_id
-    WHERE l.root = n.id
-      AND l.id <> n.id
-      AND s.tier = 'TIER3_MASTER_ARCHIVE'
-      AND m.lifecycle_state IN ('ACTIVE', 'HIDDEN')
-      AND m.full_hash IS NOT NULL
-      AND length(m.full_hash) = 64
-  )
-ORDER BY n.id
-`
-
-type ListPrunableNodesParams struct {
-	StorageLocationID int64
-	MtimeUnix         int64
-}
-
-type ListPrunableNodesRow struct {
-	ID                int64
-	NodeUuid          string
-	FilePath          string
-	FileName          string
-	SizeBytes         int64
-	MtimeUnix         int64
-	StorageLocationID int64
-}
-
-// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
-// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
-// TIER3_MASTER_ARCHIVE location has a verified (non-NULL, 64-hex) full_hash.
-// "live" matches v_media_edges_resolved's own parent_alive definition --
-// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
-// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
-// Ancestor, not "same full_hash": walks media_edges target->source
-// (REJECTED edges excluded), mirroring ListAncestors' direction convention.
-// Tier-1-only and prunable-only are already schema-enforced
-// (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
-// not re-checked here; the caller only invokes this against a location it
-// already knows is prunable.
-//
-// Every column in each anchor SELECT is explicitly named/aliased -- sqlc's
-// SQLite parser fails with `*ast.ResTarget has nil name` otherwise (see
-// docs/schema.md's sqlc risk note). "64-hex" is enforced here as
-// length(full_hash) = 64 only, matching the schema's own CHECK exactly
-// (docs/schema.md) -- sqlc's SQLite grammar does not support GLOB
-// ("no viable alternative at input 'GLOB'"), and full_hash is only ever
-// written by internal/hashing.FullHash, which always emits lowercase hex.
-// Plain positional params (?1/?2), not sqlc.arg: this file already has
-// earlier queries (e.g. ListTier3Candidates) using bare ?N placeholders,
-// and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder
-// in the same file when a bare ?N appears anywhere earlier in it --
-// reproduced by bisection, a real generator bug for this sqlc version, not
-// something wrong with sqlc.arg's own syntax elsewhere in the codebase.
-func (q *Queries) ListPrunableNodes(ctx context.Context, arg ListPrunableNodesParams) ([]ListPrunableNodesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listPrunableNodes, arg.StorageLocationID, arg.MtimeUnix)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListPrunableNodesRow{}
-	for rows.Next() {
-		var i ListPrunableNodesRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.NodeUuid,
-			&i.FilePath,
-			&i.FileName,
-			&i.SizeBytes,
-			&i.MtimeUnix,
-			&i.StorageLocationID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPendingThumbnails = `-- name: ListPendingThumbnails :many
-SELECT n.id, n.node_uuid, n.file_path, n.thumb_attempts
-FROM media_nodes n
-JOIN storage_locations s ON s.id = n.storage_location_id
-WHERE n.thumb_state = 'PENDING'
-  AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
-  AND n.thumb_attempts < ?1
-  AND s.tier <> 'TIER0_LOCAL_STAGING'
-ORDER BY n.id
-LIMIT ?2
-`
-
-type ListPendingThumbnailsParams struct {
-	ThumbAttempts int64
-	Limit         int64
-}
-
-type ListPendingThumbnailsRow struct {
-	ID            int64
-	NodeUuid      string
-	FilePath      string
-	ThumbAttempts int64
-}
-
-// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
-// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
-// index idx_media_nodes_thumb_pending (WHERE thumb_state = 'PENDING'), so
-// the index stays cheap as the backlog drains rather than scanning every
-// row regardless of state. thumb_attempts < ?1 excludes a node that has
-// already exhausted the worker's retry bound -- a permanently-broken
-// source (corrupt file, unsupported format that errors rather than
-// returning thumbs.ErrUnsupported) stops being retried every pass forever,
-// mirroring remote_sync_state's retry_count bound
-// (ResetRemoteSyncStateFailed). lifecycle_state excludes MISSING/ARCHIVED:
-// there is no live file left to read a thumbnail from.
-//
-// Joined against storage_locations to exclude TIER0_LOCAL_STAGING (#231):
-// workstation-local staging a future offline-ingest agent may record a node
-// for before its bytes have synced anywhere server-visible. Without this,
-// the worker claims a node whose file the server can never open, fails,
-// and burns a retry (and real read I/O against whatever remote/NFS tier it
-// probes) every pass until thumb_attempts hits its bound -- self-limiting
-// but noisy, and never productive. No other tier is excluded here: Tier 1
-// scratch, Tier 2 exports, Tier 3 masters, and PROJECTS are all
-// server-readable.
-//
-// Plain positional params (?1, ?2), not sqlc.arg: this file already has
-// earlier queries using bare ?N placeholders (ListTier3Candidates,
-// ListPrunableNodes, UpdateMediaNodePromotedColumns), and sqlc v1.31.1
-// mis-numbers/corrupts a later sqlc.arg(name) placeholder in the same file
-// when a bare ?N appears anywhere earlier in it.
-func (q *Queries) ListPendingThumbnails(ctx context.Context, arg ListPendingThumbnailsParams) ([]ListPendingThumbnailsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listPendingThumbnails, arg.ThumbAttempts, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListPendingThumbnailsRow{}
-	for rows.Next() {
-		var i ListPendingThumbnailsRow
-		if err := rows.Scan(&i.ID, &i.NodeUuid, &i.FilePath, &i.ThumbAttempts); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const setThumbState = `-- name: SetThumbState :exec
-UPDATE media_nodes SET thumb_state = ?2, thumb_attempts = ?3, updated_at = unixepoch() WHERE id = ?1
-`
-
-type SetThumbStateParams struct {
-	ID            int64
-	ThumbState    string
-	ThumbAttempts int64
-}
-
-// The caller passes the effective thumb_attempts value itself (0 on a
-// successful READY -- a later invalidation starts the attempt count fresh
-// again; current+1 on a FAILED retry) rather than this query
-// incrementing/resetting on its own, so one statement serves every
-// transition -- same "caller passes effective values" contract as
-// UpdateMediaNodePromotedColumns above.
-func (q *Queries) SetThumbState(ctx context.Context, arg SetThumbStateParams) error {
-	_, err := q.db.ExecContext(ctx, setThumbState, arg.ID, arg.ThumbState, arg.ThumbAttempts)
-	return err
-}
-
-const invalidateThumbnail = `-- name: InvalidateThumbnail :exec
-UPDATE media_nodes SET thumb_state = 'PENDING', thumb_attempts = 0, updated_at = unixepoch() WHERE id = ?1
-`
-
-// Resets a node's thumbnail generation state to PENDING with attempts
-// zeroed, so internal/thumbs.Worker regenerates it on its next pass. The
-// Cache.Write path is os.CreateTemp + os.Rename to the same node_uuid path,
-// so regeneration overwrites the stale file atomically -- no separate
-// Cache.Delete is needed alongside this reset. Called from
-// internal/httpapi's refreshNodeAfterInPlaceWrite, not from
-// internal/pipeline: fast_hash is by construction unchanged on both the
-// Touched branch (its own entry condition) and the rebase branch (it looks
-// the node up BY fast_hash), so neither ever observes a fast_hash change --
-// refreshNodeAfterInPlaceWrite is the one place a node's fast_hash changes
-// while its node_uuid is preserved (the inherit-metadata endpoint's
-// post-write DB sync, #188).
-func (q *Queries) InvalidateThumbnail(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, invalidateThumbnail, id)
-	return err
-}
-
-const getMediaNodeByFullHash = `-- name: GetMediaNodeByFullHash :one
-SELECT id, node_uuid, file_path, lifecycle_state, indexing_status, size_bytes
-FROM media_nodes
-WHERE full_hash = ?1
-  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
-LIMIT 1
-`
-
-type GetMediaNodeByFullHashRow struct {
-	ID             int64
-	NodeUuid       string
-	FilePath       string
-	LifecycleState string
-	IndexingStatus string
-	SizeBytes      int64
-}
-
-// Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
-// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
-func (q *Queries) GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error) {
-	row := q.db.QueryRowContext(ctx, getMediaNodeByFullHash, fullHash)
-	var i GetMediaNodeByFullHashRow
-	err := row.Scan(
-		&i.ID,
-		&i.NodeUuid,
-		&i.FilePath,
-		&i.LifecycleState,
-		&i.IndexingStatus,
-		&i.SizeBytes,
-	)
-	return i, err
-}
-
-const getMediaNodeByFastHash = `-- name: GetMediaNodeByFastHash :one
-SELECT id
-FROM media_nodes
-WHERE fast_hash = ?1
-  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
-LIMIT 1
-`
-
-func (q *Queries) GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getMediaNodeByFastHash, fastHash)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const getMediaNodeBySourcePathHash = `-- name: GetMediaNodeBySourcePathHash :one
-SELECT id, node_uuid, file_path, lifecycle_state, indexing_status
-FROM media_nodes
-WHERE source_path_hash = ?1
-  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
-ORDER BY id DESC
-LIMIT 1
-`
-
-type GetMediaNodeBySourcePathHashRow struct {
-	ID             int64
-	NodeUuid       string
-	FilePath       string
-	LifecycleState string
-	IndexingStatus string
-}
-
-func (q *Queries) GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHash *string) (GetMediaNodeBySourcePathHashRow, error) {
-	row := q.db.QueryRowContext(ctx, getMediaNodeBySourcePathHash, sourcePathHash)
-	var i GetMediaNodeBySourcePathHashRow
-	err := row.Scan(
-		&i.ID,
-		&i.NodeUuid,
-		&i.FilePath,
-		&i.LifecycleState,
-		&i.IndexingStatus,
-	)
-	return i, err
-}
-
-const listMediaNodeStatusesByUUIDs = `-- name: ListMediaNodeStatusesByUUIDs :many
-SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
-FROM media_nodes n
-LEFT JOIN storage_locations s ON s.id = n.storage_location_id
-WHERE n.node_uuid IN (SELECT value FROM json_each(?1))
-`
-
-type ListMediaNodeStatusesByUUIDsRow struct {
-	NodeUuid       string
-	LifecycleState string
-	FullHash       *string
-	Tier           sql.NullString
-}
-
-// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
-// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
-func (q *Queries) ListMediaNodeStatusesByUUIDs(ctx context.Context, dollar1 string) ([]ListMediaNodeStatusesByUUIDsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listMediaNodeStatusesByUUIDs, dollar1)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListMediaNodeStatusesByUUIDsRow{}
-	for rows.Next() {
-		var i ListMediaNodeStatusesByUUIDsRow
-		if err := rows.Scan(
-			&i.NodeUuid,
-			&i.LifecycleState,
-			&i.FullHash,
-			&i.Tier,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }

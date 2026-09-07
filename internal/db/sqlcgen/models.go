@@ -77,14 +77,6 @@ type EventQueue struct {
 	RetryCount  int64
 }
 
-// LoginAudit entries are append-only. See migration 00018_local_auth.sql's
-// table comment for the full contract. Hand-maintained rather than sqlc-
-// generated because sqlc v1.20-v1.31.1 all fail to parse the existing
-// companion_pairing.sql subqueries in this environment (the parser emits
-// truncated const blocks); running `sqlc generate` corrupts unrelated
-// files in internal/db/sqlcgen/. The file header is preserved as the
-// project's sqlcgen convention so a future regeneration can replace the
-// hand-written additions.
 type LoginAudit struct {
 	ID                int64
 	UserID            sql.NullInt64
@@ -180,22 +172,6 @@ type ScanJob struct {
 	UpdatedAt         int64
 }
 
-type StorageLocation struct {
-	ID            int64
-	Name          string
-	RootPath      string
-	Tier          string
-	ReadOnly      int64
-	Prunable      int64
-	IsActive      int64
-	CreatedAt     int64
-	UpdatedAt     int64
-	CacheTtlHours int64
-}
-
-// Session is the server-side session table backing local auth. See migration
-// 00018_local_auth.sql's table comment for the full contract. Hand-maintained
-// for the same reason as LoginAudit (see that type's doc comment).
 type Session struct {
 	ID            int64
 	CookieID      string
@@ -209,10 +185,19 @@ type Session struct {
 	RevokedAt     sql.NullInt64
 }
 
-// User is the local-auth identity. See migration 00018_local_auth.sql's
-// table comment for the full contract (sources: local / forward-jit /
-// forward-link; the first two are exercised in v1). Hand-maintained for
-// the same reason as LoginAudit (see that type's doc comment).
+type StorageLocation struct {
+	ID            int64
+	Name          string
+	RootPath      string
+	Tier          string
+	ReadOnly      int64
+	Prunable      int64
+	IsActive      int64
+	CreatedAt     int64
+	UpdatedAt     int64
+	CacheTtlHours int64
+}
+
 type User struct {
 	ID           int64
 	Username     string

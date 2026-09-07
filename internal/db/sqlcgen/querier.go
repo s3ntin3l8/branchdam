@@ -16,20 +16,6 @@ type Querier interface {
 	// row can never share file_path even for an instant within the
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
-	// "Revert to config" deletes the row -- this is what makes provenance
-	// recoverable rather than merely resettable to some other stored value.
-	DeleteAppSetting(ctx context.Context, key string) error
-	// The resolver (internal/settings) loads the whole table once at startup
-	// and on every PUT; the table is expected to stay small (one row per
-	// overridden field, never one row per node), so no pagination.
-	ListAppSettings(ctx context.Context) ([]AppSetting, error)
-	// The row's mere existence is the override -- callers pass "" for value
-	// exactly when the operator wants "explicitly empty", never as a signal to
-	// skip the write. See internal/settings/resolver.go for why an empty
-	// override still beats a populated config/env base value. updated_at is
-	// set via unixepoch() here, not passed from Go, matching every other
-	// UPDATE/upsert in this package (docs/schema.md fix #5).
-	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
 	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
@@ -48,6 +34,10 @@ type Querier interface {
 	// graph_status from -- see routes.go's recomputeGraphStatus.
 	ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
+	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
+	// sqlc's SQLite type inference only picks up the column's own (nullable)
+	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
+	// makes it fall back to interface{} for every param.
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
 	CountPairingAudit(ctx context.Context, pairingID int64) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
@@ -60,10 +50,6 @@ type Querier interface {
 	// visible in logs instead of only discoverable via a direct SQLite query.
 	CountRemoteSyncStateExhausted(ctx context.Context, arg CountRemoteSyncStateExhaustedParams) (int64, error)
 	CountRunningScanJobs(ctx context.Context) (int64, error)
-	CreateDevicePairing(ctx context.Context, arg CreateDevicePairingParams) (DevicePairing, error)
-	CreateDevicePairingKey(ctx context.Context, arg CreateDevicePairingKeyParams) (DevicePairingKey, error)
-	// Deletes remote_sync_state records when an asset is deleted / unlinked.
-	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// #163/#226: called inside the same transaction as CreateScanJob (see
 	// pipeline.createScanJob) so the check-then-insert is one atomic unit, not
 	// just an accident of the writer pool being single-connection. Parameterized
@@ -78,6 +64,39 @@ type Querier interface {
 	// long-lived by design, so they must not block (or be blocked by) either.
 	CountRunningScansForLocationByKind(ctx context.Context, arg CountRunningScansForLocationByKindParams) (int64, error)
 	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
+	// Local auth queries. The handlers in internal/httpapi/local_auth.go
+	// and the middleware in internal/auth/session.go both go through these --
+	// no raw SQL outside this file (per the project's sqlc convention,
+	// documented in CONTRIBUTING.md).
+	//
+	// All positional params use bare ?1/?2/?3 (not sqlc.arg(name)) per AGENTS.md's
+	// "SQL Syntax Traps" note.
+	// Returns the total number of users. /setup/status returns readyForSetup:
+	// (count == 0) so the SPA can branch between setup form and login form.
+	// Cheap (no WHERE), single indexed-ish scan; called on every unauthenticated
+	// request that hits the SPA shell, so kept O(1)-ish.
+	CountUsers(ctx context.Context) (int64, error)
+	// Companion pairing queries. The handlers in internal/httpapi/companion_pairings.go
+	// and the KeyLookup callback in internal/pairing/service.go both go through
+	// these -- no raw SQL outside this file (per the project's sqlc convention,
+	// documented in CONTRIBUTING.md).
+	//
+	// All positional params use bare ?1/?2/?3 (not sqlc.arg(name)) per AGENTS.md's
+	// "SQL Syntax Traps" note.
+	// Inserts the pairing row and returns it. The HTTP layer wraps this with
+	// the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
+	CreateDevicePairing(ctx context.Context, arg CreateDevicePairingParams) (DevicePairing, error)
+	CreateDevicePairingKey(ctx context.Context, arg CreateDevicePairingKeyParams) (DevicePairingKey, error)
+	// Inserts a source='forward-jit' user with password_hash = NULL. The
+	// schema CHECK constraint enforces this. email is required (callers
+	// refuse the JIT when the forward-auth email header is empty). created_by is
+	// 'forward:<forward-auth username>'.
+	CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error)
+	// Inserts a source='local' user. password_hash is the argon2id encoded
+	// string. created_by is 'setup' for the first admin, 'self' for self-
+	// registration flows (none in v1), or 'user:<principal name>' for admin-
+	// created users. Returns the inserted row.
+	CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error)
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
 	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
@@ -87,6 +106,15 @@ type Querier interface {
 	// of this.
 	CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams) (MediaEdge, error)
 	CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error)
+	// Inserts a new session row. cookie_id is 32 random bytes hex-encoded
+	// (length 64, CHECK-enforced). The HMAC tag over cookie_id is computed
+	// at cookie-write time, NOT stored here -- sessions.cookie_id alone is
+	// sufficient for lookup, the HMAC is for tamper detection (rejected by
+	// the middleware before the DB lookup).
+	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// cache_ttl_hours defaults to 0 ("never eligible", same as handlePrune's
+	// own <= 0 treatment) for the many test fixtures that don't care about it;
+	// pass it explicitly when a test needs a non-zero TTL persisted on the row.
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
 	// Backs M6: after seeding every location config.yaml currently lists,
 	// deactivate any PREVIOUSLY active location whose root_path is no longer
@@ -100,7 +128,17 @@ type Querier interface {
 	// from MarkUnseenNodesMissing's empty-array gotcha (that one silently
 	// matches nothing; this one would silently deactivate every location in
 	// the database on a misconfigured or empty config.yaml).
-	DeactivateStorageLocationsNotIn(ctx context.Context, jsonEach interface{}) (int64, error)
+	DeactivateStorageLocationsNotIn(ctx context.Context, currentRootPaths string) (int64, error)
+	DeleteAgentScratchTelemetry(ctx context.Context, agentID string) error
+	// "Revert to config" deletes the row -- this is what makes provenance
+	// recoverable rather than merely resettable to some other stored value.
+	DeleteAppSetting(ctx context.Context, key string) error
+	// Deletes remote_sync_state records when an asset is deleted / unlinked.
+	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
+	// Sets disabled_at. Idempotent. Does NOT revoke existing sessions --
+	// that's a separate admin action (RevokeAllUserSessions) so an admin can
+	// disable future logins without immediately logging the user out.
+	DisableUser(ctx context.Context, arg DisableUserParams) error
 	// Backs POST /api/v1/agent/events: persists and returns 202 in increment 1.
 	// Actually draining/processing these rows ships with the deferred
 	// workstation-agent increment -- this table and endpoint exist now so that
@@ -108,10 +146,18 @@ type Querier interface {
 	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
+	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
+	// Used by the handshake's pendingRotation hint to load the pairing by
+	// the agent_id attached to the request's Principal.
 	GetDevicePairingByAgentID(ctx context.Context, agentID string) (DevicePairing, error)
 	GetDevicePairingByID(ctx context.Context, id int64) (DevicePairing, error)
+	// The hot path: KeyLookup runs this on every authenticated agent request.
+	// UNIQUE index on key_lookup_hash keeps it O(log n). Active means
+	// revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now).
 	GetDevicePairingKeyByHash(ctx context.Context, keyLookupHash string) (DevicePairingKey, error)
 	GetDevicePairingKeyByID(ctx context.Context, id int64) (DevicePairingKey, error)
+	// Returns just the qr_svg column for the ActiveQRSVG hot path. Skips
+	// the row-wide scan if all the caller wants is the bytes.
 	GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error)
 	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
 	// The live-path lookup a scan does for every file: is there already a
@@ -124,13 +170,17 @@ type Querier interface {
 	// intentionally left untouched, so the caller re-fetches its current state
 	// here rather than treating the no-row RETURNING as an error.
 	GetMediaEdgeBySourceTargetRel(ctx context.Context, arg GetMediaEdgeBySourceTargetRelParams) (MediaEdge, error)
+	GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error)
+	// Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
+	// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
+	GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error)
 	// Includes archived rows, unlike GetLiveNodeByPath -- used to verify a
 	// superseded node's post-archive state (superseded_by, lifecycle_state).
 	GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, error)
-	GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error)
-	GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error)
-	GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error)
+	// Agent dedup: find an active or hidden node with the given SHA-256 source_path_hash.
+	// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
 	GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHash *string) (GetMediaNodeBySourcePathHashRow, error)
+	GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error)
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
@@ -138,51 +188,130 @@ type Querier interface {
 	// already exist, and in what state?
 	GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncStateParams) (RemoteSyncState, error)
 	GetScanJob(ctx context.Context, id int64) (ScanJob, error)
+	// Hot path: called by SessionMiddleware on every authenticated browser
+	// request. Returns the full row including revoked_at so the middleware
+	// can reject post-revoke cookies in one query. The partial index
+	// sessions_user_active_idx covers the active-set variant but the
+	// revoke check needs the full row, so we don't use it here.
+	GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error)
+	// handlePrune (#61, #238) reads cache_ttl_hours directly off this row --
+	// it no longer re-joins config by root_path to recover the TTL.
 	GetStorageLocationByID(ctx context.Context, id int64) (StorageLocation, error)
 	// Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 	// the single source of truth for tier is this table, never a hardcoded
 	// prefix. See docs/schema.md fix #1.
 	GetStorageLocationByPath(ctx context.Context, rootPath string) (StorageLocation, error)
+	// Used by the JIT provisioning path: a forward-auth request with email E
+	// and source 'forward-jit' either matches an existing admin or triggers
+	// a fresh INSERT in CreateForwardJITUser. Partial unique index
+	// users_email_source_uniq covers this.
+	GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error)
+	GetUserByID(ctx context.Context, id int64) (User, error)
+	// Used by /api/v1/login to resolve the presented username to a user row.
+	// The lookup is username-only; password verification happens in Go against
+	// password_hash. Index: users.username UNIQUE already covers this.
+	GetUserByUsername(ctx context.Context, username string) (User, error)
 	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
+	// Append-only. The two indexes on (user_id, created_at) and (ip, created_at)
+	// cover the admin UI's tail queries without a sort.
+	InsertLoginAudit(ctx context.Context, arg InsertLoginAuditParams) error
 	InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error)
 	// Phase 1 (#33): EXIF/ffprobe overflow. Upsert on the table's natural key so
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
 	InsertPairingAudit(ctx context.Context, arg InsertPairingAuditParams) error
 	// Resets a node's thumbnail generation state to PENDING with attempts
-	// zeroed, so internal/thumbs.Worker regenerates it on its next pass.
-	// Called from internal/pipeline's reconcilePromotedColumns call site when
-	// fast_hash changes on the Touched/rebase branches: the bytes on disk
-	// changed, so whatever thumbnail (if any) is cached no longer represents
-	// them.
+	// zeroed, so internal/thumbs.Worker regenerates it on its next pass. The
+	// Cache.Write path is os.CreateTemp + os.Rename to the same node_uuid path,
+	// so regeneration overwrites the stale file atomically -- no separate
+	// Cache.Delete is needed alongside this reset. Called from
+	// internal/httpapi's refreshNodeAfterInPlaceWrite, not from
+	// internal/pipeline: fast_hash is by construction unchanged on both the
+	// Touched branch (its own entry condition) and the rebase branch (it looks
+	// the node up BY fast_hash), so neither ever observes a fast_hash change --
+	// refreshNodeAfterInPlaceWrite is the one place a node's fast_hash changes
+	// while its node_uuid is preserved (the inherit-metadata endpoint's
+	// post-write DB sync, #188).
 	InvalidateThumbnail(ctx context.Context, id int64) error
+	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
 	// Recursively list ancestor node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-	ListAncestors(ctx context.Context, id int64) ([]int64, error)
-	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
-	// ARCHIVED nodes excluded) and returns every live ancestor on a
-	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
-	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
-	// os.Lstat) immediately before deleting the candidate (#246).
-	ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error)
-	// The audit queue (spec §7) is this query over review_state, not a second
+	// The CAST is not a runtime coercion -- root_id is always an int64 id -- it
+	// exists so sqlc infers the anchor column (and so the whole CTE) as INTEGER
+	// instead of falling back to interface{}.
+	ListAncestors(ctx context.Context, rootID int64) ([]int64, error)
+	// The resolver (internal/settings) loads the whole table once at startup
+	// and on every PUT; the table is expected to stay small (one row per
+	// overridden field, never one row per node), so no pagination.
+	ListAppSettings(ctx context.Context) ([]AppSetting, error)
+	// The audit queue (spec sec. 7) is this query over review_state, not a second
 	// table. v_media_edges_resolved's parent_missing works for every
 	// relationship_type -- the spec's deleted trigger never did. See
 	// docs/schema.md fix #4.
 	ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error)
+	// Keyset (cursor) pagination: when `before_id` is non-zero, only rows
+	// ordered AFTER the (confidence, id) cursor are returned. Ordering is
+	// (confidence DESC, id ASC); "after" means strictly greater in the
+	// lexicographic order. When `before_id` is 0, the first page is returned
+	// (no cursor constraint).
+	//
+	// Keyset over offset: a confirm/reject while the user is on page N
+	// shifts the offset window in the offset-based query, so page N+1 may
+	// duplicate or skip rows. Keyset pagination is stable across mutations
+	// because the cursor is a row identity, not a position.
+	//
+	// The tie-break for same-confidence rows uses `e.id > cursor.id` (not `<`)
+	// because the ordering is `id ASC`: within a confidence tier, the lower
+	// id comes first, so "after" the cursor means higher id. A `<` tie-break
+	// would duplicate rows on the previous page and skip the rows that should
+	// be on this one.
+	//
+	// `total` is returned as a column on every row via a separate subquery,
+	// avoiding a second COUNT(*) query per page turn and the race where a
+	// confirmation between the list and the count makes total disagree with
+	// what the list shows. The subquery applies only the review_state
+	// filter, so total always reflects the full NEEDS_REVIEW set regardless
+	// of cursor.
+	//
+	// The cursor (confidence, id) is resolved in a CTE first, then the main
+	// query references it, rather than inlining `SELECT confidence, id FROM
+	// media_edges WHERE id = ...` as a subquery at each of its two use sites
+	// below -- clearer to read and cheaper to plan than repeating the same
+	// lookup twice per row. (An earlier version of this comment attributed the
+	// CTE to a sqlc v1.31.1 placeholder-counting bug; disproven by issue #413's
+	// fix -- sqlc.arg(before_id) used twice below, once inside the CTE and once
+	// in the outer WHERE, correctly collapses to a single BeforeID field.)
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
+	// COALESCE is not a null-guard here -- the WHERE clause already excludes
+	// NULL/empty camera_model -- it exists so sqlc infers []string instead of
+	// []sql.NullString: camera_model is a nullable column (00001_init.sql), and
+	// sqlc's SQLite type inference can't see that this query's own WHERE makes
+	// the result always non-NULL.
 	ListCameraModelFacets(ctx context.Context) ([]string, error)
 	// Recursively list descendant node IDs.
 	// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-	ListDescendants(ctx context.Context, id int64) ([]int64, error)
+	// The CAST is not a runtime coercion -- root_id is always an int64 id -- it
+	// exists so sqlc infers the anchor column (and so the whole CTE) as INTEGER
+	// instead of falling back to interface{}.
+	ListDescendants(ctx context.Context, rootID int64) ([]int64, error)
+	// One row per pairing with a count of currently-active keys (NULL -> 0)
+	// and the earliest unexpired-but-soon-to-expire key (NULL if all keys
+	// are permanent or none). Used by the SPA's list view to render the
+	// grace-window countdown for in-progress rotations.
+	ListDevicePairings(ctx context.Context, arg ListDevicePairingsParams) ([]ListDevicePairingsRow, error)
+	// See ListEdgesByMultipleTargets above; this is the symmetric query for
+	// children edges at depth d+1.
+	ListEdgesByMultipleSources(ctx context.Context, nodeIds string) ([]MediaEdge, error)
+	// Batch lookup of edges by a JSON-encoded array of target_node_ids, used by
+	// handleAssetLineage's bounded BFS to fetch every parent edge at depth d+1
+	// in one query rather than one per node. Excludes REJECTED edges here (not
+	// in Go) so a rejected lineage link can never re-admit its source node into
+	// the traversal via a later level.
+	ListEdgesByMultipleTargets(ctx context.Context, nodeIds string) ([]MediaEdge, error)
 	ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error)
 	ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error)
-	ListEdgesByMultipleSources(ctx context.Context, jsonEach string) ([]MediaEdge, error)
-	ListEdgesByMultipleTargets(ctx context.Context, jsonEach string) ([]MediaEdge, error)
-	ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error)
-	ListDevicePairings(ctx context.Context, arg ListDevicePairingsParams) ([]ListDevicePairingsRow, error)
+	ListEdgesForNodes(ctx context.Context, nodeIds string) ([]ListEdgesForNodesRow, error)
 	ListKeysByPairing(ctx context.Context, pairingID int64) ([]DevicePairingKey, error)
-	ListPairingAudit(ctx context.Context, arg ListPairingAuditParams) ([]CompanionPairingAudit, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
@@ -206,18 +335,30 @@ type Querier interface {
 	// (the Immich export mount) that have NO remote_sync_state row for the given
 	// remote yet. Once pushed, a row exists and the node drops out of this set.
 	ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesForSyncParams) ([]ListLiveNodesForSyncRow, error)
+	// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
+	// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
+	ListMediaNodeStatusesByUUIDs(ctx context.Context, nodeUuids string) ([]ListMediaNodeStatusesByUUIDsRow, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
+	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
+	// sqlc's SQLite type inference only picks up the column's own (nullable)
+	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
+	// makes it fall back to interface{} for every param.
 	ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error)
-	// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
-	// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
-	ListMediaNodeStatusesByUUIDs(ctx context.Context, dollar1 string) ([]ListMediaNodeStatusesByUUIDsRow, error)
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
-	ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error)
+	// Column list matches the media_nodes table exactly (including
+	// source_path_hash, added by 00015_source_path_hash.sql) so sqlc maps this
+	// to the shared MediaNode struct instead of minting a one-off Row type.
+	ListNodesByIDs(ctx context.Context, nodeIds string) ([]MediaNode, error)
+	// Offset pagination. Audit log for a single pairing is bounded (a few
+	// hundred events over the lifetime of a device, never tens of thousands),
+	// so offset drift isn't a concern the way it is for the unbounded
+	// audit_queue edge-review list.
+	ListPairingAudit(ctx context.Context, arg ListPairingAuditParams) ([]CompanionPairingAudit, error)
 	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
 	// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
 	// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
@@ -240,12 +381,6 @@ type Querier interface {
 	// but noisy, and never productive. No other tier is excluded here: Tier 1
 	// scratch, Tier 2 exports, Tier 3 masters, and PROJECTS are all
 	// server-readable.
-	//
-	// Plain positional params (?1, ?2), not sqlc.arg: this file already has
-	// earlier queries using bare ?N placeholders (ListTier3Candidates,
-	// ListPrunableNodes, UpdateMediaNodePromotedColumns), and sqlc v1.31.1
-	// mis-numbers/corrupts a later sqlc.arg(name) placeholder in the same file
-	// when a bare ?N appears anywhere earlier in it.
 	ListPendingThumbnails(ctx context.Context, arg ListPendingThumbnailsParams) ([]ListPendingThumbnailsRow, error)
 	// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
 	// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
@@ -254,7 +389,10 @@ type Querier interface {
 	// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 	// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
 	// Ancestor, not "same full_hash": walks media_edges target->source
-	// (REJECTED edges excluded), mirroring ListAncestors' direction convention.
+	// (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
+	// mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
+	// exclusion exactly -- a chain that only connects through a superseded
+	// version doesn't represent the file currently on disk.
 	// Tier-1-only and prunable-only are already schema-enforced
 	// (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
 	// not re-checked here; the caller only invokes this against a location it
@@ -267,28 +405,31 @@ type Querier interface {
 	// (docs/schema.md) -- sqlc's SQLite grammar does not support GLOB
 	// ("no viable alternative at input 'GLOB'"), and full_hash is only ever
 	// written by internal/hashing.FullHash, which always emits lowercase hex.
-	// Plain positional params (?1/?2), not sqlc.arg: this file already has
-	// earlier queries (e.g. ListTier3Candidates) using bare ?N placeholders,
-	// and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder
-	// in the same file when a bare ?N appears anywhere earlier in it --
-	// reproduced by bisection, a real generator bug for this sqlc version, not
-	// something wrong with sqlc.arg's own syntax elsewhere in the codebase.
 	ListPrunableNodes(ctx context.Context, arg ListPrunableNodesParams) ([]ListPrunableNodesRow, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
+	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
+	// a node (both remotes), ordered by remote for a stable DTO.
+	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	// The sync worker's claim query: oldest-attempt-first so a backlog drains in
 	// order, capped at one batch. Scoped to a single remote -- a node can hold
 	// both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
 	// ProcessPending(remote) must never list (or re-flip) another remote's rows.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
-	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row
-	// for a node (both remotes), ordered by remote for a stable DTO.
-	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
-	// camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
+	// camera_serial with captured_at_unix within +/-2 seconds of a target timestamp,
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
+	// Paginated user list for the admin UI. Order by id ASC so paging is
+	// stable across inserts (new users go to the END, not the middle).
+	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
+	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
+	// ARCHIVED nodes excluded) and returns every live ancestor on a
+	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
+	// os.Lstat) immediately before deleting the candidate (#246, #352).
+	ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error)
 	// Backs POST /api/v1/assets/{id}/sync/retry (handleSyncRetry, #156): an
 	// explicit operator "try again" action on a PUSH_FAILED row, bypassing
 	// ResetRemoteSyncStateFailed's retry_count bound by design (see that
@@ -335,18 +476,25 @@ type Querier interface {
 	// (processFile error, submit refused, dropped result, batch Commit failure) --
 	// and is excluded from the sweep: a file on disk with a stale last_seen_at is
 	// not proof it's gone. KeepActive paths are passed as a JSON array string
-	// to json_each(?3) to remain within SQLite per-statement parameter bounds.
+	// to json_each(sqlc.arg(keep_active_paths)) to remain within SQLite
+	// per-statement parameter bounds.
 	// Scoped by storage_location_id so a scan of one mount never touches another.
 	// unixepoch() is 1s granularity, so a node last seen in a scan that happened
 	// to end in the SAME wall-clock second as this scan's start may survive one
 	// extra scan -- it is swept the next round, which is delayed-not-wrong.
 	MarkUnseenNodesMissing(ctx context.Context, arg MarkUnseenNodesMissingParams) (int64, error)
-	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
 	// Checked before UpsertMediaEdge so the caller can tell a genuinely new
 	// edge apart from an existing one whose confidence/evidence was merely
 	// refreshed -- UpsertMediaEdge's RETURNING row looks the same either way.
 	// Backs scan_jobs.edges_created (fix(pipeline): #90).
 	MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams) (bool, error)
+	// Used by /agent/handshake to find the device's newest unexpired key that
+	// the caller hasn't been told about yet. ?2 is the caller's current
+	// key_id; we filter strictly newer (created_at, id) so the caller is
+	// never told about an older key they already missed or were using before.
+	// Returns no rows (sql.ErrNoRows) when the caller is already on the
+	// newest active key.
+	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
 	// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
 	// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate
 	// in the live graph; their metadata is write-once historical data that grows
@@ -359,16 +507,6 @@ type Querier interface {
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
 	RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error
-	// The metadata-inheritance endpoint (#54) is the first server-initiated
-	// filesystem write: it rewrites a child's file in place via exiftool, which
-	// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
-	// next scan's commitOne sees a changed fast_hash at the same path and treats
-	// it as a version collision -- archiving the node and minting a new
-	// node_uuid, which strands every media_edges row (including a human
-	// CONFIRMED/REJECTED review decision) on the archived row. Called once,
-	// immediately after the write succeeds, so the DB and the file agree before
-	// any scan observes the change.
-	RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error
 	// Every row still 'RUNNING' at process startup, before this process has
 	// created any scan_jobs row of its own, was left behind by a previous
 	// process that never reached a terminal state -- SIGKILL, OOM-kill,
@@ -382,14 +520,27 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
+	// The metadata-inheritance endpoint (#54) is the first server-initiated
+	// filesystem write: it rewrites a child's file in place via exiftool, which
+	// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the
+	// next scan's commitOne sees a changed fast_hash at the same path and treats
+	// it as a version collision -- archiving the node and minting a new
+	// node_uuid, which strands every media_edges row (including a human
+	// CONFIRMED/REJECTED review decision) on the archived row. Called once,
+	// immediately after the write succeeds, so the DB and the file agree before
+	// any scan observes the change.
+	//
+	// full_hash is always cleared and INDEXED_FULL is downgraded to
+	// INDEXED_SHALLOW: the write changed the file's bytes, so any previously
+	// computed BLAKE3 full_hash no longer matches it. Once fast_hash agrees
+	// again this row takes commitOne's Touched branch on the next scan, which
+	// never recomputes full_hash on its own (needsFullHash escalates based on
+	// current tier/collision state, not on the node's prior indexing_status) --
+	// so a stale full_hash would otherwise persist forever, masquerading as a
+	// verified integrity fingerprint it no longer is (docs/schema.md fix #8).
+	RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error
 	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
-	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
-	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
-	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
-	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
-	RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeysForPairingParams) error
-	RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairingParams) error
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound
 	// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --
@@ -403,17 +554,32 @@ type Querier interface {
 	// attempt, so this only re-claims rows that have not been retried recently
 	// (bounded retry frequency, not a hot loop).
 	ResetRemoteSyncStateFailed(ctx context.Context, arg ResetRemoteSyncStateFailedParams) (int64, error)
+	// Crash recovery: rows left PUSHING by a process that died mid-push are reset
+	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
+	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
+	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
 	ResolvedEdgeParentMissing(ctx context.Context, id int64) (bool, error)
+	RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeysForPairingParams) error
+	// Used by admin "log out everywhere" action and by DisableUser's
+	// companion flow (future admin endpoint). Idempotent.
+	RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error
+	// Sets revoked_at on the pairing (does NOT touch keys -- the HTTP layer
+	// also revokes every key for the pairing in the same tx).
+	RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairingParams) error
+	// Sets revoked_at on a single session (used by DELETE /api/v1/session).
+	RevokeSession(ctx context.Context, arg RevokeSessionParams) error
+	// Rotation: set expires_at on every currently-active key for this pairing
+	// that doesn't already have one. Idempotent -- re-running after the same
+	// clock has no effect.
+	SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyExpirationsParams) error
 	// Backs M6: storage.LoadGuard calls this to deactivate a location whose
 	// root_path can't be resolved at startup (mount vanished) rather than
 	// treating that as a fatal error that prevents the whole server from
 	// booting -- see LoadGuard's doc comment.
-	SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyExpirationsParams) error
 	SetStorageLocationActive(ctx context.Context, arg SetStorageLocationActiveParams) error
-	UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error
 	// Step 3 of a version collision: link the archived row to its successor,
 	// once the successor's id is known (i.e. after InsertMediaNode).
 	SetSupersededBy(ctx context.Context, arg SetSupersededByParams) error
@@ -428,7 +594,28 @@ type Querier interface {
 	// and, if the row was MISSING (a file re-created at its old path), reactivates
 	// it in place -- a MISSING row found alive again is not a version collision
 	// and must not stay MISSING.
+	//
+	// The WHERE lifecycle_state != 'ARCHIVED' clause and MISSING-only CASE
+	// make #226's now-possible concurrent FULL_SCAN + manual differential
+	// INCREMENTAL against the same Tier-3 location safe rather than merely
+	// untested: if a concurrent FULL_SCAN archives this node (a version
+	// collision on the same path) between the differential sweep's
+	// sweepUnchanged check and its deferred touchBatcher flush, this UPDATE
+	// matches zero rows against the now-ARCHIVED row id. The touch is a clean
+	// no-op, never updating dead audit trail timestamps or resurrecting into
+	// a live duplicate alongside the FULL_SCAN's freshly inserted successor
+	// row. See TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch
+	// in internal/pipeline for the regression test.
 	TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error
+	// Updates last_seen_at and idle_expires_at. Called by SessionMiddleware
+	// after a successful auth (sliding idle window). One statement per
+	// request, but the WHERE matches the active-set partial index path
+	// already loaded above so the planner is happy.
+	TouchSession(ctx context.Context, arg TouchSessionParams) error
+	// Refresh the cached QR SVG after a key rotation. The SVG is computed
+	// outside the transaction (in pairing.Service) so this UPDATE is a
+	// pure byte-write with no rendering dependency.
+	UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
 	// location (docs/schema.md fix #8's full_hash policy).
@@ -443,8 +630,35 @@ type Querier interface {
 	// the node takes commitOne's Touched branch and would otherwise keep its
 	// insert-time values forever -- including a XMP-xmpMM:DerivedFrom written by
 	// inherit-metadata that never reaches media_nodes.derived_from_id.
+	//
+	// captured_at_unix (#204) is included on the same overwrite-on-differ
+	// contract as the other six, not fill-only-when-NULL: UpsertMediaEdge's
+	// confidence = MAX(excluded, stored) makes re-resolution monotone (it can
+	// only upgrade or leave an edge, never downgrade or delete one), so a value
+	// that changes here can at worst strand an already-committed Tier-3 edge at
+	// its old confidence -- not corrupt it -- while a NULL that never gets
+	// promoted is a permanent, not just temporary, blind spot for
+	// HeuristicSpatialTemporalResolver. See reconcilePromotedColumns' doc
+	// comment for the full reasoning, including why the inherit-metadata path's
+	// circular evidence (a child temporally matching the parent because the
+	// parent's own timestamp was just copied into it) is benign: every resolver
+	// derives Rel from the same inferRelationship, so a Tier-3 candidate always
+	// merges into the same (parent, child, rel) group as any stronger Tier-2
+	// edge and never creates a second one.
+	//
+	// The caller passes effective values: a column whose fresh probe value was
+	// empty or unchanged is passed through as the node's current value, so this
+	// query is only ever reached with at least one genuine change.
 	UpdateMediaNodePromotedColumns(ctx context.Context, arg UpdateMediaNodePromotedColumnsParams) error
 	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
+	UpsertAgentScratchTelemetry(ctx context.Context, arg UpsertAgentScratchTelemetryParams) (AgentScratchTelemetry, error)
+	// The row's mere existence is the override -- callers pass "" for value
+	// exactly when the operator wants "explicitly empty", never as a signal to
+	// skip the write. See internal/settings/resolver.go for why an empty
+	// override still beats a populated config/env base value. updated_at is
+	// set via unixepoch() here, not passed from Go, matching every other
+	// UPDATE/upsert in this package (docs/schema.md fix #5).
+	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
 	// A human decision outranks any resolver, permanently: the UPDATE branch is
 	// gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely.
 	// IMPORTANT: when that WHERE evaluates false, SQLite's RETURNING emits NO
@@ -505,21 +719,20 @@ type Querier interface {
 	// Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
 	// storageLocations list is applied idempotently on every restart, keyed on
 	// root_path's UNIQUE constraint, so re-running it against an
-	// already-seeded database updates tier/read_only/prunable in place rather
-	// than failing on the second startup. is_active is unconditionally reset
-	// to 1 here -- a location present in config is presumed active until
-	// storage.LoadGuard's post-seed resolvability check (M6) says otherwise
-	// via SetStorageLocationActive, which is what makes a location that
-	// vanished and came back self-heal on the next successful startup.
+	// already-seeded database updates tier/read_only/prunable/cache_ttl_hours
+	// in place rather than failing on the second startup. is_active is
+	// unconditionally reset to 1 here -- a location present in config is
+	// presumed active until storage.LoadGuard's post-seed resolvability check
+	// (M6) says otherwise via SetStorageLocationActive, which is what makes a
+	// location that vanished and came back self-heal on the next successful
+	// startup.
+	//
+	// cache_ttl_hours is persisted here (#238) instead of being re-joined from
+	// the live config by root_path at prune time -- that re-join silently
+	// orphaned a location's TTL whenever its rootPath was edited, since the
+	// new row (a different root_path) never matched the old config entry
+	// until the strings lined up again.
 	UpsertStorageLocation(ctx context.Context, arg UpsertStorageLocationParams) (StorageLocation, error)
-	// DeleteAgentScratchTelemetry removes an agent's telemetry row by agent_id.
-	DeleteAgentScratchTelemetry(ctx context.Context, agentID string) error
-	// GetAgentScratchTelemetry retrieves an agent's scratch telemetry by agent_id.
-	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
-	// ListAgentScratchTelemetry returns all reported workstation scratch telemetry rows.
-	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
-	// UpsertAgentScratchTelemetry inserts or updates a workstation scratch telemetry record.
-	UpsertAgentScratchTelemetry(ctx context.Context, arg UpsertAgentScratchTelemetryParams) (AgentScratchTelemetry, error)
 	// Walk the proposed child's descendants; if the proposed PARENT is already a
 	// descendant of the proposed CHILD, the new edge would close a cycle. Used
 	// by internal/graph (PR 7) inside the same write transaction as the edge
@@ -529,38 +742,6 @@ type Querier interface {
 	// The bare-parameter anchor `SELECT sqlc.arg(...)` needed an explicit alias
 	// to satisfy sqlc's SQLite parser -- see docs/schema.md's sqlc risk note.
 	WouldCreateCycle(ctx context.Context, arg WouldCreateCycleParams) (bool, error)
-
-	// Local-auth queries (migration 00018). Hand-maintained -- see User /
-	// Session / LoginAudit types' doc comments for the sqlc-version-pin
-	// rationale; the methods live in local_auth.sql.go alongside this
-	// package's other query files.
-
-	// Cheap call used by GET /api/v1/setup/status to decide whether the
-	// SPA shell renders the first-user setup form vs the login form.
-	CountUsers(ctx context.Context) (int64, error)
-	CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error)
-	CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error)
-	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
-	// Sets disabled_at. Idempotent; does NOT revoke existing sessions --
-	// that's RevokeAllUserSessions, a separate admin action so an admin
-	// can disable future logins without logging the user out today.
-	DisableUser(ctx context.Context, arg DisableUserParams) error
-	GetUserByID(ctx context.Context, id int64) (User, error)
-	GetUserByUsername(ctx context.Context, username string) (User, error)
-	// JIT provisioning path: lookup by (email, source). Partial unique
-	// index users_email_source_uniq covers it.
-	GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error)
-	// Hot path: SessionMiddleware calls this on every authenticated browser
-	// request. Returns the full row including revoked_at so the middleware
-	// can reject post-revoke cookies in one query.
-	GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error)
-	InsertLoginAudit(ctx context.Context, arg InsertLoginAuditParams) error
-	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
-	RevokeSession(ctx context.Context, arg RevokeSessionParams) error
-	RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error
-	// Sliding-idle-window refresh: updated by SessionMiddleware on every
-	// successful auth.
-	TouchSession(ctx context.Context, arg TouchSessionParams) error
 }
 
 var _ Querier = (*Queries)(nil)

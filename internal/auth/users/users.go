@@ -222,7 +222,7 @@ func (s *Service) CreateLocalUser(ctx context.Context, username, email, password
 		row, txErr = q.CreateLocalUser(ctx, sqlcgen.CreateLocalUserParams{
 			Username:     username,
 			Email:        emailNS,
-			PasswordHash: hash,
+			PasswordHash: sql.NullString{String: hash, Valid: true},
 			IsAdmin:      boolToInt(isAdmin),
 			CreatedAt:    createdAt,
 			CreatedBy:    createdBy,

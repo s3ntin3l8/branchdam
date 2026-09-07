@@ -33,6 +33,7 @@ func (q *Queries) CountPairingAudit(ctx context.Context, pairingID int64) (int64
 }
 
 const createDevicePairing = `-- name: CreateDevicePairing :one
+
 INSERT INTO device_pairings (
     agent_id, friendly_label, created_at, created_by, qr_svg
 ) VALUES (
@@ -516,7 +517,7 @@ type SetActiveKeyExpirationsParams struct {
 }
 
 // Rotation: set expires_at on every currently-active key for this pairing
-// that doesn't already have one. Idempotent — re-running after the same
+// that doesn't already have one. Idempotent -- re-running after the same
 // clock has no effect.
 func (q *Queries) SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyExpirationsParams) error {
 	_, err := q.db.ExecContext(ctx, setActiveKeyExpirations, arg.PairingID, arg.ExpiresAt)

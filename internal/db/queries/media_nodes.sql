@@ -23,23 +23,36 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        first_seen_at, last_seen_at, created_at, updated_at,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
-WHERE (sqlc.narg('lifecycle_state') IS NULL OR lifecycle_state = sqlc.narg('lifecycle_state'))
-  AND (sqlc.narg('camera_model') IS NULL OR camera_model = sqlc.narg('camera_model'))
-  AND (sqlc.narg('graph_status') IS NULL OR graph_status = sqlc.narg('graph_status'))
-  AND (sqlc.narg('storage_location_id') IS NULL OR storage_location_id = sqlc.narg('storage_location_id'))
+-- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
+-- sqlc's SQLite type inference only picks up the column's own (nullable)
+-- type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
+-- makes it fall back to interface{} for every param.
+WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_state') IS NULL)
+  AND (camera_model = sqlc.narg('camera_model') OR sqlc.narg('camera_model') IS NULL)
+  AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
+  AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
 -- name: CountMediaNodesFiltered :one
 SELECT COUNT(*)
 FROM media_nodes
-WHERE (sqlc.narg('lifecycle_state') IS NULL OR lifecycle_state = sqlc.narg('lifecycle_state'))
-  AND (sqlc.narg('camera_model') IS NULL OR camera_model = sqlc.narg('camera_model'))
-  AND (sqlc.narg('graph_status') IS NULL OR graph_status = sqlc.narg('graph_status'))
-  AND (sqlc.narg('storage_location_id') IS NULL OR storage_location_id = sqlc.narg('storage_location_id'));
+-- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
+-- sqlc's SQLite type inference only picks up the column's own (nullable)
+-- type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
+-- makes it fall back to interface{} for every param.
+WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_state') IS NULL)
+  AND (camera_model = sqlc.narg('camera_model') OR sqlc.narg('camera_model') IS NULL)
+  AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
+  AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL);
 
 -- name: ListCameraModelFacets :many
-SELECT DISTINCT camera_model
+-- COALESCE is not a null-guard here -- the WHERE clause already excludes
+-- NULL/empty camera_model -- it exists so sqlc infers []string instead of
+-- []sql.NullString: camera_model is a nullable column (00001_init.sql), and
+-- sqlc's SQLite type inference can't see that this query's own WHERE makes
+-- the result always non-NULL.
+SELECT DISTINCT COALESCE(camera_model, '') AS camera_model
 FROM media_nodes
 WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state != 'ARCHIVED'
 ORDER BY camera_model ASC;
@@ -136,7 +149,7 @@ LIMIT ?2;
 
 -- name: ListTier3Candidates :many
 -- Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
--- camera_serial with captured_at_unix within ±2 seconds of a target timestamp,
+-- camera_serial with captured_at_unix within +/-2 seconds of a target timestamp,
 -- excluding a given node ID.
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -298,11 +311,7 @@ WHERE id = ?1;
 --
 -- The caller passes effective values: a column whose fresh probe value was
 -- empty or unchanged is passed through as the node's current value, so this
--- query is only ever reached with at least one genuine change. Plain
--- positional params (?1..?8), not sqlc.arg: this file already has earlier
--- queries using bare ?N placeholders (ListTier3Candidates, ListPrunableNodes),
--- and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder in
--- the same file when a bare ?N appears anywhere earlier in it.
+-- query is only ever reached with at least one genuine change.
 UPDATE media_nodes SET
     original_document_id = ?2,
     document_id = ?3,
@@ -327,7 +336,8 @@ UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHE
 -- (processFile error, submit refused, dropped result, batch Commit failure) --
 -- and is excluded from the sweep: a file on disk with a stale last_seen_at is
 -- not proof it's gone. KeepActive paths are passed as a JSON array string
--- to json_each(?3) to remain within SQLite per-statement parameter bounds.
+-- to json_each(sqlc.arg(keep_active_paths)) to remain within SQLite
+-- per-statement parameter bounds.
 -- Scoped by storage_location_id so a scan of one mount never touches another.
 -- unixepoch() is 1s granularity, so a node last seen in a scan that happened
 -- to end in the SAME wall-clock second as this scan's start may survive one
@@ -337,7 +347,7 @@ SET lifecycle_state = 'MISSING', updated_at = unixepoch()
 WHERE storage_location_id = ?1
   AND lifecycle_state = 'ACTIVE'
   AND last_seen_at < ?2
-  AND file_path NOT IN (SELECT value FROM json_each(?3));
+  AND file_path NOT IN (SELECT value FROM json_each(CAST(sqlc.arg(keep_active_paths) AS TEXT)));
 
 -- name: GetMediaNodeByUUID :one
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -381,12 +391,6 @@ WHERE node_uuid = ?1;
 -- (docs/schema.md) -- sqlc's SQLite grammar does not support GLOB
 -- ("no viable alternative at input 'GLOB'"), and full_hash is only ever
 -- written by internal/hashing.FullHash, which always emits lowercase hex.
--- Plain positional params (?1/?2), not sqlc.arg: this file already has
--- earlier queries (e.g. ListTier3Candidates) using bare ?N placeholders,
--- and sqlc v1.31.1 mis-numbers/corrupts a later sqlc.arg(name) placeholder
--- in the same file when a bare ?N appears anywhere earlier in it --
--- reproduced by bisection, a real generator bug for this sqlc version, not
--- something wrong with sqlc.arg's own syntax elsewhere in the codebase.
 WITH RECURSIVE lineage(root, id) AS (
     SELECT n.id AS root, n.id AS id
     FROM media_nodes n
@@ -443,12 +447,6 @@ ORDER BY n.id;
 -- but noisy, and never productive. No other tier is excluded here: Tier 1
 -- scratch, Tier 2 exports, Tier 3 masters, and PROJECTS are all
 -- server-readable.
---
--- Plain positional params (?1, ?2), not sqlc.arg: this file already has
--- earlier queries using bare ?N placeholders (ListTier3Candidates,
--- ListPrunableNodes, UpdateMediaNodePromotedColumns), and sqlc v1.31.1
--- mis-numbers/corrupts a later sqlc.arg(name) placeholder in the same file
--- when a bare ?N appears anywhere earlier in it.
 SELECT n.id, n.node_uuid, n.file_path, n.thumb_attempts
 FROM media_nodes n
 JOIN storage_locations s ON s.id = n.storage_location_id
@@ -515,4 +513,4 @@ LIMIT 1;
 SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
 FROM media_nodes n
 LEFT JOIN storage_locations s ON s.id = n.storage_location_id
-WHERE n.node_uuid IN (SELECT value FROM json_each(?1));
+WHERE n.node_uuid IN (SELECT value FROM json_each(CAST(sqlc.arg(node_uuids) AS TEXT)));

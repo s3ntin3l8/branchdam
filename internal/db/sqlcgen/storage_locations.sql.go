@@ -56,7 +56,7 @@ const deactivateStorageLocationsNotIn = `-- name: DeactivateStorageLocationsNotI
 UPDATE storage_locations
 SET is_active = 0, updated_at = unixepoch()
 WHERE is_active = 1
-  AND root_path NOT IN (SELECT value FROM json_each(?1))
+  AND root_path NOT IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
 `
 
 // Backs M6: after seeding every location config.yaml currently lists,
@@ -71,8 +71,8 @@ WHERE is_active = 1
 // from MarkUnseenNodesMissing's empty-array gotcha (that one silently
 // matches nothing; this one would silently deactivate every location in
 // the database on a misconfigured or empty config.yaml).
-func (q *Queries) DeactivateStorageLocationsNotIn(ctx context.Context, jsonEach interface{}) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deactivateStorageLocationsNotIn, jsonEach)
+func (q *Queries) DeactivateStorageLocationsNotIn(ctx context.Context, currentRootPaths string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deactivateStorageLocationsNotIn, currentRootPaths)
 	if err != nil {
 		return 0, err
 	}

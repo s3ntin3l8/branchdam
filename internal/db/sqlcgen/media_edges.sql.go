@@ -12,7 +12,7 @@ import (
 
 const listAncestors = `-- name: ListAncestors :many
 WITH RECURSIVE ancestors(id) AS (
-    SELECT ?1 AS id
+    SELECT CAST(?1 AS INTEGER) AS id
     UNION
     SELECT e.source_node_id
     FROM media_edges e
@@ -26,8 +26,11 @@ SELECT ancestors.id FROM ancestors
 
 // Recursively list ancestor node IDs.
 // Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, listAncestors, id)
+// The CAST is not a runtime coercion -- root_id is always an int64 id -- it
+// exists so sqlc infers the anchor column (and so the whole CTE) as INTEGER
+// instead of falling back to interface{}.
+func (q *Queries) ListAncestors(ctx context.Context, rootID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listAncestors, rootID)
 	if err != nil {
 		return nil, err
 	}
@@ -39,6 +42,472 @@ func (q *Queries) ListAncestors(ctx context.Context, id int64) ([]int64, error) 
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditQueue = `-- name: ListAuditQueue :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       resolver, evidence_json, parent_alive, parent_missing
+FROM v_media_edges_resolved
+WHERE review_state = 'NEEDS_REVIEW'
+ORDER BY confidence DESC, id ASC
+LIMIT ?1 OFFSET ?2
+`
+
+type ListAuditQueueParams struct {
+	Limit  int64
+	Offset int64
+}
+
+type ListAuditQueueRow struct {
+	ID               int64
+	SourceNodeID     int64
+	TargetNodeID     int64
+	RelationshipType string
+	Confidence       float64
+	Resolver         string
+	EvidenceJson     string
+	ParentAlive      bool
+	ParentMissing    bool
+}
+
+// The audit queue (spec sec. 7) is this query over review_state, not a second
+// table. v_media_edges_resolved's parent_missing works for every
+// relationship_type -- the spec's deleted trigger never did. See
+// docs/schema.md fix #4.
+func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditQueue, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAuditQueueRow{}
+	for rows.Next() {
+		var i ListAuditQueueRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ParentAlive,
+			&i.ParentMissing,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
+WITH cursor(cd, id) AS (
+  SELECT confidence, id FROM media_edges WHERE id = CAST(?2 AS INTEGER)
+),
+total_rows AS (
+  SELECT COUNT(*) AS n
+  FROM v_media_edges_resolved e
+  WHERE e.review_state = 'NEEDS_REVIEW'
+)
+SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
+       e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
+       sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
+       sn.captured_at_unix AS source_captured_at_unix, sn.camera_model AS source_camera_model,
+       sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
+       tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
+       tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
+       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state,
+       (SELECT n FROM total_rows) AS total
+FROM v_media_edges_resolved e
+JOIN media_nodes sn ON e.source_node_id = sn.id
+JOIN media_nodes tn ON e.target_node_id = tn.id
+WHERE e.review_state = 'NEEDS_REVIEW'
+  AND (CAST(?2 AS INTEGER) = 0 OR e.confidence < (SELECT cd FROM cursor)
+       OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
+ORDER BY e.confidence DESC, e.id ASC
+LIMIT ?1
+`
+
+type ListAuditQueueDetailedParams struct {
+	Limit    int64
+	BeforeID int64
+}
+
+type ListAuditQueueDetailedRow struct {
+	ID                   int64
+	SourceNodeID         int64
+	TargetNodeID         int64
+	RelationshipType     string
+	Confidence           float64
+	Tier                 int64
+	Resolver             string
+	EvidenceJson         string
+	ParentAlive          bool
+	ParentMissing        bool
+	SourceNodeUuid       string
+	SourceFileName       string
+	SourceFilePath       string
+	SourceCapturedAtUnix sql.NullInt64
+	SourceCameraModel    sql.NullString
+	SourcePhash          sql.NullInt64
+	SourceThumbState     string
+	TargetNodeUuid       string
+	TargetFileName       string
+	TargetFilePath       string
+	TargetCapturedAtUnix sql.NullInt64
+	TargetCameraModel    sql.NullString
+	TargetPhash          sql.NullInt64
+	TargetThumbState     string
+	Total                int64
+}
+
+// Keyset (cursor) pagination: when `before_id` is non-zero, only rows
+// ordered AFTER the (confidence, id) cursor are returned. Ordering is
+// (confidence DESC, id ASC); "after" means strictly greater in the
+// lexicographic order. When `before_id` is 0, the first page is returned
+// (no cursor constraint).
+//
+// Keyset over offset: a confirm/reject while the user is on page N
+// shifts the offset window in the offset-based query, so page N+1 may
+// duplicate or skip rows. Keyset pagination is stable across mutations
+// because the cursor is a row identity, not a position.
+//
+// The tie-break for same-confidence rows uses `e.id > cursor.id` (not `<`)
+// because the ordering is `id ASC`: within a confidence tier, the lower
+// id comes first, so "after" the cursor means higher id. A `<` tie-break
+// would duplicate rows on the previous page and skip the rows that should
+// be on this one.
+//
+// `total` is returned as a column on every row via a separate subquery,
+// avoiding a second COUNT(*) query per page turn and the race where a
+// confirmation between the list and the count makes total disagree with
+// what the list shows. The subquery applies only the review_state
+// filter, so total always reflects the full NEEDS_REVIEW set regardless
+// of cursor.
+//
+// The cursor (confidence, id) is resolved in a CTE first, then the main
+// query references it, rather than inlining `SELECT confidence, id FROM
+// media_edges WHERE id = ...` as a subquery at each of its two use sites
+// below -- clearer to read and cheaper to plan than repeating the same
+// lookup twice per row. (An earlier version of this comment attributed the
+// CTE to a sqlc v1.31.1 placeholder-counting bug; disproven by issue #413's
+// fix -- sqlc.arg(before_id) used twice below, once inside the CTE and once
+// in the outer WHERE, correctly collapses to a single BeforeID field.)
+func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditQueueDetailed, arg.Limit, arg.BeforeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAuditQueueDetailedRow{}
+	for rows.Next() {
+		var i ListAuditQueueDetailedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ParentAlive,
+			&i.ParentMissing,
+			&i.SourceNodeUuid,
+			&i.SourceFileName,
+			&i.SourceFilePath,
+			&i.SourceCapturedAtUnix,
+			&i.SourceCameraModel,
+			&i.SourcePhash,
+			&i.SourceThumbState,
+			&i.TargetNodeUuid,
+			&i.TargetFileName,
+			&i.TargetFilePath,
+			&i.TargetCapturedAtUnix,
+			&i.TargetCameraModel,
+			&i.TargetPhash,
+			&i.TargetThumbState,
+			&i.Total,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDescendants = `-- name: ListDescendants :many
+WITH RECURSIVE descendants(id) AS (
+    SELECT CAST(?1 AS INTEGER) AS id
+    UNION
+    SELECT e.target_node_id
+    FROM media_edges e
+    JOIN descendants d ON e.source_node_id = d.id
+    JOIN media_nodes n ON e.target_node_id = n.id
+    WHERE e.review_state <> 'REJECTED'
+      AND n.lifecycle_state <> 'ARCHIVED'
+)
+SELECT descendants.id FROM descendants
+`
+
+// Recursively list descendant node IDs.
+// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
+// The CAST is not a runtime coercion -- root_id is always an int64 id -- it
+// exists so sqlc infers the anchor column (and so the whole CTE) as INTEGER
+// instead of falling back to interface{}.
+func (q *Queries) ListDescendants(ctx context.Context, rootID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listDescendants, rootID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgesByMultipleSources = `-- name: ListEdgesByMultipleSources :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+  AND review_state <> 'REJECTED'
+`
+
+// See ListEdgesByMultipleTargets above; this is the symmetric query for
+// children edges at depth d+1.
+func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, nodeIds string) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleSources, nodeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaEdge{}
+	for rows.Next() {
+		var i MediaEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ReviewState,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgesByMultipleTargets = `-- name: ListEdgesByMultipleTargets :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
+       created_at, updated_at
+FROM media_edges
+WHERE target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+  AND review_state <> 'REJECTED'
+`
+
+// Batch lookup of edges by a JSON-encoded array of target_node_ids, used by
+// handleAssetLineage's bounded BFS to fetch every parent edge at depth d+1
+// in one query rather than one per node. Excludes REJECTED edges here (not
+// in Go) so a rejected lineage link can never re-admit its source node into
+// the traversal via a later level.
+func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, nodeIds string) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleTargets, nodeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaEdge{}
+	for rows.Next() {
+		var i MediaEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.Tier,
+			&i.Resolver,
+			&i.EvidenceJson,
+			&i.ReviewState,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgesForNodes = `-- name: ListEdgesForNodes :many
+SELECT id, source_node_id, target_node_id, relationship_type, confidence,
+       review_state, resolver
+FROM media_edges
+WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+  AND target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+  AND review_state <> 'REJECTED'
+`
+
+type ListEdgesForNodesRow struct {
+	ID               int64
+	SourceNodeID     int64
+	TargetNodeID     int64
+	RelationshipType string
+	Confidence       float64
+	ReviewState      string
+	Resolver         string
+}
+
+func (q *Queries) ListEdgesForNodes(ctx context.Context, nodeIds string) ([]ListEdgesForNodesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, nodeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListEdgesForNodesRow{}
+	for rows.Next() {
+		var i ListEdgesForNodesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceNodeID,
+			&i.TargetNodeID,
+			&i.RelationshipType,
+			&i.Confidence,
+			&i.ReviewState,
+			&i.Resolver,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNodesByIDs = `-- name: ListNodesByIDs :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+FROM media_nodes
+WHERE id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+  AND lifecycle_state <> 'ARCHIVED'
+`
+
+// Column list matches the media_nodes table exactly (including
+// source_path_hash, added by 00015_source_path_hash.sql) so sqlc maps this
+// to the shared MediaNode struct instead of minting a one-off Row type.
+func (q *Queries) ListNodesByIDs(ctx context.Context, nodeIds string) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listNodesByIDs, nodeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
+			&i.ThumbState,
+			&i.ThumbAttempts,
+			&i.SourcePathHash,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -99,334 +568,6 @@ func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]L
 			&i.StorageLocationID,
 			&i.MtimeUnix,
 			&i.SizeBytes,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listAuditQueue = `-- name: ListAuditQueue :many
-SELECT id, source_node_id, target_node_id, relationship_type, confidence,
-       resolver, evidence_json, parent_alive, parent_missing
-FROM v_media_edges_resolved
-WHERE review_state = 'NEEDS_REVIEW'
-ORDER BY confidence DESC, id ASC
-LIMIT ?1 OFFSET ?2
-`
-
-type ListAuditQueueParams struct {
-	Limit  int64
-	Offset int64
-}
-
-type ListAuditQueueRow struct {
-	ID               int64
-	SourceNodeID     int64
-	TargetNodeID     int64
-	RelationshipType string
-	Confidence       float64
-	Resolver         string
-	EvidenceJson     string
-	ParentAlive      bool
-	ParentMissing    bool
-}
-
-// The audit queue (spec §7) is this query over review_state, not a second
-// table. v_media_edges_resolved's parent_missing works for every
-// relationship_type -- the spec's deleted trigger never did. See
-// docs/schema.md fix #4.
-func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) ([]ListAuditQueueRow, error) {
-	rows, err := q.db.QueryContext(ctx, listAuditQueue, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListAuditQueueRow{}
-	for rows.Next() {
-		var i ListAuditQueueRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.SourceNodeID,
-			&i.TargetNodeID,
-			&i.RelationshipType,
-			&i.Confidence,
-			&i.Resolver,
-			&i.EvidenceJson,
-			&i.ParentAlive,
-			&i.ParentMissing,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
-WITH cursor(cd, id) AS (
-  SELECT confidence, id FROM media_edges WHERE id = ?2
-),
-total_rows AS (
-  SELECT COUNT(*) AS n
-  FROM v_media_edges_resolved e
-  WHERE e.review_state = 'NEEDS_REVIEW'
-)
-SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
-       e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
-       sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
-       sn.captured_at_unix AS source_captured_at_unix, sn.camera_model AS source_camera_model,
-       sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
-       tn.node_uuid AS target_node_uuid, tn.file_name AS target_file_name, tn.file_path AS target_file_path,
-       tn.captured_at_unix AS target_captured_at_unix, tn.camera_model AS target_camera_model,
-       tn.phash AS target_phash, tn.thumb_state AS target_thumb_state,
-       (SELECT n FROM total_rows) AS total
-FROM v_media_edges_resolved e
-JOIN media_nodes sn ON e.source_node_id = sn.id
-JOIN media_nodes tn ON e.target_node_id = tn.id
-WHERE e.review_state = 'NEEDS_REVIEW'
-  AND (?2 = 0 OR e.confidence < (SELECT cd FROM cursor)
-       OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
-ORDER BY e.confidence DESC, e.id ASC
-LIMIT ?1
-`
-
-type ListAuditQueueDetailedParams struct {
-	Limit    int64
-	BeforeID interface{}
-}
-
-type ListAuditQueueDetailedRow struct {
-	ID                   int64
-	SourceNodeID         int64
-	TargetNodeID         int64
-	RelationshipType     string
-	Confidence           float64
-	Tier                 int64
-	Resolver             string
-	EvidenceJson         string
-	ParentAlive          bool
-	ParentMissing        bool
-	SourceNodeUuid       string
-	SourceFileName       string
-	SourceFilePath       string
-	SourceCapturedAtUnix sql.NullInt64
-	SourceCameraModel    sql.NullString
-	SourcePhash          sql.NullInt64
-	SourceThumbState     string
-	TargetNodeUuid       string
-	TargetFileName       string
-	TargetFilePath       string
-	TargetCapturedAtUnix sql.NullInt64
-	TargetCameraModel    sql.NullString
-	TargetPhash          sql.NullInt64
-	TargetThumbState     string
-	Total                int64
-}
-
-func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error) {
-	rows, err := q.db.QueryContext(ctx, listAuditQueueDetailed, arg.Limit, arg.BeforeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListAuditQueueDetailedRow{}
-	for rows.Next() {
-		var i ListAuditQueueDetailedRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.SourceNodeID,
-			&i.TargetNodeID,
-			&i.RelationshipType,
-			&i.Confidence,
-			&i.Tier,
-			&i.Resolver,
-			&i.EvidenceJson,
-			&i.ParentAlive,
-			&i.ParentMissing,
-			&i.SourceNodeUuid,
-			&i.SourceFileName,
-			&i.SourceFilePath,
-			&i.SourceCapturedAtUnix,
-			&i.SourceCameraModel,
-			&i.SourcePhash,
-			&i.SourceThumbState,
-			&i.TargetNodeUuid,
-			&i.TargetFileName,
-			&i.TargetFilePath,
-			&i.TargetCapturedAtUnix,
-			&i.TargetCameraModel,
-			&i.TargetPhash,
-			&i.TargetThumbState,
-			&i.Total,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listDescendants = `-- name: ListDescendants :many
-WITH RECURSIVE descendants(id) AS (
-    SELECT ?1 AS id
-    UNION
-    SELECT e.target_node_id
-    FROM media_edges e
-    JOIN descendants d ON e.source_node_id = d.id
-    JOIN media_nodes n ON e.target_node_id = n.id
-    WHERE e.review_state <> 'REJECTED'
-      AND n.lifecycle_state <> 'ARCHIVED'
-)
-SELECT descendants.id FROM descendants
-`
-
-// Recursively list descendant node IDs.
-// Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
-func (q *Queries) ListDescendants(ctx context.Context, id int64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, listDescendants, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []int64{}
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		items = append(items, id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listEdgesForNodes = `-- name: ListEdgesForNodes :many
-SELECT id, source_node_id, target_node_id, relationship_type, confidence,
-       review_state, resolver
-FROM media_edges
-WHERE source_node_id IN (SELECT value FROM json_each(?1))
-  AND target_node_id IN (SELECT value FROM json_each(?1))
-  AND review_state <> 'REJECTED'
-`
-
-type ListEdgesForNodesRow struct {
-	ID               int64
-	SourceNodeID     int64
-	TargetNodeID     int64
-	RelationshipType string
-	Confidence       float64
-	ReviewState      string
-	Resolver         string
-}
-
-func (q *Queries) ListEdgesForNodes(ctx context.Context, jsonEach string) ([]ListEdgesForNodesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, jsonEach)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListEdgesForNodesRow{}
-	for rows.Next() {
-		var i ListEdgesForNodesRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.SourceNodeID,
-			&i.TargetNodeID,
-			&i.RelationshipType,
-			&i.Confidence,
-			&i.ReviewState,
-			&i.Resolver,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listNodesByIDs = `-- name: ListNodesByIDs :many
-SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
-       size_bytes, mtime_unix, fast_hash, full_hash, phash,
-       indexing_status, graph_status, lifecycle_state, superseded_by,
-       original_document_id, document_id, derived_from_id,
-       captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
-FROM media_nodes
-WHERE id IN (SELECT value FROM json_each(?1))
-  AND lifecycle_state <> 'ARCHIVED'
-`
-
-func (q *Queries) ListNodesByIDs(ctx context.Context, jsonEach string) ([]MediaNode, error) {
-	rows, err := q.db.QueryContext(ctx, listNodesByIDs, jsonEach)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []MediaNode{}
-	for rows.Next() {
-		var i MediaNode
-		if err := rows.Scan(
-			&i.ID,
-			&i.NodeUuid,
-			&i.StorageLocationID,
-			&i.FilePath,
-			&i.FileName,
-			&i.FileExt,
-			&i.SizeBytes,
-			&i.MtimeUnix,
-			&i.FastHash,
-			&i.FullHash,
-			&i.Phash,
-			&i.IndexingStatus,
-			&i.GraphStatus,
-			&i.LifecycleState,
-			&i.SupersededBy,
-			&i.OriginalDocumentID,
-			&i.DocumentID,
-			&i.DerivedFromID,
-			&i.CapturedAtUnix,
-			&i.CameraModel,
-			&i.FilenameStem,
-			&i.FirstSeenAt,
-			&i.LastSeenAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.CameraSerial,
-			&i.LensModel,
-			&i.ThumbState,
-			&i.ThumbAttempts,
 		); err != nil {
 			return nil, err
 		}

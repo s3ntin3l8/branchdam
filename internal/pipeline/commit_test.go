@@ -401,10 +401,10 @@ func TestMarkUnseenNodesMissingScopedToLocation(t *testing.T) {
 		var err error
 		// KeepActive is this call's "exclude these paths" list; production
 		// passes the pass's seen-but-uncertain set marshaled as a JSON array string
-		// into json_each(?3).
+		// into json_each(sqlc.arg(keep_active_paths)).
 		jsonKeepActive, _ := json.Marshal([]string{""})
 		n, err = q.MarkUnseenNodesMissing(ctx, sqlcgen.MarkUnseenNodesMissingParams{
-			StorageLocationID: locA, LastSeenAt: 9, JsonEach: string(jsonKeepActive),
+			StorageLocationID: locA, LastSeenAt: 9, KeepActivePaths: string(jsonKeepActive),
 		})
 		return err
 	}); err != nil {
