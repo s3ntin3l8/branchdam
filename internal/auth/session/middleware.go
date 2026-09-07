@@ -178,7 +178,6 @@ func (m *Middleware) SetSessionCookie(w http.ResponseWriter, r *http.Request, co
 	// config. Plain-HTTP local dev (`make dev-api`) leaves Secure
 	// off so the browser stores the cookie; that path runs against
 	// a private loopback, not the public internet.
-	// codeql[go/cookie-secure-attribute]
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cfg.CookieName,
 		Value:    cookieValue,
@@ -196,7 +195,6 @@ func (m *Middleware) ClearSessionCookie(w http.ResponseWriter, r *http.Request, 
 	// Same conditional Secure as SetSessionCookie (see comment there).
 	// Clear must mirror Set's Secure so the browser actually matches
 	// and discards the cookie on the response.
-	// codeql[go/cookie-secure-attribute]
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cfg.CookieName,
 		Value:    "",
