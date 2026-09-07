@@ -89,6 +89,41 @@ implications and what happens if that key is absent or lost.
 |---|---|---|---|
 | `groups` | list of string | empty | Groups permitted write (mutating-method) access on browser-routed endpoints, matched against `X-Authentik-Groups`. **Empty means every authenticated user has write access** — the solo-homelab default — and logs a startup WARN naming `authz.groups` so the choice isn't silent. Must match the Authentik group name exactly; there's no validation against Authentik's own group list. |
 
+## `auth`
+
+Selects which authentication chain runs, and tunes the local-auth
+surface. See [`docs/local-auth.md`](local-auth.md) for the full operator
+guide (cookie contract, argon2id parameters, rate-limit thresholds,
+forward-JIT semantics, operational notes). The `auth.mode` field is
+the only one most operators ever touch; the rest have safe defaults.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `mode` | string | `forward` | One of `forward` (default, pre-#407 behavior), `local` (password login only), or `both` (either path authenticates; local wins on Name/Email collision). Empty / unset is treated as `forward`, so existing configs upgrade without modification. |
+| `local.cookieName` | string | `branchdam_session` | The session cookie name. Change if you run multiple branchDAM instances behind the same parent domain and need to disambiguate. |
+| `local.idleTimeout` | duration | `24h` | Idle-timeout: the session is revoked if no authenticated request lands within this window after the last `TouchSession`. |
+| `local.absoluteTimeout` | duration | `720h` (30d) | Absolute timeout: the session is revoked once this elapses, regardless of activity. Reset on each successful login. |
+| `local.argon2.memoryKB` | int | `19456` (19 MiB) | Memory cost of the password hash. See local-auth.md §5 for tuning guidance. |
+| `local.argon2.iterations` | int | `2` | Iteration count. |
+| `local.argon2.parallelism` | int | `1` | Parallelism per hash. |
+| `local.argon2.saltLength` | int | `16` | Salt length in bytes. |
+| `local.argon2.keyLength` | int | `32` | Derived key length in bytes. |
+| `local.rateLimit.maxFailuresFast` | int | `5` | Fast-window failure threshold (per source IP). |
+| `local.rateLimit.fastWindow` | duration | `5m` | Sliding window for the fast threshold. |
+| `local.rateLimit.coolOffFast` | duration | `60s` | Cool-off applied when the fast threshold trips. |
+| `local.rateLimit.maxFailuresSlow` | int | `5` | Slow-window failure threshold. |
+| `local.rateLimit.slowWindow` | duration | `5m` (defaults to fast window) | Sliding window for the slow threshold. |
+| `local.rateLimit.coolOffSlow` | duration | `5m` | Cool-off applied when the slow threshold trips. |
+| `forward.adminGroups` | list of string | empty | Forward-auth asserted group names that trigger JIT provisioning of a local `is_admin=1` account. Only meaningful when `auth.mode='both'`. Empty list disables JIT entirely. |
+| `forward.requireEmailForJIT` | bool | `true` | When true, refuse JIT provisioning if the forward-auth asserted email is empty. A homelab Authentik deployment that doesn't surface email can set this to `false`; the JIT user is then keyed by username. |
+
+When `auth.mode` is `local` or `both`, the server **refuses to boot**
+unless `BRANCHDAM_SECRET_KEY` is set and is valid base64-decoded 32 bytes
+(see [`docs/local-auth.md`](local-auth.md) §2). When `auth.mode='forward'`
+(the default), `BRANCHDAM_SECRET_KEY` is only used for app-settings
+encryption (immich / agent API keys stored in the SPA), not for
+session-cookie signing — that path is closed off entirely.
+
 ## `ingest`
 
 | Key | Type | Default | Effect |
