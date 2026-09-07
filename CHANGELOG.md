@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/s3ntin3l8/branchdam/compare/v0.17.0...v0.18.0) (2026-09-07)
+
+
+### Features
+
+* **auth:** local auth (password login) alongside forward-auth ([#407](https://github.com/s3ntin3l8/branchdam/issues/407)) ([b26f483](https://github.com/s3ntin3l8/branchdam/commit/b26f483c4472905d923f1abf88c3041506393e96))
+* **auth:** password reset (admin + self-service) ([#416](https://github.com/s3ntin3l8/branchdam/issues/416)) ([29b69e2](https://github.com/s3ntin3l8/branchdam/commit/29b69e23d3c1191c7f6051a05653f480b71cbf68))
+
+
+### Bug Fixes
+
+* **db:** root-cause and fix sqlc v1.31.1's non-ASCII query corruption ([#417](https://github.com/s3ntin3l8/branchdam/issues/417)) ([cccb2c1](https://github.com/s3ntin3l8/branchdam/commit/cccb2c101bcc23eeda4d50abb6b2daa6197de318))
+
 ## [0.17.0](https://github.com/s3ntin3l8/branchdam/compare/v0.16.1...v0.17.0) (2026-09-06)
 
 
