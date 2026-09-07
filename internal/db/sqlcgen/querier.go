@@ -100,7 +100,7 @@ type Querier interface {
 	// from MarkUnseenNodesMissing's empty-array gotcha (that one silently
 	// matches nothing; this one would silently deactivate every location in
 	// the database on a misconfigured or empty config.yaml).
-	DeactivateStorageLocationsNotIn(ctx context.Context, jsonEach interface{}) (int64, error)
+	DeactivateStorageLocationsNotIn(ctx context.Context, currentRootPaths string) (int64, error)
 	// Backs POST /api/v1/agent/events: persists and returns 202 in increment 1.
 	// Actually draining/processing these rows ships with the deferred
 	// workstation-agent increment -- this table and endpoint exist now so that
