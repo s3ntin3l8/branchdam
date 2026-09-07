@@ -45,6 +45,14 @@ jobs:
   backend:
     name: Go (build · vet · test)
     uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
+    with:
+      # GO-2026-5932: golang.org/x/crypto/openpgp subpackage is unmaintained
+      # and unsafe by design. We import x/crypto ONLY for argon2id
+      # (internal/auth/users/users.go), never for openpgp -- govulncheck
+      # flags the module, not our usage. Re-check periodically and drop
+      # this ID if/when the upstream module drops the openpgp subpackage
+      # or the advisory is otherwise resolved.
+      govulncheck-ignore: GO-2026-5932
     secrets: inherit
 
   golangci-lint:

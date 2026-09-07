@@ -24,14 +24,6 @@ func fakeChain(p Principal) ChainBuilder {
 	}
 }
 
-func noopChain() ChainBuilder {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 func TestMergePrincipals_ForwardOnly(t *testing.T) {
 	fwd := &Principal{Kind: KindUser, Name: "alice", Email: "alice@x", Groups: []string{"dam-admins"}, Authenticated: true}
 	got := mergePrincipals(fwd, nil, AuthModeForward)
