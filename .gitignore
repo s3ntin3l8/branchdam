@@ -67,3 +67,4 @@ compose.override.yml
 
 # Agent workspace (superpowers plans, scratch)
 /docs/superpowers/
+.superpowers/
