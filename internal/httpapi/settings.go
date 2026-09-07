@@ -35,7 +35,8 @@ func (s *Server) requireSettingsAdmin(ctx context.Context) error {
 	if cfg := s.cfg(); cfg != nil {
 		allowedGroups = cfg.Authz.Groups
 	}
-	if !auth.IsAdmin(p, allowedGroups) {
+	localView, _ := auth.FromUser(ctx)
+	if !auth.IsAdmin(p, allowedGroups, localView) {
 		return huma.Error403Forbidden("admin authorization required")
 	}
 	return nil

@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Me } from "../api/types";
+import { api } from "../api/client";
 
 // Monogram background colors are sampled deterministically from the user's
 // name so the same person always sees the same color across reloads and
@@ -41,6 +43,18 @@ export function UserMenu({ me }: UserMenuProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogId = useId();
+  const queryClient = useQueryClient();
+
+  // Local-auth logout: revokes the server-side session and clears the
+  // cookie. For forward-only sessions (me.isLocal === false) the server
+  // endpoint is a no-op, so we still offer the SSO logout link below.
+  const logoutMutation = useMutation({
+    mutationFn: api.logout,
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+      window.location.reload();
+    },
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -135,12 +149,23 @@ export function UserMenu({ me }: UserMenuProps) {
               </span>
             </div>
           )}
-          <a
-            href="/outpost.goauthentik.io/sign_out"
-            className="block px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-800 focus:bg-neutral-800 focus:outline-none"
-          >
-            Sign out
-          </a>
+          {me.isLocal ? (
+            <button
+              type="button"
+              onClick={() => logoutMutation.mutate()}
+              disabled={logoutMutation.isPending}
+              className="block w-full px-3 py-2 text-left text-sm text-neutral-200 hover:bg-neutral-800 focus:bg-neutral-800 focus:outline-none disabled:opacity-50"
+            >
+              {logoutMutation.isPending ? "Signing out…" : "Sign out"}
+            </button>
+          ) : (
+            <a
+              href="/outpost.goauthentik.io/sign_out"
+              className="block px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-800 focus:bg-neutral-800 focus:outline-none"
+            >
+              Sign out
+            </a>
+          )}
         </div>
       )}
     </div>

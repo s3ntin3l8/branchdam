@@ -21,6 +21,9 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
+	"github.com/s3ntin3l8/branchdam/internal/auth/session"
+	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
@@ -105,6 +108,18 @@ type Deps struct {
 	// every existing test, plus a deploy that explicitly disables
 	// pairing. cmd/branchdam sets this from internal/pairing.NewService.
 	Pairing *pairing.Service
+
+	// LocalAuth bundles the user service + login rate limiter +
+	// session middleware + auth mode. Nil in forward-only mode.
+	LocalAuth *LocalAuthDeps
+}
+
+// LocalAuthDeps is the dependency bundle for local-auth endpoints.
+type LocalAuthDeps struct {
+	Users        *users.Service
+	LoginLimiter *ratelimit.Limiter
+	SessionMw    *session.Middleware
+	AuthMode     auth.AuthMode
 }
 
 // Server bundles the dependencies handlers need.
@@ -127,6 +142,11 @@ type Server struct {
 	thumbs         *thumbs.Cache
 	requestRestart func()
 	pairingService *pairing.Service
+
+	// localAuth is the bundle the local-auth endpoints depend on.
+	// Nil when auth.mode is "forward" -- see registerLocalAuthRoutes
+	// for the "503 / no-op" stubs that mount in that case.
+	localAuth *localAuthHandlers
 }
 
 // cfg returns the current effective config -- config.yaml/.env as loaded,
@@ -166,7 +186,7 @@ func New(d Deps) *Server {
 			log.Warn("http: trustedProxies is empty -- X-Forwarded-* headers are trusted from any source (backward-compat default). Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
 		}
 	}
-	return &Server{
+	s := &Server{
 		cfgProvider:    cfgProvider,
 		settingsStore:  d.Settings,
 		log:            log,
@@ -185,6 +205,16 @@ func New(d Deps) *Server {
 		requestRestart: d.RequestRestart,
 		pairingService: d.Pairing,
 	}
+	if d.LocalAuth != nil {
+		s.localAuth = &localAuthHandlers{
+			users:        d.LocalAuth.Users,
+			loginLimiter: d.LocalAuth.LoginLimiter,
+			sessionMw:    d.LocalAuth.SessionMw,
+			log:          log,
+			authMode:     d.LocalAuth.AuthMode,
+		}
+	}
+	return s
 }
 
 // contentSecurityPolicy: the frontend build (PR 10) self-hosts its fonts
@@ -240,6 +270,10 @@ func (s *Server) Handler() http.Handler {
 	// the same reason -- Huma's response model is JSON-only and SVG
 	// needs raw image/svg+xml.
 	s.registerPairingDirectRoutes(mux)
+	// Local-auth endpoints (setup, login, logout) -- registered
+	// directly on the mux because they need Set-Cookie writes (Huma
+	// doesn't expose the underlying writer for cookie ops cleanly).
+	s.registerLocalAuthRoutes(mux)
 	// Agent streaming upload accepts raw octet stream with custom headers
 	mux.HandleFunc("POST /api/v1/agent/upload", s.handleAgentUpload)
 	// Web browser multipart upload
@@ -265,8 +299,22 @@ func (s *Server) Handler() http.Handler {
 		agentCfg.LookupKey = s.pairingService.KeyLookup
 	}
 
+	// Resolve the auth mode from config. Default AuthModeForward keeps
+	// every existing deployment's behavior byte-identical.
+	authMode := auth.AuthModeForward
+	var localBuilder auth.ChainBuilder
+	if s.localAuth != nil {
+		authMode = s.localAuth.authMode
+		switch authMode {
+		case auth.AuthModeLocal:
+			localBuilder = s.localAuth.sessionMw.Middleware
+		case auth.AuthModeBoth:
+			localBuilder = s.localAuth.sessionMw.Middleware
+		}
+	}
+
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
-	routed := auth.RouteWithConfig(agentCfg, s.log, authzHandler)
+	routed := auth.RouteWithConfig(agentCfg, authMode, localBuilder, s.log, authzHandler)
 	routed = pairingForwardedMiddleware(routed)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))

@@ -77,6 +77,26 @@ type EventQueue struct {
 	RetryCount  int64
 }
 
+// LoginAudit entries are append-only. See migration 00018_local_auth.sql's
+// table comment for the full contract. Hand-maintained rather than sqlc-
+// generated because sqlc v1.20-v1.31.1 all fail to parse the existing
+// companion_pairing.sql subqueries in this environment (the parser emits
+// truncated const blocks); running `sqlc generate` corrupts unrelated
+// files in internal/db/sqlcgen/. The file header is preserved as the
+// project's sqlcgen convention so a future regeneration can replace the
+// hand-written additions.
+type LoginAudit struct {
+	ID                int64
+	UserID            sql.NullInt64
+	UsernamePresented string
+	Source            string
+	Outcome           string
+	Ip                string
+	UserAgent         string
+	Details           string
+	CreatedAt         int64
+}
+
 type MediaEdge struct {
 	ID               int64
 	SourceNodeID     int64
@@ -171,6 +191,38 @@ type StorageLocation struct {
 	CreatedAt     int64
 	UpdatedAt     int64
 	CacheTtlHours int64
+}
+
+// Session is the server-side session table backing local auth. See migration
+// 00018_local_auth.sql's table comment for the full contract. Hand-maintained
+// for the same reason as LoginAudit (see that type's doc comment).
+type Session struct {
+	ID            int64
+	CookieID      string
+	UserID        int64
+	CreatedAt     int64
+	LastSeenAt    int64
+	ExpiresAt     int64
+	IdleExpiresAt int64
+	Ip            string
+	UserAgent     string
+	RevokedAt     sql.NullInt64
+}
+
+// User is the local-auth identity. See migration 00018_local_auth.sql's
+// table comment for the full contract (sources: local / forward-jit /
+// forward-link; the first two are exercised in v1). Hand-maintained for
+// the same reason as LoginAudit (see that type's doc comment).
+type User struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
 }
 
 type VMediaEdgesResolved struct {

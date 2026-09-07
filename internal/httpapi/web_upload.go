@@ -35,7 +35,8 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	if cfg := s.cfg(); cfg != nil {
 		allowedGroups = cfg.Authz.Groups
 	}
-	if !auth.IsAdmin(p, allowedGroups) {
+	localView, _ := auth.FromUser(r.Context())
+	if !auth.IsAdmin(p, allowedGroups, localView) {
 		s.writeJSONError(w, http.StatusForbidden, "admin authorization required")
 		return
 	}

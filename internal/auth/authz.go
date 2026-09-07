@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,43 @@ func writeForbidden(w http.ResponseWriter, detail string) {
 		Status: http.StatusForbidden,
 		Detail: detail,
 	})
+}
+
+// LocalUserView is the per-request summary of a locally-authenticated
+// user. IsAdmin consults it to honor the users.is_admin column as an
+// override on top of the config-driven authz.groups membership check.
+//
+// The session middleware (internal/auth/session) is the only producer;
+// it attaches the value via WithLocalUserView. Nil means "no local
+// session authenticated this request" (forward-only mode, or no
+// cookie). UserID is exposed so handlers can audit-log "admin alice
+// did X" without a second DB hit.
+type LocalUserView struct {
+	UserID  int64
+	IsAdmin bool
+}
+
+// IsLocalAdmin satisfies a tiny inline contract (so future refactors
+// can swap in an interface-based carrier without changing call sites).
+func (v LocalUserView) IsLocalAdmin() bool { return v.IsAdmin }
+
+// localUserCtxKey is unexported so the only writer is internal/auth
+// itself (via WithLocalUserView); readers use FromUser.
+type localUserCtxKey struct{}
+
+// WithLocalUserView attaches a LocalUserView to ctx. Used by the
+// session middleware; not exported via a separate package because the
+// session package already imports internal/auth.
+func WithLocalUserView(ctx context.Context, v LocalUserView) context.Context {
+	return context.WithValue(ctx, localUserCtxKey{}, v)
+}
+
+// FromUser returns the LocalUserView attached to ctx by the session
+// middleware, if any. RequireAdmin uses this to consult the local
+// `is_admin` override.
+func FromUser(ctx context.Context) (LocalUserView, bool) {
+	v, ok := ctx.Value(localUserCtxKey{}).(LocalUserView)
+	return v, ok
 }
 
 // RequireAdmin returns a middleware gating mutating (write) actions to users belonging
@@ -69,7 +107,8 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 				return
 			}
 
-			if IsAdmin(p, allowedGroups) {
+			localView, _ := FromUser(r.Context())
+			if IsAdmin(p, allowedGroups, localView) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -81,8 +120,10 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 
 // IsAdmin reports whether p satisfies the same admin policy RequireAdmin
 // enforces on a mutating request: a user principal, authenticated, and
-// either allowedGroups is empty (the solo-homelab default: every
-// authenticated user is admin) or p is a member of at least one of them.
+// either localView.IsAdmin (the local-`is_admin` override -- beats
+// the group check), or allowedGroups is empty (the solo-homelab
+// default: every authenticated user is admin), or p is a member of at
+// least one allowedGroup.
 //
 // This does NOT reproduce RequireAdmin's GET/HEAD/OPTIONS bypass or its
 // unconditional pass for KindMachine -- those are properties of *which
@@ -91,9 +132,12 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 // internal/httpapi's settings routes, which must reject KindMachine and gate
 // GET too, unlike every other browser-routed read) calls this directly with
 // its own Kind/method checks around it, rather than reusing the middleware.
-func IsAdmin(p Principal, allowedGroups []string) bool {
+func IsAdmin(p Principal, allowedGroups []string, localView LocalUserView) bool {
 	if p.Kind != KindUser || !p.Authenticated {
 		return false
+	}
+	if localView.IsAdmin {
+		return true
 	}
 	if len(allowedGroups) == 0 {
 		return true

@@ -143,6 +143,12 @@ type MeOutput struct {
 		Groups        []string `json:"groups,omitempty"`
 		Authenticated bool     `json:"authenticated"`
 		IsAdmin       bool     `json:"isAdmin"`
+		// IsLocal is true when the request was authenticated via the
+		// session cookie (local chain). The SPA uses this to decide
+		// whether a logout button makes sense (a forward-only user
+		// can't be logged out from branchDAM).
+		IsLocal     bool  `json:"isLocal,omitempty"`
+		LocalUserID int64 `json:"localUserId,omitempty"`
 	}
 }
 
@@ -158,7 +164,12 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 		if cfg := s.cfg(); cfg != nil {
 			allowedGroups = cfg.Authz.Groups
 		}
-		out.Body.IsAdmin = auth.IsAdmin(p, allowedGroups)
+		localView, _ := auth.FromUser(ctx)
+		out.Body.IsAdmin = auth.IsAdmin(p, allowedGroups, localView)
+		if localView.UserID != 0 {
+			out.Body.IsLocal = true
+			out.Body.LocalUserID = localView.UserID
+		}
 	}
 	return out, nil
 }

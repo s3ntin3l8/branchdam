@@ -55,6 +55,7 @@ type Config struct {
 	Workers    Workers  `yaml:"workers"`
 	Agent      Agent    `yaml:"agent"`
 	Authz      Authz    `yaml:"authz"`
+	Auth       Auth     `yaml:"auth"`
 	Immich     Immich   `yaml:"immich"`
 
 	StorageLocations []StorageLocation `yaml:"storageLocations"`
@@ -115,6 +116,70 @@ type PathRewrite struct {
 // Authz configures group-based authorization (internal/auth, PR 2 / issue 37).
 type Authz struct {
 	Groups []string `yaml:"groups"`
+}
+
+// Auth configures the authentication chain selection and the local-auth
+// knobs (cookie, session timeouts, rate limit, argon2id parameters,
+// forward-auth JIT admin provisioning).
+type Auth struct {
+	// Mode selects which chains run: "forward" (today's default,
+	// unchanged), "local" (session cookie only), or "both" (either
+	// path authenticates; groups unioned; local wins on Name/Email
+	// collision). Empty defaults to "forward" so existing configs
+	// stay byte-identical at runtime.
+	Mode string `yaml:"mode"`
+
+	Local   AuthLocal   `yaml:"local"`
+	Forward AuthForward `yaml:"forward"`
+}
+
+// AuthLocal configures the local-auth chain (only meaningful when
+// auth.mode is "local" or "both"). Defaults are safe for any deployment.
+type AuthLocal struct {
+	// CookieName. Default "branchdam_session".
+	CookieName string `yaml:"cookieName"`
+	// IdleTimeout. Default "24h".
+	IdleTimeout string `yaml:"idleTimeout"`
+	// AbsoluteTimeout. Default "720h" (30d).
+	AbsoluteTimeout string `yaml:"absoluteTimeout"`
+	// Argon2id parameters (defaults: OWASP-recommended baseline).
+	Argon Argon2 `yaml:"argon2"`
+	// RateLimit thresholds (per source IP).
+	RateLimit RateLimit `yaml:"rateLimit"`
+}
+
+// Argon2 mirrors the auth/users.Argon2idParameters YAML shape.
+type Argon2 struct {
+	MemoryKB    int `yaml:"memoryKB"`
+	Iterations  int `yaml:"iterations"`
+	Parallelism int `yaml:"parallelism"`
+	SaltLength  int `yaml:"saltLength"`
+	KeyLength   int `yaml:"keyLength"`
+}
+
+// RateLimit mirrors auth/ratelimit.Config YAML shape.
+type RateLimit struct {
+	MaxFailuresFast int    `yaml:"maxFailuresFast"`
+	FastWindow      string `yaml:"fastWindow"`
+	CoolOffFast     string `yaml:"coolOffFast"`
+	MaxFailuresSlow int    `yaml:"maxFailuresSlow"`
+	SlowWindow      string `yaml:"slowWindow"`
+	CoolOffSlow     string `yaml:"coolOffSlow"`
+}
+
+// AuthForward configures the forward-auth chain's local-side
+// integration (only meaningful when auth.mode is "both"). The
+// forward-auth header trust itself is governed by Traefik's
+// strip-identity + forward-auth middleware, NOT by branchDAM
+// config; see docs/forward-auth.md for the boundary.
+type AuthForward struct {
+	// AdminGroups is the set of forward-auth asserted group names
+	// that trigger JIT provisioning of a local is_admin=true account.
+	// Empty = no JIT.
+	AdminGroups []string `yaml:"adminGroups"`
+	// RequireEmailForJIT: when true, refuse JIT provisioning if the
+	// forward-auth asserted email is empty/missing. Default true.
+	RequireEmailForJIT bool `yaml:"requireEmailForJIT"`
 }
 
 // Database configures the SQLite file both pools open (internal/db, PR 1).
@@ -252,6 +317,12 @@ func defaultConfig() Config {
 		Agent: Agent{
 			SignedRequests:   false,
 			ReplayWindowSecs: 300,
+		},
+		Authz: Authz{
+			Groups: nil,
+		},
+		Auth: Auth{
+			Mode: "forward",
 		},
 		Trash: Trash{
 			RetentionDays: 30,

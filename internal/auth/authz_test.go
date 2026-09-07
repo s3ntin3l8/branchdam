@@ -262,7 +262,7 @@ func TestIsAdmin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsAdmin(tt.p, tt.allowedGroups)
+			got := IsAdmin(tt.p, tt.allowedGroups, LocalUserView{})
 			if got != tt.want {
 				t.Errorf("IsAdmin() = %v, want %v", got, tt.want)
 			}
