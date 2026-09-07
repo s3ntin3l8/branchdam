@@ -17,7 +17,7 @@ WITH RECURSIVE descendants(id) AS (
 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = sqlc.arg(parent_node_id)) AS would_cycle;
 
 -- name: ListAuditQueue :many
--- The audit queue (spec §7) is this query over review_state, not a second
+-- The audit queue (spec sec. 7) is this query over review_state, not a second
 -- table. v_media_edges_resolved's parent_missing works for every
 -- relationship_type -- the spec's deleted trigger never did. See
 -- docs/schema.md fix #4.
@@ -54,11 +54,15 @@ LIMIT ?1 OFFSET ?2;
 -- of cursor.
 --
 -- The cursor (confidence, id) is resolved in a CTE first, then the main
--- query references it -- sqlc v1.31.1 mis-counts placeholders when a
--- subquery in the WHERE clause references the same ?N as the outer
--- query, so a single-pass subquery would generate one too few args.
+-- query references it, rather than inlining `SELECT confidence, id FROM
+-- media_edges WHERE id = ...` as a subquery at each of its two use sites
+-- below -- clearer to read and cheaper to plan than repeating the same
+-- lookup twice per row. (An earlier version of this comment attributed the
+-- CTE to a sqlc v1.31.1 placeholder-counting bug; disproven by issue #413's
+-- fix -- sqlc.arg(before_id) used twice below, once inside the CTE and once
+-- in the outer WHERE, correctly collapses to a single BeforeID field.)
 WITH cursor(cd, id) AS (
-  SELECT confidence, id FROM media_edges WHERE id = ?2
+  SELECT confidence, id FROM media_edges WHERE id = CAST(sqlc.arg(before_id) AS INTEGER)
 ),
 total_rows AS (
   SELECT COUNT(*) AS n
@@ -78,7 +82,7 @@ FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 WHERE e.review_state = 'NEEDS_REVIEW'
-  AND (?2 = 0 OR e.confidence < (SELECT cd FROM cursor)
+  AND (CAST(sqlc.arg(before_id) AS INTEGER) = 0 OR e.confidence < (SELECT cd FROM cursor)
        OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
 ORDER BY e.confidence DESC, e.id ASC
 LIMIT ?1;
@@ -87,8 +91,11 @@ LIMIT ?1;
 -- name: ListAncestors :many
 -- Recursively list ancestor node IDs.
 -- Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
+-- The CAST is not a runtime coercion -- root_id is always an int64 id -- it
+-- exists so sqlc infers the anchor column (and so the whole CTE) as INTEGER
+-- instead of falling back to interface{}.
 WITH RECURSIVE ancestors(id) AS (
-    SELECT ?1 AS id
+    SELECT CAST(sqlc.arg(root_id) AS INTEGER) AS id
     UNION
     SELECT e.source_node_id
     FROM media_edges e
@@ -128,8 +135,11 @@ WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
 -- name: ListDescendants :many
 -- Recursively list descendant node IDs.
 -- Anchor SELECT explicitly names/aliases all columns to satisfy sqlc's SQLite parser.
+-- The CAST is not a runtime coercion -- root_id is always an int64 id -- it
+-- exists so sqlc infers the anchor column (and so the whole CTE) as INTEGER
+-- instead of falling back to interface{}.
 WITH RECURSIVE descendants(id) AS (
-    SELECT ?1 AS id
+    SELECT CAST(sqlc.arg(root_id) AS INTEGER) AS id
     UNION
     SELECT e.target_node_id
     FROM media_edges e
@@ -147,35 +157,40 @@ SELECT descendants.id FROM descendants;
 
 
 -- name: ListNodesByIDs :many
+-- Column list matches the media_nodes table exactly (including
+-- source_path_hash, added by 00015_source_path_hash.sql) so sqlc maps this
+-- to the shared MediaNode struct instead of minting a one-off Row type.
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
 FROM media_nodes
-WHERE id IN (SELECT value FROM json_each(?1))
+WHERE id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
   AND lifecycle_state <> 'ARCHIVED';
 
 -- name: ListEdgesForNodes :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        review_state, resolver
 FROM media_edges
-WHERE source_node_id IN (SELECT value FROM json_each(?1))
-  AND target_node_id IN (SELECT value FROM json_each(?1))
+WHERE source_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+  AND target_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
   AND review_state <> 'REJECTED';
 
 -- name: ListEdgesByMultipleTargets :many
 -- Batch lookup of edges by a JSON-encoded array of target_node_ids, used by
 -- handleAssetLineage's bounded BFS to fetch every parent edge at depth d+1
--- in one query rather than one per node. Returns REJECTED edges too -- the
--- handleAssetLineage filter on review_state <> 'REJECTED' is applied in Go.
+-- in one query rather than one per node. Excludes REJECTED edges here (not
+-- in Go) so a rejected lineage link can never re-admit its source node into
+-- the traversal via a later level.
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
 FROM media_edges
-WHERE target_node_id IN (SELECT value FROM json_each(?1));
+WHERE target_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+  AND review_state <> 'REJECTED';
 
 -- name: ListEdgesByMultipleSources :many
 -- See ListEdgesByMultipleTargets above; this is the symmetric query for
@@ -184,4 +199,5 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
 FROM media_edges
-WHERE source_node_id IN (SELECT value FROM json_each(?1));
+WHERE source_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+  AND review_state <> 'REJECTED';

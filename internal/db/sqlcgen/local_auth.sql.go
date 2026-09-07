@@ -3,16 +3,6 @@
 //   sqlc v1.31.1
 // source: local_auth.sql
 
-// Hand-maintained rather than sqlc-generated: sqlc v1.20-v1.31.1 all fail to
-// parse the existing companion_pairing.sql subqueries in this environment
-// (the parser emits truncated const blocks across many unrelated query
-// strings); running `sqlc generate` corrupts files in internal/db/sqlcgen/.
-// See User / Session / LoginAudit types' doc comments in models.go for the
-// full rationale, and PLAN.md in the repo root for the operational context.
-//
-// The file's header is preserved as the project's sqlcgen convention so a
-// future regeneration can replace the hand-written additions once sqlc's
-// parser is fixed or this environment is repaired.
 package sqlcgen
 
 import (
@@ -21,14 +11,247 @@ import (
 )
 
 const countUsers = `-- name: CountUsers :one
+
 SELECT COUNT(*) FROM users
 `
 
+// Local auth queries. The handlers in internal/httpapi/local_auth.go
+// and the middleware in internal/auth/session.go both go through these --
+// no raw SQL outside this file (per the project's sqlc convention,
+// documented in CONTRIBUTING.md).
+//
+// All positional params use bare ?1/?2/?3 (not sqlc.arg(name)) per AGENTS.md's
+// "SQL Syntax Traps" note.
+// Returns the total number of users. /setup/status returns readyForSetup:
+// (count == 0) so the SPA can branch between setup form and login form.
+// Cheap (no WHERE), single indexed-ish scan; called on every unauthenticated
+// request that hits the SPA shell, so kept O(1)-ish.
 func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countUsers)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const createForwardJITUser = `-- name: CreateForwardJITUser :one
+INSERT INTO users (
+    username, email, password_hash, is_admin, source, created_at, created_by
+) VALUES (
+    ?1, ?2, NULL, ?3, 'forward-jit', ?4, ?5
+)
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+`
+
+type CreateForwardJITUserParams struct {
+	Username  string
+	Email     sql.NullString
+	IsAdmin   int64
+	CreatedAt int64
+	CreatedBy string
+}
+
+// Inserts a source='forward-jit' user with password_hash = NULL. The
+// schema CHECK constraint enforces this. email is required (callers
+// refuse the JIT when the forward-auth email header is empty). created_by is
+// 'forward:<forward-auth username>'.
+func (q *Queries) CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, createForwardJITUser,
+		arg.Username,
+		arg.Email,
+		arg.IsAdmin,
+		arg.CreatedAt,
+		arg.CreatedBy,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Email,
+		&i.PasswordHash,
+		&i.IsAdmin,
+		&i.Source,
+		&i.CreatedAt,
+		&i.CreatedBy,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const createLocalUser = `-- name: CreateLocalUser :one
+INSERT INTO users (
+    username, email, password_hash, is_admin, source, created_at, created_by
+) VALUES (
+    ?1, ?2, ?3, ?4, 'local', ?5, ?6
+)
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+`
+
+type CreateLocalUserParams struct {
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	CreatedAt    int64
+	CreatedBy    string
+}
+
+// Inserts a source='local' user. password_hash is the argon2id encoded
+// string. created_by is 'setup' for the first admin, 'self' for self-
+// registration flows (none in v1), or 'user:<principal name>' for admin-
+// created users. Returns the inserted row.
+func (q *Queries) CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, createLocalUser,
+		arg.Username,
+		arg.Email,
+		arg.PasswordHash,
+		arg.IsAdmin,
+		arg.CreatedAt,
+		arg.CreatedBy,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Email,
+		&i.PasswordHash,
+		&i.IsAdmin,
+		&i.Source,
+		&i.CreatedAt,
+		&i.CreatedBy,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const createSession = `-- name: CreateSession :one
+INSERT INTO sessions (
+    cookie_id, user_id, created_at, last_seen_at, expires_at,
+    idle_expires_at, ip, user_agent
+) VALUES (
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+)
+RETURNING id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
+`
+
+type CreateSessionParams struct {
+	CookieID      string
+	UserID        int64
+	CreatedAt     int64
+	LastSeenAt    int64
+	ExpiresAt     int64
+	IdleExpiresAt int64
+	Ip            string
+	UserAgent     string
+}
+
+// Inserts a new session row. cookie_id is 32 random bytes hex-encoded
+// (length 64, CHECK-enforced). The HMAC tag over cookie_id is computed
+// at cookie-write time, NOT stored here -- sessions.cookie_id alone is
+// sufficient for lookup, the HMAC is for tamper detection (rejected by
+// the middleware before the DB lookup).
+func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
+	row := q.db.QueryRowContext(ctx, createSession,
+		arg.CookieID,
+		arg.UserID,
+		arg.CreatedAt,
+		arg.LastSeenAt,
+		arg.ExpiresAt,
+		arg.IdleExpiresAt,
+		arg.Ip,
+		arg.UserAgent,
+	)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.CookieID,
+		&i.UserID,
+		&i.CreatedAt,
+		&i.LastSeenAt,
+		&i.ExpiresAt,
+		&i.IdleExpiresAt,
+		&i.Ip,
+		&i.UserAgent,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const disableUser = `-- name: DisableUser :exec
+UPDATE users SET disabled_at = ?2 WHERE id = ?1
+`
+
+type DisableUserParams struct {
+	ID         int64
+	DisabledAt sql.NullInt64
+}
+
+// Sets disabled_at. Idempotent. Does NOT revoke existing sessions --
+// that's a separate admin action (RevokeAllUserSessions) so an admin can
+// disable future logins without immediately logging the user out.
+func (q *Queries) DisableUser(ctx context.Context, arg DisableUserParams) error {
+	_, err := q.db.ExecContext(ctx, disableUser, arg.ID, arg.DisabledAt)
+	return err
+}
+
+const getSessionByCookieID = `-- name: GetSessionByCookieID :one
+SELECT id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
+FROM sessions
+WHERE cookie_id = ?1
+`
+
+// Hot path: called by SessionMiddleware on every authenticated browser
+// request. Returns the full row including revoked_at so the middleware
+// can reject post-revoke cookies in one query. The partial index
+// sessions_user_active_idx covers the active-set variant but the
+// revoke check needs the full row, so we don't use it here.
+func (q *Queries) GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error) {
+	row := q.db.QueryRowContext(ctx, getSessionByCookieID, cookieID)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.CookieID,
+		&i.UserID,
+		&i.CreatedAt,
+		&i.LastSeenAt,
+		&i.ExpiresAt,
+		&i.IdleExpiresAt,
+		&i.Ip,
+		&i.UserAgent,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getUserByEmailSource = `-- name: GetUserByEmailSource :one
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+FROM users
+WHERE email = ?1 AND source = ?2
+`
+
+type GetUserByEmailSourceParams struct {
+	Email  sql.NullString
+	Source string
+}
+
+// Used by the JIT provisioning path: a forward-auth request with email E
+// and source 'forward-jit' either matches an existing admin or triggers
+// a fresh INSERT in CreateForwardJITUser. Partial unique index
+// users_email_source_uniq covers this.
+func (q *Queries) GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByEmailSource, arg.Email, arg.Source)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Email,
+		&i.PasswordHash,
+		&i.IsAdmin,
+		&i.Source,
+		&i.CreatedAt,
+		&i.CreatedBy,
+		&i.DisabledAt,
+	)
+	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
@@ -60,6 +283,9 @@ FROM users
 WHERE username = ?1
 `
 
+// Used by /api/v1/login to resolve the presented username to a user row.
+// The lookup is username-only; password verification happens in Go against
+// password_hash. Index: users.username UNIQUE already covers this.
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User, error) {
 	row := q.db.QueryRowContext(ctx, getUserByUsername, username)
 	var i User
@@ -77,127 +303,38 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 	return i, err
 }
 
-const getUserByEmailSource = `-- name: GetUserByEmailSource :one
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
-FROM users
-WHERE email = ?1 AND source = ?2
-`
-
-type GetUserByEmailSourceParams struct {
-	Email  sql.NullString
-	Source string
-}
-
-func (q *Queries) GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, getUserByEmailSource, arg.Email, arg.Source)
-	var i User
-	err := row.Scan(
-		&i.ID,
-		&i.Username,
-		&i.Email,
-		&i.PasswordHash,
-		&i.IsAdmin,
-		&i.Source,
-		&i.CreatedAt,
-		&i.CreatedBy,
-		&i.DisabledAt,
-	)
-	return i, err
-}
-
-const createLocalUser = `-- name: CreateLocalUser :one
-INSERT INTO users (
-    username, email, password_hash, is_admin, source, created_at, created_by
+const insertLoginAudit = `-- name: InsertLoginAudit :exec
+INSERT INTO login_audit (
+    user_id, username_presented, source, outcome, ip, user_agent, details, created_at
 ) VALUES (
-    ?1, ?2, ?3, ?4, 'local', ?5, ?6
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
 )
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
 `
 
-type CreateLocalUserParams struct {
-	Username     string
-	Email        sql.NullString
-	PasswordHash string
-	IsAdmin      int64
-	CreatedAt    int64
-	CreatedBy    string
+type InsertLoginAuditParams struct {
+	UserID            sql.NullInt64
+	UsernamePresented string
+	Source            string
+	Outcome           string
+	Ip                string
+	UserAgent         string
+	Details           string
+	CreatedAt         int64
 }
 
-func (q *Queries) CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, createLocalUser,
-		arg.Username,
-		arg.Email,
-		arg.PasswordHash,
-		arg.IsAdmin,
+// Append-only. The two indexes on (user_id, created_at) and (ip, created_at)
+// cover the admin UI's tail queries without a sort.
+func (q *Queries) InsertLoginAudit(ctx context.Context, arg InsertLoginAuditParams) error {
+	_, err := q.db.ExecContext(ctx, insertLoginAudit,
+		arg.UserID,
+		arg.UsernamePresented,
+		arg.Source,
+		arg.Outcome,
+		arg.Ip,
+		arg.UserAgent,
+		arg.Details,
 		arg.CreatedAt,
-		arg.CreatedBy,
 	)
-	var i User
-	err := row.Scan(
-		&i.ID,
-		&i.Username,
-		&i.Email,
-		&i.PasswordHash,
-		&i.IsAdmin,
-		&i.Source,
-		&i.CreatedAt,
-		&i.CreatedBy,
-		&i.DisabledAt,
-	)
-	return i, err
-}
-
-const createForwardJITUser = `-- name: CreateForwardJITUser :one
-INSERT INTO users (
-    username, email, password_hash, is_admin, source, created_at, created_by
-) VALUES (
-    ?1, ?2, NULL, ?3, 'forward-jit', ?4, ?5
-)
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
-`
-
-type CreateForwardJITUserParams struct {
-	Username  string
-	Email     sql.NullString
-	IsAdmin   int64
-	CreatedAt int64
-	CreatedBy string
-}
-
-func (q *Queries) CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, createForwardJITUser,
-		arg.Username,
-		arg.Email,
-		arg.IsAdmin,
-		arg.CreatedAt,
-		arg.CreatedBy,
-	)
-	var i User
-	err := row.Scan(
-		&i.ID,
-		&i.Username,
-		&i.Email,
-		&i.PasswordHash,
-		&i.IsAdmin,
-		&i.Source,
-		&i.CreatedAt,
-		&i.CreatedBy,
-		&i.DisabledAt,
-	)
-	return i, err
-}
-
-const disableUser = `-- name: DisableUser :exec
-UPDATE users SET disabled_at = ?2 WHERE id = ?1
-`
-
-type DisableUserParams struct {
-	ID         int64
-	DisabledAt sql.NullInt64
-}
-
-func (q *Queries) DisableUser(ctx context.Context, arg DisableUserParams) error {
-	_, err := q.db.ExecContext(ctx, disableUser, arg.ID, arg.DisabledAt)
 	return err
 }
 
@@ -213,6 +350,8 @@ type ListUsersParams struct {
 	Offset int64
 }
 
+// Paginated user list for the admin UI. Order by id ASC so paging is
+// stable across inserts (new users go to the END, not the middle).
 func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error) {
 	rows, err := q.db.QueryContext(ctx, listUsers, arg.Limit, arg.Offset)
 	if err != nil {
@@ -246,76 +385,35 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 	return items, nil
 }
 
-const createSession = `-- name: CreateSession :one
-INSERT INTO sessions (
-    cookie_id, user_id, created_at, last_seen_at, expires_at,
-    idle_expires_at, ip, user_agent
-) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-)
-RETURNING id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
+const revokeAllUserSessions = `-- name: RevokeAllUserSessions :exec
+UPDATE sessions SET revoked_at = ?2 WHERE user_id = ?1 AND revoked_at IS NULL
 `
 
-type CreateSessionParams struct {
-	CookieID      string
-	UserID        int64
-	CreatedAt     int64
-	LastSeenAt    int64
-	ExpiresAt     int64
-	IdleExpiresAt int64
-	Ip            string
-	UserAgent     string
+type RevokeAllUserSessionsParams struct {
+	UserID    int64
+	RevokedAt sql.NullInt64
 }
 
-func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
-	row := q.db.QueryRowContext(ctx, createSession,
-		arg.CookieID,
-		arg.UserID,
-		arg.CreatedAt,
-		arg.LastSeenAt,
-		arg.ExpiresAt,
-		arg.IdleExpiresAt,
-		arg.Ip,
-		arg.UserAgent,
-	)
-	var i Session
-	err := row.Scan(
-		&i.ID,
-		&i.CookieID,
-		&i.UserID,
-		&i.CreatedAt,
-		&i.LastSeenAt,
-		&i.ExpiresAt,
-		&i.IdleExpiresAt,
-		&i.Ip,
-		&i.UserAgent,
-		&i.RevokedAt,
-	)
-	return i, err
+// Used by admin "log out everywhere" action and by DisableUser's
+// companion flow (future admin endpoint). Idempotent.
+func (q *Queries) RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error {
+	_, err := q.db.ExecContext(ctx, revokeAllUserSessions, arg.UserID, arg.RevokedAt)
+	return err
 }
 
-const getSessionByCookieID = `-- name: GetSessionByCookieID :one
-SELECT id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
-FROM sessions
-WHERE cookie_id = ?1
+const revokeSession = `-- name: RevokeSession :exec
+UPDATE sessions SET revoked_at = ?2 WHERE id = ?1
 `
 
-func (q *Queries) GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error) {
-	row := q.db.QueryRowContext(ctx, getSessionByCookieID, cookieID)
-	var i Session
-	err := row.Scan(
-		&i.ID,
-		&i.CookieID,
-		&i.UserID,
-		&i.CreatedAt,
-		&i.LastSeenAt,
-		&i.ExpiresAt,
-		&i.IdleExpiresAt,
-		&i.Ip,
-		&i.UserAgent,
-		&i.RevokedAt,
-	)
-	return i, err
+type RevokeSessionParams struct {
+	ID        int64
+	RevokedAt sql.NullInt64
+}
+
+// Sets revoked_at on a single session (used by DELETE /api/v1/session).
+func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) error {
+	_, err := q.db.ExecContext(ctx, revokeSession, arg.ID, arg.RevokedAt)
+	return err
 }
 
 const touchSession = `-- name: TouchSession :exec
@@ -330,68 +428,11 @@ type TouchSessionParams struct {
 	IdleExpiresAt int64
 }
 
+// Updates last_seen_at and idle_expires_at. Called by SessionMiddleware
+// after a successful auth (sliding idle window). One statement per
+// request, but the WHERE matches the active-set partial index path
+// already loaded above so the planner is happy.
 func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) error {
 	_, err := q.db.ExecContext(ctx, touchSession, arg.ID, arg.LastSeenAt, arg.IdleExpiresAt)
-	return err
-}
-
-const revokeSession = `-- name: RevokeSession :exec
-UPDATE sessions SET revoked_at = ?2 WHERE id = ?1
-`
-
-type RevokeSessionParams struct {
-	ID        int64
-	RevokedAt sql.NullInt64
-}
-
-func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) error {
-	_, err := q.db.ExecContext(ctx, revokeSession, arg.ID, arg.RevokedAt)
-	return err
-}
-
-const revokeAllUserSessions = `-- name: RevokeAllUserSessions :exec
-UPDATE sessions SET revoked_at = ?2 WHERE user_id = ?1 AND revoked_at IS NULL
-`
-
-type RevokeAllUserSessionsParams struct {
-	UserID    int64
-	RevokedAt sql.NullInt64
-}
-
-func (q *Queries) RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error {
-	_, err := q.db.ExecContext(ctx, revokeAllUserSessions, arg.UserID, arg.RevokedAt)
-	return err
-}
-
-const insertLoginAudit = `-- name: InsertLoginAudit :exec
-INSERT INTO login_audit (
-    user_id, username_presented, source, outcome, ip, user_agent, details, created_at
-) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-)
-`
-
-type InsertLoginAuditParams struct {
-	UserID            sql.NullInt64
-	UsernamePresented string
-	Source            string
-	Outcome           string
-	Ip                string
-	UserAgent         string
-	Details           string
-	CreatedAt         int64
-}
-
-func (q *Queries) InsertLoginAudit(ctx context.Context, arg InsertLoginAuditParams) error {
-	_, err := q.db.ExecContext(ctx, insertLoginAudit,
-		arg.UserID,
-		arg.UsernamePresented,
-		arg.Source,
-		arg.Outcome,
-		arg.Ip,
-		arg.UserAgent,
-		arg.Details,
-		arg.CreatedAt,
-	)
 	return err
 }

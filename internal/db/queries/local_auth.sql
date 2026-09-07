@@ -50,8 +50,8 @@ RETURNING id, username, email, password_hash, is_admin, source, created_at, crea
 -- name: CreateForwardJITUser :one
 -- Inserts a source='forward-jit' user with password_hash = NULL. The
 -- schema CHECK constraint enforces this. email is required (callers
--- refuse the JIT when X-Authentik-Email is empty). created_by is
--- 'forward:<X-Authentik-Username>'.
+-- refuse the JIT when the forward-auth email header is empty). created_by is
+-- 'forward:<forward-auth username>'.
 INSERT INTO users (
     username, email, password_hash, is_admin, source, created_at, created_by
 ) VALUES (

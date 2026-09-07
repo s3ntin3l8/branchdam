@@ -129,7 +129,7 @@ LIMIT 1;
 
 -- name: SetActiveKeyExpirations :exec
 -- Rotation: set expires_at on every currently-active key for this pairing
--- that doesn't already have one. Idempotent — re-running after the same
+-- that doesn't already have one. Idempotent -- re-running after the same
 -- clock has no effect.
 UPDATE device_pairing_keys
 SET expires_at = ?2

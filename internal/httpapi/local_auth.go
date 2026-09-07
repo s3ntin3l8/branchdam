@@ -127,7 +127,7 @@ func (s *Server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		created, err := q.CreateLocalUser(r.Context(), sqlcgen.CreateLocalUserParams{
 			Username:     username,
 			Email:        emailNS,
-			PasswordHash: hash,
+			PasswordHash: sql.NullString{String: hash, Valid: true},
 			IsAdmin:      1,
 			CreatedAt:    now.Unix(),
 			CreatedBy:    "setup",

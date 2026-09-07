@@ -27,8 +27,8 @@ make dev-all    # Both together
 sqlc generate    # Run after editing migrations or queries; commit internal/db/sqlcgen/
 ```
 
-> **`sqlc generate` Risk Note:** Always run `git diff --stat internal/db/sqlcgen/` and inspect files you didn't deliberately change. v1.31.1 has known corruption bugs dropping characters in unrelated files.
-> **SQL Syntax Traps:** Use bare positional params (`?1`, `?2`) instead of `sqlc.arg(name)` in mixed files. Recursive CTE anchor `SELECT`s must explicitly alias every column (`SELECT sqlc.arg(x) AS id`).
+> **`sqlc generate` Risk Note:** `internal/db/queries/*.sql` files must be ASCII-only. sqlc v1.31.1's SQLite engine slices statement spans using rune offsets as if they were byte offsets, so any multi-byte UTF-8 character (even in a `--` comment) corrupts every later statement in the file -- dropped placeholder digits, truncated `RETURNING` lists, stray garbage lines. `internal/db/queries_ascii_test.go`'s `TestQueryFilesAreASCII` enforces this under `make check`; see docs/schema.md's "sqlc risk: non-ASCII in query comments" section and [sqlc#4372](https://github.com/sqlc-dev/sqlc/issues/4372)/[#4523](https://github.com/sqlc-dev/sqlc/issues/4523). Fixed upstream by [sqlc#4535](https://github.com/sqlc-dev/sqlc/pull/4535) but not yet in a release past v1.31.1 -- drop this rule once one ships.
+> **SQL Syntax Traps:** Recursive CTE anchor `SELECT`s must explicitly alias every column (`SELECT sqlc.arg(x) AS id`) or sqlc's SQLite parser fails with `*ast.ResTarget has nil name`.
 
 ## Architecture & Package Responsibilities
 
