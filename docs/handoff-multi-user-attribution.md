@@ -63,18 +63,22 @@ Rebasing onto `origin/main` means:
   `scan_jobs.started_by_user_id`, `device_pairings.user_id`) are what actually survive
   the rebase — they don't overlap with what shipped.
 
-## Also found, left unfixed here (belongs with worktree usage, not #413)
+## Also found and fixed in passing (not #413's own bug, but blocked the PR's own pre-push hook)
 
-`internal/auth/no_leak_test.go`'s directory skip list (around line 47) excludes
-`.mullion-worktrees` but not `.worktrees/` — the actual directory name git worktrees for
-this repo land in (`.gitignore`'s own entry is `.worktrees/`). Anyone with a
-`.worktrees/` checkout on disk — which is exactly this branch's own setup — gets
-`TestNoDirectAuthentikHeaderReads` failing on files inside that checkout, not their
-actual working tree. Confirmed still present and still tripped by two stale worktrees
-(`feat-multi-user-attribution` itself, plus an unrelated `feat-auth-password-reset`) as
-of this writing; the same phantom-file issue also broke `golangci-lint`'s
-generated-file filter via a third stale worktree (`docs-local-auth`), surfacing three
-unrelated `errcheck` findings against files that no longer exist on disk. One-line fix
-to the skip list (add `.worktrees`), but it's a worktree-hygiene / test-robustness issue
-orthogonal to this branch's actual work, so it's flagged here rather than fixed as part
-of #413.
+`internal/auth/no_leak_test.go`'s directory skip list excluded `.mullion-worktrees` but
+not `.worktrees/` — the actual directory name git worktrees for this repo land in
+(`.gitignore`'s own entry is `.worktrees/`). Any `.worktrees/` checkout on disk — which
+is exactly this branch's own setup — made `TestNoDirectAuthentikHeaderReads` fail on
+files inside that checkout, not the actual working tree. It was tripped by two stale
+worktrees on the machine this fix was written on (`feat-multi-user-attribution` itself,
+plus an unrelated `feat-auth-password-reset`); the same phantom-file issue also broke
+`golangci-lint`'s generated-file filter via a third stale worktree (`docs-local-auth`),
+surfacing three unrelated `errcheck` findings against files that no longer exist on
+disk. Fixed (added `.worktrees` to the skip list) because it was blocking this PR's own
+pre-push hook, not because it's part of #413 — mentioned here in case
+`feat/multi-user-attribution` was also carrying a local workaround for it.
+
+Not fixed: the `golangci-lint` generated-file-filter break from the same root cause
+(any stale `.worktrees/*` entry with no corresponding directory on disk). If it recurs,
+the fix is the same shape — the filter needs to tolerate a worktree path that no longer
+resolves, not `no_leak_test.go`.
