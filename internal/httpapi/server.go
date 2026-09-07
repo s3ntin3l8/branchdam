@@ -21,6 +21,9 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
+	"github.com/s3ntin3l8/branchdam/internal/auth/session"
+	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
@@ -105,6 +108,23 @@ type Deps struct {
 	// every existing test, plus a deploy that explicitly disables
 	// pairing. cmd/branchdam sets this from internal/pairing.NewService.
 	Pairing *pairing.Service
+
+	// LocalAuth bundles the user service + login rate limiter +
+	// session middleware + auth mode. Nil in forward-only mode.
+	LocalAuth *LocalAuthDeps
+}
+
+// LocalAuthDeps is the dependency bundle for local-auth endpoints.
+type LocalAuthDeps struct {
+	Users        *users.Service
+	LoginLimiter *ratelimit.Limiter
+	SessionMw    *session.Middleware
+	AuthMode     auth.AuthMode
+	// JIT, when non-nil, is the forward-JIT provisioner passed to
+	// auth.RouteWithConfigAndJIT. Set by cmd/branchdam when
+	// auth.mode == "both" AND auth.forward.adminGroups is non-empty;
+	// nil otherwise (no JIT, even in "both" mode).
+	JIT auth.JITProvisioner
 }
 
 // Server bundles the dependencies handlers need.
@@ -127,6 +147,11 @@ type Server struct {
 	thumbs         *thumbs.Cache
 	requestRestart func()
 	pairingService *pairing.Service
+
+	// localAuth is the bundle the local-auth endpoints depend on.
+	// Nil when auth.mode is "forward" -- see registerLocalAuthRoutes
+	// for the "503 / no-op" stubs that mount in that case.
+	localAuth *localAuthHandlers
 }
 
 // cfg returns the current effective config -- config.yaml/.env as loaded,
@@ -166,7 +191,7 @@ func New(d Deps) *Server {
 			log.Warn("http: trustedProxies is empty -- X-Forwarded-* headers are trusted from any source (backward-compat default). Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
 		}
 	}
-	return &Server{
+	s := &Server{
 		cfgProvider:    cfgProvider,
 		settingsStore:  d.Settings,
 		log:            log,
@@ -185,6 +210,17 @@ func New(d Deps) *Server {
 		requestRestart: d.RequestRestart,
 		pairingService: d.Pairing,
 	}
+	if d.LocalAuth != nil {
+		s.localAuth = &localAuthHandlers{
+			users:        d.LocalAuth.Users,
+			loginLimiter: d.LocalAuth.LoginLimiter,
+			sessionMw:    d.LocalAuth.SessionMw,
+			log:          log,
+			authMode:     d.LocalAuth.AuthMode,
+			jit:          d.LocalAuth.JIT,
+		}
+	}
+	return s
 }
 
 // contentSecurityPolicy: the frontend build (PR 10) self-hosts its fonts
@@ -240,6 +276,10 @@ func (s *Server) Handler() http.Handler {
 	// the same reason -- Huma's response model is JSON-only and SVG
 	// needs raw image/svg+xml.
 	s.registerPairingDirectRoutes(mux)
+	// Local-auth endpoints (setup, login, logout) -- registered
+	// directly on the mux because they need Set-Cookie writes (Huma
+	// doesn't expose the underlying writer for cookie ops cleanly).
+	s.registerLocalAuthRoutes(mux)
 	// Agent streaming upload accepts raw octet stream with custom headers
 	mux.HandleFunc("POST /api/v1/agent/upload", s.handleAgentUpload)
 	// Web browser multipart upload
@@ -265,8 +305,33 @@ func (s *Server) Handler() http.Handler {
 		agentCfg.LookupKey = s.pairingService.KeyLookup
 	}
 
+	// Resolve the auth mode from config. Default AuthModeForward keeps
+	// every existing deployment's behavior byte-identical.
+	authMode := auth.AuthModeForward
+	var localBuilder auth.ChainBuilder
+	var jit auth.JITProvisioner
+	if s.localAuth != nil {
+		authMode = s.localAuth.authMode
+		jit = s.localAuth.jit
+		switch authMode {
+		case auth.AuthModeLocal:
+			localBuilder = s.localAuth.sessionMw.Middleware
+		case auth.AuthModeBoth:
+			localBuilder = s.localAuth.sessionMw.Middleware
+		}
+	}
+
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
-	routed := auth.RouteWithConfig(agentCfg, s.log, authzHandler)
+	// Pass adminGroups + requireEmail only when s.cfg() is non-nil;
+	// tests that build a Server without Config (see routes_test.go's
+	// fullTestServer helper) would otherwise deref a nil cfg here.
+	var adminGroups []string
+	var requireEmailForJIT bool
+	if cfg := s.cfg(); cfg != nil {
+		adminGroups = cfg.Auth.Forward.AdminGroups
+		requireEmailForJIT = cfg.Auth.Forward.RequireEmailForJIT
+	}
+	routed := auth.RouteWithConfigAndJIT(agentCfg, authMode, localBuilder, jit, adminGroups, requireEmailForJIT, s.log, authzHandler)
 	routed = pairingForwardedMiddleware(routed)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))

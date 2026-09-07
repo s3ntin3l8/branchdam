@@ -22,6 +22,10 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/agent"
+	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
+	"github.com/s3ntin3l8/branchdam/internal/auth/session"
+	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -293,12 +297,61 @@ func main() {
 	// is what lets a device-paired API key authenticate.
 	pairingService := pairing.NewService(database, log, pairingPepper)
 
+	// Local auth: only built when the configured mode is anything other
+	// than "forward". The service is also stateless and cheap, but
+	// skipping it in forward-only mode means every existing test (and
+	// every existing deployment that doesn't opt in) keeps its
+	// current behavior byte-identical. The cookie HMAC key derives
+	// from BRANCHDAM_SECRET_KEY via users.CookieKey; a missing or
+	// invalid key is a hard error here (Hermes #407 review) because
+	// falling back to a public dev constant would mean every session
+	// cookie in production is signed with a known key.
+	var localAuthDeps *httpapi.LocalAuthDeps
+	authMode := auth.AuthMode(cfg.Auth.Mode)
+	switch authMode {
+	case "":
+		authMode = auth.AuthModeForward
+		cfg.Auth.Mode = string(authMode)
+	case auth.AuthModeLocal, auth.AuthModeBoth:
+		rawKey := os.Getenv("BRANCHDAM_SECRET_KEY")
+		// CookieKey returns nil when the secret is missing/empty/not a
+		// 32-byte base64 value. Hand the user a clear error so they
+		// don't silently boot with a guessable cookie HMAC.
+		if _, err := base64.StdEncoding.DecodeString(rawKey); err != nil || len(rawKey) == 0 {
+			log.Error("auth: auth.mode is local or both, but BRANCHDAM_SECRET_KEY is missing or invalid -- refusing to boot. Set a 32-byte base64 key in BRANCHDAM_SECRET_KEY before enabling local auth.")
+			os.Exit(1)
+		}
+		usersService := users.NewService(database, rawKey, users.ServiceOptions{
+			Log: log,
+		})
+		loginLimiter := ratelimit.New()
+		sessionMw := session.New(usersService, session.Config{
+			CookieName: "branchdam_session",
+			Log:        log,
+		})
+		localAuthDeps = &httpapi.LocalAuthDeps{
+			Users:        usersService,
+			LoginLimiter: loginLimiter,
+			SessionMw:    sessionMw,
+			AuthMode:     authMode,
+		}
+		// Pre-build the JIT provisioner closure so httpapi/Handler()
+		// can pass it to auth.RouteWithConfigAndJIT. nil when no admin
+		// groups are configured -- the route then skips JIT entirely.
+		if len(cfg.Auth.Forward.AdminGroups) > 0 {
+			localAuthDeps.JIT = users.JITProvisioner(usersService, cfg.Auth.Forward.AdminGroups, cfg.Auth.Forward.RequireEmailForJIT, log)
+			log.Info("auth: forward-JIT provisioning enabled", "adminGroups", cfg.Auth.Forward.AdminGroups, "requireEmail", cfg.Auth.Forward.RequireEmailForJIT)
+		}
+		log.Info("auth: local auth enabled", "mode", authMode)
+	}
+
 	srv := httpapi.New(httpapi.Deps{
 		Config: &cfg, Settings: settingsStore, Log: log, DB: database, Guard: guard, Prober: prober,
 		Pool: pool, Engine: engine, Hub: hub, SPA: spa, Version: version,
 		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
 		RequestRestart: requestRestart,
 		Pairing:        pairingService,
+		LocalAuth:      localAuthDeps,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,

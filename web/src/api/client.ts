@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, ListPairingsResponse, Me, PairingAuditResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -40,6 +40,24 @@ export const api = {
   listPathRewrites: () => request<PathRewrite[]>("/api/v1/config/path-rewrites"),
 
   listStorageLocations: () => request<{ locations: StorageLocation[] }>("/api/v1/storage-locations"),
+
+  // Local-auth endpoints (only meaningful when auth.mode is local or both).
+  // The SPA calls setupStatus() on the login page to decide whether to
+  // render the first-user setup form vs the login form; setupAdmin()
+  // creates the first admin and auto-logs them in via Set-Cookie;
+  // login() is the standard login form post.
+  setupStatus: () => request<SetupStatus>("/api/v1/setup/status"),
+  setupAdmin: (input: SetupAdminInput) =>
+    request<{ ok: boolean }>("/api/v1/setup/admin", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  login: (input: LoginInput) =>
+    request<{ ok: boolean }>("/api/v1/login", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  logout: () => request<void>("/api/v1/session", { method: "DELETE" }),
 
   listAssets: (params: AssetQueryParams = {}) => {
     const qs = new URLSearchParams();

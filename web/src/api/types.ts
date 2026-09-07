@@ -20,6 +20,29 @@ export interface Me {
   // Computed server-side via auth.IsAdmin, not derived client-side, so the
   // SPA doesn't need to know the configured group list.
   isAdmin: boolean;
+  // isLocal + localUserId are populated when the request was
+  // authenticated via the local session cookie (auth.mode local or
+  // both). The SPA uses isLocal to decide whether a logout button
+  // is meaningful -- a forward-only user can only be logged out by
+  // their IdP, not by branchDAM.
+  isLocal?: boolean;
+  localUserId?: number;
+}
+
+export interface SetupStatus {
+  readyForSetup: boolean;
+  mode: "forward" | "local" | "both";
+}
+
+export interface LoginInput {
+  username: string;
+  password: string;
+}
+
+export interface SetupAdminInput {
+  username: string;
+  email?: string;
+  password: string;
 }
 
 export interface PathRewrite {

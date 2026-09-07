@@ -529,6 +529,38 @@ type Querier interface {
 	// The bare-parameter anchor `SELECT sqlc.arg(...)` needed an explicit alias
 	// to satisfy sqlc's SQLite parser -- see docs/schema.md's sqlc risk note.
 	WouldCreateCycle(ctx context.Context, arg WouldCreateCycleParams) (bool, error)
+
+	// Local-auth queries (migration 00018). Hand-maintained -- see User /
+	// Session / LoginAudit types' doc comments for the sqlc-version-pin
+	// rationale; the methods live in local_auth.sql.go alongside this
+	// package's other query files.
+
+	// Cheap call used by GET /api/v1/setup/status to decide whether the
+	// SPA shell renders the first-user setup form vs the login form.
+	CountUsers(ctx context.Context) (int64, error)
+	CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error)
+	CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error)
+	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// Sets disabled_at. Idempotent; does NOT revoke existing sessions --
+	// that's RevokeAllUserSessions, a separate admin action so an admin
+	// can disable future logins without logging the user out today.
+	DisableUser(ctx context.Context, arg DisableUserParams) error
+	GetUserByID(ctx context.Context, id int64) (User, error)
+	GetUserByUsername(ctx context.Context, username string) (User, error)
+	// JIT provisioning path: lookup by (email, source). Partial unique
+	// index users_email_source_uniq covers it.
+	GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error)
+	// Hot path: SessionMiddleware calls this on every authenticated browser
+	// request. Returns the full row including revoked_at so the middleware
+	// can reject post-revoke cookies in one query.
+	GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error)
+	InsertLoginAudit(ctx context.Context, arg InsertLoginAuditParams) error
+	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
+	RevokeSession(ctx context.Context, arg RevokeSessionParams) error
+	RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error
+	// Sliding-idle-window refresh: updated by SessionMiddleware on every
+	// successful auth.
+	TouchSession(ctx context.Context, arg TouchSessionParams) error
 }
 
 var _ Querier = (*Queries)(nil)
