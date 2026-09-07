@@ -118,6 +118,13 @@ type Deps struct {
 type LocalAuthDeps struct {
 	Users        *users.Service
 	LoginLimiter *ratelimit.Limiter
+	// ResetLimiter is a separate per-IP sliding-window budget for the
+	// password-reset endpoints (PR #409). Distinct from LoginLimiter
+	// so the reset flow's failure accounting doesn't share state with
+	// /login and a login cool-off doesn't lock out a forgotten-password
+	// recovery. nil only in tests that don't construct Deps.LocalAuth;
+	// the HTTP handlers short-circuit to 503 when nil.
+	ResetLimiter *ratelimit.Limiter
 	SessionMw    *session.Middleware
 	// Reset, when non-nil, is the password-reset service (PR #409).
 	// Always wired by cmd/branchdam when auth.mode is local/both; nil
@@ -219,6 +226,7 @@ func New(d Deps) *Server {
 		s.localAuth = &localAuthHandlers{
 			users:        d.LocalAuth.Users,
 			loginLimiter: d.LocalAuth.LoginLimiter,
+			resetLimiter: d.LocalAuth.ResetLimiter,
 			sessionMw:    d.LocalAuth.SessionMw,
 			reset:        d.LocalAuth.Reset,
 			log:          log,

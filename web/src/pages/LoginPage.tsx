@@ -296,7 +296,7 @@ function LoginForm({
               disabled={resetPending || !resetEmail}
               className="flex-1 rounded bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-dark disabled:opacity-50"
             >
-              {resetPending ? "Sending…" : "Send reset link"}
+              {resetPending ? "Notifying…" : "Notify operator"}
             </button>
             <button
               type="button"

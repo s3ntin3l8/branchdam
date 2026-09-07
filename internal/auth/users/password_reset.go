@@ -201,6 +201,19 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 			return err
 		}
 
+		// Revoke every active session for this user in the same
+		// transaction as the password rotation: a session stolen
+		// alongside the compromised password must not survive the
+		// reset, and the writer pool's SetMaxOpenConns(1) makes the
+		// two queries naturally serial, but doing both inside one tx
+		// makes the atomicity obvious in the code and survives any
+		// future move to a multi-writer pool. Idempotent: re-issuing
+		// the same reset (already-revoked sessions match zero rows
+		// in the WHERE revoked_at IS NULL clause).
+		if err := revokeAllUserSessionsTx(ctx, q, user.ID, now.Unix()); err != nil {
+			return fmt.Errorf("password-reset: revoke sessions: %w", err)
+		}
+
 		details := fmt.Sprintf(`{"token_id":%d,"kind":"self-service-confirm"}`, consumed.ID)
 		return q.InsertLoginAudit(ctx, sqlcgen.InsertLoginAuditParams{
 			UserID:            sql.NullInt64{Int64: user.ID, Valid: true},
@@ -255,6 +268,13 @@ func (p *PasswordResetService) AdminResetPassword(ctx context.Context, targetUse
 			return err
 		}
 		user = rotated
+		// Revoke every active session for the target user. The reset
+		// is the operator's signal that the existing credential is
+		// compromised; a session the legitimate user had on a phone,
+		// or that an attacker had stolen, must not survive. Idempotent.
+		if err := revokeAllUserSessionsTx(ctx, q, user.ID, now.Unix()); err != nil {
+			return fmt.Errorf("password-reset: revoke sessions: %w", err)
+		}
 		details := fmt.Sprintf(`{"actor":"%s","target_user_id":%d,"kind":"admin-reset"}`, sanitizeForJSON(actor), user.ID)
 		return q.InsertLoginAudit(ctx, sqlcgen.InsertLoginAuditParams{
 			UserID:            sql.NullInt64{Int64: user.ID, Valid: true},
@@ -313,6 +333,19 @@ func updateUserPasswordHash(ctx context.Context, q *sqlcgen.Queries, userID int6
 	return q.UpdateUserPasswordHash(ctx, sqlcgen.UpdateUserPasswordHashParams{
 		ID:           userID,
 		PasswordHash: sql.NullString{String: hash, Valid: true},
+	})
+}
+
+// revokeAllUserSessionsTx is the in-transaction form of
+// Service.RevokeAllUserSessions: it calls the sqlc query directly
+// rather than going through Service.withTx, which would attempt a
+// nested transaction (and fail on SQLite's single-writer pool).
+// Both reset paths use it inside their own withTx scope so the
+// password rotation and the session revocation commit together.
+func revokeAllUserSessionsTx(ctx context.Context, q *sqlcgen.Queries, userID, revokedAt int64) error {
+	return q.RevokeAllUserSessions(ctx, sqlcgen.RevokeAllUserSessionsParams{
+		UserID:    userID,
+		RevokedAt: sql.NullInt64{Int64: revokedAt, Valid: true},
 	})
 }
 

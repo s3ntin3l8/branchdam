@@ -325,6 +325,19 @@ func main() {
 			Log: log,
 		})
 		loginLimiter := ratelimit.New()
+		// resetLimiter is a separate sliding-window failure budget for
+		// the password-reset endpoints (PR #409, Hermes review).
+		// Rationale: the existing loginLimiter never records failures
+		// from the reset endpoints (they don't call RecordFailure),
+		// so wrong-token confirms accumulate no cool-off; meanwhile a
+		// user who tripped the loginLimiter (the most likely state of
+		// someone who forgot their password) gets 429 on
+		// /password-reset/request for the cool-off window. A separate
+		// budget also gives /confirm its own failure counter, so
+		// wrong-token attempts eventually cool off. Per-IP, same
+		// defensive posture as loginLimiter (no per-account, to avoid
+		// leaking which addresses are registered via lockout timing).
+		resetLimiter := ratelimit.New()
 		sessionMw := session.New(usersService, session.Config{
 			CookieName: "branchdam_session",
 			Log:        log,
@@ -335,10 +348,21 @@ func main() {
 		// service is built unconditionally because the rate-limiter
 		// and the admin panel both need access to it regardless of
 		// whether any user has actually minted a token yet.
-		resetTTL, err := time.ParseDuration(cfg.Auth.Local.PasswordReset.TokenTTL)
-		if err != nil {
-			log.Error("auth: invalid auth.local.passwordReset.tokenTTL -- refusing to boot", "value", cfg.Auth.Local.PasswordReset.TokenTTL, "err", err.Error())
+		//
+		// Blank value -> 24h: existing local/both-mode deployments that
+		// upgrade without adding the new config key would otherwise fail
+		// to boot, because time.ParseDuration("") returns an error and
+		// the < 0 default at the next line is unreachable for an empty
+		// string. The hard-fail is reserved for non-empty malformed
+		// values, which are operator typos.
+		var resetTTL time.Duration
+		if raw := cfg.Auth.Local.PasswordReset.TokenTTL; raw == "" {
+			resetTTL = 24 * time.Hour
+		} else if d, err := time.ParseDuration(raw); err != nil {
+			log.Error("auth: invalid auth.local.passwordReset.tokenTTL -- refusing to boot", "value", raw, "err", err.Error())
 			os.Exit(1)
+		} else {
+			resetTTL = d
 		}
 		if resetTTL <= 0 {
 			resetTTL = 24 * time.Hour
@@ -349,6 +373,7 @@ func main() {
 		localAuthDeps = &httpapi.LocalAuthDeps{
 			Users:        usersService,
 			LoginLimiter: loginLimiter,
+			ResetLimiter: resetLimiter,
 			SessionMw:    sessionMw,
 			Reset:        passwordResetService,
 			AuthMode:     authMode,

@@ -230,3 +230,98 @@ func TestTokenTTL_DefaultWhenZero(t *testing.T) {
 	_, reset := newPasswordResetService(t, 0)
 	assert.Equal(t, 24*time.Hour, reset.TokenTTL(), "zero TokenTTL should fall back to 24h")
 }
+
+// mintSessionForResetTest creates a session for a user, returning its
+// cookie_id. Used by the session-revoke-on-reset tests below.
+func mintSessionForResetTest(t *testing.T, svc *Service, userID int64) string {
+	t.Helper()
+	cookieID, _, err := svc.MintCookieValue()
+	require.NoError(t, err)
+	now := time.Now()
+	_, err = svc.CreateSession(context.Background(), userID, cookieID, "127.0.0.1", "test", now.Add(time.Hour), now.Add(time.Minute))
+	require.NoError(t, err)
+	return cookieID
+}
+
+func TestConfirmPasswordReset_RevokesExistingSessions(t *testing.T) {
+	// Self-service reset must revoke the target user's active sessions:
+	// a session stolen alongside the compromised password must not
+	// survive the rotation. Sessions are independent DB cookies
+	// validated separately from password_hash, so just rotating the
+	// hash is insufficient.
+	svc, reset := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
+	cookie1 := mintSessionForResetTest(t, svc, id)
+	cookie2 := mintSessionForResetTest(t, svc, id)
+	cookie3 := mintSessionForResetTest(t, svc, id)
+
+	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
+	require.NoError(t, err)
+	require.True(t, ok)
+	_, err = reset.ConfirmPasswordReset(context.Background(), issue.PlaintextToken, "new password 123", "127.0.0.1", "test")
+	require.NoError(t, err)
+
+	for _, cid := range []string{cookie1, cookie2, cookie3} {
+		sess, err := svc.GetSessionByCookieID(context.Background(), cid)
+		require.NoError(t, err)
+		assert.True(t, sess.RevokedAt.Valid, "session for cookie %s must be revoked after self-service reset", cid)
+	}
+}
+
+func TestAdminResetPassword_RevokesExistingSessions(t *testing.T) {
+	// Same security property as the self-service path, but for the
+	// admin-initiated path: when an operator resets a user's password
+	// (compromised credentials, lost device, offboarding), every
+	// active session must be revoked, not just the password rotated.
+	svc, reset := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
+	cookie1 := mintSessionForResetTest(t, svc, id)
+	cookie2 := mintSessionForResetTest(t, svc, id)
+
+	_, err := reset.AdminResetPassword(context.Background(), id, "admin:bob", "127.0.0.1", "test")
+	require.NoError(t, err)
+
+	for _, cid := range []string{cookie1, cookie2} {
+		sess, err := svc.GetSessionByCookieID(context.Background(), cid)
+		require.NoError(t, err)
+		assert.True(t, sess.RevokedAt.Valid, "session for cookie %s must be revoked after admin reset", cid)
+	}
+}
+
+func TestConfirmPasswordReset_FailureDoesNotRevokeSessions(t *testing.T) {
+	// A wrong-token confirm MUST NOT revoke sessions: a user
+	// mistyping their token (or an attacker brute-forcing) would
+	// lock the legitimate user out of their own session. The
+	// 404-returning path runs the password-rotation logic only on
+	// a successful consume (a row was returned by the CAS); a
+	// ErrTokenNotFound return path does nothing.
+	svc, reset := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
+	cookie := mintSessionForResetTest(t, svc, id)
+
+	_, err := reset.ConfirmPasswordReset(context.Background(), "this-is-not-a-real-token", "new password 123", "127.0.0.1", "test")
+	assert.ErrorIs(t, err, ErrTokenNotFound)
+
+	sess, err := svc.GetSessionByCookieID(context.Background(), cookie)
+	require.NoError(t, err)
+	assert.False(t, sess.RevokedAt.Valid, "session must remain active on a failed (wrong-token) reset")
+}
+
+func TestAdminResetPassword_FailureDoesNotRevokeSessions(t *testing.T) {
+	// Same as above for the admin path: a no-such-user target
+	// returns ErrUserNotFound without touching the (non-existent)
+	// user's sessions. This is a no-op for the (missing) user but
+	// also guards against future bugs where a partially-applied
+	// state could leak: a tx failure mid-rotation must not also
+	// revoke sessions for an unrelated user.
+	svc, reset := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
+	cookie := mintSessionForResetTest(t, svc, id)
+
+	_, err := reset.AdminResetPassword(context.Background(), 9999 /* not alice's id */, "admin:bob", "127.0.0.1", "test")
+	assert.ErrorIs(t, err, ErrUserNotFound)
+
+	sess, err := svc.GetSessionByCookieID(context.Background(), cookie)
+	require.NoError(t, err)
+	assert.False(t, sess.RevokedAt.Valid, "session must remain active when admin reset targets a non-existent user")
+}

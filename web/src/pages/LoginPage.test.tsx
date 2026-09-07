@@ -85,7 +85,7 @@ describe("LoginPage", () => {
     });
     await user.click(screen.getByRole("button", { name: "Forgot password?" }));
     await user.type(screen.getByPlaceholderText("you@example.com"), "alice@example.com");
-    await user.click(screen.getByRole("button", { name: "Send reset link" }));
+    await user.click(screen.getByRole("button", { name: "Notify operator" }));
     await waitFor(() => {
       expect(api.requestPasswordReset).toHaveBeenCalledWith({ email: "alice@example.com" });
     });

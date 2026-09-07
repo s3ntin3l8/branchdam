@@ -32,11 +32,19 @@ CREATE TABLE password_reset_tokens (
     CHECK (length(created_by) <= 64)
 );
 
--- Active (un-consumed, un-expired) tokens are unique per (user, hash);
--- the partial index narrows the conflict surface to the small set of
--- in-flight rows. /request can race on the same email's user and the
--- second INSERT will conflict on this index; the handler treats that
--- as success (the user already has a pending token).
+-- Active (un-consumed) tokens are unique per (user, hash); the partial
+-- index narrows the conflict surface to the small set of in-flight
+-- rows. /request does NOT catch the unique-violation on a concurrent
+-- second INSERT for the same (user, hash); the handler currently
+-- returns 500 in that case. In practice the (user, hash) pair can
+-- only conflict if the same plaintext token is minted twice, which
+-- requires a crypto/rand collision -- vanishingly unlikely. The
+-- partial unique index is here for defense-in-depth: it guarantees
+-- the database never holds two un-consumed tokens with the same
+-- hash, even if a future bug double-mints. The index does NOT
+-- prevent a user from holding many distinct active tokens
+-- simultaneously; rate limiting is the right defense for that
+-- (per-IP sliding window, see internal/httpapi/password_reset.go).
 CREATE UNIQUE INDEX password_reset_tokens_active_uniq
     ON password_reset_tokens(user_id, token_hash) WHERE used_at IS NULL;
 

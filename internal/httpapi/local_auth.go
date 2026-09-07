@@ -32,6 +32,7 @@ var errSetupComplete = errors.New("setup already complete")
 type localAuthHandlers struct {
 	users        *users.Service
 	loginLimiter *ratelimit.Limiter
+	resetLimiter *ratelimit.Limiter
 	sessionMw    *session.Middleware
 	reset        *users.PasswordResetService
 	log          *slog.Logger

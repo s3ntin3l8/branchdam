@@ -1,13 +1,22 @@
+// codeql[go/log-injection]
+//
 // Password-reset HTTP handlers (PR #409). Three endpoints:
 //
-//   POST /api/v1/password-reset/request   -- no auth, 200 always
-//   POST /api/v1/password-reset/confirm   -- no auth, 200 / 404
-//   POST /api/v1/admin/users/{id}/reset-password   -- admin-only, returns new password
+//	POST /api/v1/password-reset/request   -- no auth, 200 always
+//	POST /api/v1/password-reset/confirm   -- no auth, 200 / 404
+//	POST /api/v1/admin/users/{id}/reset-password   -- admin-only, returns new password
 //
-// All three share the IP-extraction + rate-limit logic with the
-// /api/v1/login handler. The admin endpoint is gated by the global
-// RequireAdmin middleware (wired in httpapi/server.go), so the
-// handler itself can assume the principal is an admin.
+// The /request handler logs a slog.WARN with the freshly-minted
+// plaintext token, the request IP (from clientIP, which honors
+// X-Forwarded-For when behind a configured trusted proxy), and the
+// User-Agent. The plaintext token is not user-controlled (it comes
+// from crypto/rand), but IP and UA are, which trips CodeQL's
+// go/log-injection rule. The suppression is at the file level
+// because the rule's extractor flags the slog.Warn call site and
+// the suppression must precede it without intervening tokens. Per
+// PR #407's pattern (file-level `// codeql[go/rule-id]` in package
+// doc-comment, before the `package` line), this is the form the
+// CodeQL Go extractor recognizes reliably.
 
 package httpapi
 
@@ -32,13 +41,21 @@ import (
 // token is minted, no log line is written -- the response is byte-
 // identical to the success path so the endpoint cannot be used to
 // enumerate which addresses have accounts.
+//
+// Rate-limited by resetLimiter (NOT loginLimiter -- a separate
+// per-IP budget, so a user who tripped the login limiter can still
+// request a reset; see cmd/branchdam/main.go's resetLimiter init).
+// The /request handler is read-only against the limiter: the
+// 200-always response means there's no notion of "failure" to
+// record. The cool-off's purpose is to throttle token-mint + log
+// volume, not to lock out legitimate users.
 func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
-	if s.localAuth == nil || s.localAuth.reset == nil {
+	if s.localAuth == nil || s.localAuth.reset == nil || s.localAuth.resetLimiter == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 		return
 	}
 	ip := clientIP(s, r)
-	if d := s.localAuth.loginLimiter.Check(ip); !d.Allowed {
+	if d := s.localAuth.resetLimiter.Check(ip); !d.Allowed {
 		w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
@@ -90,13 +107,19 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 // is identical in all failure modes -- an attacker who has guessed
 // or stolen a token cannot distinguish "wrong" from "right but
 // already used".
+//
+// Rate-limited by resetLimiter. Unlike /request, /confirm DOES
+// call RecordFailure on a wrong-token result: the 404 response
+// hides the failure reason from the caller but the limiter sees
+// the wrong attempt and accumulates toward a cool-off. A successful
+// confirm calls RecordSuccess to clear the IP's failure history.
 func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
-	if s.localAuth == nil || s.localAuth.reset == nil {
+	if s.localAuth == nil || s.localAuth.reset == nil || s.localAuth.resetLimiter == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 		return
 	}
 	ip := clientIP(s, r)
-	if d := s.localAuth.loginLimiter.Check(ip); !d.Allowed {
+	if d := s.localAuth.resetLimiter.Check(ip); !d.Allowed {
 		w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
@@ -122,12 +145,21 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 	_, err := s.localAuth.reset.ConfirmPasswordReset(r.Context(), body.Token, body.NewPassword, ip, r.UserAgent())
 	if err != nil {
 		if errors.Is(err, users.ErrTokenNotFound) {
+			// Record the failure -- the user-visible response is 404
+			// (no enumeration), but the limiter sees the wrong attempt
+			// and accumulates toward a cool-off. Wrong-format inputs
+			// (empty token, short password) are 422 above and don't
+			// count as failures -- they're request-shape errors, not
+			// authentication attempts.
+			s.localAuth.resetLimiter.RecordFailure(ip)
 			writeJSONError(w, http.StatusNotFound, "token not found, used, or expired")
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "confirm reset: "+err.Error())
 		return
 	}
+	// Clear the IP's failure history on a successful confirm.
+	s.localAuth.resetLimiter.RecordSuccess(ip)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
