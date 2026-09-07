@@ -71,7 +71,7 @@ The standard branchDAM server deployment runs as a container behind Traefik v3 a
    docker compose up -d
    ```
 
-For detailed bring-up instructions and reverse proxy configurations, see [`docs/deploy.md`](docs/deploy.md) and [`docs/forward-auth.md`](docs/forward-auth.md).
+For detailed bring-up instructions and reverse proxy configurations, see [`docs/deploy.md`](docs/deploy.md) and [`docs/forward-auth.md`](docs/forward-auth.md). For the password-login surface (`auth.mode = local` or `both`), see [`docs/local-auth.md`](docs/local-auth.md).
 
 ---
 
@@ -84,6 +84,7 @@ For detailed bring-up instructions and reverse proxy configurations, see [`docs/
 - [`docs/deploy.md`](docs/deploy.md) — First bring-up runbook and Docker setup.
 - [`docs/configuration.md`](docs/configuration.md) — Field-by-field reference for `config.yaml` and environment variables.
 - [`docs/forward-auth.md`](docs/forward-auth.md) — Traefik v3 and Authentik ForwardAuth configuration.
+- [`docs/local-auth.md`](docs/local-auth.md) — Password-login surface (setup, cookies, argon2id, rate limits, audit log).
 - [`docs/deploy-topology.md`](docs/deploy-topology.md) — Multi-machine deployment topology (NAS archive + workstation editing).
 
 ### Workflows & Lineage
