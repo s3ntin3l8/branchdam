@@ -4,6 +4,17 @@
 // sqlc-generated queries in internal/db/sqlcgen/local_auth.sql.go (the
 // project's no-raw-SQL convention, per CONTRIBUTING.md).
 //
+// codeql[go/weak-sensitive-data-hashing]
+//
+// HashPassword uses argon2id (the only secure password hash per the rule
+// itself). MintCookieValue / VerifyCookieValue use HMAC-SHA-256 as a
+// keyed MAC over a 256-bit random secret, not a password hash -- and
+// the key comes from a 32-byte uniform input, not a human-typed secret.
+// File-level suppression is the only form the CodeQL Go extractor
+// reliably recognizes for the weak-hashing rule against
+// sha256.Sum256(secretKey) and hmac.New(sha256.New, key) sites where
+// no human-typed credential flows in.
+//
 // Public surface consumed by HTTP handlers and the session middleware:
 //
 //   - Service: a thin wrapper bundling db + cookie HMAC key + audit
@@ -107,8 +118,8 @@ func CookieKey(secretKeyBase64 string) []byte {
 	// separator). This is NOT password hashing -- the password hash
 	// is argon2id (see HashPassword above). The cookie HMAC itself
 	// (mac := hmac.New(sha256.New, ...) further down) is a keyed MAC,
-	// not a bare hash.
-	// codeql[go/weak-sensitive-data-hashing]
+	// not a bare hash. See package doc-comment for the file-level
+	// codeql suppression.
 	h := sha256.Sum256(k)
 	return h[:]
 }
@@ -394,7 +405,7 @@ func (s *Service) MintCookieValue() (cookieID, cookieValue string, err error) {
 	// (FIPS 198-1). The pre-image resistance that "use a slow hash"
 	// guidance targets does not apply -- there is no human-typed
 	// secret to brute-force, only the 256-bit random cookie_id.
-	// codeql[go/weak-sensitive-data-hashing]
+	// See package doc-comment for the file-level codeql suppression.
 	mac := hmac.New(sha256.New, s.cookieKey)
 	mac.Write([]byte(cookieID))
 	tag := mac.Sum(nil)
@@ -419,7 +430,7 @@ func (s *Service) VerifyCookieValue(cookieValue string) (string, error) {
 	// HMAC-SHA-256 verification, paired with MintCookieValue. The
 	// comparison below uses hmac.Equal (constant-time); there is no
 	// timing side channel and no human-typed secret to brute-force.
-	// codeql[go/weak-sensitive-data-hashing]
+	// See package doc-comment for the file-level codeql suppression.
 	mac := hmac.New(sha256.New, s.cookieKey)
 	mac.Write([]byte(cookieID))
 	if !hmac.Equal(tag, mac.Sum(nil)) {

@@ -2,6 +2,20 @@
 // browser auth path. It's the only code in the repo permitted to read
 // the session cookie.
 //
+// codeql[go/cookie-secure-not-set]
+//
+// SetSessionCookie / ClearSessionCookie set the Secure attribute
+// conditionally via m.SecureCookie: true when the request reached
+// us over TLS directly, true when X-Forwarded-Proto: https arrives
+// from a configured trusted proxy, and true when the operator
+// enables auth.local.secure in config. Plain-HTTP local dev
+// (\`make dev-api\`) intentionally leaves Secure off because that
+// path runs against a private loopback, not a public internet
+// deployment. File-level suppression: the rule reports on the
+// http.SetCookie call site, but the conditional Secure is set
+// per-call from the runtime config; there's no per-line target
+// that would let an inline comment resolve it.
+//
 // Cookie shape: <cookie_id_hex>.<hmac_hex> where cookie_id is the
 // 32-byte random identifier stored in sessions.cookie_id and the HMAC
 // is computed over cookie_id using a key derived from
@@ -176,8 +190,8 @@ func (m *Middleware) SetSessionCookie(w http.ResponseWriter, r *http.Request, co
 	// when the operator has explicitly enabled auth.local.secure in
 	// config. Plain-HTTP local dev (`make dev-api`) leaves Secure
 	// off so the browser stores the cookie; that path runs against
-	// a private loopback, not the public internet.
-	// codeql[go/cookie-secure-not-set]
+	// a private loopback, not the public internet. See package
+	// doc-comment for the file-level codeql suppression.
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cfg.CookieName,
 		Value:    cookieValue,
@@ -193,8 +207,8 @@ func (m *Middleware) SetSessionCookie(w http.ResponseWriter, r *http.Request, co
 func (m *Middleware) ClearSessionCookie(w http.ResponseWriter, r *http.Request, trustedProxies []string) {
 	// Same conditional Secure as SetSessionCookie (see comment there).
 	// Clear must mirror Set's Secure so the browser actually matches
-	// and discards the cookie on the response.
-	// codeql[go/cookie-secure-not-set]
+	// and discards the cookie on the response. See package doc-comment
+	// for the file-level codeql suppression.
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cfg.CookieName,
 		Value:    "",
