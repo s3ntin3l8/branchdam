@@ -87,7 +87,11 @@ describe("LoginPage", () => {
     await user.type(screen.getByPlaceholderText("you@example.com"), "alice@example.com");
     await user.click(screen.getByRole("button", { name: "Notify operator" }));
     await waitFor(() => {
-      expect(api.requestPasswordReset).toHaveBeenCalledWith({ email: "alice@example.com" });
+      // React Query 5.x passes extra args to mutationFn (the QueryClient
+      // and meta). Match on the first positional arg only.
+      expect(api.requestPasswordReset).toHaveBeenCalled();
+      const firstCall = vi.mocked(api.requestPasswordReset).mock.calls[0];
+      expect(firstCall[0]).toEqual({ email: "alice@example.com" });
     });
   });
 
@@ -104,7 +108,7 @@ describe("LoginPage", () => {
     });
     await user.click(screen.getByRole("button", { name: "Forgot password?" }));
     await user.type(screen.getByPlaceholderText("you@example.com"), "alice@example.com");
-    await user.click(screen.getByRole("button", { name: "Send reset link" }));
+    await user.click(screen.getByRole("button", { name: "Notify operator" }));
     await waitFor(() => {
       expect(screen.getByTestId("reset-sent")).toBeInTheDocument();
     });
