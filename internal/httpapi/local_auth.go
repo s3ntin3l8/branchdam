@@ -32,7 +32,9 @@ var errSetupComplete = errors.New("setup already complete")
 type localAuthHandlers struct {
 	users        *users.Service
 	loginLimiter *ratelimit.Limiter
+	resetLimiter *ratelimit.Limiter
 	sessionMw    *session.Middleware
+	reset        *users.PasswordResetService
 	log          *slog.Logger
 	authMode     auth.AuthMode
 	jit          auth.JITProvisioner
@@ -42,7 +44,9 @@ type localAuthHandlers struct {
 // /api/v1/setup/admin, /api/v1/login, and DELETE /api/v1/session
 // directly on the mux (Huma's response model is JSON-only; these
 // endpoints must write Set-Cookie headers, which Huma's response
-// pipeline doesn't expose cleanly).
+// pipeline doesn't expose cleanly). The password-reset endpoints
+// (PR #409) mount in the same file because they share the rate-
+// limiter and the IP-extraction logic; see password_reset.go.
 func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 	if s.localAuth == nil {
 		// Local auth disabled. The setup endpoints 503; the session
@@ -53,12 +57,18 @@ func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/setup/admin", s.handleSetupAdminNoLocal)
 		mux.HandleFunc("POST /api/v1/login", s.handleLoginNoLocal)
 		mux.HandleFunc("DELETE /api/v1/session", s.handleLogoutNoLocal)
+		mux.HandleFunc("POST /api/v1/password-reset/request", s.handlePasswordResetRequestNoLocal)
+		mux.HandleFunc("POST /api/v1/password-reset/confirm", s.handlePasswordResetConfirmNoLocal)
+		mux.HandleFunc("POST /api/v1/admin/users/{id}/reset-password", s.handleAdminResetPasswordNoLocal)
 		return
 	}
 	mux.HandleFunc("GET /api/v1/setup/status", s.handleSetupStatus)
 	mux.HandleFunc("POST /api/v1/setup/admin", s.handleSetupAdmin)
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
 	mux.HandleFunc("DELETE /api/v1/session", s.handleLogout)
+	mux.HandleFunc("POST /api/v1/password-reset/request", s.handlePasswordResetRequest)
+	mux.HandleFunc("POST /api/v1/password-reset/confirm", s.handlePasswordResetConfirm)
+	mux.HandleFunc("POST /api/v1/admin/users/{id}/reset-password", s.handleAdminResetPassword)
 }
 
 // --- /api/v1/setup/status ---
@@ -280,6 +290,15 @@ func (s *Server) handleLoginNoLocal(w http.ResponseWriter, _ *http.Request) {
 }
 func (s *Server) handleLogoutNoLocal(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Server) handlePasswordResetRequestNoLocal(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+}
+func (s *Server) handlePasswordResetConfirmNoLocal(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+}
+func (s *Server) handleAdminResetPasswordNoLocal(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 }
 
 // --- helpers ---

@@ -338,6 +338,35 @@ func (q *Queries) InsertLoginAudit(ctx context.Context, arg InsertLoginAuditPara
 	return err
 }
 
+const updateUserPasswordHash = `-- name: UpdateUserPasswordHash :one
+UPDATE users
+SET password_hash = ?2
+WHERE id = ?1
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+`
+
+type UpdateUserPasswordHashParams struct {
+	ID           int64
+	PasswordHash sql.NullString
+}
+
+func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, updateUserPasswordHash, arg.ID, arg.PasswordHash)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Email,
+		&i.PasswordHash,
+		&i.IsAdmin,
+		&i.Source,
+		&i.CreatedAt,
+		&i.CreatedBy,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
 FROM users
