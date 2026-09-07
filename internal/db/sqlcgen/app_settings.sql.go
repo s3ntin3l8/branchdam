@@ -10,6 +10,7 @@ import (
 )
 
 const deleteAppSetting = `-- name: DeleteAppSetting :exec
+
 DELETE FROM app_settings WHERE key = ?1
 `
 
@@ -21,6 +22,7 @@ func (q *Queries) DeleteAppSetting(ctx context.Context, key string) error {
 }
 
 const listAppSettings = `-- name: ListAppSettings :many
+
 SELECT key, value, is_secret, updated_at, updated_by
 FROM app_settings
 ORDER BY key
@@ -59,6 +61,7 @@ func (q *Queries) ListAppSettings(ctx context.Context) ([]AppSetting, error) {
 }
 
 const upsertAppSetting = `-- name: UpsertAppSetting :one
+
 INSERT INTO app_settings (key, value, is_secret, updated_at, updated_by)
 VALUES (?1, ?2, ?3, unixepoch(), ?4)
 ON CONFLICT (key) DO UPDATE SET

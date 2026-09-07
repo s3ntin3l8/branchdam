@@ -9,12 +9,17 @@
 -- name: CreateDevicePairing :one
 -- Inserts the pairing row and returns it. The HTTP layer wraps this with
 -- the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
+--
+-- RETURNING includes user_id (the owner column) so the result struct
+-- matches the new DevicePairing shape introduced by migration 00018
+-- (otherwise sqlc creates a separate CreateDevicePairingRow struct that
+-- breaks the service call sites, which expect the DevicePairing type).
 INSERT INTO device_pairings (
     agent_id, friendly_label, created_at, created_by, qr_svg
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5
 )
-RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg;
+RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id;
 
 -- name: GetDevicePairingByID :one
 SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg

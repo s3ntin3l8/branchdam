@@ -11,6 +11,7 @@ import (
 )
 
 const confirmMediaEdge = `-- name: ConfirmMediaEdge :one
+
 UPDATE media_edges
 SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
 WHERE id = ?1
@@ -35,6 +36,7 @@ func (q *Queries) ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgePara
 }
 
 const getMediaEdgeBySourceTargetRel = `-- name: GetMediaEdgeBySourceTargetRel :one
+
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
@@ -74,6 +76,7 @@ func (q *Queries) GetMediaEdgeBySourceTargetRel(ctx context.Context, arg GetMedi
 }
 
 const mediaEdgeExists = `-- name: MediaEdgeExists :one
+
 SELECT EXISTS(
     SELECT 1 FROM media_edges
     WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3
@@ -98,6 +101,7 @@ func (q *Queries) MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams
 }
 
 const rejectMediaEdge = `-- name: RejectMediaEdge :one
+
 UPDATE media_edges
 SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
 WHERE id = ?1
@@ -118,6 +122,7 @@ func (q *Queries) RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams
 }
 
 const resolvedEdgeParentMissing = `-- name: ResolvedEdgeParentMissing :one
+
 SELECT parent_missing FROM v_media_edges_resolved WHERE id = ?1
 `
 
@@ -132,6 +137,7 @@ func (q *Queries) ResolvedEdgeParentMissing(ctx context.Context, id int64) (bool
 }
 
 const upsertMediaEdge = `-- name: UpsertMediaEdge :one
+
 INSERT INTO media_edges (
     source_node_id, target_node_id, relationship_type, confidence, tier,
     resolver, evidence_json, review_state

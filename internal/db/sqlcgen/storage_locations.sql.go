@@ -10,6 +10,7 @@ import (
 )
 
 const createStorageLocation = `-- name: CreateStorageLocation :one
+
 INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
@@ -80,6 +81,7 @@ func (q *Queries) DeactivateStorageLocationsNotIn(ctx context.Context, currentRo
 }
 
 const getStorageLocationByID = `-- name: GetStorageLocationByID :one
+
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
 FROM storage_locations
 WHERE id = ?1
@@ -106,6 +108,7 @@ func (q *Queries) GetStorageLocationByID(ctx context.Context, id int64) (Storage
 }
 
 const getStorageLocationByPath = `-- name: GetStorageLocationByPath :one
+
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
 FROM storage_locations
 WHERE root_path = ?1
@@ -133,6 +136,7 @@ func (q *Queries) GetStorageLocationByPath(ctx context.Context, rootPath string)
 }
 
 const listNodeCountsByLocation = `-- name: ListNodeCountsByLocation :many
+
 SELECT storage_location_id, COUNT(*) AS node_count
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
@@ -168,6 +172,7 @@ func (q *Queries) ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCount
 }
 
 const listStorageLocations = `-- name: ListStorageLocations :many
+
 SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
 FROM storage_locations
 ORDER BY id
@@ -208,6 +213,7 @@ func (q *Queries) ListStorageLocations(ctx context.Context) ([]StorageLocation, 
 }
 
 const setStorageLocationActive = `-- name: SetStorageLocationActive :exec
+
 UPDATE storage_locations SET is_active = ?2, updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -226,6 +232,7 @@ func (q *Queries) SetStorageLocationActive(ctx context.Context, arg SetStorageLo
 }
 
 const upsertStorageLocation = `-- name: UpsertStorageLocation :one
+
 INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT (root_path) DO UPDATE SET

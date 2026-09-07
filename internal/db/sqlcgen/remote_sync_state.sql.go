@@ -11,6 +11,7 @@ import (
 )
 
 const countRemoteSyncStateExhausted = `-- name: CountRemoteSyncStateExhausted :one
+
 SELECT count(*) FROM remote_sync_state
 WHERE sync_status = 'PUSH_FAILED' AND remote = ?1 AND retry_count >= ?2
 `
@@ -35,6 +36,7 @@ func (q *Queries) CountRemoteSyncStateExhausted(ctx context.Context, arg CountRe
 }
 
 const deleteRemoteSyncStateForNode = `-- name: DeleteRemoteSyncStateForNode :exec
+
 DELETE FROM remote_sync_state
 WHERE node_id = ?1
 `
@@ -46,6 +48,7 @@ func (q *Queries) DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64
 }
 
 const getRemoteSyncState = `-- name: GetRemoteSyncState :one
+
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE node_id = ?1 AND remote = ?2
@@ -76,6 +79,7 @@ func (q *Queries) GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncState
 }
 
 const listLiveNodesForSync = `-- name: ListLiveNodesForSync :many
+
 SELECT n.id, n.file_path, n.file_name, n.file_ext, n.fast_hash, n.full_hash
 FROM media_nodes n
 LEFT JOIN remote_sync_state rs
@@ -136,6 +140,7 @@ func (q *Queries) ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesFor
 }
 
 const listRemoteSyncStateByNode = `-- name: ListRemoteSyncStateByNode :many
+
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE node_id = ?1
@@ -178,6 +183,7 @@ func (q *Queries) ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) (
 }
 
 const listRemoteSyncStateByStatus = `-- name: ListRemoteSyncStateByStatus :many
+
 SELECT node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, created_at, updated_at, retry_count
 FROM remote_sync_state
 WHERE remote = ?1 AND sync_status = ?2
@@ -229,6 +235,7 @@ func (q *Queries) ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemot
 }
 
 const manualRetryRemoteSyncState = `-- name: ManualRetryRemoteSyncState :exec
+
 UPDATE remote_sync_state
 SET sync_status = 'PENDING_CLOUD_PUSH', last_error = NULL, retry_count = 0,
     updated_at = unixepoch()
@@ -263,6 +270,7 @@ func (q *Queries) ManualRetryRemoteSyncState(ctx context.Context, arg ManualRetr
 }
 
 const markRemoteSyncStateFailed = `-- name: MarkRemoteSyncStateFailed :exec
+
 UPDATE remote_sync_state
 SET sync_status = 'PUSH_FAILED', last_error = ?3, retry_count = retry_count + 1,
     last_attempt_at = unixepoch(), updated_at = unixepoch()
@@ -283,6 +291,7 @@ func (q *Queries) MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteS
 }
 
 const markRemoteSyncStatePushed = `-- name: MarkRemoteSyncStatePushed :exec
+
 UPDATE remote_sync_state
 SET sync_status = 'PUSHED', remote_asset_id = COALESCE(?3, remote_asset_id), last_error = NULL,
     retry_count = 0, last_attempt_at = unixepoch(), updated_at = unixepoch()
@@ -367,6 +376,7 @@ func (q *Queries) ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemote
 }
 
 const upsertRemoteSyncState = `-- name: UpsertRemoteSyncState :one
+
 INSERT INTO remote_sync_state (node_id, remote, sync_status, remote_asset_id, last_error, last_attempt_at, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
 ON CONFLICT (node_id, remote) DO UPDATE SET

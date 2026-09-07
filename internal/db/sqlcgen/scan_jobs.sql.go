@@ -11,6 +11,7 @@ import (
 )
 
 const cancelScanJob = `-- name: CancelScanJob :exec
+
 UPDATE scan_jobs SET state = 'CANCELLED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -22,6 +23,7 @@ func (q *Queries) CancelScanJob(ctx context.Context, id int64) error {
 }
 
 const completeScanJob = `-- name: CompleteScanJob :exec
+
 UPDATE scan_jobs SET state = 'COMPLETED', finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -31,6 +33,7 @@ func (q *Queries) CompleteScanJob(ctx context.Context, id int64) error {
 }
 
 const completeScanJobWithWarning = `-- name: CompleteScanJobWithWarning :exec
+
 UPDATE scan_jobs SET state = 'COMPLETED', last_error = ?2, finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -51,6 +54,7 @@ func (q *Queries) CompleteScanJobWithWarning(ctx context.Context, arg CompleteSc
 }
 
 const countRunningScanJobs = `-- name: CountRunningScanJobs :one
+
 SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
 `
 
@@ -62,6 +66,7 @@ func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
 }
 
 const countRunningScansForLocationByKind = `-- name: CountRunningScansForLocationByKind :one
+
 SELECT COUNT(*) FROM scan_jobs
 WHERE storage_location_id = ?1 AND kind = ?2 AND state = 'RUNNING'
 `
@@ -91,6 +96,7 @@ func (q *Queries) CountRunningScansForLocationByKind(ctx context.Context, arg Co
 }
 
 const countScanJobsFiltered = `-- name: CountScanJobsFiltered :one
+
 SELECT COUNT(*)
 FROM scan_jobs
 WHERE (?1 IS NULL OR kind = ?1)
@@ -110,6 +116,7 @@ func (q *Queries) CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFi
 }
 
 const createScanJob = `-- name: CreateScanJob :one
+
 INSERT INTO scan_jobs (storage_location_id, kind, state, started_at, updated_at)
 VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch())
 RETURNING id, storage_location_id, kind, state, files_seen, files_hashed,
@@ -121,9 +128,24 @@ type CreateScanJobParams struct {
 	Kind              string
 }
 
-func (q *Queries) CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error) {
+type CreateScanJobRow struct {
+	ID                int64
+	StorageLocationID sql.NullInt64
+	Kind              string
+	State             string
+	FilesSeen         int64
+	FilesHashed       int64
+	FilesFailed       int64
+	EdgesCreated      int64
+	StartedAt         int64
+	FinishedAt        sql.NullInt64
+	LastError         sql.NullString
+	UpdatedAt         int64
+}
+
+func (q *Queries) CreateScanJob(ctx context.Context, arg CreateScanJobParams) (CreateScanJobRow, error) {
 	row := q.db.QueryRowContext(ctx, createScanJob, arg.StorageLocationID, arg.Kind)
-	var i ScanJob
+	var i CreateScanJobRow
 	err := row.Scan(
 		&i.ID,
 		&i.StorageLocationID,
@@ -142,6 +164,7 @@ func (q *Queries) CreateScanJob(ctx context.Context, arg CreateScanJobParams) (S
 }
 
 const failScanJob = `-- name: FailScanJob :exec
+
 UPDATE scan_jobs SET state = 'FAILED', last_error = ?2, finished_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1
 `
 
@@ -156,15 +179,31 @@ func (q *Queries) FailScanJob(ctx context.Context, arg FailScanJobParams) error 
 }
 
 const getScanJob = `-- name: GetScanJob :one
+
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
        files_failed, edges_created, started_at, finished_at, last_error, updated_at
 FROM scan_jobs
 WHERE id = ?1
 `
 
-func (q *Queries) GetScanJob(ctx context.Context, id int64) (ScanJob, error) {
+type GetScanJobRow struct {
+	ID                int64
+	StorageLocationID sql.NullInt64
+	Kind              string
+	State             string
+	FilesSeen         int64
+	FilesHashed       int64
+	FilesFailed       int64
+	EdgesCreated      int64
+	StartedAt         int64
+	FinishedAt        sql.NullInt64
+	LastError         sql.NullString
+	UpdatedAt         int64
+}
+
+func (q *Queries) GetScanJob(ctx context.Context, id int64) (GetScanJobRow, error) {
 	row := q.db.QueryRowContext(ctx, getScanJob, id)
-	var i ScanJob
+	var i GetScanJobRow
 	err := row.Scan(
 		&i.ID,
 		&i.StorageLocationID,
@@ -183,6 +222,7 @@ func (q *Queries) GetScanJob(ctx context.Context, id int64) (ScanJob, error) {
 }
 
 const listRecentScanJobs = `-- name: ListRecentScanJobs :many
+
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
        files_failed, edges_created, started_at, finished_at, last_error, updated_at
 FROM scan_jobs
@@ -190,15 +230,30 @@ ORDER BY started_at DESC
 LIMIT ?1
 `
 
-func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error) {
+type ListRecentScanJobsRow struct {
+	ID                int64
+	StorageLocationID sql.NullInt64
+	Kind              string
+	State             string
+	FilesSeen         int64
+	FilesHashed       int64
+	FilesFailed       int64
+	EdgesCreated      int64
+	StartedAt         int64
+	FinishedAt        sql.NullInt64
+	LastError         sql.NullString
+	UpdatedAt         int64
+}
+
+func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ListRecentScanJobsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRecentScanJobs, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ScanJob{}
+	items := []ListRecentScanJobsRow{}
 	for rows.Next() {
-		var i ScanJob
+		var i ListRecentScanJobsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.StorageLocationID,
@@ -227,6 +282,7 @@ func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJo
 }
 
 const listScanJobsFiltered = `-- name: ListScanJobsFiltered :many
+
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
        files_failed, edges_created, started_at, finished_at, last_error, updated_at
 FROM scan_jobs
@@ -243,7 +299,22 @@ type ListScanJobsFilteredParams struct {
 	State  interface{}
 }
 
-func (q *Queries) ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error) {
+type ListScanJobsFilteredRow struct {
+	ID                int64
+	StorageLocationID sql.NullInt64
+	Kind              string
+	State             string
+	FilesSeen         int64
+	FilesHashed       int64
+	FilesFailed       int64
+	EdgesCreated      int64
+	StartedAt         int64
+	FinishedAt        sql.NullInt64
+	LastError         sql.NullString
+	UpdatedAt         int64
+}
+
+func (q *Queries) ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ListScanJobsFilteredRow, error) {
 	rows, err := q.db.QueryContext(ctx, listScanJobsFiltered,
 		arg.Limit,
 		arg.Offset,
@@ -254,9 +325,9 @@ func (q *Queries) ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilt
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ScanJob{}
+	items := []ListScanJobsFilteredRow{}
 	for rows.Next() {
-		var i ScanJob
+		var i ListScanJobsFilteredRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.StorageLocationID,
@@ -311,6 +382,7 @@ func (q *Queries) ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.N
 }
 
 const updateScanJobProgress = `-- name: UpdateScanJobProgress :exec
+
 UPDATE scan_jobs
 SET files_seen = ?2, files_hashed = ?3, files_failed = ?4, edges_created = ?5, updated_at = unixepoch()
 WHERE id = ?1

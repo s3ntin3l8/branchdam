@@ -11,6 +11,7 @@ import (
 )
 
 const countPendingAgentEvents = `-- name: CountPendingAgentEvents :one
+
 SELECT COUNT(*)
 FROM event_queue
 WHERE status = 'PENDING'
@@ -24,6 +25,7 @@ func (q *Queries) CountPendingAgentEvents(ctx context.Context) (int64, error) {
 }
 
 const enqueueAgentEvent = `-- name: EnqueueAgentEvent :one
+
 INSERT INTO event_queue (event_uuid, agent_id, event_type, payload_json, status)
 VALUES (?1, ?2, ?3, ?4, 'PENDING')
 RETURNING id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
@@ -77,6 +79,7 @@ func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventPa
 }
 
 const getAgentEventByUUID = `-- name: GetAgentEventByUUID :one
+
 SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
 WHERE event_uuid = ?1
@@ -114,6 +117,7 @@ func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (Ge
 }
 
 const getLatestProcessedAgentEventByAgent = `-- name: GetLatestProcessedAgentEventByAgent :one
+
 SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
 WHERE agent_id = ?1 AND status = 'PROCESSED'
@@ -153,6 +157,7 @@ func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agent
 }
 
 const incrementAgentEventRetry = `-- name: IncrementAgentEventRetry :exec
+
 UPDATE event_queue
 SET retry_count = retry_count + 1, error_log = ?2
 WHERE id = ?1
@@ -169,6 +174,7 @@ func (q *Queries) IncrementAgentEventRetry(ctx context.Context, arg IncrementAge
 }
 
 const listPendingAgentEvents = `-- name: ListPendingAgentEvents :many
+
 SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
 WHERE status = 'PENDING'
@@ -224,6 +230,7 @@ func (q *Queries) ListPendingAgentEvents(ctx context.Context, limit int64) ([]Li
 }
 
 const markAgentEventFailed = `-- name: MarkAgentEventFailed :exec
+
 UPDATE event_queue
 SET status = 'FAILED', processed_at = unixepoch(), error_log = ?2
 WHERE id = ?1
@@ -240,6 +247,7 @@ func (q *Queries) MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFa
 }
 
 const markAgentEventProcessed = `-- name: MarkAgentEventProcessed :exec
+
 UPDATE event_queue
 SET status = 'PROCESSED', processed_at = unixepoch(), error_log = NULL
 WHERE id = ?1
