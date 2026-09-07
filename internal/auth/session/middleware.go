@@ -170,7 +170,6 @@ func (m *Middleware) Middleware(next http.Handler) http.Handler {
 
 // SetSessionCookie writes the cookie value to the response.
 func (m *Middleware) SetSessionCookie(w http.ResponseWriter, r *http.Request, cookieValue string, maxAge int, trustedProxies []string) {
-	// codeql[go/cookie-secure-not-set]
 	// Secure is set conditionally via SecureCookie: true when the
 	// request reached us over TLS directly (r.TLS != nil), or via
 	// X-Forwarded-Proto: https from a configured trusted proxy, or
@@ -178,6 +177,7 @@ func (m *Middleware) SetSessionCookie(w http.ResponseWriter, r *http.Request, co
 	// config. Plain-HTTP local dev (`make dev-api`) leaves Secure
 	// off so the browser stores the cookie; that path runs against
 	// a private loopback, not the public internet.
+	// codeql[go/cookie-secure-not-set]
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cfg.CookieName,
 		Value:    cookieValue,
@@ -191,10 +191,10 @@ func (m *Middleware) SetSessionCookie(w http.ResponseWriter, r *http.Request, co
 
 // ClearSessionCookie instructs the browser to discard the cookie.
 func (m *Middleware) ClearSessionCookie(w http.ResponseWriter, r *http.Request, trustedProxies []string) {
-	// codeql[go/cookie-secure-not-set]
 	// Same conditional Secure as SetSessionCookie (see comment there).
 	// Clear must mirror Set's Secure so the browser actually matches
 	// and discards the cookie on the response.
+	// codeql[go/cookie-secure-not-set]
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cfg.CookieName,
 		Value:    "",

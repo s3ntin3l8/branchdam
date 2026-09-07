@@ -101,7 +101,6 @@ func CookieKey(secretKeyBase64 string) []byte {
 	if err != nil || len(k) != 32 {
 		return nil
 	}
-	// codeql[go/weak-sensitive-data-hashing]
 	// SHA-256 here is used to derive a 32-byte HMAC key from the
 	// operator-supplied BRANCHDAM_SECRET_KEY (a 32-byte secret input
 	// is already uniformly distributed; SHA-256 acts as a domain
@@ -109,6 +108,7 @@ func CookieKey(secretKeyBase64 string) []byte {
 	// is argon2id (see HashPassword above). The cookie HMAC itself
 	// (mac := hmac.New(sha256.New, ...) further down) is a keyed MAC,
 	// not a bare hash.
+	// codeql[go/weak-sensitive-data-hashing]
 	h := sha256.Sum256(k)
 	return h[:]
 }
@@ -388,13 +388,13 @@ func (s *Service) MintCookieValue() (cookieID, cookieValue string, err error) {
 		return "", "", fmt.Errorf("mint cookie id: %w", err)
 	}
 	cookieID = fmt.Sprintf("%x", id)
-	// codeql[go/weak-sensitive-data-hashing]
 	// HMAC-SHA-256 is the right primitive here: a KEYED MAC over a
 	// 32-byte random secret. Not a password hash. HMAC-SHA-256 is
 	// explicitly in NIST SP 800-107's recommended MAC algorithms
 	// (FIPS 198-1). The pre-image resistance that "use a slow hash"
 	// guidance targets does not apply -- there is no human-typed
 	// secret to brute-force, only the 256-bit random cookie_id.
+	// codeql[go/weak-sensitive-data-hashing]
 	mac := hmac.New(sha256.New, s.cookieKey)
 	mac.Write([]byte(cookieID))
 	tag := mac.Sum(nil)
@@ -416,10 +416,10 @@ func (s *Service) VerifyCookieValue(cookieValue string) (string, error) {
 	if err != nil {
 		return "", nil
 	}
-	// codeql[go/weak-sensitive-data-hashing]
 	// HMAC-SHA-256 verification, paired with MintCookieValue. The
 	// comparison below uses hmac.Equal (constant-time); there is no
 	// timing side channel and no human-typed secret to brute-force.
+	// codeql[go/weak-sensitive-data-hashing]
 	mac := hmac.New(sha256.New, s.cookieKey)
 	mac.Write([]byte(cookieID))
 	if !hmac.Equal(tag, mac.Sum(nil)) {
