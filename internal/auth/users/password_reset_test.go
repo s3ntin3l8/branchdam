@@ -325,3 +325,27 @@ func TestAdminResetPassword_FailureDoesNotRevokeSessions(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, sess.RevokedAt.Valid, "session must remain active when admin reset targets a non-existent user")
 }
+
+// TestConfirmPasswordReset_BadTokenDoesNotRevoke covers the
+// no-side-effects invariant for the wrong-token case. The
+// audit-row-content (outcome='bad-password', identifier=token hash
+// prefix) is verified end-to-end in the HTTP-layer test in
+// internal/httpapi/local_auth_routes_test.go; the
+// underlying side-effect invariant (no session revocation on
+// failure) is what the service-layer test guards. A future
+// regression that swaps the CAS update for an unconditional
+// session-revoke would break this test but not the HTTP one.
+func TestConfirmPasswordReset_BadTokenDoesNotRevoke(t *testing.T) {
+	svc, reset := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
+	cookie := mintSessionForResetTest(t, svc, id)
+
+	_, err := reset.ConfirmPasswordReset(context.Background(), "this-token-does-not-exist", "newpassword123", "127.0.0.1", "test-agent")
+	assert.ErrorIs(t, err, ErrTokenNotFound)
+
+	// The session must remain active -- a failed confirm never
+	// touches the user's session table.
+	sess, err := svc.GetSessionByCookieID(context.Background(), cookie)
+	require.NoError(t, err)
+	assert.False(t, sess.RevokedAt.Valid, "session must remain active on a failed (wrong-token) confirm -- matches the no-side-effects invariant for ErrTokenNotFound")
+}

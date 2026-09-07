@@ -157,9 +157,22 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 	now := p.svc.nowFn()
 	usedAt := now.Unix()
 
+	// Failure-audit row payload is captured during the tx so we
+	// can write it in a SEPARATE tx after the lookup/rotation tx
+	// commits. Writing it inside the withTx callback would be a
+	// nested transaction: p.svc.WriteLoginAudit calls p.svc.withTx
+	// under the hood, and SQLite's single-writer pool (per
+	// AGENTS.md invariant #2) means BeginTx blocks forever waiting
+	// for the outer tx to release. So: capture -> commit -> audit.
+	type failureAudit struct {
+		userID   sql.NullInt64
+		username string
+		kind     string
+		tokenID  int64
+	}
 	var (
-		rotated           sqlcgen.User
-		usernamePresented string
+		rotated         sqlcgen.User
+		failureAuditRow *failureAudit
 	)
 	err := p.svc.withTx(ctx, func(q *sqlcgen.Queries) error {
 		match, err := q.GetPasswordResetTokenByHash(ctx, sqlcgen.GetPasswordResetTokenByHashParams{
@@ -168,6 +181,28 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		})
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				// We don't know which user this token was issued
+				// to (the index lookup missed), so we can't log
+				// a username. Use a 16-char prefix of the
+				// presented token's sha256 hash as the
+				// identifier instead -- it gives an operator
+				// hunting for repeated abuse from a single
+				// client something to correlate on without
+				// leaking the full token. The 16-char prefix
+				// collides with negligible probability on a
+				// small fleet. outcome is 'bad-password' (the
+				// token IS the credential here, not
+				// 'user-locked' which implies account lockout
+				// -- a separate concept that didn't happen).
+				presented := tokenHash
+				if len(presented) > 16 {
+					presented = presented[:16]
+				}
+				failureAuditRow = &failureAudit{
+					userID:   sql.NullInt64{},
+					username: presented,
+					kind:     "self-service-confirm-no-match",
+				}
 				return ErrTokenNotFound
 			}
 			return err
@@ -181,6 +216,21 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		})
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				// Race: the token was consumed between
+				// GetByHash and Consume. We DO have the
+				// token_id (and via the original match
+				// row, the user_id), so the audit row
+				// carries a real identity.
+				usernameForAudit := match.CreatedBy
+				if userRow, lookupErr := q.GetUserByID(ctx, match.UserID); lookupErr == nil {
+					usernameForAudit = userRow.Username
+				}
+				failureAuditRow = &failureAudit{
+					userID:   sql.NullInt64{Int64: match.UserID, Valid: true},
+					username: usernameForAudit,
+					kind:     "self-service-confirm-already-consumed",
+					tokenID:  match.ID,
+				}
 				return ErrTokenNotFound
 			}
 			return err
@@ -190,7 +240,6 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		if err != nil {
 			return fmt.Errorf("password-reset: lookup user after consume: %w", err)
 		}
-		usernamePresented = user.Username
 
 		hash, err := p.svc.HashPassword(newPassword)
 		if err != nil {
@@ -228,7 +277,23 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 	})
 	if err != nil {
 		if errors.Is(err, ErrTokenNotFound) {
-			p.svc.WriteLoginAudit(ctx, sql.NullInt64{}, usernamePresented, "password-reset", "user-locked", ip, userAgent, `{"kind":"self-service-confirm-failed"}`)
+			// Write the failure-accurate audit row in its own
+			// transaction -- see the comment at the top of
+			// this function for why this can't be inside the
+			// outer withTx callback. Best-effort: a transient
+			// DB failure is logged by WriteLoginAudit and
+			// swallowed, so it doesn't mask the 404 to the
+			// caller.
+			if failureAuditRow != nil {
+				details := fmt.Sprintf(`{"kind":%q,"token_id":%d}`, failureAuditRow.kind, failureAuditRow.tokenID)
+				p.svc.WriteLoginAudit(ctx, failureAuditRow.userID, failureAuditRow.username, "password-reset", "bad-password", ip, userAgent, details)
+			}
+			// Returning the generic error here keeps the HTTP
+			// layer's 404 response byte-identical across all
+			// failure modes (no enumeration of "wrong" vs
+			// "used" vs "expired" -- the audit row carries the
+			// precise reason for the operator to investigate,
+			// the response carries only the outcome class).
 			return ConfirmResult{}, ErrTokenNotFound
 		}
 		return ConfirmResult{}, err

@@ -351,11 +351,40 @@ func (s *Server) Handler() http.Handler {
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))
 }
 
+// noAuthLocalAuthPaths are the local-auth endpoints that MUST be reachable
+// without any session cookie or admin principal. A user who forgot their
+// password has no session and no admin status; gating these behind
+// requireAdmin (the default of openAPIMiddleware) makes them unreachable
+// (Hermes re-review on PR #416, 2026-09-07). The set is intentionally
+// narrow: only the four endpoints that are no-auth by design. The
+// admin-side POST /api/v1/admin/users/{id}/reset-password is NOT in
+// this set -- it requires RequireAdmin and belongs on the gated path.
+var noAuthLocalAuthPaths = map[string]struct{}{
+	"GET /api/v1/setup/status":            {},
+	"POST /api/v1/setup/admin":            {},
+	"POST /api/v1/login":                  {},
+	"DELETE /api/v1/session":              {},
+	"POST /api/v1/password-reset/request": {},
+	"POST /api/v1/password-reset/confirm": {},
+}
+
 func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Logger, next http.Handler) http.Handler {
 	requireAdmin := auth.RequireAdmin(allowedGroups, log)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		isOpenAPI := path == "/openapi.json" || path == "/openapi.yaml" || path == "/openapi" || path == "/docs" || strings.HasPrefix(path, "/docs/") || strings.HasPrefix(path, "/openapi/")
+		// No-auth local-auth paths skip requireAdmin entirely.
+		// A request to one of these paths with no session cookie
+		// is the design state (forgotten password, fresh setup)
+		// and must NOT 403. The handlers themselves enforce any
+		// per-endpoint policy (e.g. password-reset/confirm is
+		// 200 on success and 404 on failure; session DELETE is a
+		// no-op without a cookie).
+		key := r.Method + " " + path
+		if _, ok := noAuthLocalAuthPaths[key]; ok {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if isOpenAPI {
 			if !exposeOpenAPI {
 				http.NotFound(w, r)
