@@ -27,6 +27,13 @@ export interface Me {
   // their IdP, not by branchDAM.
   isLocal?: boolean;
   localUserId?: number;
+  // attributionUserId is the resolved users.id for this Principal,
+  // populated by /api/v1/me via internal/users.ResolveOrCreate. The
+  // SPA pins it on /api/v1/assets?uploadedByUserId= for the "My
+  // uploads" filter. 0 / undefined means attribution isn't wired
+  // (forward-only deployments, machine principals, anonymous
+  // requests) -- the filter is then disabled.
+  attributionUserId?: number;
 }
 
 export interface SetupStatus {
@@ -130,6 +137,12 @@ export interface Asset {
   originalDocumentId?: string;
   cameraModel?: string;
   thumbState: ThumbState;
+  // uploadedByUserID carries the resolved attribution user id from
+  // media_nodes.uploaded_by_user_id (migration 00020). Optional: legacy
+  // rows and background-scan writes have null. The SPA's "My uploads"
+  // filter pins it to the request's own id; the row-level render
+  // resolves it via /api/v1/users when present.
+  uploadedByUserId?: number;
 }
 
 export interface Edge {
@@ -158,7 +171,7 @@ export interface AuditNode {
   thumbState: ThumbState;
 }
 
-export interface AuditEntry {
+export interface EdgeAuditEntry {
   id: number;
   sourceNodeId: number;
   targetNodeId: number;
@@ -446,6 +459,11 @@ export interface AssetQueryParams {
   storageLocationId?: number;
   lifecycleState?: Asset["lifecycleState"];
   unlinkedOnly?: boolean;
+  // uploadedByUserId, when set, restricts the list to assets that
+  // carry the given attribution FK (media_nodes.uploaded_by_user_id).
+  // The "My uploads" filter passes the request's own id; 0 / undefined
+  // disables the filter.
+  uploadedByUserId?: number;
 }
 
 export interface JobsQueryParams {
@@ -562,4 +580,48 @@ export interface SourceStatusResult {
   filePath?: string;
   indexingStatus?: string;
   lifecycleState?: string;
+}
+
+// AttributionUser is one row from /api/v1/users (admin-only). Used by
+// the asset list's "uploaded by" lookup and the pairing UI's
+// "Owned by" selector. externalUid is the stable per-user id
+// (Authentik X-Authentik-Uid); username is the denormalized display
+// label, refreshed on every ResolveOrCreate.
+export interface AttributionUser {
+  id: number;
+  authProvider: string;
+  externalUid: string;
+  username: string;
+  email?: string;
+  createdAt: number;
+  lastSeenAt: number;
+}
+
+// AuditEntry is the merged row shape returned by /api/v1/audit. Source
+// discriminates actor_audit (cross-cutting admin event log) from
+// login_audit (PR #407's local-auth login/reset log); the route merges
+// them via ?type=activity|login.
+export interface AuditEntry {
+  id: number;
+  source: "actor_audit" | "login_audit";
+  actorUserId?: number;
+  actorKind: string;
+  actorName: string;
+  event: string;
+  resourceType?: string;
+  resourceId?: string;
+  detailsJson?: string;
+  createdAt: number;
+}
+
+export interface AuditQueryParams {
+  type?: "activity" | "login";
+  actorUserId?: number;
+  event?: string;
+  resourceType?: string;
+  resourceId?: string;
+  sinceUnix?: number;
+  untilUnix?: number;
+  limit?: number;
+  offset?: number;
 }

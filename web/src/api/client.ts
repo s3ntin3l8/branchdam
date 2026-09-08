@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AttributionUser, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -40,6 +40,26 @@ export const api = {
   listPathRewrites: () => request<PathRewrite[]>("/api/v1/config/path-rewrites"),
 
   listStorageLocations: () => request<{ locations: StorageLocation[] }>("/api/v1/storage-locations"),
+
+  // Multi-user attribution: list of all users (admin-only). Backs the
+  // pairing UI's "Owned by" selector and the asset list's "uploaded by"
+  // display. Returns 503 when the server hasn't wired attribution --
+  // matches the route's 503 contract (test setups, forward-only
+  // deployments without users). The SPA treats that as "list is empty".
+  listUsers: () => request<{ users: AttributionUser[]; total: number }>("/api/v1/users"),
+  listAudit: (params: AuditQueryParams = {}) => {
+    const qs = new URLSearchParams();
+    if (params.type) qs.set("type", params.type);
+    if (params.actorUserId) qs.set("actorUserId", String(params.actorUserId));
+    if (params.event) qs.set("event", params.event);
+    if (params.resourceType) qs.set("resourceType", params.resourceType);
+    if (params.resourceId) qs.set("resourceId", params.resourceId);
+    if (params.sinceUnix) qs.set("sinceUnix", String(params.sinceUnix));
+    if (params.untilUnix) qs.set("untilUnix", String(params.untilUnix));
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    return request<{ entries: AuditEntry[]; total: number }>(`/api/v1/audit?${qs.toString()}`);
+  },
 
   // Local-auth endpoints (only meaningful when auth.mode is local or both).
   // The SPA calls setupStatus() on the login page to decide whether to
@@ -87,6 +107,7 @@ export const api = {
     if (params.storageLocationId) qs.set("storageLocationId", String(params.storageLocationId));
     if (params.lifecycleState) qs.set("lifecycleState", params.lifecycleState);
     if (params.unlinkedOnly) qs.set("unlinkedOnly", "true");
+    if (params.uploadedByUserId) qs.set("uploadedByUserId", String(params.uploadedByUserId));
     return request<{ assets: Asset[]; total: number }>(`/api/v1/assets?${qs.toString()}`);
   },
   getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),
@@ -106,7 +127,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.beforeId) qs.set("beforeId", String(params.beforeId));
-    return request<{ entries: AuditEntry[]; total: number }>(`/api/v1/edges/audit?${qs}`);
+    return request<{ entries: EdgeAuditEntry[]; total: number }>(`/api/v1/edges/audit?${qs}`);
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),
   rejectEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/reject`, { method: "POST" }),

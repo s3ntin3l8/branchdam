@@ -155,6 +155,14 @@ type MeOutput struct {
 		// can't be logged out from branchDAM).
 		IsLocal     bool  `json:"isLocal,omitempty"`
 		LocalUserID int64 `json:"localUserId,omitempty"`
+		// AttributionUserID is the resolved users.id for this
+		// Principal (internal/users.ResolveOrCreate). Non-zero for any
+		// authenticated browser request; the SPA pins it on the
+		// /api/v1/assets?uploadedByUserId= filter for the "My uploads"
+		// view, and resolves it via /api/v1/users for row-level
+		// "uploaded by" display. 0 means attribution isn't wired or
+		// the principal isn't usable (machine, anonymous).
+		AttributionUserID int64 `json:"attributionUserId,omitempty"`
 	}
 }
 
@@ -175,6 +183,19 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 		if localView.UserID != 0 {
 			out.Body.IsLocal = true
 			out.Body.LocalUserID = localView.UserID
+		}
+		// Lazy-resolve the attribution user id so the SPA can pin the
+		// "My uploads" filter without a separate round-trip. The
+		// ResolveOrCreate itself is the write path: the first request
+		// from a new Authentik user inserts the users row; every later
+		// request from the same user is a refresh-on-sight of the
+		// denormalized username/email + last_seen_at. A failed
+		// resolve leaves AttributionUserID at 0, which the SPA treats
+		// as "My uploads disabled" -- never as "show everyone else's".
+		if s.attribution != nil && p.Kind == auth.KindUser && p.Authenticated && p.ExternalUID != "" {
+			if a, err := s.attribution.ResolveOrCreate(ctx, p); err == nil {
+				out.Body.AttributionUserID = a.ID
+			}
 		}
 	}
 	return out, nil

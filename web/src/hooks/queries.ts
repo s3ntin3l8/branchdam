@@ -13,6 +13,29 @@ export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: api.me });
 }
 
+// useUsers backs the asset list's "uploaded by" column lookup + the
+// pairing UI's "Owned by" selector. /api/v1/users is admin-only and
+// returns 503 in deployments without attribution wired; the SPA
+// tolerates that as "empty cache" (the table falls back to "#id").
+export function useUsers() {
+  return useQuery({
+    queryKey: ["users"],
+    queryFn: () => api.listUsers(),
+    retry: (failureCount, error) => {
+      // 503 = feature disabled; don't retry, don't pollute the console.
+      if (error instanceof Error && /503/.test(error.message)) return false;
+      return failureCount < 2;
+    },
+  });
+}
+
+export function useAudit(params: import("../api/types").AuditQueryParams = {}) {
+  return useQuery({
+    queryKey: ["audit", params],
+    queryFn: () => api.listAudit(params),
+  });
+}
+
 export function useConfig() {
   return useQuery({ queryKey: ["config"], queryFn: api.config });
 }
