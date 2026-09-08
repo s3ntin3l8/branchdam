@@ -28,7 +28,7 @@ export default function ManualUploadZone() {
   const uploadFile = useUploadFile();
 
   const locations = locationsData?.locations ?? [];
-  const writableLocations = locations.filter((l) => !l.readOnly);
+  const archiveLocations = locations.filter((l) => !l.readOnly && l.tier === "TIER3_MASTER_ARCHIVE");
 
   const [selectedLocationId, setSelectedLocationId] = useState<number | "">("");
   const [applyNamingTemplate, setApplyNamingTemplate] = useState<boolean>(true);
@@ -41,13 +41,12 @@ export default function ManualUploadZone() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
-  // Set default writable location once loaded
+  // Set default writable archive location once loaded
   React.useEffect(() => {
-    if (selectedLocationId === "" && writableLocations.length > 0) {
-      const defaultLoc = writableLocations.find((l) => l.tier === "TIER3_MASTER_ARCHIVE") || writableLocations[0];
-      setSelectedLocationId(defaultLoc.id);
+    if (selectedLocationId === "" && archiveLocations.length > 0) {
+      setSelectedLocationId(archiveLocations[0].id);
     }
-  }, [writableLocations, selectedLocationId]);
+  }, [archiveLocations, selectedLocationId]);
 
   const addFilesToQueue = useCallback((files: { file: File; relativePath?: string }[]) => {
     const newItems: QueueItem[] = files.map(({ file, relativePath }) => ({
@@ -271,10 +270,10 @@ export default function ManualUploadZone() {
             >
               {loadingLocations ? (
                 <option value="">Loading storage locations…</option>
-              ) : writableLocations.length === 0 ? (
-                <option value="">No writable storage locations found</option>
+              ) : archiveLocations.length === 0 ? (
+                <option value="">No writable Master Archive locations found</option>
               ) : (
-                writableLocations.map((loc: StorageLocation) => (
+                archiveLocations.map((loc: StorageLocation) => (
                   <option key={loc.id} value={loc.id}>
                     {loc.name} ({loc.tier})
                   </option>
@@ -282,7 +281,7 @@ export default function ManualUploadZone() {
               )}
             </select>
             <p className="mt-1 text-xs text-neutral-500">
-              Only writable storage locations are available for upload.
+              Uploads land in Master Archive (TIER3_MASTER_ARCHIVE) storage locations.
             </p>
           </div>
 
@@ -380,7 +379,7 @@ export default function ManualUploadZone() {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={isProcessingQueue || writableLocations.length === 0}
+            disabled={isProcessingQueue || archiveLocations.length === 0}
             className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
           >
             Choose Files
@@ -388,7 +387,7 @@ export default function ManualUploadZone() {
           <button
             type="button"
             onClick={() => folderInputRef.current?.click()}
-            disabled={isProcessingQueue || writableLocations.length === 0}
+            disabled={isProcessingQueue || archiveLocations.length === 0}
             className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
           >
             Choose Folder
