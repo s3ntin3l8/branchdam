@@ -10,10 +10,11 @@ interface SettingsLayoutProps {
   children: React.ReactNode;
 }
 
-function getScrollParent(element: HTMLElement | null): HTMLElement | Window {
+function getScrollParent(element: HTMLElement | null): HTMLElement | Window | null {
+  if (typeof window === "undefined") return null;
   let el: HTMLElement | null = element?.parentElement ?? null;
   while (el) {
-    if (typeof window !== "undefined" && window.getComputedStyle) {
+    if (window.getComputedStyle) {
       const overflowY = window.getComputedStyle(el).overflowY;
       if (overflowY === "auto" || overflowY === "scroll") {
         return el;
@@ -21,7 +22,7 @@ function getScrollParent(element: HTMLElement | null): HTMLElement | Window {
     }
     el = el.parentElement;
   }
-  return typeof window !== "undefined" ? window : (null as unknown as Window);
+  return window;
 }
 
 export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
@@ -31,23 +32,30 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
   const isProgrammaticScrollRef = useRef(false);
   const scrollTimeoutRef = useRef<number | null>(null);
 
+  const resetScrollSettlingTimer = useCallback(() => {
+    if (scrollTimeoutRef.current !== null) {
+      window.clearTimeout(scrollTimeoutRef.current);
+    }
+    scrollTimeoutRef.current = window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+      scrollTimeoutRef.current = null;
+    }, 150);
+  }, []);
+
   const scrollTo = useCallback((id: string) => {
     const el = containerRef.current?.querySelector(`#${CSS.escape(id)}`);
     if (el) {
-      if (scrollTimeoutRef.current !== null) {
-        window.clearTimeout(scrollTimeoutRef.current);
-      }
       isProgrammaticScrollRef.current = true;
       setActiveId(id);
+      if (typeof window !== "undefined" && window.history?.replaceState) {
+        window.history.replaceState(null, "", `#${id}`);
+      }
       if (typeof el.scrollIntoView === "function") {
         el.scrollIntoView({ behavior: "smooth", block: "start" });
       }
-      scrollTimeoutRef.current = window.setTimeout(() => {
-        isProgrammaticScrollRef.current = false;
-        scrollTimeoutRef.current = null;
-      }, 800);
+      resetScrollSettlingTimer();
     }
-  }, []);
+  }, [resetScrollSettlingTimer]);
 
   useEffect(() => {
     const hash = window.location.hash.replace(/^#/, "");
@@ -84,12 +92,17 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
 
     const scrollParent = getScrollParent(container);
     const handleScroll = () => {
-      if (isProgrammaticScrollRef.current || categories.length === 0) return;
+      if (isProgrammaticScrollRef.current) {
+        // Keep the lock held while smooth-scroll events are still arriving
+        resetScrollSettlingTimer();
+        return;
+      }
+      if (categories.length === 0) return;
 
       let isAtBottom = false;
       if (scrollParent instanceof HTMLElement) {
         isAtBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 24;
-      } else if (typeof window !== "undefined" && typeof document !== "undefined") {
+      } else if (scrollParent === window && typeof document !== "undefined") {
         isAtBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
       }
 
@@ -111,7 +124,7 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
         window.clearTimeout(scrollTimeoutRef.current);
       }
     };
-  }, [categories]);
+  }, [categories, resetScrollSettlingTimer]);
 
   return (
     <div className="flex gap-6">

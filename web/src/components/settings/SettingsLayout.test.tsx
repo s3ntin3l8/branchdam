@@ -50,8 +50,10 @@ describe("SettingsLayout", () => {
     expect(appearanceLink).not.toHaveClass("bg-neutral-800");
   });
 
-  it("highlights the clicked category and calls scrollIntoView", async () => {
+  it("highlights the clicked category, calls scrollIntoView, and updates URL hash via history.replaceState", async () => {
     const user = userEvent.setup();
+    const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+
     render(
       <SettingsLayout categories={TEST_CATEGORIES}>
         <section id="server" data-settings-section="server">
@@ -74,6 +76,7 @@ describe("SettingsLayout", () => {
       behavior: "smooth",
       block: "start",
     });
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#appearance");
   });
 
   it("activates the last category when scrolled to the bottom of the scroll container", () => {
