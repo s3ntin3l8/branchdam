@@ -1,4 +1,4 @@
--- 00018_users_and_audit.sql — multi-user attribution + actor audit log.
+-- 00019_users_and_audit.sql — multi-user attribution + actor audit log.
 --
 -- Two new tables (users, actor_audit) plus three nullable FKs that record
 -- per-asset / per-job / per-device attribution. All FKs are RESTRICT and
