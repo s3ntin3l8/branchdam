@@ -542,10 +542,11 @@ func TestSweepMissingNodeAlwaysRehashes(t *testing.T) {
 }
 
 // seedTier3Location mirrors seedPipelineLocation but for a
-// TIER3_MASTER_ARCHIVE/read-only location -- #226's differential-Tier-3
-// scenario needs a location whose full_hash policy actually forces a
-// BLAKE3 computation (needsFullHash's tierReadOnly branch), which
-// seedPipelineLocation's hardcoded TIER2_EXPORTS/ReadOnly:0 row never does.
+// TIER3_MASTER_ARCHIVE location -- #226's differential-Tier-3 scenario
+// needs a location whose full_hash policy actually forces a BLAKE3
+// computation (needsFullHash's TIER3_MASTER_ARCHIVE branch, per the
+// default "tier3_and_collision" policy), which seedPipelineLocation's
+// hardcoded TIER2_EXPORTS row never does.
 func seedTier3Location(t *testing.T, database *db.DB, rootPath string) int64 {
 	t.Helper()
 	var id int64
@@ -570,7 +571,7 @@ func seedTier3Location(t *testing.T, database *db.DB, rootPath string) int64 {
 // Unlike scanTestDepsN (hardcoded to TIER2_EXPORTS/FullHashPolicy:"never"
 // for every other sweep test in this file), this uses the default
 // "tier3_and_collision" policy so needsFullHash actually escalates to a
-// full BLAKE3 hash on the read-only tier -- the behavior #226's differential
+// full BLAKE3 hash on the Tier 3 tier -- the behavior #226's differential
 // path must avoid re-running for files sweepUnchanged finds unchanged.
 func tier3ScanTestDeps(t *testing.T, database *db.DB, rootPath string, locationID int64) ScanDeps {
 	t.Helper()

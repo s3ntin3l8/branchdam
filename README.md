@@ -81,21 +81,20 @@ For detailed bring-up instructions and reverse proxy configurations, see [`docs/
 - [`docs/mobile.md`](docs/mobile.md) — Mobile companion app architecture, background ingest, and Safe Space reclaim.
 
 ### Getting Started & Deployment
-- [`docs/deploy.md`](docs/deploy.md) — First bring-up runbook and Docker setup.
+- [`docs/deploy.md`](docs/deploy.md) — First bring-up runbook, Docker setup, and multi-machine topology (§9).
 - [`docs/configuration.md`](docs/configuration.md) — Field-by-field reference for `config.yaml` and environment variables.
 - [`docs/forward-auth.md`](docs/forward-auth.md) — Traefik v3 and Authentik ForwardAuth configuration.
 - [`docs/local-auth.md`](docs/local-auth.md) — Password-login surface (setup, cookies, argon2id, rate limits, audit log).
-- [`docs/deploy-topology.md`](docs/deploy-topology.md) — Multi-machine deployment topology (NAS archive + workstation editing).
 
 ### Workflows & Lineage
-- [`docs/integrations.md`](docs/integrations.md) — Comprehensive guide to DaVinci Resolve, Luminar Neo, Immich, NLE timelines, and manifests.
+- [`docs/integrations.md`](docs/integrations.md) — DaVinci Resolve, NLE timelines, Luminar, Immich, workstation agent, Google Photos spike.
 - [`docs/workflow-coverage.md`](docs/workflow-coverage.md) — Step-by-step SD card to Immich workflow audit.
 
 ### Operations & Architecture
 - [`docs/operations.md`](docs/operations.md) — Upgrades, database backups, cache pruning, and troubleshooting.
 - [`docs/schema.md`](docs/schema.md) — SQLite schema design decisions and invariants.
-- [`docs/agent-protocol.md`](docs/agent-protocol.md) — Workstation & mobile agent REST/SSE transport protocol ADR.
-- [`docs/roadmap.md`](docs/roadmap.md) — Architecture history and roadmap records.
+- [`docs/agent-api.md`](docs/agent-api.md) — Workstation & mobile agent REST wire format and behavioral caveats.
+- [`docs/google-photos.md`](docs/google-photos.md) — Google Photos API feasibility spike and no-go verdict.
 
 ---
 

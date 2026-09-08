@@ -223,21 +223,22 @@ func TestNeedsFullHashPolicy(t *testing.T) {
 	cases := []struct {
 		name         string
 		policy       string
-		tierReadOnly bool
+		tier         string
 		hasCollision bool
 		want         bool
 	}{
-		{"always, no signal", "always", false, false, true},
-		{"never, tier3", "never", true, true, false},
-		{"default tier3", "tier3_and_collision", true, false, true},
-		{"default collision", "tier3_and_collision", false, true, true},
-		{"default neither", "tier3_and_collision", false, false, false},
-		{"unknown policy behaves like default", "bogus", true, false, true},
+		{"always, no signal", "always", "TIER2_EXPORTS", false, true},
+		{"never, tier3", "never", "TIER3_MASTER_ARCHIVE", true, false},
+		{"default tier3", "tier3_and_collision", "TIER3_MASTER_ARCHIVE", false, true},
+		{"default collision", "tier3_and_collision", "TIER2_EXPORTS", true, true},
+		{"default neither", "tier3_and_collision", "TIER2_EXPORTS", false, false},
+		{"writable tier3 (readOnly:false) still escalates", "tier3_and_collision", "TIER3_MASTER_ARCHIVE", false, true},
+		{"unknown policy behaves like default", "bogus", "TIER3_MASTER_ARCHIVE", false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := needsFullHash(c.policy, c.tierReadOnly, c.hasCollision); got != c.want {
-				t.Errorf("needsFullHash(%q, %v, %v) = %v, want %v", c.policy, c.tierReadOnly, c.hasCollision, got, c.want)
+			if got := needsFullHash(c.policy, c.tier, c.hasCollision); got != c.want {
+				t.Errorf("needsFullHash(%q, %q, %v) = %v, want %v", c.policy, c.tier, c.hasCollision, got, c.want)
 			}
 		})
 	}

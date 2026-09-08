@@ -60,6 +60,7 @@ graph TD
 4. **Instant Zero-Storage Immich Display**:
    - Non-RAW displayable images and videos (`.jpg`, `.heic`, `.png`, `.webp`, `.mp4`, `.mov`) are automatically hardlinked into `TIER2_EXPORTS/immich/` under the matching folder structure.
    - A `FINAL_EXPORT` edge is registered in `media_edges`, giving instant access in Immich galleries without taking up duplicate disk space.
+   - For the Immich integration's prerequisites and operational caveats (external-library-only, matching `exportPath`, etc.), see [`integrations.md` §4](integrations.md#4-immich-external-library-push).
 
 5. **Safe Space Reclaim**:
    - Once the server responds with `201 UPLOADED` and matching BLAKE3 hash confirmation, the local file is marked `BACKED_UP`.

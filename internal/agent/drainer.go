@@ -1044,8 +1044,8 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 // tier is refused *unless* it is specifically TIER3_MASTER_ARCHIVE and the
 // file already exists there (checked via guard.Exists, a pure stat -- see
 // its doc comment for why this never performs a write against the
-// archive). Tier 3 is read-only unless `readOnly: false` is configured; the
-// `:ro` mount remains a defense-in-depth default. This is the spec §9-required
+// archive). Tier 3 is writable by default; `readOnly: true` is opt-in for
+// archive-only deployments. This is the spec §9-required
 // "LOCAL_STAGING -> CENTRAL_TIER3" scenario: once the workstation agent has
 // copied the bytes into the archive itself, the server may record that
 // location, but branchDAM's own code still never writes, renames, or deletes

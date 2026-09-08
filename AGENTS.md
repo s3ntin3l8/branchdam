@@ -53,7 +53,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 
 1. **No Triggers, No CASCADE**: Every FK is `RESTRICT`. `PRAGMA foreign_keys = ON` is set on every connection in `ConnectHook`. Missing files set `lifecycle_state = 'MISSING'`; rows are never deleted.
 2. **Single-Connection Writer Pool**: `db.DB` writer has `SetMaxOpenConns(1)` to eliminate race conditions during cycle checks and edge insertions.
-3. **Filesystem Write Guarding**: All storage writes route through `storage.Guard`. Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default.
+3. **Filesystem Write Guarding**: All storage writes route through `storage.Guard`. Tier 3 is writable by default for server-governed ingest; `readOnly: true` in config and the `:ro` mount are opt-in for archive-only deployments.
 4. **Header Isolation**: `internal/auth.BrowserChain` is the ONLY code permitted to read `X-Authentik-*` headers (`TestNoDirectAuthentikHeaderReads`). Agent routes unconditionally strip them.
 5. **Agent Paths Untrusted**: `storage_location_id` on agent DTOs is ignored and re-derived from `storage.Guard.Resolve(filePath)`.
 6. **Audit Priority**: Human `CONFIRMED`/`REJECTED` edge review states permanently outrank automated resolvers.

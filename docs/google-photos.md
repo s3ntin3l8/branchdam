@@ -4,9 +4,8 @@ This document is the answer to issue [#56](https://github.com/s3ntin3l8/branchda
 research spike against [`docs/spec/original-spec.md:193`](spec/original-spec.md)'s one-liner —
 *"API Ingest: Uses `mediaItems:batchCreate` with OAuth2 refresh tokens."* Google cut the Photos
 Library API down substantially on 2025-04-01, so that line needed re-checking against the API as
-it exists today before Phase 7 (see [`docs/roadmap.md`](roadmap.md)) budgets any implementation
-work against it. No code changes accompany this document; the `GOOGLE_PHOTOS` value in
-`remote_sync_state.remote`'s `CHECK` constraint already exists in
+it exists today before any implementation work against it. No code changes accompany this document;
+the `GOOGLE_PHOTOS` value in `remote_sync_state.remote`'s `CHECK` constraint already exists in
 [`00001_init.sql`](../internal/db/migrations/00001_init.sql) and stays unused pending this
 outcome.
 

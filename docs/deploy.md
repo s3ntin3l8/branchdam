@@ -9,8 +9,7 @@ steps to actually stand the container up, with pointers into that doc rather tha
 For field-by-field config reference, see [`configuration.md`](configuration.md). For what to do
 once it's running — upgrades, backups, troubleshooting — see [`operations.md`](operations.md). For
 a multi-machine setup — ingest and editing on separate workstations, a NAS-hosted master archive,
-exports and Immich on a separate server — see [`deploy-topology.md`](deploy-topology.md), which
-covers a specific worked topology and cross-references
+exports and Immich on a separate server — see §9 below, which cross-references
 [`workflow-coverage.md`](workflow-coverage.md) for what that workflow does and does not support
 today. This document stays the portable runbook for a plain `docker compose` deployment; if your
 deployment target is managed by its own infrastructure-as-code (Ansible, Terraform, etc.) instead,
@@ -30,7 +29,7 @@ treat this as the contract that tooling needs to satisfy rather than a sequence 
 - If branchDAM will trigger an Immich library scan, that library must be an Immich **external**
   library pointed at branchDAM's export path — an existing Immich-managed (internally-ingested)
   library is not reachable by this integration at all; see
-  [`workflow-coverage.md` §6](workflow-coverage.md#6-immich-integration).
+  [`integrations.md` §4](integrations.md#4-immich-external-library-push).
 
 ## 1. Authentik: proxy provider, application, group
 
@@ -64,10 +63,14 @@ services:
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - /your/real/staging:/storage/staging:rw
-      - /your/real/scratch:/storage/scratch:rw
       - /your/real/exports:/storage/exports:rw
-      - /your/real/projects:/storage/projects:rw
-      - /your/real/archive:/storage/archive:ro   # Tier 3 — :ro by default
+      # TIER1_LOCAL_SCRATCH and PROJECTS are typically workstation-local and
+      # not mounted into the headless server. Uncomment the mount AND the
+      # matching storageLocations entry in config.yaml only if your
+      # deployment needs server-side access.
+      # - /your/real/scratch:/storage/scratch:rw
+      # - /your/real/projects:/storage/projects:rw
+      - /your/real/archive:/storage/archive:rw   # Tier 3 — :rw for server-governed ingest
 ```
 
 **No `image:` override.** This deployment deliberately stays on `ghcr.io/s3ntin3l8/branchdam:latest`
@@ -77,8 +80,7 @@ so a `docker compose pull` picks up every release automatically — see
 advice is aimed at a production deploy, and is being knowingly declined here.
 
 Only mount the storage tiers you actually have — drop volumes lines (and the corresponding
-`storageLocations` entries in step 4) for tiers that don't apply yet. Tier 3 is read-only unless
-`readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default.
+`storageLocations` entries in step 4) for tiers that don't apply yet. Tier 3 is mounted `:rw` for server-governed ingest (uploads, mobile uploads, agent uploads → archive); `readOnly: false` is the default in `config.yaml`. Set `readOnly: true` and use `:ro` only for archive-only deployments.
 
 ## 4. `config.yaml`
 
@@ -89,11 +91,11 @@ right-hand side of the volume mount you just wrote, not the host path on the lef
 
 | Tier | Container path (config.yaml `rootPath`) | Host path (compose `volumes:` left side) | Mount mode |
 |---|---|---|---|
-| `TIER0_LOCAL_STAGING` | `/storage/staging` | your staging dir | `rw` |
-| `TIER1_LOCAL_SCRATCH` | `/storage/scratch` | your scratch dir | `rw` |
+| `TIER0_LOCAL_STAGING` | `/storage/staging` | your staging dir (empty stub) | `rw` |
 | `TIER2_EXPORTS` | `/storage/exports` | your exports dir | `rw` |
-| `PROJECTS` | `/storage/projects` | your projects dir | `rw` |
-| `TIER3_MASTER_ARCHIVE` | `/storage/archive` | your archive dir | **`ro`** by default (and `readOnly: true` in config; Tier 3 is read-only unless `readOnly: false` is configured; the `:ro` mount remains a defense-in-depth default) |
+| `TIER3_MASTER_ARCHIVE` | `/storage/archive` | your archive dir | **`rw`** for server-governed ingest (`readOnly: false` in config; set `readOnly: true` and use `:ro` only for archive-only deployments) |
+| `TIER1_LOCAL_SCRATCH` | `/storage/scratch` | your scratch dir | `rw` — optional, workstation-local in most topologies |
+| `PROJECTS` | `/storage/projects` | your projects dir | `rw` — optional, rarely needed |
 
 `database.path` must stay an **absolute** container path (`/data/branchdam.db` is the default and
 is fine as-is) — `storage.Guard`'s `canonicalize` rejects a relative root outright, and the
@@ -196,7 +198,111 @@ candidate between the RAW and its JPEG. Check **Storage Health** shows every con
 active — an inactive one means `storage.LoadGuard` couldn't resolve that mount at startup, usually
 a path mismatch between `config.yaml` and the compose volume.
 
-## 9. Done when
+## 9. Multi-machine topology
+
+Setup: ingest and editing on a Windows workstation and a MacBook; a Tier-3 master archive on a
+NAS; Tier-2 exports and Immich on a separate Docker host on the same LAN.
+
+### 9.1. Host decision: server and NAS are separate hosts
+
+Run branchDAM on the same host as the exports directory and Immich, with the Tier-3 archive
+mounted over NFS from the NAS, rather than running branchDAM on the NAS itself.
+
+Exports, Immich, and `branchdam.db` all want to be local to one host — the archive is the only
+thing that would argue for putting branchDAM on the NAS instead, and that argument is weak:
+
+- A full archive scan re-reads every byte regardless of which host runs branchDAM, since
+  `full_hash` is forced for every `TIER3_MASTER_ARCHIVE` node under the default
+  `fullHashPolicy` (`tier3_and_collision` — keys on the tier, not the `readOnly` flag, so it
+  holds whether the location is mounted `:rw` for server-governed ingest or `:ro` for
+  archive-only deployments).
+- Thumbnail generation reads every node with a `PENDING` thumbnail state with no tier filter, so
+  every master gets read once for its thumbnail regardless of where branchDAM runs.
+
+Both are one-time-per-node costs, not recurring ones, and they become close to zero once an
+ingest client posts `EVENT_NODE_CREATED` directly instead of relying on a full rescan. Until
+that exists, size the first full scan against the actual archive size before running it — for a
+multi-terabyte archive over NFS this is a multi-hour operation, not a routine one.
+
+### 9.2. Mount table
+
+| Tier | Purpose | Mount |
+|---|---|---|
+| `TIER3_MASTER_ARCHIVE` | Camera originals | NAS, over NFS, mounted `:rw` in the compose layer and `readOnly: false` in `config.yaml` for server-governed ingest; set `:ro` / `readOnly: true` only for archive-only deployments |
+| `TIER2_EXPORTS` | Renders/exports, shared with Immich | Local disk on the server host, read-write |
+| `TIER0_LOCAL_STAGING` | Workstation ingest staging root | Server-local mount/directory (`/storage/staging`, `rw`) — empty stub satisfying `storage.Guard.Resolve` for agent offline queue drain; actual bytes remain on workstation NVMe until synced |
+| `TIER1_LOCAL_SCRATCH` | Workstation editing cache | Not mounted into the server at all — see §9.5 |
+| `PROJECTS` | — | Not configured — project files are workstation-local |
+
+### 9.3. Constraints
+
+- **The archive must resolve as a real, symlink-free mount target inside the container.** The
+  scanner writes `file_path` in the config-declared form; `storage.Guard` resolves the same root
+  through `filepath.EvalSymlinks`. A symlink anywhere in the mounted root means scanner-written
+  paths and any agent-supplied paths for the same location stop matching on exact-string lookup.
+- **`branchdam.db` must sit on real local storage, not a NAS-backed user share.** A SQLite
+  database in WAL mode over shfs/FUSE-style network filesystems is not a combination to discover
+  is broken in production — keep the database volume local to the server host regardless of where
+  the archive itself lives.
+- **If the server host is a container/LXC without direct NFS client support, mount the archive on
+  the outer host and bind it into the container** rather than mounting NFS from inside an
+  unprivileged container.
+- **One branchDAM process per database file, ever.** There is no file lock or PID guard; a second
+  process pointed at the same `database.path` marks the first process's in-flight scans `FAILED`.
+  This includes any second `-config` invocation for local debugging.
+- **Do not set `fullHashPolicy: never` to speed up the first archive scan.** It permanently
+  disables prune eligibility for every node it touches — `full_hash` is required, non-NULL, and
+  64 hex characters for a node to ever be treated as a verified Tier-3 ancestor, and a node
+  scanned under `never` does not self-repair on a later scan under a different policy without a
+  further rescan.
+- **Back up the database volume before every image update.** The image tracks a moving tag; goose
+  migrations run automatically at container start with no reverse-migration path wired in. The
+  database is the only place lineage history exists — there is no way to reconstruct it from the
+  filesystem alone.
+
+### 9.4. Deployment mechanism
+
+This kind of multi-host topology is typically deployed and updated through Ansible playbooks (or
+equivalent infrastructure-as-code), not a manually-run `docker compose up -d`. The mount table,
+tier layout, and constraints above are still the contract the compose file has to satisfy; how
+that compose file gets rendered and applied is out of scope for this repo. For a plain Docker
+Compose deployment, the runbook in §1–§8 above applies directly.
+
+### 9.5. Local editing tiers: scratch vs. staging visibility
+
+`TIER1_LOCAL_SCRATCH` is not mounted into the server at all in this topology — it is
+workstation-local NVMe, and mounting it over the network to make it server-visible would trade
+away the local editing performance this topology is built to preserve.
+
+In this architecture, ephemeral render caches (e.g. DaVinci Resolve `CacheClip/`) and proxy
+media are managed client-side by `branchdam-agent`:
+- The agent discovers local render caches and queries `POST /api/v1/agent/node-status` on the server
+  to confirm all referenced source masters are live and hash-verified on `TIER3_MASTER_ARCHIVE`.
+- Stale render caches are automatically evicted based on inactivity TTL and scratch disk watermarks,
+  leaving camera originals on `LocalEditRoot` protected from automated deletion.
+- Workstation scratch storage usage and reclaimed bytes are reported back to the server via
+  `POST /api/v1/agent/telemetry`.
+- Server-side cache pruning (`POST /api/v1/prune`, `pruning.enabled`, `cacheTtlHours`) remains
+  available for any server-visible scratch locations.
+
+`TIER0_LOCAL_STAGING`, by contrast, is configured in the server's `config.yaml` (and mounted as an
+empty directory, e.g. `/storage/staging`) purely so `storage.Guard.Resolve` recognizes paths
+submitted during the agent's offline queue drain (`/storage/staging/<agentId>/...`) before files
+are synced and rebased to the Tier-3 archive. The actual media bytes do not need to be transferred
+or mounted into `/storage/staging` — an empty directory satisfies `storage.Guard`'s symlink
+canonicalization and lets the node metadata be tracked immediately.
+
+### 9.6. Reaching this server when a workstation isn't on the LAN
+
+Everything above assumes the ingest workstation is on the same LAN as the server host. For a
+travelling workstation doing field ingest away from home, see
+[`forward-auth.md` §4](forward-auth.md#4-reaching-the-agent-route-off-lan): an overlay network
+(Tailscale or equivalent) is the assumed transport, it has to land on the same Traefik hostname
+and router rather than exposing the container port directly, and `/api/v1/agent/*`'s
+`X-API-Key` auth model is unchanged either way — the security boundary is the key, not the
+network.
+
+## 10. Done when
 
 - [ ] `docker compose ps` shows `(healthy)`.
 - [ ] `/healthz` and `/api/v1/me` both return correctly through Traefik.
