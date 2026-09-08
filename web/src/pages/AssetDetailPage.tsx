@@ -226,7 +226,7 @@ export default function AssetDetailPage() {
             className="h-24 w-24 shrink-0 rounded-lg object-cover"
           />
           <div>
-            <h1 className="text-xl font-semibold">{asset.fileName}</h1>
+            <h1 className="text-xl font-semibold text-neutral-100">{asset.fileName}</h1>
             <p className="text-sm text-neutral-500">{asset.filePath}</p>
           </div>
         </div>
