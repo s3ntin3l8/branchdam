@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/agent"
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
@@ -41,6 +42,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/sync"
 	"github.com/s3ntin3l8/branchdam/internal/thumbs"
+	attributionusers "github.com/s3ntin3l8/branchdam/internal/users"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 	"github.com/s3ntin3l8/branchdam/web"
 )
@@ -234,6 +236,18 @@ func main() {
 	swept := sweptFromConfig(cfg.StorageLocations)
 	warnOverlappingWatchAndSweep(log, watched, swept)
 
+	// Multi-user attribution: lazy-provision users rows on first sight,
+	// provision the system sentinel once at boot so background workers
+	// can attribute their writes to a stable id. Wired into
+	// Deps.Attribution / Deps.Audit below; ScanDeps.StartedByUserID uses
+	// the system user id for the SweeperSupervisor's INCREMENTAL passes.
+	attributionSvc := attributionusers.NewService(database)
+	if _, err := attributionSvc.EnsureSystemUser(ctx); err != nil {
+		log.Error("attribution: ensure system user", "err", err)
+		os.Exit(1)
+	}
+	auditSvc := audit.NewService(database, attributionSvc)
+
 	var supervisor *pipeline.WatcherSupervisor
 	if len(watched) > 0 {
 		watchedLocs, err := resolveWatchedLocations(ctx, database, watched)
@@ -259,6 +273,7 @@ func main() {
 			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
 			FullHashPolicy: cfg.Workers.FullHashPolicy, DisablePerceptualHash: !cfg.Workers.PerceptualHash, Log: log,
 			Nudge: func() { hub.Broadcast() }, Shutdown: ctx.Done(),
+			StartedByUserID: attributionSvc.SystemUserID(),
 		})
 		sweeper.Start(ctx, sweptLocs)
 	}
@@ -395,6 +410,8 @@ func main() {
 		RequestRestart: requestRestart,
 		Pairing:        pairingService,
 		LocalAuth:      localAuthDeps,
+		Attribution:    attributionSvc,
+		Audit:          auditSvc,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,

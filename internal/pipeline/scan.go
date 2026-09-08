@@ -84,6 +84,19 @@ type ScanDeps struct {
 	// see runScan's #99/#353 note.
 	// Optional: nil means never shutting down, matching every existing test.
 	Shutdown <-chan struct{}
+
+	// StartedByUserID is the resolved users.id that initiated this scan.
+	// For an HTTP-triggered scan (POST /api/v1/scan), the route resolves
+	// the request Principal via internal/users.ResolveOrCreate and sets
+	// this. For background scans (SweeperSupervisor's INCREMENTAL passes,
+	// any future operator-initiated scan without a request Principal),
+	// the caller sets the system user id. WatcherSupervisor's RUNNING
+	// WATCH rows are inserted directly with started_by_user_id NULL --
+	// they're long-lived server-owned rows, not user actions.
+	// Optional: 0 means "no user attribution" -- matches pre-attribution
+	// callers (existing tests, the SweeperSupervisor if it doesn't wire
+	// the system user yet).
+	StartedByUserID int64
 }
 
 // ScanTracker joins every in-flight RunScan goroutine, mirroring
@@ -232,6 +245,7 @@ func createScanJob(ctx context.Context, deps ScanDeps, location storage.Location
 		j, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
 			StorageLocationID: sql.NullInt64{Int64: location.ID, Valid: true},
 			Kind:              kind,
+			StartedByUserID:   sql.NullInt64{Int64: deps.StartedByUserID, Valid: deps.StartedByUserID != 0},
 		})
 		job = j
 		return err

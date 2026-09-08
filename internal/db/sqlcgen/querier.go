@@ -45,6 +45,7 @@ type Querier interface {
 	CountActorAudit(ctx context.Context, arg CountActorAuditParams) (int64, error)
 	CountAttributionUsers(ctx context.Context) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
+	CountLoginAudit(ctx context.Context) (int64, error)
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -440,6 +441,18 @@ type Querier interface {
 	// (the Immich export mount) that have NO remote_sync_state row for the given
 	// remote yet. Once pushed, a row exists and the node drops out of this set.
 	ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesForSyncParams) ([]ListLiveNodesForSyncRow, error)
+	// login_audit: append-only log of authentication events (PR #407).
+	// Read by /api/v1/audit?type=login alongside /api/v1/audit?type=activity
+	// (which reads actor_audit). login_audit is owned by internal/auth/users;
+	// these queries are kept here so the merged audit route can read both
+	// tables through the same sqlcgen layer without a second db call site.
+	//
+	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
+	// "SQL Syntax Traps" note.
+	// Newest-first. Offset pagination -- volume is bounded by authentication
+	// events (not per-asset), so the drift problem that justifies keyset
+	// pagination on /api/v1/edges/audit doesn't apply here.
+	ListLoginAudit(ctx context.Context, arg ListLoginAuditParams) ([]ListLoginAuditRow, error)
 	// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
 	// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
 	ListMediaNodeStatusesByUUIDs(ctx context.Context, nodeUuids string) ([]ListMediaNodeStatusesByUUIDsRow, error)

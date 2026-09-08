@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
+	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -31,6 +33,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	syncpkg "github.com/s3ntin3l8/branchdam/internal/sync"
+	attributionusers "github.com/s3ntin3l8/branchdam/internal/users"
 )
 
 func (s *Server) registerRoutes(api huma.API) {
@@ -64,6 +67,9 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
 	huma.Post(api, "/api/v1/edges/{id}/confirm", s.handleConfirmEdge)
 	huma.Post(api, "/api/v1/edges/{id}/reject", s.handleRejectEdge)
+
+	huma.Get(api, "/api/v1/audit", s.handleAudit)
+	huma.Get(api, "/api/v1/users", s.handleListUsers)
 
 	huma.Register(api, huma.Operation{
 		Method:        http.MethodPost,
@@ -1358,6 +1364,38 @@ func reviewerName(ctx context.Context) sql.NullString {
 	return sql.NullString{String: p.Name, Valid: true}
 }
 
+// resolveActorUserID resolves the request Principal to a stable
+// users.id for attribution (scan_jobs.started_by_user_id,
+// media_nodes.uploaded_by_user_id, device_pairings.user_id). Returns 0
+// when the request has no usable Principal (an anonymous or unauth'd
+// call) -- the caller is expected to leave the column NULL in that case.
+// Returns the system user id when attribution is wired but the request
+// is a KindMachine / background-attribution edge case the auth layer
+// doesn't otherwise expose.
+//
+// attribution may be nil in tests; the result is 0 in that case (the
+// routes that depend on attribution 503 before reaching this helper).
+func resolveActorUserID(ctx context.Context, attribution *attributionusers.Service, log *slog.Logger) int64 {
+	if attribution == nil {
+		return 0
+	}
+	p, ok := auth.From(ctx)
+	if !ok {
+		return 0
+	}
+	if p.Kind != auth.KindUser || !p.Authenticated || p.ExternalUID == "" {
+		return 0
+	}
+	a, err := attribution.ResolveOrCreate(ctx, p)
+	if err != nil {
+		if log != nil {
+			log.Warn("attribution: ResolveOrCreate failed, leaving started_by_user_id NULL", "err", err)
+		}
+		return 0
+	}
+	return a.ID
+}
+
 // recomputeGraphStatus delegates to graph.RecomputeStatusFromPersistedEdges,
 // which now also backs internal/agent's applyEdgeAttached -- see that
 // function's doc comment for why this is a distinct computation from
@@ -1481,6 +1519,7 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 				s.hub.Broadcast()
 			}
 		},
+		StartedByUserID: resolveActorUserID(ctx, s.attribution, s.log),
 	}
 
 	var jobID int64
@@ -2880,5 +2919,228 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 	if s.hub != nil {
 		s.hub.Broadcast()
 	}
+	return out, nil
+}
+
+// --- /api/v1/audit ---
+
+// AuditInput is the merged audit read query. The activity/login split
+// mirrors the two underlying tables: actor_audit (cross-cutting admin
+// event log) and login_audit (PR #407's local-auth login/reset log).
+// type=login is only meaningful in local-auth deployments (it reads the
+// login_audit table that PR #407 ships) -- forward-only deployments
+// never write to it and a login query there returns an empty page.
+type AuditInput struct {
+	Type         string `query:"type" default:"activity" enum:"activity,login"`
+	ActorUserID  int64  `query:"actorUserId" default:"0"`
+	Event        string `query:"event"`
+	ResourceType string `query:"resourceType"`
+	ResourceID   string `query:"resourceId"`
+	SinceUnix    int64  `query:"sinceUnix" default:"0"`
+	UntilUnix    int64  `query:"untilUnix" default:"0"`
+	Limit        int64  `query:"limit" default:"50" minimum:"1" maximum:"500"`
+	Offset       int64  `query:"offset" default:"0" minimum:"0"`
+}
+
+type auditEntryOut struct {
+	ID           int64  `json:"id"`
+	Source       string `json:"source"`
+	ActorUserID  *int64 `json:"actorUserId,omitempty"`
+	ActorKind    string `json:"actorKind"`
+	ActorName    string `json:"actorName"`
+	Event        string `json:"event"`
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	DetailsJSON  string `json:"detailsJson,omitempty"`
+	CreatedAt    int64  `json:"createdAt"`
+}
+
+type AuditOutput struct {
+	Body struct {
+		Entries []auditEntryOut `json:"entries"`
+		Total   int64           `json:"total"`
+	}
+}
+
+// handleAudit is the merged actor_audit + login_audit read endpoint.
+// Returns 503 when no audit service is wired (every existing test).
+// The merge is in Go: actor_audit comes from internal/audit; login_audit
+// comes from internal/auth/users (PR #407). Newest-first, capped at 200.
+func (s *Server) handleAudit(ctx context.Context, in *AuditInput) (*AuditOutput, error) {
+	if s.audit == nil {
+		return nil, huma.Error503ServiceUnavailable("audit service not configured")
+	}
+	var entries []auditEntryOut
+	var total int64
+
+	switch in.Type {
+	case "activity":
+		filter := auditPkg.Filter{}
+		if in.ActorUserID > 0 {
+			filter.ActorUserID = sql.NullInt64{Int64: in.ActorUserID, Valid: true}
+		}
+		if in.Event != "" {
+			filter.Event = in.Event
+		}
+		if in.ResourceType != "" {
+			filter.ResourceType = in.ResourceType
+		}
+		if in.ResourceID != "" {
+			filter.ResourceID = in.ResourceID
+		}
+		if in.SinceUnix > 0 {
+			filter.SinceUnix = sql.NullInt64{Int64: in.SinceUnix, Valid: true}
+		}
+		if in.UntilUnix > 0 {
+			filter.UntilUnix = sql.NullInt64{Int64: in.UntilUnix, Valid: true}
+		}
+		rows, n, err := s.audit.ListActivity(ctx, filter, in.Limit, in.Offset)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list activity audit", err)
+		}
+		entries = make([]auditEntryOut, len(rows))
+		for i, r := range rows {
+			out := auditEntryOut{
+				ID:        r.ID,
+				Source:    "actor_audit",
+				ActorKind: r.ActorKind,
+				ActorName: r.ActorName,
+				Event:     r.Event,
+				CreatedAt: r.CreatedAt,
+			}
+			if r.ActorUserID.Valid {
+				v := r.ActorUserID.Int64
+				out.ActorUserID = &v
+			}
+			if r.ResourceID.Valid {
+				out.ResourceID = r.ResourceID.String
+				out.ResourceType = r.ResourceType
+			}
+			out.DetailsJSON = r.DetailsJSON
+			entries[i] = out
+		}
+		total = n
+
+	case "login":
+		// login_audit lives in internal/auth/users (PR #407). Read it
+		// directly through the same DB handle the audit package uses.
+		rows, n, err := s.listLoginAudit(ctx, in)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list login audit", err)
+		}
+		entries = rows
+		total = n
+
+	default:
+		return nil, huma.Error400BadRequest("type must be 'activity' or 'login'")
+	}
+
+	out := &AuditOutput{}
+	out.Body.Entries = entries
+	out.Body.Total = total
+	return out, nil
+}
+
+// listLoginAudit reads login_audit directly through the db.Reader.
+// Lives in this file rather than internal/audit because login_audit
+// is owned by internal/auth/users (PR #407) -- this is the read side
+// of the merged /api/v1/audit route.
+func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEntryOut, int64, error) {
+	rows, err := s.db.Reader.ListLoginAudit(ctx, sqlcgen.ListLoginAuditParams{
+		Limit:  in.Limit,
+		Offset: in.Offset,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.db.Reader.CountLoginAudit(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]auditEntryOut, len(rows))
+	for i, r := range rows {
+		e := auditEntryOut{
+			ID:           r.ID,
+			Source:       "login_audit",
+			ActorKind:    "user",
+			Event:        r.Outcome,
+			ResourceType: "login_source",
+			ResourceID:   r.Source,
+			ActorName:    r.UsernamePresented,
+			DetailsJSON:  fmt.Sprintf("{\"ip\":\"%s\",\"userAgent\":\"%s\"}", r.Ip, r.UserAgent),
+			CreatedAt:    r.CreatedAt,
+		}
+		if r.UserID.Valid {
+			v := r.UserID.Int64
+			e.ActorUserID = &v
+		}
+		out[i] = e
+	}
+	return out, total, nil
+}
+
+// --- /api/v1/users ---
+
+// ListUsersInput backs GET /api/v1/users. The route is admin-only and
+// used by the pairing UI's "Owned by" selector + the attribution
+// column filter ("uploaded by") on the assets list.
+type ListUsersInput struct {
+	Limit  int64 `query:"limit" default:"50" minimum:"1" maximum:"200"`
+	Offset int64 `query:"offset" default:"0" minimum:"0"`
+}
+
+type attributionUserDTO struct {
+	ID           int64  `json:"id"`
+	AuthProvider string `json:"authProvider"`
+	ExternalUID  string `json:"externalUid"`
+	Username     string `json:"username"`
+	Email        string `json:"email,omitempty"`
+	CreatedAt    int64  `json:"createdAt"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+}
+
+type ListUsersOutput struct {
+	Body struct {
+		Users []attributionUserDTO `json:"users"`
+		Total int64                `json:"total"`
+	}
+}
+
+// handleListUsers is the admin-only read endpoint for the users
+// attribution table. Used by the pairing UI's "Owned by" selector and
+// the SPA's "Uploaded by" filter on /assets. Returns 503 when the
+// attribution service hasn't been wired (every existing test).
+func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*ListUsersOutput, error) {
+	if s.attribution == nil {
+		return nil, huma.Error503ServiceUnavailable("attribution service not configured")
+	}
+	rows, err := s.db.Reader.ListAttributionUsers(ctx, sqlcgen.ListAttributionUsersParams{
+		Limit:  in.Limit,
+		Offset: in.Offset,
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list users", err)
+	}
+	total, err := s.db.Reader.CountAttributionUsers(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("count users", err)
+	}
+	out := &ListUsersOutput{}
+	out.Body.Users = make([]attributionUserDTO, len(rows))
+	for i, r := range rows {
+		u := attributionUserDTO{
+			ID:           r.ID,
+			AuthProvider: r.AuthProvider,
+			ExternalUID:  r.ExternalUid,
+			Username:     r.Username,
+			CreatedAt:    r.CreatedAt,
+			LastSeenAt:   r.LastSeenAt,
+		}
+		if r.Email.Valid {
+			u.Email = r.Email.String
+		}
+		out.Body.Users[i] = u
+	}
+	out.Body.Total = total
 	return out, nil
 }
