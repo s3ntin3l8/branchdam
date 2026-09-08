@@ -191,7 +191,7 @@ A `TIER0_LOCAL_STAGING` location serves as the server-side registration namespac
 `branchdam-agent`'s offline ingest queue drain (`EVENT_NODE_CREATED` posted as soon as a file lands
 on a workstation, before its bytes reach the Tier-3 archive). Configured with `virtual: true` (or defaulting to virtual for Tier 0), it needs no real media bytes or host directory on the server host — `storage.Guard` resolves virtual locations lexically and skips `EvalSymlinks` and filesystem `statfs` checks.
 Per-machine subtree paths (`/storage/staging/<agentId>/...`) should be used to prevent path
-collisions across multiple workstations. A `TIER0_LOCAL_STAGING` location is never watched or swept, and its nodes never get a generated thumbnail (`ListPendingThumbnails`
+collisions across multiple workstations. Virtual locations are never watched or swept, and `TIER0_LOCAL_STAGING` nodes never get a generated thumbnail (`ListPendingThumbnails`
 excludes this tier by design, #231) — the node rebases to Tier 3 shortly after, so generation work
 is skipped until the final synced master arrives. This is a permanent property of the tier, not a
 bug to work around.

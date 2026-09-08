@@ -188,6 +188,12 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 // that points into the Tier 3 archive is resolved to its real target first,
 // so it cannot be used to route a write around the tier check.
 // For virtual locations, lexical prefix matching is used without filesystem checks.
+// Note on prefix shadowing: virtual locations are checked in registration order
+// (g.locs slice order) before physical canonicalization runs. If an operator
+// configures overlapping virtual roots (e.g. /storage and /storage/staging) or a
+// virtual root that lexically prefixes a physical mount path, the first matching
+// virtual location takes precedence and writes under it will be refused. Distinct,
+// non-overlapping root paths should be configured.
 func (g *Guard) Resolve(path string) (Location, error) {
 	cleanPath := filepath.Clean(path)
 	if !filepath.IsAbs(cleanPath) {
