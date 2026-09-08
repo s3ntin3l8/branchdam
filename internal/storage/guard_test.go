@@ -416,3 +416,41 @@ func TestGuardReloadLocationsConcurrent(t *testing.T) {
 
 	<-done
 }
+
+// TestVirtualLocationResolvesWithoutExistingDirectory proves virtual locations
+// resolve lexically without requiring an existing directory on disk, refuse writes,
+// report absent via Exists, and are never skipped by LoadGuard.
+func TestVirtualLocationResolvesWithoutExistingDirectory(t *testing.T) {
+	nonExistentRoot := "/virtual/nonexistent/staging"
+
+	guard, skipped, err := LoadGuard(context.Background(), &fakeLister{rows: []StorageLocationRow{
+		{ID: 10, Name: "staging", RootPath: nonExistentRoot, Tier: "TIER0_LOCAL_STAGING", ReadOnly: false, IsVirtual: true},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("LoadGuard with virtual location failed: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("LoadGuard skipped virtual location %v, want none skipped", skipped)
+	}
+
+	subPath := filepath.Join(nonExistentRoot, "agent-1", "clip.mov")
+	loc, err := guard.Resolve(subPath)
+	if err != nil {
+		t.Fatalf("Resolve(%q) failed on virtual location: %v", subPath, err)
+	}
+	if loc.ID != 10 || !loc.IsVirtual || !loc.ReadOnly {
+		t.Errorf("Resolve got %+v, want ID=10, IsVirtual=true, ReadOnly=true", loc)
+	}
+
+	if err := guard.CheckWrite(subPath); err == nil {
+		t.Errorf("CheckWrite on virtual location succeeded, want *ErrReadOnlyTier")
+	}
+
+	exists, err := guard.Exists(subPath)
+	if err != nil {
+		t.Fatalf("Exists(%q) failed on virtual location: %v", subPath, err)
+	}
+	if exists {
+		t.Errorf("Exists(%q) = true on virtual location, want false", subPath)
+	}
+}

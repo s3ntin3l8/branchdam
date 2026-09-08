@@ -225,12 +225,13 @@ func (s *Server) handleListPathRewrites(_ context.Context, _ *struct{}) (*PathRe
 // --- /api/v1/storage-locations ---
 
 type storageLocationDTO struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	RootPath string `json:"rootPath"`
-	Tier     string `json:"tier"`
-	ReadOnly bool   `json:"readOnly"`
-	Prunable bool   `json:"prunable"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	RootPath  string `json:"rootPath"`
+	Tier      string `json:"tier"`
+	ReadOnly  bool   `json:"readOnly"`
+	Prunable  bool   `json:"prunable"`
+	IsVirtual bool   `json:"isVirtual"`
 }
 
 type ListStorageLocationsOutput struct {
@@ -250,6 +251,7 @@ func (s *Server) handleListStorageLocations(ctx context.Context, _ *struct{}) (*
 		out.Body.Locations[i] = storageLocationDTO{
 			ID: r.ID, Name: r.Name, RootPath: r.RootPath, Tier: r.Tier,
 			ReadOnly: r.ReadOnly != 0, Prunable: r.Prunable != 0,
+			IsVirtual: r.IsVirtual != 0,
 		}
 	}
 	return out, nil
@@ -2461,13 +2463,14 @@ func (s *Server) handleDeleteAgentTelemetry(ctx context.Context, in *DeleteAgent
 // --- /api/v1/storage-health ---
 
 type storageLocationHealthDTO struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	RootPath string `json:"rootPath"`
-	Tier     string `json:"tier"`
-	ReadOnly bool   `json:"readOnly"`
-	Prunable bool   `json:"prunable"`
-	IsActive bool   `json:"isActive"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	RootPath  string `json:"rootPath"`
+	Tier      string `json:"tier"`
+	ReadOnly  bool   `json:"readOnly"`
+	Prunable  bool   `json:"prunable"`
+	IsActive  bool   `json:"isActive"`
+	IsVirtual bool   `json:"isVirtual"`
 	// Watch, Sweep, SweepIntervalSecs, and CacheTtlHours are the effective
 	// (config.yaml, with any storageLocation.* app_settings override
 	// applied) values -- all four are restart-required, see
@@ -2577,10 +2580,16 @@ func statfsWithTimeoutFn(statfs func(path string, buf *unix.Statfs_t) error, pat
 // the only shared state. On timeout it leaks its inner syscall goroutine
 // (unblocked when the wedged mount recovers or the process exits), the same
 // trade-off statfsWithTimeout already documents. dtos and locations must be
-// parallel slices (same length, same order).
+// parallel slices (same length, same order). Virtual locations skip statfs
+// probes completely.
 func probeStorageLocationHealth(dtos []storageLocationHealthDTO, locations []sqlcgen.StorageLocation, probe func(path string) (unix.Statfs_t, error)) {
 	var wg sync.WaitGroup
 	for i, loc := range locations {
+		if loc.IsVirtual != 0 {
+			dtos[i].IsVirtual = true
+			dtos[i].IsDegraded = false
+			continue
+		}
 		wg.Add(1)
 		go func(i int, path string) {
 			defer wg.Done()
@@ -2714,6 +2723,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 			ReadOnly:          loc.ReadOnly == 1,
 			Prunable:          loc.Prunable == 1,
 			IsActive:          loc.IsActive == 1,
+			IsVirtual:         loc.IsVirtual == 1,
 			Watch:             watch,
 			Sweep:             sweep,
 			SweepIntervalSecs: sweepIntervalSecs,

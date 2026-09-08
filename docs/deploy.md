@@ -91,7 +91,7 @@ right-hand side of the volume mount you just wrote, not the host path on the lef
 
 | Tier | Container path (config.yaml `rootPath`) | Host path (compose `volumes:` left side) | Mount mode |
 |---|---|---|---|
-| `TIER0_LOCAL_STAGING` | `/storage/staging` | your staging dir (empty stub) | `rw` |
+| `TIER0_LOCAL_STAGING` | `/storage/staging` | *(none — virtual namespace)* | Virtual (no volume mount needed) |
 | `TIER2_EXPORTS` | `/storage/exports` | your exports dir | `rw` |
 | `TIER3_MASTER_ARCHIVE` | `/storage/archive` | your archive dir | **`rw`** for server-governed ingest (`readOnly: false` in config; set `readOnly: true` and use `:ro` only for archive-only deployments) |
 | `TIER1_LOCAL_SCRATCH` | `/storage/scratch` | your scratch dir | `rw` — optional, workstation-local in most topologies |
@@ -230,7 +230,7 @@ multi-terabyte archive over NFS this is a multi-hour operation, not a routine on
 |---|---|---|
 | `TIER3_MASTER_ARCHIVE` | Camera originals | NAS, over NFS, mounted `:rw` in the compose layer and `readOnly: false` in `config.yaml` for server-governed ingest; set `:ro` / `readOnly: true` only for archive-only deployments |
 | `TIER2_EXPORTS` | Renders/exports, shared with Immich | Local disk on the server host, read-write |
-| `TIER0_LOCAL_STAGING` | Workstation ingest staging root | Server-local mount/directory (`/storage/staging`, `rw`) — empty stub satisfying `storage.Guard.Resolve` for agent offline queue drain; actual bytes remain on workstation NVMe until synced |
+| `TIER0_LOCAL_STAGING` | Workstation ingest staging namespace | Virtual namespace (`/storage/staging`, `virtual: true`) — no host mount required; satisfies `storage.Guard.Resolve` for agent offline queue drain; actual bytes remain on workstation NVMe until synced |
 | `TIER1_LOCAL_SCRATCH` | Workstation editing cache | Not mounted into the server at all — see §9.5 |
 | `PROJECTS` | — | Not configured — project files are workstation-local |
 
@@ -285,12 +285,11 @@ media are managed client-side by `branchdam-agent`:
 - Server-side cache pruning (`POST /api/v1/prune`, `pruning.enabled`, `cacheTtlHours`) remains
   available for any server-visible scratch locations.
 
-`TIER0_LOCAL_STAGING`, by contrast, is configured in the server's `config.yaml` (and mounted as an
-empty directory, e.g. `/storage/staging`) purely so `storage.Guard.Resolve` recognizes paths
-submitted during the agent's offline queue drain (`/storage/staging/<agentId>/...`) before files
-are synced and rebased to the Tier-3 archive. The actual media bytes do not need to be transferred
-or mounted into `/storage/staging` — an empty directory satisfies `storage.Guard`'s symlink
-canonicalization and lets the node metadata be tracked immediately.
+`TIER0_LOCAL_STAGING`, by contrast, is configured in the server's `config.yaml` as a virtual
+storage location (`/storage/staging`, `virtual: true`) purely so `storage.Guard.Resolve`
+recognizes paths submitted during the agent's offline queue drain (`/storage/staging/<agentId>/...`)
+before files are synced and rebased to the Tier-3 archive. No host directory creation or volume mount
+is required — `storage.Guard` resolves virtual namespaces lexically and immediately tracks node metadata.
 
 ### 9.6. Reaching this server when a workstation isn't on the LAN
 

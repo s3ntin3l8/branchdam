@@ -23,10 +23,9 @@ services:
     volumes:
       - branchdam-data:/data
       - ./config.yaml:/config/config.yaml:ro
-      # One mount per storage tier declared in config.yaml's
+      # One mount per physical storage tier declared in config.yaml's
       # storageLocations. Master archive is mounted :rw for server-governed
-      # ingest and archive storage.
-      - /mnt/local/staging:/storage/staging:rw # TIER0_LOCAL_STAGING
+      # ingest and archive storage. TIER0_LOCAL_STAGING is virtual and requires no mount.
       - /mnt/nas/exports:/storage/exports:rw # TIER2_EXPORTS
       - /mnt/nas/archive:/storage/archive:rw # TIER3_MASTER_ARCHIVE
       # TIER1_LOCAL_SCRATCH is typically workstation-local NVMe, not mounted

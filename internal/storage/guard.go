@@ -23,11 +23,12 @@ import (
 // always the fully symlink-resolved, absolute, no-trailing-slash form --
 // see loadLocations and canonicalize.
 type Location struct {
-	ID       int64
-	Name     string
-	RootPath string
-	Tier     string
-	ReadOnly bool
+	ID        int64
+	Name      string
+	RootPath  string
+	Tier      string
+	ReadOnly  bool
+	IsVirtual bool
 }
 
 // ErrReadOnlyTier is returned by every write method when the resolved
@@ -106,11 +107,12 @@ type locationLister interface {
 // row. internal/db's caller adapts sqlcgen.StorageLocation into this with a
 // small conversion -- see cmd/branchdam (wired when a consumer needs it).
 type StorageLocationRow struct {
-	ID       int64
-	Name     string
-	RootPath string
-	Tier     string
-	ReadOnly bool
+	ID        int64
+	Name      string
+	RootPath  string
+	Tier      string
+	ReadOnly  bool
+	IsVirtual bool
 }
 
 // LoadGuard reads storage_locations via lister and canonicalizes every
@@ -140,6 +142,17 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 	locs := make([]Location, 0, len(rows))
 	var skipped []int64
 	for _, row := range rows {
+		if row.IsVirtual {
+			locs = append(locs, Location{
+				ID:        row.ID,
+				Name:      row.Name,
+				RootPath:  filepath.Clean(row.RootPath),
+				Tier:      row.Tier,
+				ReadOnly:  true,
+				IsVirtual: true,
+			})
+			continue
+		}
 		resolved, err := filepath.EvalSymlinks(row.RootPath)
 		if err != nil {
 			log.Error("storage: location root_path unresolvable, excluding from Guard and marking inactive",
@@ -148,11 +161,12 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 			continue
 		}
 		locs = append(locs, Location{
-			ID:       row.ID,
-			Name:     row.Name,
-			RootPath: filepath.Clean(resolved),
-			Tier:     row.Tier,
-			ReadOnly: row.ReadOnly,
+			ID:        row.ID,
+			Name:      row.Name,
+			RootPath:  filepath.Clean(resolved),
+			Tier:      row.Tier,
+			ReadOnly:  row.ReadOnly,
+			IsVirtual: false,
 		})
 	}
 	return NewGuard(locs), skipped, nil
@@ -163,17 +177,34 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 // the tier lookup runs -- a symlink sitting in a read-write Tier 2 directory
 // that points into the Tier 3 archive is resolved to its real target first,
 // so it cannot be used to route a write around the tier check.
+// For virtual locations, lexical prefix matching is used without filesystem checks.
 func (g *Guard) Resolve(path string) (Location, error) {
-	canon, err := canonicalize(path)
-	if err != nil {
-		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		return Location{}, fmt.Errorf("storage: resolve %q: path must be absolute", path)
 	}
 
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
 	for _, loc := range g.locs {
-		if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
-			return loc, nil
+		if loc.IsVirtual {
+			if cleanPath == loc.RootPath || strings.HasPrefix(cleanPath, loc.RootPath+string(filepath.Separator)) {
+				return loc, nil
+			}
+		}
+	}
+
+	canon, err := canonicalize(cleanPath)
+	if err != nil {
+		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+	}
+
+	for _, loc := range g.locs {
+		if !loc.IsVirtual {
+			if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
+				return loc, nil
+			}
 		}
 	}
 	return Location{}, &ErrUnknownLocation{Path: path}
@@ -255,6 +286,13 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 // point of this check. Stat follows the symlink and correctly reports
 // absent when the target doesn't resolve.
 func (g *Guard) Exists(path string) (bool, error) {
+	loc, err := g.Resolve(path)
+	if err != nil {
+		return false, err
+	}
+	if loc.IsVirtual {
+		return false, nil
+	}
 	canon, err := canonicalize(path)
 	if err != nil {
 		return false, fmt.Errorf("storage: resolve %q: %w", path, err)

@@ -262,6 +262,7 @@ type StorageLocation struct {
 	Tier     string `yaml:"tier"`
 	ReadOnly bool   `yaml:"readOnly"`
 	Prunable bool   `yaml:"prunable"`
+	Virtual  bool   `yaml:"virtual"`
 
 	// Watch opts this location into a continuous fsnotify watcher at startup
 	// (kind='WATCH' scan job), off by default. Never honored for Tier 3 --

@@ -210,6 +210,7 @@ type StorageLocation struct {
 	CreatedAt     int64
 	UpdatedAt     int64
 	CacheTtlHours int64
+	IsVirtual     int64
 }
 
 type User struct {

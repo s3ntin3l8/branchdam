@@ -110,6 +110,7 @@ export interface StorageLocation {
     | "PROJECTS";
   readOnly: boolean;
   prunable: boolean;
+  isVirtual?: boolean;
 }
 
 export type ThumbState = "PENDING" | "READY" | "UNSUPPORTED" | "FAILED";
@@ -270,6 +271,7 @@ export interface StorageLocationHealth {
   readOnly: boolean;
   prunable: boolean;
   isActive: boolean;
+  isVirtual?: boolean;
   // watch/sweep/sweepIntervalSecs/cacheTtlHours are the effective (config,
   // with any override applied) values -- all restart-required, so this can
   // legitimately differ from what's actually running until the next
