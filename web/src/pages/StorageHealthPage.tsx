@@ -686,7 +686,7 @@ export default function StorageHealthPage() {
       <div className="p-6 space-y-8 max-w-6xl">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-neutral-100">Storage Health</h1>
+          <h1 className="text-xl font-semibold text-neutral-100">Storage Health</h1>
           <p className="mt-1 text-sm text-neutral-400">
             Real-time storage capacity across Tiers 1–3, connected workstation scratch disks, and background processing queue depths.
           </p>

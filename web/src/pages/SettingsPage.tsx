@@ -435,7 +435,7 @@ export default function SettingsPage() {
   return (
     <DirtyFormContext.Provider value={dirtyContextValue}>
     <div className="p-6">
-      <h1 className="mb-6 text-2xl font-bold text-neutral-100">System Settings</h1>
+      <h1 className="mb-6 text-xl font-semibold text-neutral-100">System Settings</h1>
 
       {settings && (settings.pendingRestart?.length ?? 0) > 0 && (
         <div className="mb-6 rounded-lg border border-amber-800/60 bg-amber-950/30 p-4 text-sm text-amber-300">

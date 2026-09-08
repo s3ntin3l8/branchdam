@@ -183,7 +183,7 @@ export default function CompanionPairingsPage() {
     <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-neutral-100">Companion Pairing</h1>
+          <h1 className="text-xl font-semibold text-neutral-100">Companion Pairing</h1>
           <p className="mt-1 text-sm text-neutral-400">
             Pair mobile devices (Android, iOS) with this server. Each device gets its own API key.
           </p>

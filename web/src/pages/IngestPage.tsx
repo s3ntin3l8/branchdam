@@ -17,7 +17,7 @@ export default function IngestPage() {
 
   return (
     <div className="p-6">
-      <h1 className="mb-4 text-xl font-semibold">Ingest</h1>
+      <h1 className="mb-4 text-xl font-semibold text-neutral-100">Ingest</h1>
 
       {/* Tabs Header */}
       <div className="mb-6 flex border-b border-neutral-800">
@@ -99,7 +99,7 @@ export default function IngestPage() {
             </p>
           )}
 
-          <h2 className="mb-2 text-lg font-semibold">Recent jobs</h2>
+          <h2 className="mb-2 text-lg font-semibold text-neutral-200">Recent jobs</h2>
           {progress.isLoading ? (
             <p className="text-neutral-500">Loading…</p>
           ) : progress.isError ? (
