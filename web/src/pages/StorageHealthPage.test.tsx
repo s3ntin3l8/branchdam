@@ -530,4 +530,30 @@ describe("StorageHealthPage", () => {
       expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument();
     });
   });
+
+  it("renders virtual storage location with VIRTUAL badge and namespace description", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [
+        baseLocation({
+          id: 2,
+          name: "Staging Namespace",
+          rootPath: "/storage/staging",
+          tier: "TIER0_LOCAL_STAGING",
+          readOnly: true,
+          isVirtual: true,
+          nodeCount: 42,
+        }),
+      ],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+      agents: [],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    expect(await screen.findByText("Staging Namespace")).toBeInTheDocument();
+
+    expect(screen.getByText("VIRTUAL")).toBeInTheDocument();
+    expect(screen.getByText("READ-ONLY")).toBeInTheDocument();
+    expect(screen.getByText(/Virtual staging namespace for offline agent ingest/)).toBeInTheDocument();
+    expect(screen.getByText("42")).toBeInTheDocument();
+  });
 });

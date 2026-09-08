@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +18,18 @@ import (
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 var unresolvedVarRe = regexp.MustCompile(`\$\{[^}]+\}`)
+
+func validateStorageLocations(cfg Config) error {
+	for _, loc := range cfg.StorageLocations {
+		if loc.RootPath == "" {
+			return fmt.Errorf("storage location %q: rootPath must not be empty", loc.Name)
+		}
+		if !filepath.IsAbs(loc.RootPath) {
+			return fmt.Errorf("storage location %q: rootPath %q must be an absolute path", loc.Name, loc.RootPath)
+		}
+	}
+	return nil
+}
 
 func validateSecretExpansion(cfg Config) error {
 	sensitiveFields := []struct {
@@ -262,7 +275,6 @@ type StorageLocation struct {
 	Tier     string `yaml:"tier"`
 	ReadOnly bool   `yaml:"readOnly"`
 	Prunable bool   `yaml:"prunable"`
-	Virtual  bool   `yaml:"virtual"`
 
 	// Watch opts this location into a continuous fsnotify watcher at startup
 	// (kind='WATCH' scan job), off by default. Never honored for Tier 3 --
@@ -298,6 +310,21 @@ type StorageLocation struct {
 	// since the DB schema itself already restricts Prunable to
 	// TIER1_LOCAL_SCRATCH.
 	CacheTTLHours int `yaml:"cacheTtlHours"`
+
+	// Virtual marks this location as a virtual metadata-only namespace (no physical
+	// directory or volume mount required on host). When omitted/nil, defaults to true
+	// for TIER0_LOCAL_STAGING and false for other tiers.
+	Virtual *bool `yaml:"virtual,omitempty"`
+}
+
+// IsVirtual returns whether the storage location is virtual. If Virtual is
+// explicitly set in config, that value is used; otherwise, it defaults to true
+// for TIER0_LOCAL_STAGING and false for all other tiers.
+func (s StorageLocation) IsVirtual() bool {
+	if s.Virtual != nil {
+		return *s.Virtual
+	}
+	return s.Tier == "TIER0_LOCAL_STAGING"
 }
 
 func defaultConfig() Config {
@@ -374,6 +401,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if err := validateSecretExpansion(cfg); err != nil {
+		return cfg, fmt.Errorf("config validation: %w", err)
+	}
+
+	if err := validateStorageLocations(cfg); err != nil {
 		return cfg, fmt.Errorf("config validation: %w", err)
 	}
 

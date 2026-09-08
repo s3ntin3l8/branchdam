@@ -454,3 +454,18 @@ func TestVirtualLocationResolvesWithoutExistingDirectory(t *testing.T) {
 		t.Errorf("Exists(%q) = true on virtual location, want false", subPath)
 	}
 }
+
+func TestLoadGuardSkipsNonAbsoluteVirtualRoot(t *testing.T) {
+	guard, skipped, err := LoadGuard(context.Background(), &fakeLister{rows: []StorageLocationRow{
+		{ID: 11, Name: "rel-staging", RootPath: "relative/path/staging", Tier: "TIER0_LOCAL_STAGING", IsVirtual: true},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("LoadGuard failed: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != 11 {
+		t.Errorf("skipped = %v, want [11]", skipped)
+	}
+	if len(guard.Locations()) != 0 {
+		t.Errorf("guard locations = %v, want empty", guard.Locations())
+	}
+}

@@ -710,17 +710,17 @@ func seedStorageLocations(ctx context.Context, database *db.DB, locations []conf
 	return database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		rootPaths := make([]string, 0, len(locations))
 		for _, loc := range locations {
+			isVirtual := int64(0)
+			if loc.IsVirtual() {
+				isVirtual = 1
+			}
 			readOnly := int64(0)
-			if loc.ReadOnly {
+			if loc.ReadOnly || isVirtual == 1 {
 				readOnly = 1
 			}
 			prunable := int64(0)
 			if loc.Prunable {
 				prunable = 1
-			}
-			isVirtual := int64(0)
-			if loc.Virtual || loc.Tier == "TIER0_LOCAL_STAGING" {
-				isVirtual = 1
 			}
 			if _, err := q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
 				Name: loc.Name, RootPath: loc.RootPath, Tier: loc.Tier,
@@ -800,7 +800,7 @@ func logLevel(cfgLevel string, debug bool) slog.Level {
 func watchedFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
 	out := make([]config.StorageLocation, 0, len(cfgs))
 	for _, c := range cfgs {
-		if c.Watch && c.Tier != "TIER3_MASTER_ARCHIVE" && !c.Virtual && c.Tier != "TIER0_LOCAL_STAGING" {
+		if c.Watch && c.Tier != "TIER3_MASTER_ARCHIVE" && !c.IsVirtual() {
 			out = append(out, c)
 		}
 	}
@@ -856,7 +856,7 @@ func validatePruneConfig(cfgs []config.StorageLocation) error {
 func sweptFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
 	out := make([]config.StorageLocation, 0, len(cfgs))
 	for _, c := range cfgs {
-		if c.Sweep && c.Tier != "TIER3_MASTER_ARCHIVE" && !c.Virtual && c.Tier != "TIER0_LOCAL_STAGING" {
+		if c.Sweep && c.Tier != "TIER3_MASTER_ARCHIVE" && !c.IsVirtual() {
 			out = append(out, c)
 		}
 	}

@@ -20,8 +20,9 @@ import (
 )
 
 // Location mirrors one row of storage_locations (internal/db). RootPath is
-// always the fully symlink-resolved, absolute, no-trailing-slash form --
-// see loadLocations and canonicalize.
+// the absolute, no-trailing-slash form (fully symlink-resolved for physical
+// mounts via EvalSymlinks, cleaned for virtual namespaces) -- see loadLocations
+// and canonicalize.
 type Location struct {
 	ID        int64
 	Name      string
@@ -116,15 +117,15 @@ type StorageLocationRow struct {
 }
 
 // LoadGuard reads storage_locations via lister and canonicalizes every
-// RootPath with EvalSymlinks. Root paths are operator-configured mount
-// points and are normally expected to exist at startup, but a single
-// missing or unresolvable root (M6: an unplugged drive, a dead NFS/SMB
-// mount) is NOT treated as fatal -- that would brick the entire server,
-// including the UI an operator would use to diagnose it, over one bad
-// mount out of potentially several. That location is instead excluded from
-// the returned Guard (so no write can ever be routed to a path Guard
-// cannot actually protect) and its id is returned in skippedLocationIDs
-// for the caller to mark inactive (cmd/branchdam calls
+// RootPath with EvalSymlinks (or validates absolute cleaned path for virtual
+// locations). Root paths are operator-configured mount points and are normally
+// expected to exist at startup, but a single missing or unresolvable root
+// (M6: an unplugged drive, a dead NFS/SMB mount) is NOT treated as fatal --
+// that would brick the entire server, including the UI an operator would use
+// to diagnose it, over one bad mount out of potentially several. That location
+// is instead excluded from the returned Guard (so no write can ever be routed
+// to a path Guard cannot actually protect) and its id is returned in
+// skippedLocationIDs for the caller to mark inactive (cmd/branchdam calls
 // sqlcgen.SetStorageLocationActive) -- LoadGuard itself only reads via
 // lister (this package has no dependency on internal/db/sqlcgen at all),
 // so it cannot perform that write itself. A lister-level failure (the
@@ -143,10 +144,17 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 	var skipped []int64
 	for _, row := range rows {
 		if row.IsVirtual {
+			clean := filepath.Clean(row.RootPath)
+			if !filepath.IsAbs(clean) {
+				log.Error("storage: virtual location root_path is not absolute, excluding from Guard and marking inactive",
+					"location", row.Name, "rootPath", row.RootPath)
+				skipped = append(skipped, row.ID)
+				continue
+			}
 			locs = append(locs, Location{
 				ID:        row.ID,
 				Name:      row.Name,
-				RootPath:  filepath.Clean(row.RootPath),
+				RootPath:  clean,
 				Tier:      row.Tier,
 				ReadOnly:  true,
 				IsVirtual: true,
@@ -173,8 +181,10 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 }
 
 // Resolve canonicalizes path and returns the Location it falls under.
-// Symlinks anywhere in path's existing ancestry are fully resolved before
-// the tier lookup runs -- a symlink sitting in a read-write Tier 2 directory
+// Virtual locations are matched first via lexical prefix checking before
+// filesystem canonicalization is performed on physical mounts.
+// Symlinks anywhere in a physical path's existing ancestry are fully resolved
+// before the tier lookup runs -- a symlink sitting in a read-write Tier 2 directory
 // that points into the Tier 3 archive is resolved to its real target first,
 // so it cannot be used to route a write around the tier check.
 // For virtual locations, lexical prefix matching is used without filesystem checks.
@@ -267,14 +277,16 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 	return os.Open(path)
 }
 
-// Exists reports whether path is already present on disk, using the same
-// symlink-safe canonicalization Resolve uses so a not-yet-existing suffix
-// can't be spoofed via a symlink planted in a writable location. A pure
-// stat, never a write -- permitted against any tier, including Tier 3,
-// mirroring OpenRead. This is what lets a caller distinguish "the bytes are
-// already at this Tier 3 path" (safe to record in the database) from "they
-// are not" (nothing else will ever place them there, since Tier 3 is
-// read-only) without ever attempting a write against the archive itself.
+// Exists reports whether path is already present on disk (or false for
+// virtual locations), using the same symlink-safe canonicalization Resolve
+// uses so a not-yet-existing suffix can't be spoofed via a symlink planted
+// in a writable location. A pure stat, never a write -- permitted against
+// any tier, including Tier 3, mirroring OpenRead. This is what lets a caller
+// distinguish "the bytes are already at this Tier 3 path" (safe to record
+// in the database) from "they are not" (nothing else will ever place them
+// there, since Tier 3 is read-only) without ever attempting a write against
+// the archive itself. Virtual locations immediately report false without
+// performing a stat.
 //
 // Deliberately os.Stat, not os.Lstat: canonicalize only resolves symlinks
 // up to the deepest EXISTING ancestor, so for a DANGLING symlink at the
