@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -84,9 +84,10 @@ describe("IngestJobsPage", () => {
       expect(screen.getByText("#16")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("ACTIVE")).toBeInTheDocument();
-    expect(screen.getByText("STOPPED")).toBeInTheDocument();
-    expect(screen.queryByText("CANCELLED")).not.toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("ACTIVE")).toBeInTheDocument();
+    expect(within(table).getByText("STOPPED")).toBeInTheDocument();
+    expect(within(table).queryByText("CANCELLED")).not.toBeInTheDocument();
   });
 
   it("updates filters when clicking quick preset buttons", async () => {
