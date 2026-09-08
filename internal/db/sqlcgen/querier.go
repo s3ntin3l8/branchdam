@@ -110,6 +110,8 @@ type Querier interface {
 	// "SQL Syntax Traps" note.
 	// Inserts the pairing row and returns it. The HTTP layer wraps this with
 	// the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
+	// user_id is the owner FK from migration 00020; nullable so legacy
+	// pairings pre-dating that migration stay valid.
 	//
 	// RETURNING includes user_id (the owner column) so the result struct
 	// matches the new DevicePairing shape introduced by migration 00019

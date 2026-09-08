@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,7 @@ func TestCreatePairing_HappyPath(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, key, err := svc.CreatePairing(ctx, "Björn's iPhone", "user:tester", stubQRPayload)
+	pairing, key, err := svc.CreatePairing(ctx, "Björn's iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 	require.NotNil(t, pairing)
 	require.NotNil(t, key)
@@ -64,13 +65,49 @@ func TestCreatePairing_HappyPath(t *testing.T) {
 	assert.False(t, key.RevokedAt.Valid)
 }
 
+// TestCreatePairing_StoresOwnerUserID: when the HTTP layer passes a
+// resolved user id, the pairing's user_id column carries it. This is
+// the contract the agent upload path relies on to attribute
+// paired-device uploads back to the human who paired the device.
+func TestCreatePairing_StoresOwnerUserID(t *testing.T) {
+	svc, dbx := newTestService(t)
+	ctx := context.Background()
+
+	// Create a real users row to satisfy the FK.
+	var userID int64
+	require.NoError(t, dbx.InTx(ctx, func(q *sqlcgen.Queries) error {
+		u, err := q.CreateLocalUser(ctx, sqlcgen.CreateLocalUserParams{
+			Username:     "alice",
+			Email:        sql.NullString{String: "alice@example.com", Valid: true},
+			PasswordHash: sql.NullString{String: "x", Valid: true},
+			IsAdmin:      0,
+			CreatedAt:    time.Now().Unix(),
+			CreatedBy:    "test",
+		})
+		userID = u.ID
+		return err
+	}))
+
+	pairing, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", userID, stubQRPayload)
+	require.NoError(t, err)
+	assert.True(t, pairing.UserID.Valid)
+	assert.Equal(t, userID, pairing.UserID.Int64)
+}
+
+func TestCreatePairing_NilUserIDIsAllowed(t *testing.T) {
+	svc, _ := newTestService(t)
+	pairing, _, err := svc.CreatePairing(context.Background(), "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	assert.False(t, pairing.UserID.Valid, "userID=0 must surface as NULL")
+}
+
 func TestCreatePairing_MintsUniqueAgentIDs(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	p1, _, err := svc.CreatePairing(ctx, "iPhone A", "user:tester", stubQRPayload)
+	p1, _, err := svc.CreatePairing(ctx, "iPhone A", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
-	p2, _, err := svc.CreatePairing(ctx, "iPhone B", "user:tester", stubQRPayload)
+	p2, _, err := svc.CreatePairing(ctx, "iPhone B", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, p1.AgentID, p2.AgentID)
@@ -80,7 +117,7 @@ func TestCreatePairing_RejectsDuplicateAgentID(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	p, _, err := svc.CreatePairing(ctx, "first", "user:tester", stubQRPayload)
+	p, _, err := svc.CreatePairing(ctx, "first", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	// Try to manually create another pairing with the same agent_id -- should
@@ -101,7 +138,7 @@ func TestKeyLookup_ActiveKeyReturnsAgentID(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	agentID, err := svc.KeyLookup(ctx, key.Plaintext)
@@ -122,7 +159,7 @@ func TestKeyLookup_RevokedPairingReturnsEmpty(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
@@ -137,7 +174,7 @@ func TestKeyLookup_ExpiredKeyReturnsEmpty(t *testing.T) {
 	svc, db := newTestService(t)
 	ctx := context.Background()
 
-	pairing, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	// Manually expire the only key by setting expires_at in the past. Service
@@ -165,7 +202,7 @@ func TestRotateKey_HappyPath(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, oldKey, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, oldKey, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	newKey, previousExpiry, err := svc.RotateKey(ctx, pairing.ID, "user:tester", 24*60, stubQRPayload)
@@ -190,7 +227,7 @@ func TestRotateKey_GraceExpiryExpiresOldKey(t *testing.T) {
 	svc, db := newTestService(t)
 	ctx := context.Background()
 
-	pairing, oldKey, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, oldKey, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
 	_, _, err = svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
@@ -215,7 +252,7 @@ func TestRevokePairing_TerminatesAllKeys(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, k1, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, k1, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 	k2, _, err := svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
 	require.NoError(t, err)
@@ -234,7 +271,7 @@ func TestLatestActiveKey_ReturnsNewestDifferentFromGiven(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, k1, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, k1, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 	k2, _, err := svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
 	require.NoError(t, err)
@@ -253,7 +290,7 @@ func TestLatestActiveKey_RevokedPairingReturnsNoRows(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	pairing, k1, err := svc.CreatePairing(ctx, "iPhone", "user:tester", stubQRPayload)
+	pairing, k1, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 	_, _, err = svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
 	require.NoError(t, err)

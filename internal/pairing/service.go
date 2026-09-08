@@ -47,6 +47,12 @@ type Pairing struct {
 	CreatedAt     int64
 	CreatedBy     string
 	RevokedAt     sql.NullInt64
+	// UserID is the nullable owner FK from device_pairings.user_id
+	// (migration 00020). Set at create time from the creating request's
+	// resolved attribution user id; NULL for legacy pairings created
+	// before this PR landed. Used by the agent upload path to attribute
+	// paired-device uploads back to the human who paired them.
+	UserID sql.NullInt64
 }
 
 // Key is a device's API key, plaintext included. Plaintext is the ONLY
@@ -143,7 +149,7 @@ func nowUnix() int64 { return time.Now().Unix() }
 func (s *Service) withTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	return s.db.InTx(ctx, fn)
 }
-func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string, qrPayloadFor func(agentID, apiKey string) []byte) (*Pairing, *Key, error) {
+func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string, userID int64, qrPayloadFor func(agentID, apiKey string) []byte) (*Pairing, *Key, error) {
 	now := s.nowFn()
 	agentID, err := mintAgentID()
 	if err != nil {
@@ -159,6 +165,11 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		return nil, nil, fmt.Errorf("render qr: %w", err)
 	}
 
+	var userIDArg sql.NullInt64
+	if userID != 0 {
+		userIDArg = sql.NullInt64{Int64: userID, Valid: true}
+	}
+
 	var (
 		pRow   sqlcgen.DevicePairing
 		keyRow sqlcgen.DevicePairingKey
@@ -170,6 +181,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 			CreatedAt:     now,
 			CreatedBy:     actor,
 			QrSvg:         svg,
+			UserID:        userIDArg,
 		})
 		if err != nil {
 			return fmt.Errorf("insert pairing: %w", err)
@@ -217,6 +229,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 			CreatedAt:     pRow.CreatedAt,
 			CreatedBy:     pRow.CreatedBy,
 			RevokedAt:     pRow.RevokedAt,
+			UserID:        pRow.UserID,
 		}, &Key{
 			ID:         keyRow.ID,
 			PairingID:  keyRow.PairingID,
