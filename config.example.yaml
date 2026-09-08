@@ -135,7 +135,7 @@ storageLocations:
     tier: TIER2_EXPORTS
     # watch: false                # continuous ingest is opt-in, off by default
 
-# PROJECTS: Not needed for the standard workflow. Project files (.dam.json, .drp,
+  # PROJECTS: Not needed for the standard workflow. Project files (.dam.json, .drp,
   # .fcpxml) live on editing workstations (running branchdam-agent); only
   # configure this if the headless server needs direct access to project files
   # for Tier-1 introspection — both mount and entry required.
