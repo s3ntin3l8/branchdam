@@ -31,6 +31,7 @@ WHERE (lifecycle_state = ?1 OR ?1 IS NULL)
   AND (camera_model = ?2 OR ?2 IS NULL)
   AND (graph_status = ?3 OR ?3 IS NULL)
   AND (storage_location_id = ?4 OR ?4 IS NULL)
+  AND (uploaded_by_user_id = ?5 OR ?5 IS NULL)
 `
 
 type CountMediaNodesFilteredParams struct {
@@ -38,6 +39,7 @@ type CountMediaNodesFilteredParams struct {
 	CameraModel       sql.NullString
 	GraphStatus       sql.NullString
 	StorageLocationID sql.NullInt64
+	UploadedByUserID  sql.NullInt64
 }
 
 // Comparison before IS NULL in each clause (not the reverse) is load-bearing:
@@ -50,6 +52,7 @@ func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNod
 		arg.CameraModel,
 		arg.GraphStatus,
 		arg.StorageLocationID,
+		arg.UploadedByUserID,
 	)
 	var count int64
 	err := row.Scan(&count)
@@ -955,6 +958,7 @@ WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
   AND (camera_model = ?4 OR ?4 IS NULL)
   AND (graph_status = ?5 OR ?5 IS NULL)
   AND (storage_location_id = ?6 OR ?6 IS NULL)
+  AND (uploaded_by_user_id = ?7 OR ?7 IS NULL)
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2
 `
@@ -966,6 +970,7 @@ type ListMediaNodesFilteredParams struct {
 	CameraModel       sql.NullString
 	GraphStatus       sql.NullString
 	StorageLocationID sql.NullInt64
+	UploadedByUserID  sql.NullInt64
 }
 
 // Comparison before IS NULL in each clause (not the reverse) is load-bearing:
@@ -980,6 +985,7 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 		arg.CameraModel,
 		arg.GraphStatus,
 		arg.StorageLocationID,
+		arg.UploadedByUserID,
 	)
 	if err != nil {
 		return nil, err

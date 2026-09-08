@@ -279,6 +279,13 @@ type assetDTO struct {
 	OriginalDocumentID string  `json:"originalDocumentId,omitempty"`
 	CameraModel        string  `json:"cameraModel,omitempty"`
 	ThumbState         string  `json:"thumbState"`
+	// UploadedByUserID is the nullable attribution FK
+	// (media_nodes.uploaded_by_user_id, migration 00020). NULL = no
+	// resolved attribution (legacy rows, background scans, system
+	// writes). The SPA renders this via the /api/v1/users lookup when
+	// non-null; the "My uploads" filter pins it to the request's own
+	// resolved id.
+	UploadedByUserID *int64 `json:"uploadedByUserId,omitempty"`
 }
 
 func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
@@ -297,6 +304,10 @@ func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
 		StorageLocationID: n.StorageLocationID,
 		ThumbState:        n.ThumbState,
 	}
+	if n.UploadedByUserID.Valid {
+		v := n.UploadedByUserID.Int64
+		dto.UploadedByUserID = &v
+	}
 	if n.OriginalDocumentID.Valid {
 		dto.OriginalDocumentID = n.OriginalDocumentID.String
 	}
@@ -314,6 +325,11 @@ type ListAssetsInput struct {
 	StorageLocationID int64  `query:"storageLocationId"`
 	LifecycleState    string `query:"lifecycleState"`
 	UnlinkedOnly      bool   `query:"unlinkedOnly"`
+	// UploadedByUserID, when > 0, restricts the list to assets the
+	// given user uploaded (media_nodes.uploaded_by_user_id). The SPA's
+	// "My uploads" filter pins it to the request's own id via the
+	// /api/v1/me + /api/v1/users round-trip. 0 disables the filter.
+	UploadedByUserID int64 `query:"uploadedByUserId" default:"0"`
 }
 
 type ListAssetsOutput struct {
@@ -346,7 +362,12 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		storageLocationID = sql.NullInt64{Int64: in.StorageLocationID, Valid: true}
 	}
 
-	hasFilters := lifecycleState.Valid || graphStatus.Valid || cameraModel.Valid || storageLocationID.Valid
+	var uploadedByUserID sql.NullInt64
+	if in.UploadedByUserID > 0 {
+		uploadedByUserID = sql.NullInt64{Int64: in.UploadedByUserID, Valid: true}
+	}
+
+	hasFilters := lifecycleState.Valid || graphStatus.Valid || cameraModel.Valid || storageLocationID.Valid || uploadedByUserID.Valid
 
 	var rows []sqlcgen.MediaNode
 	var total int64
@@ -369,6 +390,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
 			StorageLocationID: storageLocationID,
+			UploadedByUserID:  uploadedByUserID,
 		}
 		rows, err = s.db.Reader.ListMediaNodesFiltered(ctx, params)
 		if err != nil {
@@ -379,6 +401,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
 			StorageLocationID: storageLocationID,
+			UploadedByUserID:  uploadedByUserID,
 		})
 		if err != nil {
 			total = int64(len(rows))
