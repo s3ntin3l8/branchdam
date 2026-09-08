@@ -25,6 +25,16 @@ function getScrollParent(element: HTMLElement | null): HTMLElement | Window | nu
   return window;
 }
 
+function isScrolledToBottom(scrollParent: HTMLElement | Window | null): boolean {
+  if (scrollParent instanceof HTMLElement) {
+    return scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 24;
+  }
+  if (scrollParent === window && typeof document !== "undefined") {
+    return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
+  }
+  return false;
+}
+
 export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
   const [activeId, setActiveId] = useState(categories[0]?.id ?? "");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -99,14 +109,7 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
       }
       if (categories.length === 0) return;
 
-      let isAtBottom = false;
-      if (scrollParent instanceof HTMLElement) {
-        isAtBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 24;
-      } else if (scrollParent === window && typeof document !== "undefined") {
-        isAtBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
-      }
-
-      if (isAtBottom) {
+      if (isScrolledToBottom(scrollParent)) {
         setActiveId(categories[categories.length - 1].id);
       }
     };
@@ -122,7 +125,9 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
       }
       if (scrollTimeoutRef.current !== null) {
         window.clearTimeout(scrollTimeoutRef.current);
+        scrollTimeoutRef.current = null;
       }
+      isProgrammaticScrollRef.current = false;
     };
   }, [categories, resetScrollSettlingTimer]);
 

@@ -79,8 +79,7 @@ describe("SettingsLayout", () => {
     expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#appearance");
   });
 
-  it("activates the last category when scrolled to the bottom of the scroll container", () => {
-    const originalGetComputedStyle = window.getComputedStyle;
+  it("activates the last category when scrolled to the bottom of an HTMLElement scroll container", () => {
     const { container } = render(
       <div
         data-testid="scroll-container"
@@ -103,20 +102,6 @@ describe("SettingsLayout", () => {
     const scrollContainer = container.querySelector('[data-testid="scroll-container"]') as HTMLElement;
     expect(scrollContainer).not.toBeNull();
 
-    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element) => {
-      const style = originalGetComputedStyle(el);
-      if (el === scrollContainer) {
-        return new Proxy(style, {
-          get(target, prop) {
-            if (prop === "overflowY") return "auto";
-            const val = Reflect.get(target, prop);
-            return typeof val === "function" ? val.bind(target) : val;
-          },
-        });
-      }
-      return style;
-    });
-
     // Simulate scroll container at bottom
     Object.defineProperty(scrollContainer, "scrollHeight", { value: 1000, configurable: true });
     Object.defineProperty(scrollContainer, "clientHeight", { value: 500, configurable: true });
@@ -124,6 +109,31 @@ describe("SettingsLayout", () => {
 
     // Fire scroll event on container
     fireEvent.scroll(scrollContainer);
+
+    const appearanceLink = screen.getByRole("link", { name: "Appearance" });
+    expect(appearanceLink).toHaveClass("bg-neutral-800", "text-neutral-100");
+  });
+
+  it("activates the last category when scrolled to the bottom of the window", () => {
+    render(
+      <SettingsLayout categories={TEST_CATEGORIES}>
+        <section id="server" data-settings-section="server">
+          <h2>Server Section</h2>
+        </section>
+        <section id="workers" data-settings-section="workers">
+          <h2>Workers Section</h2>
+        </section>
+        <section id="appearance" data-settings-section="appearance">
+          <h2>Appearance Section</h2>
+        </section>
+      </SettingsLayout>
+    );
+
+    Object.defineProperty(window, "innerHeight", { value: 600, configurable: true });
+    Object.defineProperty(window, "scrollY", { value: 400, configurable: true, writable: true });
+    Object.defineProperty(document.documentElement, "scrollHeight", { value: 1000, configurable: true }); // 600 + 400 = 1000 >= 1000 - 24
+
+    fireEvent.scroll(window);
 
     const appearanceLink = screen.getByRole("link", { name: "Appearance" });
     expect(appearanceLink).toHaveClass("bg-neutral-800", "text-neutral-100");
@@ -152,5 +162,56 @@ describe("SettingsLayout", () => {
       behavior: "smooth",
       block: "start",
     });
+  });
+
+  it("resets the scroll lock on effect cleanup so subsequent scrolls are not blocked", async () => {
+    const user = userEvent.setup();
+    const { rerender, container } = render(
+      <div data-testid="scroll-container" style={{ height: "500px", overflowY: "auto" }}>
+        <SettingsLayout categories={TEST_CATEGORIES}>
+          <section id="server" data-settings-section="server">
+            <h2>Server Section</h2>
+          </section>
+          <section id="workers" data-settings-section="workers">
+            <h2>Workers Section</h2>
+          </section>
+          <section id="appearance" data-settings-section="appearance">
+            <h2>Appearance Section</h2>
+          </section>
+        </SettingsLayout>
+      </div>
+    );
+
+    // Click to start programmatic scroll lock
+    const appearanceLink = screen.getByRole("link", { name: "Appearance" });
+    await user.click(appearanceLink);
+
+    // Rerender with new categories array identity (triggers effect teardown/cleanup)
+    const newCategories = [...TEST_CATEGORIES];
+    rerender(
+      <div data-testid="scroll-container" style={{ height: "500px", overflowY: "auto" }}>
+        <SettingsLayout categories={newCategories}>
+          <section id="server" data-settings-section="server">
+            <h2>Server Section</h2>
+          </section>
+          <section id="workers" data-settings-section="workers">
+            <h2>Workers Section</h2>
+          </section>
+          <section id="appearance" data-settings-section="appearance">
+            <h2>Appearance Section</h2>
+          </section>
+        </SettingsLayout>
+      </div>
+    );
+
+    const scrollContainer = container.querySelector('[data-testid="scroll-container"]') as HTMLElement;
+    Object.defineProperty(scrollContainer, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(scrollContainer, "clientHeight", { value: 500, configurable: true });
+    Object.defineProperty(scrollContainer, "scrollTop", { value: 490, configurable: true, writable: true });
+
+    // Scrolling to bottom should work immediately and not be blocked by stale lock
+    fireEvent.scroll(scrollContainer);
+
+    expect(screen.getByRole("link", { name: "Appearance" })).toHaveClass("bg-neutral-800", "text-neutral-100");
   });
 });
