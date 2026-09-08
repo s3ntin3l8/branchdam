@@ -3,9 +3,9 @@
 This document walks one specific real-world deployment shape — SD card ingest on a Windows
 workstation and a MacBook, local NVMe editing in DaVinci Resolve and Luminar, a Tier-3 master
 archive on a NAS, Tier-2 exports and Immich on a separate host — against what branchDAM's server
-actually does today, as opposed to what the spec or roadmap describe as eventually landing. It is
+actually does today, as opposed to what the spec describes as eventually landing. It is
 a coverage audit, not a tutorial; see [`deploy.md`](deploy.md) for bring-up steps and
-[`deploy-topology.md`](deploy-topology.md) for a specific host layout.
+[`deploy.md` §9](deploy.md) for a specific multi-host layout.
 
 ## 1. Summary
 
@@ -132,25 +132,15 @@ the already-scanned exports directory is sufficient on its own. This was origina
 independently buildable in *this* repo (#233), on the strength of that same
 no-`PROJECTS`-tier argument; the hook itself still needs nothing beyond what's described above, but
 the issue tracking it has since moved to `s3ntin3l8/branchdam-agent#5`, alongside the rest of
-phase 10 (see `docs/roadmap.md`).
+phase 10.
 
 ## 6. Immich integration
 
-Two things to configure explicitly:
+The integration prerequisites and operational caveats (external-library-only, matching
+`exportPath`, all-or-nothing worker) are documented in [`integrations.md` §4](integrations.md#4-immich-external-library-push).
 
-- **An Immich library that is managed (internal ingest) rather than external is invisible to
-  branchDAM permanently.** The integration is exactly one call —
-  `POST /api/libraries/{library_id}/scan` against an **external** library — and transfers no
-  bytes. Existing managed-library assets do not appear in branchDAM's graph and never will
-  without a separate migration; only assets that later land in the export path and get indexed
-  via a new external library are covered.
-- **branchDAM's `immich.exportPath` and Immich's external-library path must be the same string.**
-  The sync worker filters live nodes by `exportPath` as branchDAM resolves it; Immich scans the
-  library path as Immich resolves it. If the two containers mount the shared export directory at
-  different paths, the sync worker enqueues nothing, indefinitely, with no error surfaced.
-  Mounting the same host directory at the same container path in both containers avoids this.
-- The sync worker is all-or-nothing: an empty or unresolved `immich.apiUrl` or `immich.libraryId`
-  disables it entirely, logged once at startup.
+The full step-by-step wiring of "render to Tier-2 → Immich picks it up" is step 11 of the
+coverage table in [§1](#1-summary).
 
 ## 7. What local-only project files mean for lineage
 
@@ -158,9 +148,10 @@ Because Resolve/Luminar project files and catalogs live only on the editing work
 
 - `.drp`/`.fcpxml`/`.edl` introspection cannot fire — `ProjectSidecarResolver` opens the project
   file directly (`os.Open`), which requires a path the server itself can read. A workstation-local
-  project file is never reachable this way.
-- The Luminar `catalog.db` reader is unaffected by this — it is phase-10, workstation-side by
-  design regardless of where the catalog lives.
+  project file is never reachable this way. For the `pathRewrites` configuration that closes
+  this gap, see [`integrations.md` §2](integrations.md#2-nle-timelines--path-rewrites).
+- The Luminar `catalog.db` reader is unaffected by this — it is workstation-side by
+  design regardless of where the catalog lives; see [`integrations.md` §3](integrations.md#3-skylum-luminar-neo).
 - `.dam.json` is unaffected, per §5 — it is written into an already-scanned Tier-2 location, not
   read from the workstation.
 

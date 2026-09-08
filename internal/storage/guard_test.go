@@ -9,8 +9,9 @@ import (
 )
 
 // newTestGuard builds a Guard over two real directories under t.TempDir():
-// tier2 (read-write) and tier3 (read-only), mirroring the production shape
-// where the master archive is mounted :ro alongside a writable exports tier.
+// tier2 (read-write) and tier3 (read-only, opt-in), mirroring the production
+// shape where the master archive is writable by default but can be marked
+// read-only for archive-only deployments.
 func newTestGuard(t *testing.T) (guard *Guard, tier2, tier3 string) {
 	t.Helper()
 	root := t.TempDir()

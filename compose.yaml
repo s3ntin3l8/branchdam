@@ -26,10 +26,18 @@ services:
       # One mount per storage tier declared in config.yaml's
       # storageLocations. Master archive is mounted :rw for server-governed
       # ingest and archive storage.
-      - /mnt/local/scratch:/storage/scratch:rw # TIER1_LOCAL_SCRATCH
+      - /mnt/local/staging:/storage/staging:rw # TIER0_LOCAL_STAGING
       - /mnt/nas/exports:/storage/exports:rw # TIER2_EXPORTS
-      - /mnt/nas/projects:/storage/projects:rw # PROJECTS
       - /mnt/nas/archive:/storage/archive:rw # TIER3_MASTER_ARCHIVE
+      # TIER1_LOCAL_SCRATCH is typically workstation-local NVMe, not mounted
+      # into the headless server. Uncomment both this mount and the
+      # corresponding storageLocations entry if your deployment needs it.
+      # - /mnt/local/scratch:/storage/scratch:rw # TIER1_LOCAL_SCRATCH
+      # PROJECTS is not needed for the standard workflow — project files
+      # (.dam.json, .drp, .fcpxml) live on editing workstations running
+      # branchdam-agent. Uncomment both this mount and the corresponding
+      # storageLocations entry if the server needs direct access.
+      # - /mnt/nas/projects:/storage/projects:rw # PROJECTS
       # Example SMB/NFS share matching config.example.yaml's `nas-share`
       # location (sweep-only, since fsnotify doesn't fire reliably over
       # SMB/NFS -- #60). Uncomment both the mount here and the

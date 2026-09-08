@@ -103,22 +103,30 @@ See the [Luminar Catalog Schema Reference](https://github.com/s3ntin3l8/branchda
 
 ## 4. Immich (External Library Push)
 
-branchDAM integrates with self-hosted [Immich](https://immich.app) instances to automatically trigger external library rescans upon discovering newly exported deliverables:
-
-### Configuration (`config.yaml`)
-```yaml
-immich:
-  enabled: true
-  url: "http://immich-server:2283"
-  apiKey: "your-immich-api-key"
-  libraryId: "your-external-library-uuid"
-  intervalMinutes: 5
-```
+branchDAM integrates with self-hosted [Immich](https://immich.app) instances to automatically trigger external library rescans upon discovering newly exported deliverables.
 
 ### Architecture
 - **External Library Mount:** Immich is configured with an **External Library** pointed at branchDAM's Tier-2 exports directory (`/storage/exports`).
 - **Rescan Trigger:** When branchDAM discovers new exported files in Tier 2, its sync worker triggers `POST /api/libraries/{id}/scan` to update Immich immediately.
 - **Supervisor Safety:** The Immich sync worker supports live settings reload (`PUT /api/v1/settings`) and joins cleanly during graceful server shutdown.
+
+### Prerequisites & caveats
+- **Immich must use an external library, not a managed one.** An Immich library that is managed
+  (internal ingest) rather than external is invisible to branchDAM permanently. The integration
+  is exactly one call — `POST /api/libraries/{library_id}/scan` against an **external** library —
+  and transfers no bytes. Existing managed-library assets do not appear in branchDAM's graph and
+  never will without a separate migration; only assets that later land in the export path and get
+  indexed via a new external library are covered.
+- **`immich.exportPath` and Immich's external-library path must be the same string.** The sync
+  worker filters live nodes by `exportPath` as branchDAM resolves it; Immich scans the library
+  path as Immich resolves it. If the two containers mount the shared export directory at
+  different paths, the sync worker enqueues nothing indefinitely, with no error surfaced.
+  Mounting the same host directory at the same container path in both containers avoids this.
+- **The sync worker is all-or-nothing.** An empty or unresolved `immich.apiUrl` or
+  `immich.libraryId` disables it entirely (logged once at startup). An empty library ID would
+  otherwise call `POST /api/libraries//scan` and 404 forever.
+
+For the field-level `config.yaml` reference for `immich.*`, see [`configuration.md`](configuration.md).
 
 ---
 
@@ -128,3 +136,26 @@ The [`branchdam-agent`](https://github.com/s3ntin3l8/branchdam-agent) companion 
 - **Bit-for-Bit Dual Ingest:** Reads camera SD cards once and streams simultaneously to local edit SSDs and the remote NAS master archive.
 - **Cache-Busting Verification:** Performs unbuffered re-reads (`O_DIRECT` on Linux, `F_NOCACHE` on macOS, `FILE_FLAG_NO_BUFFERING` on Windows) before signaling safe card ejection.
 - **Offline Field Mode:** Persists ingest records locally in `queue.db` when disconnected from LAN, draining and rebasing paths (`POST /api/v1/agent/rebase`) once reconnected.
+
+For the mobile companion app (a separate agent), see [`mobile.md`](mobile.md).
+
+---
+
+## 6. Google Photos (no-go spike)
+
+Google Photos sync was investigated as research spike issue #56. The verdict is **no-go**, with
+two reasons:
+
+1. **branchDAM's sync layer has no byte-transfer capability** — the Immich integration triggers a
+   library rescan rather than uploading bytes (`integrations.md` §4 above), and there is no path
+   to push media bytes to Google Photos from the server.
+2. **No way to integrity-verify a Google Photos copy against `full_hash`** — Google Photos'
+   re-encoding would invalidate any BLAKE3 comparison, and the platform offers no verifiable
+   round-trip.
+
+The push direction survived Google's 2025-04-01 Photos Library API cuts (quota is ample, OAuth
+has a workable path pending confirmation), but the above two constraints make it impractical
+for branchDAM's architecture.
+
+For the full research spike, including the OAuth workaround, quota analysis, and a pending
+8-day refresh-token test, see [`google-photos.md`](google-photos.md).

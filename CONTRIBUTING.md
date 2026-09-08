@@ -74,7 +74,7 @@ Branch off the latest `origin/main`, not a possibly-stale local `main`:
 git fetch origin && git checkout -b <branch> origin/main
 ```
 
-No direct commits to `main`. One issue = one PR, per [`docs/roadmap.md`](docs/roadmap.md).
+No direct commits to `main`. One issue = one PR.
 
 ## Branch protection
 

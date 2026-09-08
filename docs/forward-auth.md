@@ -167,7 +167,7 @@ connectivity and executes `SYNC_HANDSHAKE` on reconnect. That offline-queue/dual
 behavior is `s3ntin3l8/branchdam-agent#2` ("SD-card ingest engine -- dual-copy writer, offline
 queue, Tier-0/3 rebase"; this repo's own #234, which originally tracked it, is closed in favor of
 that issue), not #62 -- #62 is now scoped to only the tray app and the Luminar `catalog.db`
-reader, which also ships in `branchdam-agent` (see `docs/roadmap.md`). Reachability just
+reader, which also ships in `branchdam-agent`. Reachability just
 determines whether "reconnect" means "back on the LAN" or "the tailnet came up."
 
 ## 5. Verifying it works
