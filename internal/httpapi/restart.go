@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+
+	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 )
 
 // restartGraceDelay is how long handlePostRestart waits, after writing its
@@ -41,6 +43,16 @@ func (s *Server) handlePostRestart(ctx context.Context, _ *struct{}) (*PostResta
 	}
 
 	s.log.Info("restart requested", "actor", principalName(ctx))
+
+	if s.audit != nil {
+		// Audit BEFORE scheduling the restart -- the deferred
+		// goroutine may race with the process actually exiting,
+		// and an audit row that lands after the binary is gone is
+		// strictly less useful than one that lands before.
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventRestart, "system", "", nil); err != nil {
+			s.log.Warn("audit: restart write failed", "err", err)
+		}
+	}
 
 	requestRestart := s.requestRestart
 	go func() {

@@ -1539,6 +1539,17 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 		s.hub.Broadcast()
 	}
 
+	if s.audit != nil {
+		details := map[string]any{
+			"jobId":             jobID,
+			"storageLocationId": in.Body.StorageLocationID,
+			"differential":      in.Body.Differential,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventScanStarted, "scan_job", strconv.FormatInt(jobID, 10), details); err != nil {
+			s.log.Warn("audit: scan.started write failed", "err", err)
+		}
+	}
+
 	out := &StartScanOutput{}
 	out.Body.JobID = jobID
 	return out, nil
@@ -2918,6 +2929,24 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 	}
 	if s.hub != nil {
 		s.hub.Broadcast()
+	}
+	if s.audit != nil {
+		purged := 0
+		for _, r := range results {
+			if r.Purged {
+				purged++
+			}
+		}
+		details := map[string]any{
+			"storageLocationId":   loc.ID,
+			"storageLocationName": loc.Name,
+			"planned":             len(results),
+			"purged":              purged,
+			"cutoffUnix":          cutoffUnix,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventPruneExecuted, "storage_location", loc.Name, details); err != nil {
+			s.log.Warn("audit: prune.executed write failed", "err", err)
+		}
 	}
 	return out, nil
 }
