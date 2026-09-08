@@ -226,6 +226,23 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 
 	locs := make([]storage.Location, 0, len(effective))
 	for _, c := range effective {
+		if c.IsVirtual() {
+			clean := filepath.Clean(c.RootPath)
+			if !filepath.IsAbs(clean) {
+				s.log.Warn("storage reload: skipping non-absolute virtual root",
+					"name", c.Name, "rootPath", c.RootPath)
+				continue
+			}
+			locs = append(locs, storage.Location{
+				ID:        0, // re-resolved from override; Guard doesn't need the DB id for Resolve/CheckWrite
+				Name:      c.Name,
+				RootPath:  clean,
+				Tier:      c.Tier,
+				ReadOnly:  true,
+				IsVirtual: true,
+			})
+			continue
+		}
 		resolved, err := filepath.EvalSymlinks(c.RootPath)
 		if err != nil {
 			s.log.Warn("storage reload: skipping unresolvable root",
@@ -233,11 +250,12 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 			continue
 		}
 		locs = append(locs, storage.Location{
-			ID:       0, // re-resolved from override; Guard doesn't need the DB id for Resolve/CheckWrite
-			Name:     c.Name,
-			RootPath: filepath.Clean(resolved),
-			Tier:     c.Tier,
-			ReadOnly: c.ReadOnly,
+			ID:        0, // re-resolved from override; Guard doesn't need the DB id for Resolve/CheckWrite
+			Name:      c.Name,
+			RootPath:  filepath.Clean(resolved),
+			Tier:      c.Tier,
+			ReadOnly:  c.ReadOnly,
+			IsVirtual: false,
 		})
 	}
 	s.guard.ReloadLocations(locs)

@@ -20,14 +20,16 @@ import (
 )
 
 // Location mirrors one row of storage_locations (internal/db). RootPath is
-// always the fully symlink-resolved, absolute, no-trailing-slash form --
-// see loadLocations and canonicalize.
+// the absolute, no-trailing-slash form (fully symlink-resolved for physical
+// mounts via EvalSymlinks, cleaned for virtual namespaces) -- see loadLocations
+// and canonicalize.
 type Location struct {
-	ID       int64
-	Name     string
-	RootPath string
-	Tier     string
-	ReadOnly bool
+	ID        int64
+	Name      string
+	RootPath  string
+	Tier      string
+	ReadOnly  bool
+	IsVirtual bool
 }
 
 // ErrReadOnlyTier is returned by every write method when the resolved
@@ -106,23 +108,24 @@ type locationLister interface {
 // row. internal/db's caller adapts sqlcgen.StorageLocation into this with a
 // small conversion -- see cmd/branchdam (wired when a consumer needs it).
 type StorageLocationRow struct {
-	ID       int64
-	Name     string
-	RootPath string
-	Tier     string
-	ReadOnly bool
+	ID        int64
+	Name      string
+	RootPath  string
+	Tier      string
+	ReadOnly  bool
+	IsVirtual bool
 }
 
 // LoadGuard reads storage_locations via lister and canonicalizes every
-// RootPath with EvalSymlinks. Root paths are operator-configured mount
-// points and are normally expected to exist at startup, but a single
-// missing or unresolvable root (M6: an unplugged drive, a dead NFS/SMB
-// mount) is NOT treated as fatal -- that would brick the entire server,
-// including the UI an operator would use to diagnose it, over one bad
-// mount out of potentially several. That location is instead excluded from
-// the returned Guard (so no write can ever be routed to a path Guard
-// cannot actually protect) and its id is returned in skippedLocationIDs
-// for the caller to mark inactive (cmd/branchdam calls
+// RootPath with EvalSymlinks (or validates absolute cleaned path for virtual
+// locations). Root paths are operator-configured mount points and are normally
+// expected to exist at startup, but a single missing or unresolvable root
+// (M6: an unplugged drive, a dead NFS/SMB mount) is NOT treated as fatal --
+// that would brick the entire server, including the UI an operator would use
+// to diagnose it, over one bad mount out of potentially several. That location
+// is instead excluded from the returned Guard (so no write can ever be routed
+// to a path Guard cannot actually protect) and its id is returned in
+// skippedLocationIDs for the caller to mark inactive (cmd/branchdam calls
 // sqlcgen.SetStorageLocationActive) -- LoadGuard itself only reads via
 // lister (this package has no dependency on internal/db/sqlcgen at all),
 // so it cannot perform that write itself. A lister-level failure (the
@@ -140,6 +143,24 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 	locs := make([]Location, 0, len(rows))
 	var skipped []int64
 	for _, row := range rows {
+		if row.IsVirtual {
+			clean := filepath.Clean(row.RootPath)
+			if !filepath.IsAbs(clean) {
+				log.Error("storage: virtual location root_path is not absolute, excluding from Guard and marking inactive",
+					"location", row.Name, "rootPath", row.RootPath)
+				skipped = append(skipped, row.ID)
+				continue
+			}
+			locs = append(locs, Location{
+				ID:        row.ID,
+				Name:      row.Name,
+				RootPath:  clean,
+				Tier:      row.Tier,
+				ReadOnly:  true,
+				IsVirtual: true,
+			})
+			continue
+		}
 		resolved, err := filepath.EvalSymlinks(row.RootPath)
 		if err != nil {
 			log.Error("storage: location root_path unresolvable, excluding from Guard and marking inactive",
@@ -148,32 +169,58 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 			continue
 		}
 		locs = append(locs, Location{
-			ID:       row.ID,
-			Name:     row.Name,
-			RootPath: filepath.Clean(resolved),
-			Tier:     row.Tier,
-			ReadOnly: row.ReadOnly,
+			ID:        row.ID,
+			Name:      row.Name,
+			RootPath:  filepath.Clean(resolved),
+			Tier:      row.Tier,
+			ReadOnly:  row.ReadOnly,
+			IsVirtual: false,
 		})
 	}
 	return NewGuard(locs), skipped, nil
 }
 
 // Resolve canonicalizes path and returns the Location it falls under.
-// Symlinks anywhere in path's existing ancestry are fully resolved before
-// the tier lookup runs -- a symlink sitting in a read-write Tier 2 directory
+// Virtual locations are matched first via lexical prefix checking before
+// filesystem canonicalization is performed on physical mounts.
+// Symlinks anywhere in a physical path's existing ancestry are fully resolved
+// before the tier lookup runs -- a symlink sitting in a read-write Tier 2 directory
 // that points into the Tier 3 archive is resolved to its real target first,
 // so it cannot be used to route a write around the tier check.
+// For virtual locations, lexical prefix matching is used without filesystem checks.
+// Note on prefix shadowing: virtual locations are checked in registration order
+// (g.locs slice order) before physical canonicalization runs. If an operator
+// configures overlapping virtual roots (e.g. /storage and /storage/staging) or a
+// virtual root that lexically prefixes a physical mount path, the first matching
+// virtual location takes precedence and writes under it will be refused. Distinct,
+// non-overlapping root paths should be configured.
 func (g *Guard) Resolve(path string) (Location, error) {
-	canon, err := canonicalize(path)
-	if err != nil {
-		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		return Location{}, fmt.Errorf("storage: resolve %q: path must be absolute", path)
 	}
 
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
 	for _, loc := range g.locs {
-		if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
-			return loc, nil
+		if loc.IsVirtual {
+			if cleanPath == loc.RootPath || strings.HasPrefix(cleanPath, loc.RootPath+string(filepath.Separator)) {
+				return loc, nil
+			}
+		}
+	}
+
+	canon, err := canonicalize(cleanPath)
+	if err != nil {
+		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+	}
+
+	for _, loc := range g.locs {
+		if !loc.IsVirtual {
+			if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
+				return loc, nil
+			}
 		}
 	}
 	return Location{}, &ErrUnknownLocation{Path: path}
@@ -236,14 +283,16 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 	return os.Open(path)
 }
 
-// Exists reports whether path is already present on disk, using the same
-// symlink-safe canonicalization Resolve uses so a not-yet-existing suffix
-// can't be spoofed via a symlink planted in a writable location. A pure
-// stat, never a write -- permitted against any tier, including Tier 3,
-// mirroring OpenRead. This is what lets a caller distinguish "the bytes are
-// already at this Tier 3 path" (safe to record in the database) from "they
-// are not" (nothing else will ever place them there, since Tier 3 is
-// read-only) without ever attempting a write against the archive itself.
+// Exists reports whether path is already present on disk (or false for
+// virtual locations), using the same symlink-safe canonicalization Resolve
+// uses so a not-yet-existing suffix can't be spoofed via a symlink planted
+// in a writable location. A pure stat, never a write -- permitted against
+// any tier, including Tier 3, mirroring OpenRead. This is what lets a caller
+// distinguish "the bytes are already at this Tier 3 path" (safe to record
+// in the database) from "they are not" (nothing else will ever place them
+// there, since Tier 3 is read-only) without ever attempting a write against
+// the archive itself. Virtual locations immediately report false without
+// performing a stat.
 //
 // Deliberately os.Stat, not os.Lstat: canonicalize only resolves symlinks
 // up to the deepest EXISTING ancestor, so for a DANGLING symlink at the
@@ -255,6 +304,13 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 // point of this check. Stat follows the symlink and correctly reports
 // absent when the target doesn't resolve.
 func (g *Guard) Exists(path string) (bool, error) {
+	loc, err := g.Resolve(path)
+	if err != nil {
+		return false, err
+	}
+	if loc.IsVirtual {
+		return false, nil
+	}
 	canon, err := canonicalize(path)
 	if err != nil {
 		return false, fmt.Errorf("storage: resolve %q: %w", path, err)

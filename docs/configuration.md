@@ -187,14 +187,11 @@ One entry per mounted storage tier. `tier` must be one of `TIER0_LOCAL_STAGING`,
 every startup (`seedStorageLocations`, keyed on `rootPath`'s `UNIQUE` constraint) — no separate
 migration step needed when a mount is added, changed, or removed from config.
 
-A `TIER0_LOCAL_STAGING` location serves as the server-side registration stub for
+A `TIER0_LOCAL_STAGING` location serves as the server-side registration namespace for
 `branchdam-agent`'s offline ingest queue drain (`EVENT_NODE_CREATED` posted as soon as a file lands
-on a workstation, before its bytes reach the Tier-3 archive). It needs no real media bytes on disk
-on the server host — an empty directory satisfies `storage.Guard`'s `EvalSymlinks` canonicalize
-step, allowing `storage.Guard.Resolve` to match the path and track the node metadata immediately.
+on a workstation, before its bytes reach the Tier-3 archive). Configured with `virtual: true` (or defaulting to virtual for Tier 0), it needs no real media bytes or host directory on the server host — `storage.Guard` resolves virtual locations lexically and skips `EvalSymlinks` and filesystem `statfs` checks.
 Per-machine subtree paths (`/storage/staging/<agentId>/...`) should be used to prevent path
-collisions across multiple workstations. A `TIER0_LOCAL_STAGING` location is scanned and indexed
-like any other tier, but its nodes never get a generated thumbnail (`ListPendingThumbnails`
+collisions across multiple workstations. Virtual locations are never watched or swept, and `TIER0_LOCAL_STAGING` nodes never get a generated thumbnail (`ListPendingThumbnails`
 excludes this tier by design, #231) — the node rebases to Tier 3 shortly after, so generation work
 is skipped until the final synced master arrives. This is a permanent property of the tier, not a
 bug to work around.
@@ -202,13 +199,14 @@ bug to work around.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `name` | string | — | Display name only (non-unique; `rootPath` is the unique mount key, so `rootPath` can be freely edited under an unchanged `name`). |
-| `rootPath` | string | — | **Container path**, not host path — must match the right-hand side of the corresponding compose volume mount. See [`deploy.md`](deploy.md)'s tier table. |
+| `rootPath` | string | — | **Container path**, not host path — must match the right-hand side of the corresponding compose volume mount (or virtual namespace path). See [`deploy.md`](deploy.md)'s tier table. |
 | `tier` | string | — | See above. |
+| `virtual` | bool | `false` (auto `true` for `TIER0_LOCAL_STAGING`) | Marks the location as a virtual metadata-only namespace. Skips symlink canonicalization and disk presence checks; write attempts via `Guard` are always refused. No container/host volume mount is required. |
 | `readOnly` | bool | `false` | Enforced by `storage.Guard.CheckWrite`, which refuses any write against a read-only location before any syscall. Tier 3 is writable by default for server-governed ingest; `readOnly: true` and `:ro` mount are opt-in for archive-only deployments. |
 | `prunable` | bool | `false` | Opts this location into TTL cache pruning eligibility (`POST /api/v1/prune`). The schema itself restricts this to `TIER1_LOCAL_SCRATCH` — setting it elsewhere is a config error caught at startup. |
 | `cacheTtlHours` | int | `0` (never eligible) | Age by `mtime_unix` (not scan recency) past which an `ACTIVE` node here becomes prunable, **provided it also has a verified `full_hash` on a live Tier-3 ancestor** — `prunable: true` alone never makes anything eligible. **Setting this on a non-prunable location is a fatal startup error** (`validatePruneConfig`), not a silent no-op; a negative value is also rejected outright, since `handlePrune` would otherwise treat it identically to zero and the mistake would never surface. |
-| `watch` | bool | `false` | Opts into continuous fsnotify watching. Local NVMe only — fsnotify does not fire reliably over SMB/NFS; use `sweep` for those. **Never honored on Tier 3** regardless of this flag — the master archive is never watched. |
-| `sweep` | bool | `false` | Opts into a low-priority differential mtime sweep — the polling adjunct for SMB/NFS shares where `watch` doesn't fire. **Never honored on Tier 3** — the master archive is never swept (a manual scan already covers the MISSING-detection case). |
+| `watch` | bool | `false` | Opts into continuous fsnotify watching. Local NVMe only — fsnotify does not fire reliably over SMB/NFS; use `sweep` for those. **Never honored on Tier 3 or virtual locations** regardless of this flag — the master archive and virtual namespaces are never watched. |
+| `sweep` | bool | `false` | Opts into a low-priority differential mtime sweep — the polling adjunct for SMB/NFS shares where `watch` doesn't fire. **Never honored on Tier 3 or virtual locations** — the master archive and virtual namespaces are never swept (a manual scan already covers the MISSING-detection case). |
 | `sweepIntervalSecs` | int | `600` (10 min) | Interval between sweep passes. Zero or negative both fall back to the default rather than busy-looping — but a negative value isn't a meaningful setting, just a value that happens to be handled safely. |
 
 Setting both `watch` and `sweep` on the same location is logged as a WARN at startup — wasteful

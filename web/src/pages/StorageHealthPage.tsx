@@ -402,7 +402,11 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
               INACTIVE
             </span>
           )}
-          {loc.isDegraded ? (
+          {loc.isVirtual ? (
+            <span className="rounded bg-sky-950 px-2 py-0.5 text-xs font-medium text-sky-300 border border-sky-800">
+              VIRTUAL
+            </span>
+          ) : loc.isDegraded ? (
             <span className="rounded bg-red-950 px-2 py-0.5 text-xs font-medium text-red-300 border border-red-800">
               DEGRADED
             </span>
@@ -426,7 +430,17 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
 
       {editing && <StorageLocationEditForm loc={loc} onClose={() => setEditing(false)} />}
 
-      {loc.isDegraded ? (
+      {loc.isVirtual ? (
+        <div className="rounded bg-neutral-800/40 p-3 text-xs text-neutral-300 border border-neutral-800 space-y-2">
+          <p className="text-neutral-400">
+            Virtual staging namespace for offline agent ingest and temporary metadata registration. No local host filesystem mount required.
+          </p>
+          <div className="pt-2 border-t border-neutral-800 text-center">
+            <span className="block text-neutral-400">Indexed Nodes</span>
+            <span className="font-semibold text-neutral-200">{loc.nodeCount.toLocaleString()}</span>
+          </div>
+        </div>
+      ) : loc.isDegraded ? (
         <div className="rounded bg-red-950/50 p-3 text-xs text-red-300 border border-red-900/50">
           <p className="font-semibold">Location Access Failed</p>
           <p className="mt-0.5 font-mono text-neutral-400">{loc.degradedMessage || "Failed to query filesystem stats via statfs"}</p>

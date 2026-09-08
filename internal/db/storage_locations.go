@@ -22,11 +22,12 @@ func (d *DB) ListStorageLocations(ctx context.Context) ([]storage.StorageLocatio
 	out := make([]storage.StorageLocationRow, len(rows))
 	for i, r := range rows {
 		out[i] = storage.StorageLocationRow{
-			ID:       r.ID,
-			Name:     r.Name,
-			RootPath: r.RootPath,
-			Tier:     r.Tier,
-			ReadOnly: r.ReadOnly != 0,
+			ID:        r.ID,
+			Name:      r.Name,
+			RootPath:  r.RootPath,
+			Tier:      r.Tier,
+			ReadOnly:  r.ReadOnly != 0,
+			IsVirtual: r.IsVirtual != 0,
 		}
 	}
 	return out, nil

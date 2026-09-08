@@ -264,3 +264,48 @@ func TestLoadAllowsEmptySecretFields(t *testing.T) {
 		t.Fatalf("Load with empty secrets: %v, want nil", err)
 	}
 }
+
+func TestStorageLocationIsVirtual(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	// Default for Tier 0 is true when nil
+	t0Default := StorageLocation{Tier: "TIER0_LOCAL_STAGING"}
+	if !t0Default.IsVirtual() {
+		t.Errorf("t0Default.IsVirtual() = false, want true")
+	}
+
+	// Explicit virtual: false on Tier 0
+	t0ExplicitFalse := StorageLocation{Tier: "TIER0_LOCAL_STAGING", Virtual: &falseVal}
+	if t0ExplicitFalse.IsVirtual() {
+		t.Errorf("t0ExplicitFalse.IsVirtual() = true, want false")
+	}
+
+	// Default for Tier 3 is false when nil
+	t3Default := StorageLocation{Tier: "TIER3_MASTER_ARCHIVE"}
+	if t3Default.IsVirtual() {
+		t.Errorf("t3Default.IsVirtual() = true, want false")
+	}
+
+	// Explicit virtual: true on Tier 2
+	t2ExplicitTrue := StorageLocation{Tier: "TIER2_EXPORTS", Virtual: &trueVal}
+	if !t2ExplicitTrue.IsVirtual() {
+		t.Errorf("t2ExplicitTrue.IsVirtual() = false, want true")
+	}
+}
+
+func TestValidateStorageLocationsRejectsRelativeRootPath(t *testing.T) {
+	path := writeConfig(t, `
+storageLocations:
+  - name: staging
+    rootPath: relative/staging
+    tier: TIER0_LOCAL_STAGING
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load with relative storage location rootPath: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be an absolute path") {
+		t.Errorf("error = %q, want mention of absolute path", err.Error())
+	}
+}

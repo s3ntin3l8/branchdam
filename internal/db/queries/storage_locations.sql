@@ -2,12 +2,12 @@
 -- cache_ttl_hours defaults to 0 ("never eligible", same as handlePrune's
 -- own <= 0 treatment) for the many test fixtures that don't care about it;
 -- pass it explicitly when a test needs a non-zero TTL persisted on the row.
-INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours;
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours, is_virtual)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual;
 
 -- name: ListStorageLocations :many
-SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 FROM storage_locations
 ORDER BY id;
 
@@ -28,17 +28,18 @@ ORDER BY id;
 -- orphaned a location's TTL whenever its rootPath was edited, since the
 -- new row (a different root_path) never matched the old config entry
 -- until the strings lined up again.
-INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours, is_virtual)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 ON CONFLICT (root_path) DO UPDATE SET
     name = excluded.name,
     tier = excluded.tier,
     read_only = excluded.read_only,
     prunable = excluded.prunable,
     cache_ttl_hours = excluded.cache_ttl_hours,
+    is_virtual = excluded.is_virtual,
     is_active = 1,
     updated_at = unixepoch()
-RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours;
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual;
 
 -- name: SetStorageLocationActive :exec
 -- Backs M6: storage.LoadGuard calls this to deactivate a location whose
@@ -68,7 +69,7 @@ WHERE is_active = 1
 -- name: GetStorageLocationByID :one
 -- handlePrune (#61, #238) reads cache_ttl_hours directly off this row --
 -- it no longer re-joins config by root_path to recover the TTL.
-SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 FROM storage_locations
 WHERE id = ?1;
 
@@ -76,7 +77,7 @@ WHERE id = ?1;
 -- Used by storage.Guard (PR 2) to resolve a canonicalized path to its tier --
 -- the single source of truth for tier is this table, never a hardcoded
 -- prefix. See docs/schema.md fix #1.
-SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 FROM storage_locations
 WHERE root_path = ?1;
 

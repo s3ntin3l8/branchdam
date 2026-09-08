@@ -710,8 +710,12 @@ func seedStorageLocations(ctx context.Context, database *db.DB, locations []conf
 	return database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		rootPaths := make([]string, 0, len(locations))
 		for _, loc := range locations {
+			isVirtual := int64(0)
+			if loc.IsVirtual() {
+				isVirtual = 1
+			}
 			readOnly := int64(0)
-			if loc.ReadOnly {
+			if loc.ReadOnly || isVirtual == 1 {
 				readOnly = 1
 			}
 			prunable := int64(0)
@@ -722,6 +726,7 @@ func seedStorageLocations(ctx context.Context, database *db.DB, locations []conf
 				Name: loc.Name, RootPath: loc.RootPath, Tier: loc.Tier,
 				ReadOnly: readOnly, Prunable: prunable,
 				CacheTtlHours: int64(loc.CacheTTLHours),
+				IsVirtual:     isVirtual,
 			}); err != nil {
 				return err
 			}
@@ -789,13 +794,13 @@ func logLevel(cfgLevel string, debug bool) slog.Level {
 }
 
 // watchedFromConfig returns the config locations to watch: opt-in via config
-// (`watch: true`) and never Tier 3, regardless of config -- the master
-// archive is not watched (spec Pillar 3's continuous ingest is for working
-// tiers).
+// (`watch: true`) and never Tier 3 or virtual locations, regardless of config
+// -- the master archive is not watched (spec Pillar 3's continuous ingest is
+// for working tiers).
 func watchedFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
 	out := make([]config.StorageLocation, 0, len(cfgs))
 	for _, c := range cfgs {
-		if c.Watch && c.Tier != "TIER3_MASTER_ARCHIVE" {
+		if c.Watch && c.Tier != "TIER3_MASTER_ARCHIVE" && !c.IsVirtual() {
 			out = append(out, c)
 		}
 	}
@@ -843,15 +848,15 @@ func validatePruneConfig(cfgs []config.StorageLocation) error {
 }
 
 // sweptFromConfig returns the config locations to sweep: opt-in via config
-// (`sweep: true`) and never Tier 3, regardless of config. Unlike
-// watchedFromConfig's rationale (continuous ingest is for working tiers),
+// (`sweep: true`) and never Tier 3 or virtual locations, regardless of config.
+// Unlike watchedFromConfig's rationale (continuous ingest is for working tiers),
 // Tier 3 is the master archive -- the differential sweep there would only
 // ever drive the MISSING sweep (which a manual POST /api/v1/scan already
 // covers), so we never sweep it automatically.
 func sweptFromConfig(cfgs []config.StorageLocation) []config.StorageLocation {
 	out := make([]config.StorageLocation, 0, len(cfgs))
 	for _, c := range cfgs {
-		if c.Sweep && c.Tier != "TIER3_MASTER_ARCHIVE" {
+		if c.Sweep && c.Tier != "TIER3_MASTER_ARCHIVE" && !c.IsVirtual() {
 			out = append(out, c)
 		}
 	}

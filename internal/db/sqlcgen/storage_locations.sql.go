@@ -10,9 +10,9 @@ import (
 )
 
 const createStorageLocation = `-- name: CreateStorageLocation :one
-INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours, is_virtual)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 `
 
 type CreateStorageLocationParams struct {
@@ -22,6 +22,7 @@ type CreateStorageLocationParams struct {
 	ReadOnly      int64
 	Prunable      int64
 	CacheTtlHours int64
+	IsVirtual     int64
 }
 
 // cache_ttl_hours defaults to 0 ("never eligible", same as handlePrune's
@@ -35,6 +36,7 @@ func (q *Queries) CreateStorageLocation(ctx context.Context, arg CreateStorageLo
 		arg.ReadOnly,
 		arg.Prunable,
 		arg.CacheTtlHours,
+		arg.IsVirtual,
 	)
 	var i StorageLocation
 	err := row.Scan(
@@ -48,6 +50,7 @@ func (q *Queries) CreateStorageLocation(ctx context.Context, arg CreateStorageLo
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CacheTtlHours,
+		&i.IsVirtual,
 	)
 	return i, err
 }
@@ -80,7 +83,7 @@ func (q *Queries) DeactivateStorageLocationsNotIn(ctx context.Context, currentRo
 }
 
 const getStorageLocationByID = `-- name: GetStorageLocationByID :one
-SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 FROM storage_locations
 WHERE id = ?1
 `
@@ -101,12 +104,13 @@ func (q *Queries) GetStorageLocationByID(ctx context.Context, id int64) (Storage
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CacheTtlHours,
+		&i.IsVirtual,
 	)
 	return i, err
 }
 
 const getStorageLocationByPath = `-- name: GetStorageLocationByPath :one
-SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 FROM storage_locations
 WHERE root_path = ?1
 `
@@ -128,6 +132,7 @@ func (q *Queries) GetStorageLocationByPath(ctx context.Context, rootPath string)
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CacheTtlHours,
+		&i.IsVirtual,
 	)
 	return i, err
 }
@@ -168,7 +173,7 @@ func (q *Queries) ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCount
 }
 
 const listStorageLocations = `-- name: ListStorageLocations :many
-SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+SELECT id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 FROM storage_locations
 ORDER BY id
 `
@@ -193,6 +198,7 @@ func (q *Queries) ListStorageLocations(ctx context.Context) ([]StorageLocation, 
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CacheTtlHours,
+			&i.IsVirtual,
 		); err != nil {
 			return nil, err
 		}
@@ -226,17 +232,18 @@ func (q *Queries) SetStorageLocationActive(ctx context.Context, arg SetStorageLo
 }
 
 const upsertStorageLocation = `-- name: UpsertStorageLocation :one
-INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+INSERT INTO storage_locations (name, root_path, tier, read_only, prunable, cache_ttl_hours, is_virtual)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 ON CONFLICT (root_path) DO UPDATE SET
     name = excluded.name,
     tier = excluded.tier,
     read_only = excluded.read_only,
     prunable = excluded.prunable,
     cache_ttl_hours = excluded.cache_ttl_hours,
+    is_virtual = excluded.is_virtual,
     is_active = 1,
     updated_at = unixepoch()
-RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours
+RETURNING id, name, root_path, tier, read_only, prunable, is_active, created_at, updated_at, cache_ttl_hours, is_virtual
 `
 
 type UpsertStorageLocationParams struct {
@@ -246,6 +253,7 @@ type UpsertStorageLocationParams struct {
 	ReadOnly      int64
 	Prunable      int64
 	CacheTtlHours int64
+	IsVirtual     int64
 }
 
 // Backs config-driven seeding at startup (cmd/branchdam): config.yaml's
@@ -272,6 +280,7 @@ func (q *Queries) UpsertStorageLocation(ctx context.Context, arg UpsertStorageLo
 		arg.ReadOnly,
 		arg.Prunable,
 		arg.CacheTtlHours,
+		arg.IsVirtual,
 	)
 	var i StorageLocation
 	err := row.Scan(
@@ -285,6 +294,7 @@ func (q *Queries) UpsertStorageLocation(ctx context.Context, arg UpsertStorageLo
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CacheTtlHours,
+		&i.IsVirtual,
 	)
 	return i, err
 }

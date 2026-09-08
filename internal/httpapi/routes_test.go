@@ -3356,6 +3356,41 @@ func TestProbeStorageLocationHealthBoundedByTimeout(t *testing.T) {
 	}
 }
 
+func TestProbeStorageLocationHealthSkipsVirtualLocation(t *testing.T) {
+	locations := []sqlcgen.StorageLocation{
+		{ID: 1, Name: "virtual-staging", RootPath: "/storage/staging", Tier: "TIER0_LOCAL_STAGING", IsVirtual: 1},
+		{ID: 2, Name: "physical-exports", RootPath: "/storage/exports", Tier: "TIER2_EXPORTS", IsVirtual: 0},
+	}
+	dtos := make([]storageLocationHealthDTO, len(locations))
+
+	probeCalled := make(map[string]bool)
+	probe := func(path string) (unix.Statfs_t, error) {
+		probeCalled[path] = true
+		return unix.Statfs_t{
+			Bsize:  4096,
+			Blocks: 1000,
+			Bfree:  400,
+			Bavail: 300,
+		}, nil
+	}
+
+	probeStorageLocationHealth(dtos, locations, probe)
+
+	if probeCalled["/storage/staging"] {
+		t.Errorf("probe was called for virtual location /storage/staging, want skipped")
+	}
+	if !probeCalled["/storage/exports"] {
+		t.Errorf("probe was not called for physical location /storage/exports")
+	}
+
+	if !dtos[0].IsVirtual || dtos[0].IsDegraded {
+		t.Errorf("dtos[0] (virtual): IsVirtual=%v, IsDegraded=%v, want IsVirtual=true, IsDegraded=false", dtos[0].IsVirtual, dtos[0].IsDegraded)
+	}
+	if dtos[1].IsVirtual || dtos[1].IsDegraded || dtos[1].TotalBytes != 1000*4096 {
+		t.Errorf("dtos[1] (physical): got %+v, want TotalBytes=4096000", dtos[1])
+	}
+}
+
 func TestFilteredAssetsAndFacets(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()
