@@ -354,6 +354,10 @@ type Querier interface {
 	// without deleting media_nodes rows themselves (the "rows are never deleted"
 	// invariant for media_nodes stands).
 	PruneArchivedNodeMetadata(ctx context.Context) (int64, error)
+	// Prunes historical CANCELLED or FAILED WATCH jobs that saw zero files and
+	// are older than the cutoff timestamp, preventing unbounded table accumulation
+	// across server restarts while preserving active or eventful jobs.
+	PruneOldZeroEventWatchJobs(ctx context.Context, finishedAt sql.NullInt64) (int64, error)
 	// Pillar 5 move detection, applied: the id and node_uuid never change, so
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.

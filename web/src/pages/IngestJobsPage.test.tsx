@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -50,5 +50,78 @@ describe("IngestJobsPage", () => {
     expect(screen.getAllByText("1,200").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Previous page" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument();
+  });
+
+  it("renders WATCH jobs in CANCELLED state as STOPPED and RUNNING as ACTIVE", async () => {
+    vi.mocked(api.listJobs).mockResolvedValueOnce({
+      jobs: [
+        {
+          id: 17,
+          kind: "WATCH",
+          state: "RUNNING",
+          filesSeen: 4,
+          filesHashed: 4,
+          filesFailed: 0,
+          edgesCreated: 2,
+        },
+        {
+          id: 16,
+          kind: "WATCH",
+          state: "CANCELLED",
+          filesSeen: 0,
+          filesHashed: 0,
+          filesFailed: 0,
+          edgesCreated: 0,
+        },
+      ],
+      total: 2,
+    });
+
+    renderWithClient(<IngestJobsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("#17")).toBeInTheDocument();
+      expect(screen.getByText("#16")).toBeInTheDocument();
+    });
+
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("ACTIVE")).toBeInTheDocument();
+    expect(within(table).getByText("STOPPED")).toBeInTheDocument();
+    expect(within(table).queryByText("CANCELLED")).not.toBeInTheDocument();
+  });
+
+  it("updates filters when clicking quick preset buttons", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue({
+      jobs: [],
+      total: 0,
+    });
+
+    renderWithClient(<IngestJobsPage />);
+
+    const user = (await import("@testing-library/user-event")).default.setup();
+
+    // Click "Watchers" preset
+    await user.click(screen.getByRole("button", { name: "Watchers" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: "WATCH" }));
+    });
+
+    // Click "Full Scans" preset
+    await user.click(screen.getByRole("button", { name: "Full Scans" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: "FULL_SCAN" }));
+    });
+
+    // Click "Incremental" preset
+    await user.click(screen.getByRole("button", { name: "Incremental" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: "INCREMENTAL" }));
+    });
+
+    // Click "All Types" preset
+    await user.click(screen.getByRole("button", { name: "All Types" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: undefined }));
+    });
   });
 });

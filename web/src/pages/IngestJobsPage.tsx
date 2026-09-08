@@ -8,20 +8,56 @@ const kindBadge: Record<ScanJob["kind"], string> = {
   WATCH: "bg-purple-950 text-purple-300 border-purple-800",
 };
 
-const stateBadge: Record<ScanJob["state"], string> = {
-  RUNNING: "bg-blue-950 text-blue-300 border-blue-800 animate-pulse",
-  COMPLETED: "bg-emerald-950 text-emerald-300 border-emerald-800",
-  FAILED: "bg-red-950 text-red-300 border-red-800",
-  CANCELLED: "bg-neutral-800 text-neutral-400 border-neutral-700",
-};
+function getJobStateDisplay(job: Pick<ScanJob, "kind" | "state">): {
+  label: string;
+  badgeClass: string;
+  title?: string;
+} {
+  if (job.kind === "WATCH") {
+    if (job.state === "RUNNING") {
+      return {
+        label: "ACTIVE",
+        badgeClass: "bg-emerald-950 text-emerald-300 border-emerald-800 animate-pulse",
+        title: "Continuous filesystem watcher is actively monitoring storage",
+      };
+    }
+    if (job.state === "CANCELLED") {
+      return {
+        label: "STOPPED",
+        badgeClass: "bg-neutral-800 text-neutral-400 border-neutral-700",
+        title: "Continuous background watcher stopped cleanly on server shutdown or restart",
+      };
+    }
+  }
+
+  const badgeMap: Record<ScanJob["state"], string> = {
+    RUNNING: "bg-blue-950 text-blue-300 border-blue-800 animate-pulse",
+    COMPLETED: "bg-emerald-950 text-emerald-300 border-emerald-800",
+    FAILED: "bg-red-950 text-red-300 border-red-800",
+    CANCELLED: "bg-neutral-800 text-neutral-400 border-neutral-700",
+  };
+
+  const titleMap: Partial<Record<ScanJob["state"], string>> = {
+    RUNNING: "Scan in progress",
+    COMPLETED: "Scan completed successfully",
+    FAILED: "Scan encountered errors",
+    CANCELLED: "Scan was cancelled or interrupted",
+  };
+
+  return {
+    label: job.state,
+    badgeClass: badgeMap[job.state] || "bg-neutral-800 text-neutral-300",
+    title: titleMap[job.state],
+  };
+}
 
 const PAGE_SIZE = 25;
 
 export default function IngestJobsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const kind = (searchParams.get("kind") as ScanJob["kind"]) || "";
-  const state = (searchParams.get("state") as ScanJob["state"]) || "";
+  const kind = (searchParams.get("kind") as ScanJob["kind"] | null) ?? "";
+  const state = (searchParams.get("state") as ScanJob["state"] | null) ?? "";
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
 
   const offset = (page - 1) * PAGE_SIZE;
@@ -83,9 +119,59 @@ export default function IngestJobsPage() {
       </div>
 
       {/* FILTER BAR */}
-      <div className="rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs space-y-2">
-        <div className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px]">Filter Jobs</div>
-        <div className="flex flex-wrap gap-4 items-center">
+      <div className="rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px]">Filter Jobs</div>
+          {/* Quick presets */}
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => updateFilters({ kind: null })}
+              className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                kind === ""
+                  ? "bg-neutral-700 text-neutral-100"
+                  : "bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200"
+              }`}
+            >
+              All Types
+            </button>
+            <button
+              type="button"
+              onClick={() => updateFilters({ kind: "FULL_SCAN" })}
+              className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                kind === "FULL_SCAN"
+                  ? "bg-indigo-900 text-indigo-200 border border-indigo-700"
+                  : "bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200"
+              }`}
+            >
+              Full Scans
+            </button>
+            <button
+              type="button"
+              onClick={() => updateFilters({ kind: "INCREMENTAL" })}
+              className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                kind === "INCREMENTAL"
+                  ? "bg-amber-900 text-amber-200 border border-amber-700"
+                  : "bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200"
+              }`}
+            >
+              Incremental
+            </button>
+            <button
+              type="button"
+              onClick={() => updateFilters({ kind: "WATCH" })}
+              className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                kind === "WATCH"
+                  ? "bg-purple-900 text-purple-200 border border-purple-700"
+                  : "bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200"
+              }`}
+            >
+              Watchers
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-4 items-center pt-1 border-t border-neutral-800/60">
           <div>
             <label htmlFor="kind-filter" className="block text-neutral-400 mb-1">Scan Kind</label>
             <select
@@ -144,28 +230,34 @@ export default function IngestJobsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-900">
-                {jobs.map((j) => (
-                  <tr key={j.id} className="hover:bg-neutral-900/50 text-xs">
-                    <td className="py-2.5 px-4 font-mono font-medium text-neutral-300">#{j.id}</td>
-                    <td className="py-2.5 px-4">
-                      <span className={`inline-block rounded px-2 py-0.5 font-mono text-[11px] border ${kindBadge[j.kind] || "bg-neutral-800 text-neutral-300"}`}>
-                        {j.kind}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-4">
-                      <span className={`inline-block rounded px-2 py-0.5 font-mono text-[11px] border ${stateBadge[j.state] || "bg-neutral-800 text-neutral-300"}`}>
-                        {j.state}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-4 text-right font-mono text-neutral-300">{j.filesSeen.toLocaleString()}</td>
-                    <td className="py-2.5 px-4 text-right font-mono text-neutral-300">{j.filesHashed.toLocaleString()}</td>
-                    <td className="py-2.5 px-4 text-right font-mono text-red-400">{j.filesFailed > 0 ? j.filesFailed.toLocaleString() : "0"}</td>
-                    <td className="py-2.5 px-4 text-right font-mono text-emerald-400">{j.edgesCreated.toLocaleString()}</td>
-                    <td className="py-2.5 px-4 font-mono text-red-400 max-w-xs truncate">
-                      {j.lastError || "—"}
-                    </td>
-                  </tr>
-                ))}
+                {jobs.map((j) => {
+                  const stateDisplay = getJobStateDisplay(j);
+                  return (
+                    <tr key={j.id} className="hover:bg-neutral-900/50 text-xs">
+                      <td className="py-2.5 px-4 font-mono font-medium text-neutral-300">#{j.id}</td>
+                      <td className="py-2.5 px-4">
+                        <span className={`inline-block rounded px-2 py-0.5 font-mono text-[11px] border ${kindBadge[j.kind] || "bg-neutral-800 text-neutral-300"}`}>
+                          {j.kind}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-4">
+                        <span
+                          title={stateDisplay.title}
+                          className={`inline-block rounded px-2 py-0.5 font-mono text-[11px] border ${stateDisplay.badgeClass}`}
+                        >
+                          {stateDisplay.label}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono text-neutral-300">{j.filesSeen.toLocaleString()}</td>
+                      <td className="py-2.5 px-4 text-right font-mono text-neutral-300">{j.filesHashed.toLocaleString()}</td>
+                      <td className="py-2.5 px-4 text-right font-mono text-red-400">{j.filesFailed > 0 ? j.filesFailed.toLocaleString() : "0"}</td>
+                      <td className="py-2.5 px-4 text-right font-mono text-emerald-400">{j.edgesCreated.toLocaleString()}</td>
+                      <td className="py-2.5 px-4 font-mono text-red-400 max-w-xs truncate">
+                        {j.lastError || "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

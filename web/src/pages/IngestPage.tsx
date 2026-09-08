@@ -120,23 +120,42 @@ export default function IngestPage() {
                 </tr>
               </thead>
               <tbody>
-                {progress.data?.jobs.map((j) => (
-                  <tr key={j.id} className="border-b border-neutral-900">
-                    <td className="py-2 pr-4">{j.kind}</td>
-                    <td
-                      className={`py-2 pr-4 ${
-                        j.state === "FAILED" ? "text-red-400" : j.state === "RUNNING" ? "text-amber-400" : "text-neutral-300"
-                      }`}
-                    >
-                      {j.state}
-                    </td>
-                    <td className="py-2 pr-4 text-right">{j.filesSeen}</td>
-                    <td className="py-2 pr-4 text-right">{j.filesHashed}</td>
-                    <td className="py-2 pr-4 text-right">{j.filesFailed}</td>
-                    <td className="py-2 pr-4 text-right">{j.edgesCreated}</td>
-                    <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{j.lastError ?? "—"}</td>
-                  </tr>
-                ))}
+                {progress.data?.jobs.map((j) => {
+                  const isWatch = j.kind === "WATCH";
+                  const label = isWatch && j.state === "CANCELLED" ? "STOPPED" : isWatch && j.state === "RUNNING" ? "ACTIVE" : j.state;
+                  const title = isWatch && j.state === "CANCELLED"
+                    ? "Continuous background watcher stopped cleanly on server shutdown or restart"
+                    : isWatch && j.state === "RUNNING"
+                    ? "Continuous filesystem watcher is actively monitoring storage"
+                    : undefined;
+
+                  const colorClass = j.state === "FAILED"
+                    ? "text-red-400"
+                    : isWatch && j.state === "RUNNING"
+                    ? "text-emerald-400"
+                    : j.state === "RUNNING"
+                    ? "text-amber-400"
+                    : isWatch && j.state === "CANCELLED"
+                    ? "text-neutral-400"
+                    : "text-neutral-300";
+
+                  return (
+                    <tr key={j.id} className="border-b border-neutral-900">
+                      <td className="py-2 pr-4">{j.kind}</td>
+                      <td
+                        title={title}
+                        className={`py-2 pr-4 ${colorClass}`}
+                      >
+                        {label}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{j.filesSeen}</td>
+                      <td className="py-2 pr-4 text-right">{j.filesHashed}</td>
+                      <td className="py-2 pr-4 text-right">{j.filesFailed}</td>
+                      <td className="py-2 pr-4 text-right">{j.edgesCreated}</td>
+                      <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{j.lastError ?? "—"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

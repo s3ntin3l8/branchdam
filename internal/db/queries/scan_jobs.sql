@@ -92,3 +92,14 @@ SELECT COUNT(*)
 FROM scan_jobs
 WHERE (sqlc.narg('kind') IS NULL OR kind = sqlc.narg('kind'))
   AND (sqlc.narg('state') IS NULL OR state = sqlc.narg('state'));
+
+-- name: PruneOldZeroEventWatchJobs :execrows
+-- Prunes historical CANCELLED or FAILED WATCH jobs that saw zero files and
+-- are older than the cutoff timestamp, preventing unbounded table accumulation
+-- across server restarts while preserving active or eventful jobs.
+DELETE FROM scan_jobs
+WHERE kind = 'WATCH'
+  AND state IN ('CANCELLED', 'FAILED')
+  AND files_seen = 0
+  AND finished_at IS NOT NULL
+  AND finished_at < ?1;
