@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.19.0](https://github.com/s3ntin3l8/branchdam/compare/v0.18.0...v0.19.0) (2026-09-08)
+
+
+### Features
+
+* **pipeline,web:** clarify WATCH job lifecycle states and prune stale records ([#420](https://github.com/s3ntin3l8/branchdam/issues/420)) ([8f990af](https://github.com/s3ntin3l8/branchdam/commit/8f990af8f0e053b81d4641f5729aaf67abd3debb))
+* **storage:** support virtual staging locations and remove dummy mount ([#423](https://github.com/s3ntin3l8/branchdam/issues/423)) ([8208ba4](https://github.com/s3ntin3l8/branchdam/commit/8208ba4f10249a065ece0cf51d853b9c94a8ed0a))
+
+
+### Bug Fixes
+
+* **upload:** restrict ingest uploads to TIER3_MASTER_ARCHIVE storage locations ([#419](https://github.com/s3ntin3l8/branchdam/issues/419)) ([fed0353](https://github.com/s3ntin3l8/branchdam/commit/fed0353d6085339fb6db9f1e3cfa3ba8b23741e4))
+* **web:** fix settings appearance scroll and active highlight ([#424](https://github.com/s3ntin3l8/branchdam/issues/424)) ([a5f490c](https://github.com/s3ntin3l8/branchdam/commit/a5f490cd52ca0aedede517d2cbc9cb510312845f))
+* **web:** standardize page heading typography ([#422](https://github.com/s3ntin3l8/branchdam/issues/422)) ([d663b59](https://github.com/s3ntin3l8/branchdam/commit/d663b59fd0edb97485b2ddb4c8e7b4efbaf95843))
+
 ## [0.18.0](https://github.com/s3ntin3l8/branchdam/compare/v0.17.0...v0.18.0) (2026-09-07)
 
 
