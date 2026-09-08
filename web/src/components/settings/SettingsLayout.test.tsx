@@ -214,4 +214,40 @@ describe("SettingsLayout", () => {
 
     expect(screen.getByRole("link", { name: "Appearance" })).toHaveClass("bg-neutral-800", "text-neutral-100");
   });
+
+  it("unlocks programmatic scroll immediately on user wheel or keyboard interaction", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <div data-testid="scroll-container" style={{ height: "500px", overflowY: "auto" }}>
+        <SettingsLayout categories={TEST_CATEGORIES}>
+          <section id="server" data-settings-section="server">
+            <h2>Server Section</h2>
+          </section>
+          <section id="workers" data-settings-section="workers">
+            <h2>Workers Section</h2>
+          </section>
+          <section id="appearance" data-settings-section="appearance">
+            <h2>Appearance Section</h2>
+          </section>
+        </SettingsLayout>
+      </div>
+    );
+
+    // Click to start programmatic scroll lock
+    const appearanceLink = screen.getByRole("link", { name: "Appearance" });
+    await user.click(appearanceLink);
+
+    // User spins mouse wheel
+    fireEvent.wheel(window);
+
+    const scrollContainer = container.querySelector('[data-testid="scroll-container"]') as HTMLElement;
+    Object.defineProperty(scrollContainer, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(scrollContainer, "clientHeight", { value: 500, configurable: true });
+    Object.defineProperty(scrollContainer, "scrollTop", { value: 490, configurable: true, writable: true });
+
+    // Scroll event immediately processes
+    fireEvent.scroll(scrollContainer);
+
+    expect(screen.getByRole("link", { name: "Appearance" })).toHaveClass("bg-neutral-800", "text-neutral-100");
+  });
 });

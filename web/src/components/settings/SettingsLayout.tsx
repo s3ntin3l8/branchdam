@@ -10,6 +10,11 @@ interface SettingsLayoutProps {
   children: React.ReactNode;
 }
 
+// Quiet window after the last scroll event before releasing programmatic lock
+const SCROLL_SETTLE_MS = 150;
+// Pixel distance from bottom of scrollable container to treat as bottomed out
+const BOTTOM_THRESHOLD_PX = 24;
+
 function getScrollParent(element: HTMLElement | null): HTMLElement | Window | null {
   if (typeof window === "undefined") return null;
   let el: HTMLElement | null = element?.parentElement ?? null;
@@ -27,10 +32,10 @@ function getScrollParent(element: HTMLElement | null): HTMLElement | Window | nu
 
 function isScrolledToBottom(scrollParent: HTMLElement | Window | null): boolean {
   if (scrollParent instanceof HTMLElement) {
-    return scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 24;
+    return scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= BOTTOM_THRESHOLD_PX;
   }
   if (scrollParent === window && typeof document !== "undefined") {
-    return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
+    return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - BOTTOM_THRESHOLD_PX;
   }
   return false;
 }
@@ -42,15 +47,27 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
   const isProgrammaticScrollRef = useRef(false);
   const scrollTimeoutRef = useRef<number | null>(null);
 
-  const resetScrollSettlingTimer = useCallback(() => {
+  const clearScrollTimeout = useCallback(() => {
     if (scrollTimeoutRef.current !== null) {
       window.clearTimeout(scrollTimeoutRef.current);
+      scrollTimeoutRef.current = null;
     }
+  }, []);
+
+  const resetScrollSettlingTimer = useCallback(() => {
+    clearScrollTimeout();
     scrollTimeoutRef.current = window.setTimeout(() => {
       isProgrammaticScrollRef.current = false;
       scrollTimeoutRef.current = null;
-    }, 150);
-  }, []);
+    }, SCROLL_SETTLE_MS);
+  }, [clearScrollTimeout]);
+
+  const unlockProgrammaticScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current) {
+      clearScrollTimeout();
+      isProgrammaticScrollRef.current = false;
+    }
+  }, [clearScrollTimeout]);
 
   const scrollTo = useCallback((id: string) => {
     const el = containerRef.current?.querySelector(`#${CSS.escape(id)}`);
@@ -114,8 +131,17 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
       }
     };
 
+    const handleUserInput = () => {
+      unlockProgrammaticScroll();
+    };
+
     if (scrollParent && typeof scrollParent.addEventListener === "function") {
       scrollParent.addEventListener("scroll", handleScroll, { passive: true });
+    }
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("wheel", handleUserInput, { passive: true });
+      window.addEventListener("touchstart", handleUserInput, { passive: true });
+      window.addEventListener("keydown", handleUserInput, { passive: true });
     }
 
     return () => {
@@ -123,13 +149,15 @@ export function SettingsLayout({ categories, children }: SettingsLayoutProps) {
       if (scrollParent && typeof scrollParent.removeEventListener === "function") {
         scrollParent.removeEventListener("scroll", handleScroll);
       }
-      if (scrollTimeoutRef.current !== null) {
-        window.clearTimeout(scrollTimeoutRef.current);
-        scrollTimeoutRef.current = null;
+      if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+        window.removeEventListener("wheel", handleUserInput);
+        window.removeEventListener("touchstart", handleUserInput);
+        window.removeEventListener("keydown", handleUserInput);
       }
+      clearScrollTimeout();
       isProgrammaticScrollRef.current = false;
     };
-  }, [categories, resetScrollSettlingTimer]);
+  }, [categories, resetScrollSettlingTimer, unlockProgrammaticScroll, clearScrollTimeout]);
 
   return (
     <div className="flex gap-6">
