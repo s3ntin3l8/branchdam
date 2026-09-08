@@ -1,6 +1,6 @@
--- 00019_users_and_audit.sql — multi-user attribution + actor audit log.
+-- 00020_users_and_audit.sql — multi-user attribution + actor audit log.
 --
--- Two new tables (users, actor_audit) plus three nullable FKs that record
+-- Two new tables (actor_audit) plus three nullable FKs that record
 -- per-asset / per-job / per-device attribution. All FKs are RESTRICT and
 -- nullable so this migration lands safely on systems with existing data
 -- (e.g. device_pairings rows that pre-date this PR have no owner yet --
@@ -32,17 +32,32 @@
 -- fragment attribution. Username/email are denormalized display
 -- fields, refreshed on every ResolveOrCreate call (cheap, no extra
 -- round trip -- they're already in the Principal).
-CREATE TABLE users (
-    id              INTEGER PRIMARY KEY,
-    auth_provider   TEXT    NOT NULL DEFAULT 'authentik',
-    external_uid    TEXT    NOT NULL,                  -- X-Authentik-Uid, stable across renames
-    username        TEXT    NOT NULL,                  -- X-Authentik-Username, display
-    email           TEXT    NOT NULL DEFAULT '',
-    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
-    last_seen_at    INTEGER NOT NULL DEFAULT (unixepoch()),
-    UNIQUE (auth_provider, external_uid)
-);
-CREATE INDEX ix_users_username ON users(username);
+--
+-- The PR #407 migration 00018_local_auth.sql already created the
+-- users table with columns: id, username, email, password_hash,
+-- is_admin, source, created_at, created_by, disabled_at.
+-- This migration adds the attribution columns and the unique index.
+-- See docs/forward-auth.md for the X-Authentik-Uid header mapping.
+
+ALTER TABLE users
+    ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'authentik';
+
+ALTER TABLE users
+    ADD COLUMN external_uid TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE users
+    ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT (unixepoch());
+
+-- Backfill external_uid for existing rows (use username as a stable proxy
+-- until the user re-authenticates and ResolveOrCreate updates it).
+UPDATE users SET external_uid = username WHERE external_uid = '';
+
+CREATE UNIQUE INDEX ix_users_auth_provider_external_uid
+    ON users(auth_provider, external_uid);
+
+-- Drop the now-redundant username index (PR #407's username UNIQUE
+-- already creates an implicit index).
+DROP INDEX IF EXISTS ix_users_username;
 
 -- device_pairings gains a nullable owner_user_id FK. New pairings
 -- default to the creating admin (handler sets it explicitly); existing
@@ -98,19 +113,22 @@ CREATE INDEX ix_actor_audit_time         ON actor_audit(created_at DESC);
 
 -- +goose Down
 
-DROP INDEX IF EXISTS ix_actor_audit_time;
-DROP INDEX IF EXISTS ix_actor_audit_resource;
-DROP INDEX IF EXISTS ix_actor_audit_actor_time;
 DROP TABLE IF EXISTS actor_audit;
 
--- SQLite ALTER TABLE DROP COLUMN is supported (3.35+); older migration
--- tools would need a table-rebuild dance but goose emits these
--- directly. All three are nullable, so dropping is lossless.
-ALTER TABLE scan_jobs DROP COLUMN started_by_user_id;
-ALTER TABLE media_nodes DROP COLUMN uploaded_by_user_id;
 DROP INDEX IF EXISTS ix_media_nodes_uploader;
-ALTER TABLE device_pairings DROP COLUMN user_id;
-DROP INDEX IF EXISTS ix_device_pairings_user_id;
+ALTER TABLE media_nodes DROP COLUMN uploaded_by_user_id;
 
-DROP INDEX IF EXISTS ix_users_username;
-DROP TABLE IF EXISTS users;
+ALTER TABLE scan_jobs DROP COLUMN started_by_user_id;
+
+DROP INDEX IF EXISTS ix_device_pairings_user_id;
+ALTER TABLE device_pairings DROP COLUMN user_id;
+
+DROP INDEX IF EXISTS ix_users_auth_provider_external_uid;
+ALTER TABLE users DROP COLUMN external_uid;
+ALTER TABLE users DROP COLUMN auth_provider;
+ALTER TABLE users DROP COLUMN last_seen_at;
+
+-- PR #407's CREATE UNIQUE INDEX ix_users_username was dropped by Up;
+-- recreate it on Down so existing call sites that reference the index
+-- name in older DB snapshots keep working after a downgrade.
+CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users(username);

@@ -8,6 +8,18 @@ import (
 	"database/sql"
 )
 
+type ActorAudit struct {
+	ID           int64
+	ActorUserID  sql.NullInt64
+	ActorKind    string
+	ActorName    string
+	Event        string
+	ResourceType string
+	ResourceID   sql.NullString
+	DetailsJson  string
+	CreatedAt    int64
+}
+
 type AgentScratchTelemetry struct {
 	AgentID                string
 	ClientVersion          string
@@ -52,6 +64,7 @@ type DevicePairing struct {
 	CreatedBy     string
 	RevokedAt     sql.NullInt64
 	QrSvg         []byte
+	UserID        sql.NullInt64
 }
 
 type DevicePairingKey struct {
@@ -87,20 +100,6 @@ type LoginAudit struct {
 	UserAgent         string
 	Details           string
 	CreatedAt         int64
-}
-
-// PasswordResetToken is a single-use password-reset credential. See
-// migration 00019_password_reset.sql for the full table contract
-// (partial unique index, expiry enforcement, FK RESTRICT). Hand-
-// maintained for the same reason as LoginAudit / User / Session.
-type PasswordResetToken struct {
-	ID        int64
-	UserID    int64
-	TokenHash string
-	CreatedAt int64
-	ExpiresAt int64
-	UsedAt    sql.NullInt64
-	CreatedBy string
 }
 
 type MediaEdge struct {
@@ -150,6 +149,7 @@ type MediaNode struct {
 	ThumbState         string
 	ThumbAttempts      int64
 	SourcePathHash     *string
+	UploadedByUserID   sql.NullInt64
 }
 
 type NodeMetadatum struct {
@@ -157,6 +157,16 @@ type NodeMetadatum struct {
 	Source string
 	Key    string
 	Value  string
+}
+
+type PasswordResetToken struct {
+	ID        int64
+	UserID    int64
+	TokenHash string
+	CreatedAt int64
+	ExpiresAt int64
+	UsedAt    sql.NullInt64
+	CreatedBy string
 }
 
 type RemoteSyncState struct {
@@ -184,6 +194,7 @@ type ScanJob struct {
 	FinishedAt        sql.NullInt64
 	LastError         sql.NullString
 	UpdatedAt         int64
+	StartedByUserID   sql.NullInt64
 }
 
 type Session struct {
@@ -222,6 +233,9 @@ type User struct {
 	CreatedAt    int64
 	CreatedBy    string
 	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
 }
 
 type VMediaEdgesResolved struct {

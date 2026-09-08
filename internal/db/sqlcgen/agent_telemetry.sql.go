@@ -10,7 +10,6 @@ import (
 )
 
 const deleteAgentScratchTelemetry = `-- name: DeleteAgentScratchTelemetry :exec
-
 DELETE FROM agent_scratch_telemetry
 WHERE agent_id = ?1
 `
@@ -21,7 +20,6 @@ func (q *Queries) DeleteAgentScratchTelemetry(ctx context.Context, agentID strin
 }
 
 const getAgentScratchTelemetry = `-- name: GetAgentScratchTelemetry :one
-
 SELECT agent_id, client_version, timestamp_unix, mount_path, total_bytes, free_bytes, used_bytes, mirrors_size_bytes, render_cache_size_bytes, proxies_size_bytes, prunable_bytes, last_prune_timestamp_unix, last_reclaimed_bytes, last_prune_duration_ms, pruned_item_counts, updated_at
 FROM agent_scratch_telemetry
 WHERE agent_id = ?1
@@ -52,7 +50,6 @@ func (q *Queries) GetAgentScratchTelemetry(ctx context.Context, agentID string) 
 }
 
 const listAgentScratchTelemetry = `-- name: ListAgentScratchTelemetry :many
-
 SELECT agent_id, client_version, timestamp_unix, mount_path, total_bytes, free_bytes, used_bytes, mirrors_size_bytes, render_cache_size_bytes, proxies_size_bytes, prunable_bytes, last_prune_timestamp_unix, last_reclaimed_bytes, last_prune_duration_ms, pruned_item_counts, updated_at
 FROM agent_scratch_telemetry
 ORDER BY agent_id ASC
@@ -99,7 +96,6 @@ func (q *Queries) ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratch
 }
 
 const upsertAgentScratchTelemetry = `-- name: UpsertAgentScratchTelemetry :one
-
 INSERT INTO agent_scratch_telemetry (
     agent_id,
     client_version,

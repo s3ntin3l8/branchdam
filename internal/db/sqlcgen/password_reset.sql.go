@@ -3,23 +3,48 @@
 //   sqlc v1.31.1
 // source: password_reset.sql
 
-// Hand-maintained rather than sqlc-generated: sqlc v1.20-v1.31.1 all
-// fail to parse the existing companion_pairing.sql subqueries in this
-// environment (the parser emits truncated const blocks across many
-// unrelated query strings); running `sqlc generate` corrupts files in
-// internal/db/sqlcgen/. See User / Session / LoginAudit /
-// PasswordResetToken types' doc comments in models.go for the full
-// rationale, and AGENTS.md's "sqlc generate Risk Note" for the
-// operational context.
-//
-// The file's header is preserved as the project's sqlcgen convention
-// so a future regeneration can replace the hand-written additions
-// once sqlc's parser is fixed or this environment is repaired.
 package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
+
+const consumePasswordResetToken = `-- name: ConsumePasswordResetToken :one
+UPDATE password_reset_tokens
+SET used_at = ?3
+WHERE id = ?1
+  AND used_at IS NULL
+  AND expires_at > ?2
+RETURNING id, user_id, token_hash, created_at, expires_at, used_at, created_by
+`
+
+type ConsumePasswordResetTokenParams struct {
+	ID        int64
+	ExpiresAt int64
+	UsedAt    sql.NullInt64
+}
+
+// Atomic single-use consume. The WHERE used_at IS NULL guard is the
+// whole point: a second attempt with the same token id matches zero
+// rows, and the caller treats that as "token already consumed". The
+// expires_at < ?3 guard means an expired token fails the same way
+// (no row, no error), so a stolen-expired-token doesn't reveal that
+// it was once valid.
+func (q *Queries) ConsumePasswordResetToken(ctx context.Context, arg ConsumePasswordResetTokenParams) (PasswordResetToken, error) {
+	row := q.db.QueryRowContext(ctx, consumePasswordResetToken, arg.ID, arg.ExpiresAt, arg.UsedAt)
+	var i PasswordResetToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.TokenHash,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.CreatedBy,
+	)
+	return i, err
+}
 
 const createPasswordResetToken = `-- name: CreatePasswordResetToken :one
 INSERT INTO password_reset_tokens (
@@ -59,23 +84,27 @@ func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswo
 	return i, err
 }
 
-const consumePasswordResetToken = `-- name: ConsumePasswordResetToken :one
-UPDATE password_reset_tokens
-SET used_at = ?3
-WHERE id = ?1
+const getPasswordResetTokenByHash = `-- name: GetPasswordResetTokenByHash :one
+SELECT id, user_id, token_hash, created_at, expires_at, used_at, created_by
+FROM password_reset_tokens
+WHERE token_hash = ?1
   AND used_at IS NULL
   AND expires_at > ?2
-RETURNING id, user_id, token_hash, created_at, expires_at, used_at, created_by
+LIMIT 1
 `
 
-type ConsumePasswordResetTokenParams struct {
-	ID     int64
-	Now    int64
-	UsedAt int64
+type GetPasswordResetTokenByHashParams struct {
+	TokenHash string
+	ExpiresAt int64
 }
 
-func (q *Queries) ConsumePasswordResetToken(ctx context.Context, arg ConsumePasswordResetTokenParams) (PasswordResetToken, error) {
-	row := q.db.QueryRowContext(ctx, consumePasswordResetToken, arg.ID, arg.Now, arg.UsedAt)
+// Confirm-time lookup: scan the active-token index for a specific
+// token_hash. The active-partial unique index keeps the candidate
+// set small. The handler iterates and finds the row whose hash
+// matches -- the index narrows the scan to the small set of
+// in-flight tokens, not the entire history.
+func (q *Queries) GetPasswordResetTokenByHash(ctx context.Context, arg GetPasswordResetTokenByHashParams) (PasswordResetToken, error) {
+	row := q.db.QueryRowContext(ctx, getPasswordResetTokenByHash, arg.TokenHash, arg.ExpiresAt)
 	var i PasswordResetToken
 	err := row.Scan(
 		&i.ID,
@@ -99,12 +128,14 @@ ORDER BY created_at DESC
 `
 
 type ListActivePasswordResetTokensParams struct {
-	UserID int64
-	Now    int64
+	UserID    int64
+	ExpiresAt int64
 }
 
+// "Pending" panel: list of un-consumed, un-expired tokens for a given
+// user. The /admin/users/{id}/resets endpoint will use this in #408.
 func (q *Queries) ListActivePasswordResetTokens(ctx context.Context, arg ListActivePasswordResetTokensParams) ([]PasswordResetToken, error) {
-	rows, err := q.db.QueryContext(ctx, listActivePasswordResetTokens, arg.UserID, arg.Now)
+	rows, err := q.db.QueryContext(ctx, listActivePasswordResetTokens, arg.UserID, arg.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -144,13 +175,18 @@ LIMIT ?2 OFFSET ?3
 `
 
 type ListAllActivePasswordResetTokensParams struct {
-	Now    int64
-	Limit  int64
-	Offset int64
+	ExpiresAt int64
+	Limit     int64
+	Offset    int64
 }
 
+// Global pending list -- used by the admin-UI pending-resets panel
+// (PR #408). The query is intentionally cheap: the
+// password_reset_tokens_user_idx covers user_id + created_at, and the
+// partial active unique covers used_at IS NULL. With a homelab user
+// count this is < 100 rows; production-scale is a follow-up.
 func (q *Queries) ListAllActivePasswordResetTokens(ctx context.Context, arg ListAllActivePasswordResetTokensParams) ([]PasswordResetToken, error) {
-	rows, err := q.db.QueryContext(ctx, listAllActivePasswordResetTokens, arg.Now, arg.Limit, arg.Offset)
+	rows, err := q.db.QueryContext(ctx, listAllActivePasswordResetTokens, arg.ExpiresAt, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -189,39 +225,12 @@ WHERE id = ?1
 
 type RevokePasswordResetTokenParams struct {
 	ID     int64
-	UsedAt int64
+	UsedAt sql.NullInt64
 }
 
+// Admin "delete" / revoke. Idempotent: revoking an already-used or
+// already-expired token matches the row but is a no-op.
 func (q *Queries) RevokePasswordResetToken(ctx context.Context, arg RevokePasswordResetTokenParams) error {
 	_, err := q.db.ExecContext(ctx, revokePasswordResetToken, arg.ID, arg.UsedAt)
 	return err
-}
-
-const getPasswordResetTokenByHash = `-- name: GetPasswordResetTokenByHash :one
-SELECT id, user_id, token_hash, created_at, expires_at, used_at, created_by
-FROM password_reset_tokens
-WHERE token_hash = ?1
-  AND used_at IS NULL
-  AND expires_at > ?2
-LIMIT 1
-`
-
-type GetPasswordResetTokenByHashParams struct {
-	TokenHash string
-	Now       int64
-}
-
-func (q *Queries) GetPasswordResetTokenByHash(ctx context.Context, arg GetPasswordResetTokenByHashParams) (PasswordResetToken, error) {
-	row := q.db.QueryRowContext(ctx, getPasswordResetTokenByHash, arg.TokenHash, arg.Now)
-	var i PasswordResetToken
-	err := row.Scan(
-		&i.ID,
-		&i.UserID,
-		&i.TokenHash,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-		&i.UsedAt,
-		&i.CreatedBy,
-	)
-	return i, err
 }

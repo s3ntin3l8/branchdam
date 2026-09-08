@@ -11,7 +11,6 @@ import (
 )
 
 const countActorAudit = `-- name: CountActorAudit :one
-
 SELECT COUNT(*)
 FROM actor_audit
 WHERE (?1 IS NULL OR actor_user_id = ?1)
@@ -97,7 +96,6 @@ func (q *Queries) InsertActorAudit(ctx context.Context, arg InsertActorAuditPara
 }
 
 const listActorAudit = `-- name: ListActorAudit :many
-
 SELECT id, actor_user_id, actor_kind, actor_name,
        event, resource_type, resource_id, details_json, created_at
 FROM actor_audit

@@ -192,6 +192,7 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 		CameraSerial:       nullString(r.SerialNumber),
 		LensModel:          nullString(r.LensModel),
 		FilenameStem:       nullString(naming.Stem(r.FileName)),
+		UploadedByUserID:   sql.NullInt64{}, // NULL for scanner / sweeper / agent paths
 	}
 	if r.PHash != nil {
 		params.Phash = sql.NullInt64{Int64: *r.PHash, Valid: true}

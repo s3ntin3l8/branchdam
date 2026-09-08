@@ -7,21 +7,21 @@
 -- All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 -- "SQL Syntax Traps" note.
 
--- name: GetUserByExternalUID :one
+-- name: GetAttributionUserByExternalUID :one
 SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at
 FROM users
 WHERE auth_provider = ?1 AND external_uid = ?2;
 
--- name: GetUserByID :one
+-- name: GetAttributionUserByID :one
 SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at
 FROM users
 WHERE id = ?1;
 
--- name: CreateUser :one
+-- name: CreateAttributionUser :one
 -- Lazy-provisioning insert. The caller resolves auth_provider +
--- external_uid from the Principal (BrowserChain reads X-Authentik-Uid);
--- username/email are denormalized display fields refreshed on every
--- ResolveOrCreate. Returns the row id even on conflict (no-op) so the
+-- external_uid from the Principal; username/email are denormalized
+-- display fields refreshed on every ResolveOrCreate.
+-- Returns the row id even on conflict (no-op) so the
 -- caller never has to distinguish "created" from "already existed" --
 -- matching the ResolveOrCreate contract: get-or-create with stable id.
 INSERT INTO users (auth_provider, external_uid, username, email, last_seen_at)
@@ -29,7 +29,7 @@ VALUES (?1, ?2, ?3, ?4, unixepoch())
 ON CONFLICT (auth_provider, external_uid) DO NOTHING
 RETURNING id;
 
--- name: RefreshUserSeen :exec
+-- name: RefreshAttributionUserSeen :exec
 -- Updates the denormalized username/email (a user may have renamed since
 -- their last request) and bumps last_seen_at. Called by
 -- ResolveOrCreate after a cache miss, in the same transaction as the
@@ -55,14 +55,14 @@ RETURNING id;
 -- The EnsureSystemUser companion query: lookup the system user by its
 -- stable sentinel (external_uid='system'), so the boot sequence can
 -- capture its id before any background worker starts. Same shape as
--- GetUserByExternalUID -- named distinctly so the boot path reads
--- self-documentingly and a future "system user has been renamed" rename
--- has one obvious place to land.
+-- GetAttributionUserByExternalUID -- named distinctly so the boot path
+-- reads self-documentingly and a future "system user has been renamed"
+-- rename has one obvious place to land.
 SELECT id
 FROM users
 WHERE auth_provider = 'system' AND external_uid = 'system';
 
--- name: ListUsers :many
+-- name: ListAttributionUsers :many
 -- Backs GET /api/v1/users (admin-only). Used by the pairing UI's
 -- "Owned by" selector (when it lands -- today defaults to the creating
 -- admin, see internal/pairing's CreatePairing). Capped at 200 rows in
@@ -73,5 +73,5 @@ FROM users
 ORDER BY username ASC, id ASC
 LIMIT ?1 OFFSET ?2;
 
--- name: CountUsers :one
+-- name: CountAttributionUsers :one
 SELECT COUNT(*) FROM users;

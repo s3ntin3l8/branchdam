@@ -1,84 +1,60 @@
 # Handoff: `feat/multi-user-attribution`
 
-For whoever picks up local branch `feat/multi-user-attribution` (checked out at
-`.worktrees/feat-multi-user-attribution`, commit `ced2908`, never pushed). Written while
-fixing issue #413 (sqlc v1.31.1 "corruption"), which that branch's own commit message
-misdiagnoses — see below.
+Local branch `feat/multi-user-attribution` (checked out at
+`.worktrees/feat-multi-user-attribution`, current HEAD after rebase + schema reconciliation;
+never pushed). Implements multi-user attribution on top of PR #407's `users` table.
 
 ## State
 
-One commit ahead of `fadd2d4`, so now several commits behind `origin/main` (which has
-since gained `b26f483` local auth and `8b458d2`).
+Rebased onto `origin/main` past issue #413's root-cause fix (commit `cccb2c1`,
+merged via PR #417). All 28 packages now pass `go test ./... -count=1`; `go build ./...` clean.
+Migration landed as `00020_users_and_audit.sql` (PR #407's `00019_password_reset.sql` already
+lives on main, so this branch's original `00019_` was renumbered). sqlc generation is plain —
+no `.bin/sqlc-fixup.sh`, no post-processing. `.worktrees` is now in the no_leak_test skip list
+so this worktree itself doesn't trip the test.
 
-## What is real and worth keeping
+## What's shipped on this branch (schema + queries)
 
-Migration `00018_users_and_audit.sql` (users + actor_audit tables, nullable user_id FKs
-on `media_nodes.uploaded_by_user_id`, `scan_jobs.started_by_user_id`,
-`device_pairings.user_id`) and the accompanying
-`internal/db/queries/{users,actor_audit}.sql`. The commit message's own "NOT YET DONE"
-list (internal/users package, internal/audit package, BrowserChain X-Authentik-Uid,
-route wiring, SPA updates, docs) is accurate and still needed.
+- `internal/db/migrations/00020_users_and_audit.sql`
+  - `users.auth_provider`, `users.external_uid`, `users.last_seen_at` columns + backfill
+  - `UNIQUE (auth_provider, external_uid)` index; drops PR #407's redundant `ix_users_username`
+  - Nullable `device_pairings.user_id` (RESTRICT)
+  - Nullable `media_nodes.uploaded_by_user_id` (RESTRICT) + partial index
+  - Nullable `scan_jobs.started_by_user_id` (RESTRICT)
+  - `actor_audit` table (cross-cutting audit log; separate from `login_audit`)
+- `internal/db/queries/users.sql`, `actor_audit.sql`, `local_auth.sql`,
+  `media_nodes.sql`, `media_edges.sql`, `scan_jobs.sql`, `companion_pairing.sql` —
+  all column sets and INSERTs reconciled.
+- `internal/pipeline/commit.go` carries nullable `UploadedByUserID` through
+  `InsertMediaNode`; the upload path uses the resolved user, scanner/sweeper leave it NULL.
 
-## What is not real — do not carry it forward
+## Still to do (real PR scope)
 
-1. **Everything in the commit message under "Pre-existing sqlc v1.31.1 corruption
-   patterns … fixed by `.bin/sqlc-fixup.sh`".** That script does not exist and never
-   did — not in the working tree, not on `main`, not anywhere in git history. The real
-   cause (issue #413, fixed on `fix/sqlc-non-ascii-corruption`): sqlc v1.31.1's SQLite
-   engine slices statement spans using rune offsets as if they were byte offsets, so any
-   multi-byte UTF-8 character in `internal/db/queries/*.sql` (even inside a `--`
-   comment) corrupts every later statement in that file. Three characters in three files
-   caused all of it. See `docs/schema.md`'s "sqlc risk: non-ASCII in query comments"
-   section for the full writeup, reproduction, and upstream links
-   ([sqlc#4372](https://github.com/sqlc-dev/sqlc/issues/4372),
-   [#4523](https://github.com/sqlc-dev/sqlc/issues/4523),
-   [#4535](https://github.com/sqlc-dev/sqlc/pull/4535)).
+- `internal/users`: lazy provisioning, `ResolveOrCreate(auth_provider, external_uid, ...) -> user_id`,
+  `SystemUserID` (provisioned at boot, used by background scans/watchers).
+- `internal/audit`: write helper for `actor_audit` + read for the merged audit route.
+- `internal/auth.BrowserChain`: surface the `X-Authentik-Uid` header on the `Principal`
+  (so `ResolveOrCreate` has a stable identity across username renames).
+- Pairing: `CreateDevicePairing` accepts the creating user's id; paired-upload path
+  uses the pairing's owner_user_id.
+- HTTP routes: `POST /api/v1/scan` (and any future operator endpoints) write
+  `actor_audit` and set `scan_jobs.started_by_user_id`; `POST /api/v1/settings`,
+  `POST /api/v1/storage-location` similarly. Single `GET /api/v1/audit?type=activity|login`
+  merges `actor_audit` and `login_audit` sorted by timestamp.
+- SPA: `My uploads` filter, `Uploaded by` column on assets/edges.
+- Tests: end-to-end attribution in `internal/auth/users` and `internal/httpapi`;
+  `actor_audit` write/read; pairing owner inheritance.
 
-   Any hand-edits made to `internal/db/sqlcgen/` on this branch to work around the
-   "corruption" should be discarded. Once rebased past the fix branch, `internal/db/queries/*.sql` must stay ASCII-only (enforced by
-   `internal/db/queries_ascii_test.go`'s `TestQueryFilesAreASCII` under `make check`) and
-   a plain `sqlc generate` will produce correct output — no post-processor needed.
+## Notes for the next agent
 
-2. **The four "pre-existing test failures (NOT caused by this work)"** —
-   `TestCreatePairing_HappyPath`, `TestGetMediaNodeByFullHash`,
-   `TestHeuristicSpatialTemporalResolver`, `TestDrainer_NodeCreated_ContentDedup_*`. All
-   four **pass** on `main` (verified: `go test ./internal/...` on a clean checkout is
-   26 packages `ok`, one failure — `TestNoDirectAuthentikHeaderReads`, unrelated, see
-   below — and none of these four are it). If they fail on this branch after rebasing,
-   this branch's own changes caused it — don't carry the "pre-existing" framing forward
-   without re-verifying against current `main`.
-
-## Blocking conflict: migration number `00018` is taken
-
-`origin/main` already ships `00018_local_auth.sql` (PR #407) with its own `users` table
-— overlapping in intent and in name with this branch's `00018_users_and_audit.sql`.
-Rebasing onto `origin/main` means:
-
-- Renumbering this branch's migration to `00019_`.
-- Reconciling the two `users` schemas. The shipped one already has
-  `source ∈ ('local', 'forward-jit', 'forward-link')`, `is_admin`, `disabled_at`, and a
-  `password_hash` CHECK enforcing the local/forward-auth split. Most of this branch's
-  `users` table work is likely superseded by it.
-- `actor_audit` and the three `*_user_id` FK columns (`media_nodes.uploaded_by_user_id`,
-  `scan_jobs.started_by_user_id`, `device_pairings.user_id`) are what actually survive
-  the rebase — they don't overlap with what shipped.
-
-## Also found and fixed in passing (not #413's own bug, but blocked the PR's own pre-push hook)
-
-`internal/auth/no_leak_test.go`'s directory skip list excluded `.mullion-worktrees` but
-not `.worktrees/` — the actual directory name git worktrees for this repo land in
-(`.gitignore`'s own entry is `.worktrees/`). Any `.worktrees/` checkout on disk — which
-is exactly this branch's own setup — made `TestNoDirectAuthentikHeaderReads` fail on
-files inside that checkout, not the actual working tree. It was tripped by two stale
-worktrees on the machine this fix was written on (`feat-multi-user-attribution` itself,
-plus an unrelated `feat-auth-password-reset`); the same phantom-file issue also broke
-`golangci-lint`'s generated-file filter via a third stale worktree (`docs-local-auth`),
-surfacing three unrelated `errcheck` findings against files that no longer exist on
-disk. Fixed (added `.worktrees` to the skip list) because it was blocking this PR's own
-pre-push hook, not because it's part of #413 — mentioned here in case
-`feat/multi-user-attribution` was also carrying a local workaround for it.
-
-Not fixed: the `golangci-lint` generated-file-filter break from the same root cause
-(any stale `.worktrees/*` entry with no corresponding directory on disk). If it recurs,
-the fix is the same shape — the filter needs to tolerate a worktree path that no longer
-resolves, not `no_leak_test.go`.
+- Migration 00020's `Down` cleanly reverses to `ix_users_username` (the index PR #407
+  dropped), so a downgrade to a pre-PR #407 schema still leaves the schema consistent.
+- `TestDowngradeIndexSuffixStemEdges` was updated to also raw-`ALTER TABLE` add
+  `uploaded_by_user_id` after `goose.UpTo(7)`, matching the existing pattern it uses
+  for `source_path_hash` from migration 15.
+- `CreateLocalUser` and `CreateForwardJITUser` now write
+  `(auth_provider, external_uid)` explicitly (`('local', username)` /
+  `('forward-jit', username)`) so they don't fall back to the `'authentik'`/`''` defaults
+  that would collide on the unique index.
+- The unused throwaway `.bin/sqlc-fixup.sh` is gone; don't reintroduce it — plain
+  `sqlc generate` works on this branch.

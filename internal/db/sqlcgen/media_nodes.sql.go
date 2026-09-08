@@ -63,7 +63,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -105,6 +106,7 @@ func (q *Queries) GetLiveNodeByPath(ctx context.Context, filePath string) (Media
 		&i.ThumbState,
 		&i.ThumbAttempts,
 		&i.SourcePathHash,
+		&i.UploadedByUserID,
 	)
 	return i, err
 }
@@ -164,7 +166,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE id = ?1
 `
@@ -205,6 +208,7 @@ func (q *Queries) GetMediaNodeByID(ctx context.Context, id int64) (MediaNode, er
 		&i.ThumbState,
 		&i.ThumbAttempts,
 		&i.SourcePathHash,
+		&i.UploadedByUserID,
 	)
 	return i, err
 }
@@ -248,7 +252,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE node_uuid = ?1
 `
@@ -287,6 +292,7 @@ func (q *Queries) GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (Medi
 		&i.ThumbState,
 		&i.ThumbAttempts,
 		&i.SourcePathHash,
+		&i.UploadedByUserID,
 	)
 	return i, err
 }
@@ -298,7 +304,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
 LIMIT 1
@@ -340,6 +347,7 @@ func (q *Queries) GetMissingNodeByFastHash(ctx context.Context, fastHash *string
 		&i.ThumbState,
 		&i.ThumbAttempts,
 		&i.SourcePathHash,
+		&i.UploadedByUserID,
 	)
 	return i, err
 }
@@ -352,6 +360,7 @@ INSERT INTO media_nodes (
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
     camera_serial, lens_model, source_path_hash,
+    uploaded_by_user_id,
     first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5,
@@ -359,6 +368,7 @@ INSERT INTO media_nodes (
     ?11, ?12, ?13,
     ?14, ?15, ?16,
     ?17, ?18, ?19, ?20, ?21, ?22,
+    ?23,
     unixepoch(), unixepoch(), unixepoch(), unixepoch()
 )
 RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -367,7 +377,8 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
           first_seen_at, last_seen_at, created_at, updated_at,
-          camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+          camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+          uploaded_by_user_id
 `
 
 type InsertMediaNodeParams struct {
@@ -393,6 +404,7 @@ type InsertMediaNodeParams struct {
 	CameraSerial       sql.NullString
 	LensModel          sql.NullString
 	SourcePathHash     *string
+	UploadedByUserID   sql.NullInt64
 }
 
 func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams) (MediaNode, error) {
@@ -419,6 +431,7 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		arg.CameraSerial,
 		arg.LensModel,
 		arg.SourcePathHash,
+		arg.UploadedByUserID,
 	)
 	var i MediaNode
 	err := row.Scan(
@@ -452,6 +465,7 @@ func (q *Queries) InsertMediaNode(ctx context.Context, arg InsertMediaNodeParams
 		&i.ThumbState,
 		&i.ThumbAttempts,
 		&i.SourcePathHash,
+		&i.UploadedByUserID,
 	)
 	return i, err
 }
@@ -519,7 +533,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -567,6 +582,7 @@ func (q *Queries) ListLiveNodesByDocumentID(ctx context.Context, documentID sql.
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -588,7 +604,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -636,6 +653,7 @@ func (q *Queries) ListLiveNodesByFastHash(ctx context.Context, fastHash *string)
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -657,7 +675,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED'
 `
@@ -703,6 +722,7 @@ func (q *Queries) ListLiveNodesByFileName(ctx context.Context, fileName string) 
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -724,7 +744,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
 LIMIT ?2
@@ -783,6 +804,7 @@ func (q *Queries) ListLiveNodesByFilenameStem(ctx context.Context, arg ListLiveN
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -848,7 +870,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
@@ -903,6 +926,7 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -924,7 +948,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
   AND (camera_model = ?4 OR ?4 IS NULL)
@@ -994,6 +1019,7 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -1193,7 +1219,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE camera_serial = ?1
   AND captured_at_unix >= ?2
@@ -1257,6 +1284,7 @@ func (q *Queries) ListTier3Candidates(ctx context.Context, arg ListTier3Candidat
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}

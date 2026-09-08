@@ -11,7 +11,6 @@ import (
 )
 
 const countDevicePairings = `-- name: CountDevicePairings :one
-
 SELECT COUNT(*) FROM device_pairings
 `
 
@@ -23,8 +22,7 @@ func (q *Queries) CountDevicePairings(ctx context.Context) (int64, error) {
 }
 
 const countPairingAudit = `-- name: CountPairingAudit :one
-
-SELECT COUNT(*) FROM companion_pairing_audit WHERE pairing_id =
+SELECT COUNT(*) FROM companion_pairing_audit WHERE pairing_id = ?1
 `
 
 func (q *Queries) CountPairingAudit(ctx context.Context, pairingID int64) (int64, error) {
@@ -41,7 +39,7 @@ INSERT INTO device_pairings (
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5
 )
-RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
 `
 
 type CreateDevicePairingParams struct {
@@ -49,16 +47,6 @@ type CreateDevicePairingParams struct {
 	FriendlyLabel string
 	CreatedAt     int64
 	CreatedBy     string
-	QrSvg         []byte
-}
-
-type CreateDevicePairingRow struct {
-	ID            int64
-	AgentID       string
-	FriendlyLabel string
-	CreatedAt     int64
-	CreatedBy     string
-	RevokedAt     sql.NullInt64
 	QrSvg         []byte
 }
 
@@ -71,7 +59,12 @@ type CreateDevicePairingRow struct {
 // "SQL Syntax Traps" note.
 // Inserts the pairing row and returns it. The HTTP layer wraps this with
 // the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
-func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairingParams) (CreateDevicePairingRow, error) {
+//
+// RETURNING includes user_id (the owner column) so the result struct
+// matches the new DevicePairing shape introduced by migration 00019
+// (otherwise sqlc creates a separate CreateDevicePairingRow struct that
+// breaks the service call sites, which expect the DevicePairing type).
+func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairingParams) (DevicePairing, error) {
 	row := q.db.QueryRowContext(ctx, createDevicePairing,
 		arg.AgentID,
 		arg.FriendlyLabel,
@@ -79,7 +72,7 @@ func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairi
 		arg.CreatedBy,
 		arg.QrSvg,
 	)
-	var i CreateDevicePairingRow
+	var i DevicePairing
 	err := row.Scan(
 		&i.ID,
 		&i.AgentID,
@@ -88,12 +81,12 @@ func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairi
 		&i.CreatedBy,
 		&i.RevokedAt,
 		&i.QrSvg,
+		&i.UserID,
 	)
 	return i, err
 }
 
 const createDevicePairingKey = `-- name: CreateDevicePairingKey :one
-
 INSERT INTO device_pairing_keys (
     pairing_id, key_lookup_hash, key_preview, created_at
 ) VALUES (
@@ -131,7 +124,6 @@ func (q *Queries) CreateDevicePairingKey(ctx context.Context, arg CreateDevicePa
 }
 
 const getDevicePairingByAgentID = `-- name: GetDevicePairingByAgentID :one
-
 SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
 FROM device_pairings
 WHERE agent_id = ?1
@@ -165,7 +157,6 @@ func (q *Queries) GetDevicePairingByAgentID(ctx context.Context, agentID string)
 }
 
 const getDevicePairingByID = `-- name: GetDevicePairingByID :one
-
 SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
 FROM device_pairings
 WHERE id = ?1
@@ -197,7 +188,6 @@ func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (GetDevice
 }
 
 const getDevicePairingKeyByHash = `-- name: GetDevicePairingKeyByHash :one
-
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
        k.expires_at, k.revoked_at
 FROM device_pairing_keys k
@@ -228,7 +218,6 @@ func (q *Queries) GetDevicePairingKeyByHash(ctx context.Context, keyLookupHash s
 }
 
 const getDevicePairingKeyByID = `-- name: GetDevicePairingKeyByID :one
-
 SELECT id, pairing_id, key_lookup_hash, key_preview, created_at,
        expires_at, revoked_at
 FROM device_pairing_keys
@@ -251,7 +240,6 @@ func (q *Queries) GetDevicePairingKeyByID(ctx context.Context, id int64) (Device
 }
 
 const getDevicePairingQRSVG = `-- name: GetDevicePairingQRSVG :one
-
 SELECT qr_svg
 FROM device_pairings
 WHERE id = ?1
@@ -267,11 +255,11 @@ func (q *Queries) GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, 
 }
 
 const insertPairingAudit = `-- name: InsertPairingAudit :exec
-
 INSERT INTO companion_pairing_audit (
     pairing_id, actor, event, details, created_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5
+)
 `
 
 type InsertPairingAuditParams struct {
@@ -294,7 +282,6 @@ func (q *Queries) InsertPairingAudit(ctx context.Context, arg InsertPairingAudit
 }
 
 const listDevicePairings = `-- name: ListDevicePairings :many
-
 SELECT
     p.id, p.agent_id, p.friendly_label, p.created_at, p.created_by, p.revoked_at,
     COALESCE((
@@ -374,7 +361,6 @@ func (q *Queries) ListDevicePairings(ctx context.Context, arg ListDevicePairings
 }
 
 const listKeysByPairing = `-- name: ListKeysByPairing :many
-
 SELECT id, pairing_id, key_lookup_hash, key_preview, created_at,
        expires_at, revoked_at
 FROM device_pairing_keys
@@ -414,7 +400,6 @@ func (q *Queries) ListKeysByPairing(ctx context.Context, pairingID int64) ([]Dev
 }
 
 const listPairingAudit = `-- name: ListPairingAudit :many
-
 SELECT id, pairing_id, actor, event, details, created_at
 FROM companion_pairing_audit
 WHERE pairing_id = ?1
@@ -463,7 +448,6 @@ func (q *Queries) ListPairingAudit(ctx context.Context, arg ListPairingAuditPara
 }
 
 const newestActiveKeyForPairing = `-- name: NewestActiveKeyForPairing :one
-
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
        k.expires_at, k.revoked_at
 FROM device_pairing_keys k
@@ -509,12 +493,11 @@ func (q *Queries) NewestActiveKeyForPairing(ctx context.Context, arg NewestActiv
 }
 
 const revokeAllKeysForPairing = `-- name: RevokeAllKeysForPairing :exec
-
 UPDATE device_pairing_keys
 SET revoked_at = ?2
 WHERE pairing_id = ?1
   AND revoked_at IS NULL
-  AND (expires_at IS NULL OR expires_at > ?2
+  AND (expires_at IS NULL OR expires_at > ?2)
 `
 
 type RevokeAllKeysForPairingParams struct {
@@ -528,7 +511,6 @@ func (q *Queries) RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeys
 }
 
 const revokeDevicePairing = `-- name: RevokeDevicePairing :exec
-
 UPDATE device_pairings
 SET revoked_at = ?2
 WHERE id = ?1
@@ -548,7 +530,6 @@ func (q *Queries) RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairi
 }
 
 const setActiveKeyExpirations = `-- name: SetActiveKeyExpirations :exec
-
 UPDATE device_pairing_keys
 SET expires_at = ?2
 WHERE pairing_id = ?1
@@ -570,7 +551,6 @@ func (q *Queries) SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyE
 }
 
 const updateDevicePairingQRSVG = `-- name: UpdateDevicePairingQRSVG :exec
-
 UPDATE device_pairings
 SET qr_svg = ?2
 WHERE id = ?1

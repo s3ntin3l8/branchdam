@@ -10,7 +10,6 @@ import (
 )
 
 const insertNodeMetadata = `-- name: InsertNodeMetadata :exec
-
 INSERT INTO node_metadata (node_id, source, key, value)
 VALUES (?1, ?2, ?3, ?4)
 ON CONFLICT (node_id, source, key) DO UPDATE SET value = excluded.value
@@ -36,7 +35,6 @@ func (q *Queries) InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadata
 }
 
 const listNodeMetadata = `-- name: ListNodeMetadata :many
-
 SELECT node_id, source, key, value
 FROM node_metadata
 WHERE node_id = ?1

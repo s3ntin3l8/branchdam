@@ -11,7 +11,7 @@ INSERT INTO scan_jobs (storage_location_id, kind, state, started_at, updated_at,
 VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch(), ?3)
 RETURNING id, storage_location_id, kind, state, files_seen, files_hashed,
           files_failed, edges_created, started_at, finished_at, last_error, updated_at,
-          started_by_user_id;
+       started_by_user_id;
 
 -- name: CountRunningScansForLocationByKind :one
 -- #163/#226: called inside the same transaction as CreateScanJob (see
@@ -26,7 +26,8 @@ RETURNING id, storage_location_id, kind, state, files_seen, files_hashed,
 -- caller only ever passing FULL_SCAN or INCREMENTAL here -- they're already
 -- singleton-per-location via WatcherSupervisor.Start's sync.Once and are
 -- long-lived by design, so they must not block (or be blocked by) either.
-SELECT COUNT(*) FROM scan_jobs
+SELECT COUNT(*)
+       FROM scan_jobs
 WHERE storage_location_id = ?1 AND kind = ?2 AND state = 'RUNNING';
 
 -- name: UpdateScanJobProgress :exec
@@ -73,23 +74,27 @@ WHERE state = 'RUNNING';
 
 -- name: GetScanJob :one
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
-       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 FROM scan_jobs
 WHERE id = ?1;
 
 -- name: ListRecentScanJobs :many
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
-       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 FROM scan_jobs
 ORDER BY started_at DESC
 LIMIT ?1;
 
 -- name: CountRunningScanJobs :one
-SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH';
+SELECT COUNT(*)
+       FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH';
 
 -- name: ListScanJobsFiltered :many
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
-       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 FROM scan_jobs
 WHERE (sqlc.narg('kind') IS NULL OR kind = sqlc.narg('kind'))
   AND (sqlc.narg('state') IS NULL OR state = sqlc.narg('state'))

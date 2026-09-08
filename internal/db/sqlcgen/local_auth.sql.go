@@ -35,11 +35,13 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 
 const createForwardJITUser = `-- name: CreateForwardJITUser :one
 INSERT INTO users (
-    username, email, password_hash, is_admin, source, created_at, created_by
+    username, email, password_hash, is_admin, source, created_at, created_by,
+    auth_provider, external_uid
 ) VALUES (
-    ?1, ?2, NULL, ?3, 'forward-jit', ?4, ?5
+    ?1, ?2, NULL, ?3, 'forward-jit', ?4, ?5,
+    'forward-jit', ?1
 )
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 `
 
 type CreateForwardJITUserParams struct {
@@ -73,17 +75,22 @@ func (q *Queries) CreateForwardJITUser(ctx context.Context, arg CreateForwardJIT
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.DisabledAt,
+		&i.AuthProvider,
+		&i.ExternalUid,
+		&i.LastSeenAt,
 	)
 	return i, err
 }
 
 const createLocalUser = `-- name: CreateLocalUser :one
 INSERT INTO users (
-    username, email, password_hash, is_admin, source, created_at, created_by
+    username, email, password_hash, is_admin, source, created_at, created_by,
+    auth_provider, external_uid
 ) VALUES (
-    ?1, ?2, ?3, ?4, 'local', ?5, ?6
+    ?1, ?2, ?3, ?4, 'local', ?5, ?6,
+    'local', ?1
 )
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 `
 
 type CreateLocalUserParams struct {
@@ -119,6 +126,9 @@ func (q *Queries) CreateLocalUser(ctx context.Context, arg CreateLocalUserParams
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.DisabledAt,
+		&i.AuthProvider,
+		&i.ExternalUid,
+		&i.LastSeenAt,
 	)
 	return i, err
 }
@@ -223,7 +233,7 @@ func (q *Queries) GetSessionByCookieID(ctx context.Context, cookieID string) (Se
 }
 
 const getUserByEmailSource = `-- name: GetUserByEmailSource :one
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 WHERE email = ?1 AND source = ?2
 `
@@ -250,12 +260,15 @@ func (q *Queries) GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSo
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.DisabledAt,
+		&i.AuthProvider,
+		&i.ExternalUid,
+		&i.LastSeenAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 WHERE id = ?1
 `
@@ -273,12 +286,15 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.DisabledAt,
+		&i.AuthProvider,
+		&i.ExternalUid,
+		&i.LastSeenAt,
 	)
 	return i, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 WHERE username = ?1
 `
@@ -299,6 +315,9 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.DisabledAt,
+		&i.AuthProvider,
+		&i.ExternalUid,
+		&i.LastSeenAt,
 	)
 	return i, err
 }
@@ -338,37 +357,8 @@ func (q *Queries) InsertLoginAudit(ctx context.Context, arg InsertLoginAuditPara
 	return err
 }
 
-const updateUserPasswordHash = `-- name: UpdateUserPasswordHash :one
-UPDATE users
-SET password_hash = ?2
-WHERE id = ?1
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
-`
-
-type UpdateUserPasswordHashParams struct {
-	ID           int64
-	PasswordHash sql.NullString
-}
-
-func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, updateUserPasswordHash, arg.ID, arg.PasswordHash)
-	var i User
-	err := row.Scan(
-		&i.ID,
-		&i.Username,
-		&i.Email,
-		&i.PasswordHash,
-		&i.IsAdmin,
-		&i.Source,
-		&i.CreatedAt,
-		&i.CreatedBy,
-		&i.DisabledAt,
-	)
-	return i, err
-}
-
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 ORDER BY id ASC
 LIMIT ?1 OFFSET ?2
@@ -400,6 +390,9 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.CreatedAt,
 			&i.CreatedBy,
 			&i.DisabledAt,
+			&i.AuthProvider,
+			&i.ExternalUid,
+			&i.LastSeenAt,
 		); err != nil {
 			return nil, err
 		}
@@ -464,4 +457,38 @@ type TouchSessionParams struct {
 func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) error {
 	_, err := q.db.ExecContext(ctx, touchSession, arg.ID, arg.LastSeenAt, arg.IdleExpiresAt)
 	return err
+}
+
+const updateUserPasswordHash = `-- name: UpdateUserPasswordHash :one
+UPDATE users
+SET password_hash = ?2
+WHERE id = ?1
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
+`
+
+type UpdateUserPasswordHashParams struct {
+	ID           int64
+	PasswordHash sql.NullString
+}
+
+// Rotates the password hash. Used by /api/v1/password-reset/confirm
+// (self-service) and /api/v1/admin/users/{id}/reset-password (admin).
+func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, updateUserPasswordHash, arg.ID, arg.PasswordHash)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Email,
+		&i.PasswordHash,
+		&i.IsAdmin,
+		&i.Source,
+		&i.CreatedAt,
+		&i.CreatedBy,
+		&i.DisabledAt,
+		&i.AuthProvider,
+		&i.ExternalUid,
+		&i.LastSeenAt,
+	)
+	return i, err
 }

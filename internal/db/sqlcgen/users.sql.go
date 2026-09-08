@@ -7,43 +7,42 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
 
-const countUsers = `-- name: CountUsers :one
-
+const countAttributionUsers = `-- name: CountAttributionUsers :one
 SELECT COUNT(*) FROM users
 `
 
-func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countUsers)
+func (q *Queries) CountAttributionUsers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAttributionUsers)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
-const createUser = `-- name: CreateUser :one
-
+const createAttributionUser = `-- name: CreateAttributionUser :one
 INSERT INTO users (auth_provider, external_uid, username, email, last_seen_at)
 VALUES (?1, ?2, ?3, ?4, unixepoch())
 ON CONFLICT (auth_provider, external_uid) DO NOTHING
 RETURNING id
 `
 
-type CreateUserParams struct {
+type CreateAttributionUserParams struct {
 	AuthProvider string
 	ExternalUid  string
 	Username     string
-	Email        string
+	Email        sql.NullString
 }
 
 // Lazy-provisioning insert. The caller resolves auth_provider +
-// external_uid from the Principal (BrowserChain reads X-Authentik-Uid);
-// username/email are denormalized display fields refreshed on every
-// ResolveOrCreate. Returns the row id even on conflict (no-op) so the
+// external_uid from the Principal; username/email are denormalized
+// display fields refreshed on every ResolveOrCreate.
+// Returns the row id even on conflict (no-op) so the
 // caller never has to distinguish "created" from "already existed" --
 // matching the ResolveOrCreate contract: get-or-create with stable id.
-func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, createUser,
+func (q *Queries) CreateAttributionUser(ctx context.Context, arg CreateAttributionUserParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, createAttributionUser,
 		arg.AuthProvider,
 		arg.ExternalUid,
 		arg.Username,
@@ -55,7 +54,6 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (int64, 
 }
 
 const ensureSystemUser = `-- name: EnsureSystemUser :one
-
 INSERT INTO users (auth_provider, external_uid, username, email, last_seen_at)
 VALUES ('system', 'system', 'system', '', unixepoch())
 ON CONFLICT (auth_provider, external_uid) DO NOTHING
@@ -75,36 +73,26 @@ func (q *Queries) EnsureSystemUser(ctx context.Context) (int64, error) {
 	return id, err
 }
 
-const getSystemUserID = `-- name: GetSystemUserID :one
-
-SELECT id
-FROM users
-WHERE auth_provider = 'system' AND external_uid = 'system'
-`
-
-// The EnsureSystemUser companion query: lookup the system user by its
-// stable sentinel (external_uid='system'), so the boot sequence can
-// capture its id before any background worker starts. Same shape as
-// GetUserByExternalUID -- named distinctly so the boot path reads
-// self-documentingly and a future "system user has been renamed" rename
-// has one obvious place to land.
-func (q *Queries) GetSystemUserID(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getSystemUserID)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const getUserByExternalUID = `-- name: GetUserByExternalUID :one
+const getAttributionUserByExternalUID = `-- name: GetAttributionUserByExternalUID :one
 
 SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at
 FROM users
 WHERE auth_provider = ?1 AND external_uid = ?2
 `
 
-type GetUserByExternalUIDParams struct {
+type GetAttributionUserByExternalUIDParams struct {
 	AuthProvider string
 	ExternalUid  string
+}
+
+type GetAttributionUserByExternalUIDRow struct {
+	ID           int64
+	AuthProvider string
+	ExternalUid  string
+	Username     string
+	Email        sql.NullString
+	CreatedAt    int64
+	LastSeenAt   int64
 }
 
 // users: one row per human principal that has ever authenticated via
@@ -115,9 +103,9 @@ type GetUserByExternalUIDParams struct {
 //
 // All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 // "SQL Syntax Traps" note.
-func (q *Queries) GetUserByExternalUID(ctx context.Context, arg GetUserByExternalUIDParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, getUserByExternalUID, arg.AuthProvider, arg.ExternalUid)
-	var i User
+func (q *Queries) GetAttributionUserByExternalUID(ctx context.Context, arg GetAttributionUserByExternalUIDParams) (GetAttributionUserByExternalUIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getAttributionUserByExternalUID, arg.AuthProvider, arg.ExternalUid)
+	var i GetAttributionUserByExternalUIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.AuthProvider,
@@ -130,16 +118,25 @@ func (q *Queries) GetUserByExternalUID(ctx context.Context, arg GetUserByExterna
 	return i, err
 }
 
-const getUserByID = `-- name: GetUserByID :one
-
+const getAttributionUserByID = `-- name: GetAttributionUserByID :one
 SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at
 FROM users
 WHERE id = ?1
 `
 
-func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
-	row := q.db.QueryRowContext(ctx, getUserByID, id)
-	var i User
+type GetAttributionUserByIDRow struct {
+	ID           int64
+	AuthProvider string
+	ExternalUid  string
+	Username     string
+	Email        sql.NullString
+	CreatedAt    int64
+	LastSeenAt   int64
+}
+
+func (q *Queries) GetAttributionUserByID(ctx context.Context, id int64) (GetAttributionUserByIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getAttributionUserByID, id)
+	var i GetAttributionUserByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.AuthProvider,
@@ -152,17 +149,45 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 	return i, err
 }
 
-const listUsers = `-- name: ListUsers :many
+const getSystemUserID = `-- name: GetSystemUserID :one
+SELECT id
+FROM users
+WHERE auth_provider = 'system' AND external_uid = 'system'
+`
 
+// The EnsureSystemUser companion query: lookup the system user by its
+// stable sentinel (external_uid='system'), so the boot sequence can
+// capture its id before any background worker starts. Same shape as
+// GetAttributionUserByExternalUID -- named distinctly so the boot path
+// reads self-documentingly and a future "system user has been renamed"
+// rename has one obvious place to land.
+func (q *Queries) GetSystemUserID(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getSystemUserID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const listAttributionUsers = `-- name: ListAttributionUsers :many
 SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at
 FROM users
 ORDER BY username ASC, id ASC
 LIMIT ?1 OFFSET ?2
 `
 
-type ListUsersParams struct {
+type ListAttributionUsersParams struct {
 	Limit  int64
 	Offset int64
+}
+
+type ListAttributionUsersRow struct {
+	ID           int64
+	AuthProvider string
+	ExternalUid  string
+	Username     string
+	Email        sql.NullString
+	CreatedAt    int64
+	LastSeenAt   int64
 }
 
 // Backs GET /api/v1/users (admin-only). Used by the pairing UI's
@@ -170,15 +195,15 @@ type ListUsersParams struct {
 // admin, see internal/pairing's CreatePairing). Capped at 200 rows in
 // the handler; this query is unbounded by design (an admin-only endpoint,
 // no pagination UI yet).
-func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error) {
-	rows, err := q.db.QueryContext(ctx, listUsers, arg.Limit, arg.Offset)
+func (q *Queries) ListAttributionUsers(ctx context.Context, arg ListAttributionUsersParams) ([]ListAttributionUsersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAttributionUsers, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []User{}
+	items := []ListAttributionUsersRow{}
 	for rows.Next() {
-		var i User
+		var i ListAttributionUsersRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.AuthProvider,
@@ -201,17 +226,16 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 	return items, nil
 }
 
-const refreshUserSeen = `-- name: RefreshUserSeen :exec
-
+const refreshAttributionUserSeen = `-- name: RefreshAttributionUserSeen :exec
 UPDATE users
 SET username = ?2, email = ?3, last_seen_at = unixepoch()
 WHERE id = ?1
 `
 
-type RefreshUserSeenParams struct {
+type RefreshAttributionUserSeenParams struct {
 	ID       int64
 	Username string
-	Email    string
+	Email    sql.NullString
 }
 
 // Updates the denormalized username/email (a user may have renamed since
@@ -219,7 +243,7 @@ type RefreshUserSeenParams struct {
 // ResolveOrCreate after a cache miss, in the same transaction as the
 // create-or-no-op insert above. No-op on a missing row (the create
 // branch above will have just inserted one in the same tx).
-func (q *Queries) RefreshUserSeen(ctx context.Context, arg RefreshUserSeenParams) error {
-	_, err := q.db.ExecContext(ctx, refreshUserSeen, arg.ID, arg.Username, arg.Email)
+func (q *Queries) RefreshAttributionUserSeen(ctx context.Context, arg RefreshAttributionUserSeenParams) error {
+	_, err := q.db.ExecContext(ctx, refreshAttributionUserSeen, arg.ID, arg.Username, arg.Email)
 	return err
 }

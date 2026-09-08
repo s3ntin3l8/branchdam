@@ -177,7 +177,7 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 	err := p.svc.withTx(ctx, func(q *sqlcgen.Queries) error {
 		match, err := q.GetPasswordResetTokenByHash(ctx, sqlcgen.GetPasswordResetTokenByHashParams{
 			TokenHash: tokenHash,
-			Now:       now.Unix(),
+			ExpiresAt: now.Unix(),
 		})
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -210,9 +210,9 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 
 		// CAS consume.
 		consumed, err := q.ConsumePasswordResetToken(ctx, sqlcgen.ConsumePasswordResetTokenParams{
-			ID:     match.ID,
-			Now:    now.Unix(),
-			UsedAt: usedAt,
+			ID:        match.ID,
+			ExpiresAt: now.Unix(),
+			UsedAt:    sql.NullInt64{Int64: usedAt, Valid: true},
 		})
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -362,9 +362,9 @@ func (p *PasswordResetService) AdminResetPassword(ctx context.Context, targetUse
 // across all users, paginated for the admin-UI panel.
 func (p *PasswordResetService) ListPending(ctx context.Context, limit, offset int64) ([]sqlcgen.PasswordResetToken, error) {
 	return p.svc.db.Reader.ListAllActivePasswordResetTokens(ctx, sqlcgen.ListAllActivePasswordResetTokensParams{
-		Now:    p.svc.nowFn().Unix(),
-		Limit:  limit,
-		Offset: offset,
+		ExpiresAt: p.svc.nowFn().Unix(),
+		Limit:     limit,
+		Offset:    offset,
 	})
 }
 
@@ -372,8 +372,8 @@ func (p *PasswordResetService) ListPending(ctx context.Context, limit, offset in
 // Used by the admin users page in PR #408.
 func (p *PasswordResetService) ListPendingForUser(ctx context.Context, userID int64) ([]sqlcgen.PasswordResetToken, error) {
 	return p.svc.db.Reader.ListActivePasswordResetTokens(ctx, sqlcgen.ListActivePasswordResetTokensParams{
-		UserID: userID,
-		Now:    p.svc.nowFn().Unix(),
+		UserID:    userID,
+		ExpiresAt: p.svc.nowFn().Unix(),
 	})
 }
 
@@ -382,7 +382,7 @@ func (p *PasswordResetService) RevokeToken(ctx context.Context, tokenID int64) e
 	return p.svc.withTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.RevokePasswordResetToken(ctx, sqlcgen.RevokePasswordResetTokenParams{
 			ID:     tokenID,
-			UsedAt: p.svc.nowFn().Unix(),
+			UsedAt: sql.NullInt64{Int64: p.svc.nowFn().Unix(), Valid: true},
 		})
 	})
 }

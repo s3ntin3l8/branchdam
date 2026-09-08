@@ -11,7 +11,6 @@ import (
 )
 
 const createManualMediaEdge = `-- name: CreateManualMediaEdge :one
-
 INSERT INTO media_edges (
     source_node_id, target_node_id, relationship_type, confidence, tier,
     resolver, evidence_json, review_state, reviewed_by, reviewed_at
@@ -65,7 +64,6 @@ func (q *Queries) CreateManualMediaEdge(ctx context.Context, arg CreateManualMed
 }
 
 const createMediaEdge = `-- name: CreateMediaEdge :one
-
 INSERT INTO media_edges (
     source_node_id, target_node_id, relationship_type, confidence, tier,
     resolver, evidence_json, review_state
@@ -125,7 +123,6 @@ func (q *Queries) CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams
 }
 
 const getMediaEdge = `-- name: GetMediaEdge :one
-
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
@@ -155,7 +152,6 @@ func (q *Queries) GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
 }
 
 const listEdgesBySource = `-- name: ListEdgesBySource :many
-
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
@@ -201,7 +197,6 @@ func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]
 }
 
 const listEdgesByTarget = `-- name: ListEdgesByTarget :many
-
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
