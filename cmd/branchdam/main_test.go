@@ -650,6 +650,12 @@ func TestPruneOldZeroEventWatchJobs(t *testing.T) {
 			t.Errorf("GetScanJob(%d) = %v, want job to be retained", id, err)
 		}
 	}
+
+	// Verify error propagation on closed DB
+	_ = database.Close()
+	if _, err := pruneOldZeroEventWatchJobs(ctx, database, log); err == nil {
+		t.Error("pruneOldZeroEventWatchJobs on closed DB succeeded, want error")
+	}
 }
 
 func TestParseLogLevel(t *testing.T) {

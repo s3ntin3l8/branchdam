@@ -196,10 +196,10 @@ export default function IngestJobsPage() {
               className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none focus:border-neutral-500 min-w-[140px]"
             >
               <option value="">All States</option>
-              <option value="RUNNING">RUNNING (ACTIVE)</option>
+              <option value="RUNNING">RUNNING</option>
               <option value="COMPLETED">COMPLETED</option>
               <option value="FAILED">FAILED</option>
-              <option value="CANCELLED">CANCELLED (STOPPED)</option>
+              <option value="CANCELLED">CANCELLED</option>
             </select>
           </div>
         </div>

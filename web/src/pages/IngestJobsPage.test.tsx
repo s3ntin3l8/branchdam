@@ -88,4 +88,39 @@ describe("IngestJobsPage", () => {
     expect(screen.getByText("STOPPED")).toBeInTheDocument();
     expect(screen.queryByText("CANCELLED")).not.toBeInTheDocument();
   });
+
+  it("updates filters when clicking quick preset buttons", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue({
+      jobs: [],
+      total: 0,
+    });
+
+    renderWithClient(<IngestJobsPage />);
+
+    const user = (await import("@testing-library/user-event")).default.setup();
+
+    // Click "Watchers" preset
+    await user.click(screen.getByRole("button", { name: "Watchers" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: "WATCH" }));
+    });
+
+    // Click "Full Scans" preset
+    await user.click(screen.getByRole("button", { name: "Full Scans" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: "FULL_SCAN" }));
+    });
+
+    // Click "Incremental" preset
+    await user.click(screen.getByRole("button", { name: "Incremental" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: "INCREMENTAL" }));
+    });
+
+    // Click "All Types" preset
+    await user.click(screen.getByRole("button", { name: "All Types" }));
+    await waitFor(() => {
+      expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: undefined }));
+    });
+  });
 });

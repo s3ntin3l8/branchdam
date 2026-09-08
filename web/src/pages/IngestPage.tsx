@@ -129,14 +129,22 @@ export default function IngestPage() {
                     ? "Continuous filesystem watcher is actively monitoring storage"
                     : undefined;
 
+                  const colorClass = j.state === "FAILED"
+                    ? "text-red-400"
+                    : isWatch && j.state === "RUNNING"
+                    ? "text-emerald-400"
+                    : j.state === "RUNNING"
+                    ? "text-amber-400"
+                    : isWatch && j.state === "CANCELLED"
+                    ? "text-neutral-400"
+                    : "text-neutral-300";
+
                   return (
                     <tr key={j.id} className="border-b border-neutral-900">
                       <td className="py-2 pr-4">{j.kind}</td>
                       <td
                         title={title}
-                        className={`py-2 pr-4 ${
-                          j.state === "FAILED" ? "text-red-400" : j.state === "RUNNING" ? "text-amber-400" : "text-neutral-300"
-                        }`}
+                        className={`py-2 pr-4 ${colorClass}`}
                       >
                         {label}
                       </td>
