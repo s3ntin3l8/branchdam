@@ -51,4 +51,41 @@ describe("IngestJobsPage", () => {
     expect(screen.getByRole("button", { name: "Previous page" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument();
   });
+
+  it("renders WATCH jobs in CANCELLED state as STOPPED and RUNNING as ACTIVE", async () => {
+    vi.mocked(api.listJobs).mockResolvedValueOnce({
+      jobs: [
+        {
+          id: 17,
+          kind: "WATCH",
+          state: "RUNNING",
+          filesSeen: 4,
+          filesHashed: 4,
+          filesFailed: 0,
+          edgesCreated: 2,
+        },
+        {
+          id: 16,
+          kind: "WATCH",
+          state: "CANCELLED",
+          filesSeen: 0,
+          filesHashed: 0,
+          filesFailed: 0,
+          edgesCreated: 0,
+        },
+      ],
+      total: 2,
+    });
+
+    renderWithClient(<IngestJobsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("#17")).toBeInTheDocument();
+      expect(screen.getByText("#16")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("ACTIVE")).toBeInTheDocument();
+    expect(screen.getByText("STOPPED")).toBeInTheDocument();
+    expect(screen.queryByText("CANCELLED")).not.toBeInTheDocument();
+  });
 });

@@ -143,4 +143,36 @@ describe("IngestPage", () => {
 
     expect(await screen.findByText(/Failed to start scan: Error: Storage location not found/i)).toBeInTheDocument();
   });
+
+  it("renders WATCH jobs in CANCELLED state as STOPPED and RUNNING as ACTIVE in recent jobs table", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations });
+    vi.mocked(api.listProgress).mockResolvedValue({
+      jobs: [
+        {
+          id: 17,
+          kind: "WATCH",
+          state: "RUNNING",
+          filesSeen: 10,
+          filesHashed: 10,
+          filesFailed: 0,
+          edgesCreated: 3,
+        },
+        {
+          id: 16,
+          kind: "WATCH",
+          state: "CANCELLED",
+          filesSeen: 0,
+          filesHashed: 0,
+          filesFailed: 0,
+          edgesCreated: 0,
+        },
+      ],
+    });
+    renderWithClient(<IngestPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+
+    expect(await screen.findByText("ACTIVE")).toBeInTheDocument();
+    expect(screen.getByText("STOPPED")).toBeInTheDocument();
+  });
 });

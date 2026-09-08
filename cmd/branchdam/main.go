@@ -176,6 +176,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if _, err := pruneOldZeroEventWatchJobs(ctx, database, log); err != nil {
+		log.Error("prune old zero-event watch jobs", "err", err)
+		os.Exit(1)
+	}
+
 	if err := seedStorageLocations(ctx, database, cfg.StorageLocations); err != nil {
 		log.Error("seed storage locations", "err", err)
 		os.Exit(1)
@@ -666,6 +671,29 @@ func reconcileOrphanedScanJobs(ctx context.Context, database *db.DB, log *slog.L
 	}
 	if n > 0 {
 		log.Warn("pipeline: reconciled orphaned scan_jobs rows from a previous process", "count", n)
+	}
+	return n, nil
+}
+
+// pruneOldZeroEventWatchJobs deletes historical finished/cancelled WATCH rows
+// older than 7 days that saw 0 files. A continuous WATCH job starts on every
+// boot and ends CANCELLED on every clean shutdown, so over time repeated
+// container/process restarts can accumulate many empty rows. Active jobs,
+// recent jobs (< 7 days), and jobs that recorded activity (files_seen > 0)
+// are retained.
+func pruneOldZeroEventWatchJobs(ctx context.Context, database *db.DB, log *slog.Logger) (int64, error) {
+	cutoff := time.Now().Add(-7 * 24 * time.Hour).Unix()
+	var n int64
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		n, err = q.PruneOldZeroEventWatchJobs(ctx, sql.NullInt64{Int64: cutoff, Valid: true})
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		log.Info("pipeline: pruned old zero-event watch job records", "count", n)
 	}
 	return n, nil
 }

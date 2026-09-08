@@ -520,6 +520,138 @@ func TestReconcileOrphanedScanJobs(t *testing.T) {
 	}
 }
 
+func TestPruneOldZeroEventWatchJobs(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "prune_watch.db")
+	database, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	now := time.Now().Unix()
+	eightDaysAgo := now - (8 * 86400)
+	oneDayAgo := now - (1 * 86400)
+
+	var (
+		oldZeroCancelledID int64
+		oldZeroFailedID    int64
+		oldWithEventsID    int64
+		recentZeroID       int64
+		liveRunningID      int64
+		oldFullScanID      int64
+	)
+
+	// Seed scan_jobs with various age/state/seen combos
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// 1. Old cancelled watch job with 0 files seen -> should be PRUNED
+		j1, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "WATCH"})
+		if err != nil {
+			return err
+		}
+		oldZeroCancelledID = j1.ID
+		if err := q.CancelScanJob(ctx, j1.ID); err != nil {
+			return err
+		}
+
+		// 2. Old failed watch job with 0 files seen -> should be PRUNED
+		j2, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "WATCH"})
+		if err != nil {
+			return err
+		}
+		oldZeroFailedID = j2.ID
+		if err := q.FailScanJob(ctx, sqlcgen.FailScanJobParams{
+			ID:        j2.ID,
+			LastError: sql.NullString{String: "crashed", Valid: true},
+		}); err != nil {
+			return err
+		}
+
+		// 3. Old cancelled watch job with files_seen = 5 -> should be KEPT
+		j3, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "WATCH"})
+		if err != nil {
+			return err
+		}
+		oldWithEventsID = j3.ID
+		if err := q.UpdateScanJobProgress(ctx, sqlcgen.UpdateScanJobProgressParams{
+			ID:          j3.ID,
+			FilesSeen:   5,
+			FilesHashed: 5,
+		}); err != nil {
+			return err
+		}
+		if err := q.CancelScanJob(ctx, j3.ID); err != nil {
+			return err
+		}
+
+		// 4. Recent cancelled watch job with 0 files seen -> should be KEPT
+		j4, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "WATCH"})
+		if err != nil {
+			return err
+		}
+		recentZeroID = j4.ID
+		if err := q.CancelScanJob(ctx, j4.ID); err != nil {
+			return err
+		}
+
+		// 5. Live running watch job -> should be KEPT
+		j5, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "WATCH"})
+		if err != nil {
+			return err
+		}
+		liveRunningID = j5.ID
+
+		// 6. Old cancelled FULL_SCAN with 0 files seen -> should be KEPT (kind != WATCH)
+		j6, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{Kind: "FULL_SCAN"})
+		if err != nil {
+			return err
+		}
+		oldFullScanID = j6.ID
+		if err := q.CancelScanJob(ctx, j6.ID); err != nil {
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		t.Fatalf("seed scan jobs: %v", err)
+	}
+
+	// Backdate the timestamps on old vs recent jobs directly in DB
+	if _, err := database.ExecInTx(ctx, `
+		UPDATE scan_jobs SET started_at = ?, finished_at = ? WHERE id IN (?, ?, ?, ?)
+	`, eightDaysAgo, eightDaysAgo, oldZeroCancelledID, oldZeroFailedID, oldWithEventsID, oldFullScanID); err != nil {
+		t.Fatalf("backdate old timestamps: %v", err)
+	}
+	if _, err := database.ExecInTx(ctx, `
+		UPDATE scan_jobs SET started_at = ?, finished_at = ? WHERE id = ?
+	`, oneDayAgo, oneDayAgo, recentZeroID); err != nil {
+		t.Fatalf("backdate recent timestamps: %v", err)
+	}
+
+	log := slog.New(slog.DiscardHandler)
+	n, err := pruneOldZeroEventWatchJobs(ctx, database, log)
+	if err != nil {
+		t.Fatalf("pruneOldZeroEventWatchJobs: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("pruneOldZeroEventWatchJobs deleted %d rows, want 2", n)
+	}
+
+	// Verify pruned jobs are gone
+	for _, id := range []int64{oldZeroCancelledID, oldZeroFailedID} {
+		if _, err := database.Reader.GetScanJob(ctx, id); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("GetScanJob(%d) = %v, want sql.ErrNoRows (should have been pruned)", id, err)
+		}
+	}
+
+	// Verify kept jobs still exist
+	for _, id := range []int64{oldWithEventsID, recentZeroID, liveRunningID, oldFullScanID} {
+		if _, err := database.Reader.GetScanJob(ctx, id); err != nil {
+			t.Errorf("GetScanJob(%d) = %v, want job to be retained", id, err)
+		}
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	cases := map[string]slog.Level{
 		"info": slog.LevelInfo, "debug": slog.LevelDebug,

@@ -284,6 +284,26 @@ func (q *Queries) ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilt
 	return items, nil
 }
 
+const pruneOldZeroEventWatchJobs = `-- name: PruneOldZeroEventWatchJobs :execrows
+DELETE FROM scan_jobs
+WHERE kind = 'WATCH'
+  AND state IN ('CANCELLED', 'FAILED')
+  AND files_seen = 0
+  AND finished_at IS NOT NULL
+  AND finished_at < ?1
+`
+
+// Prunes historical CANCELLED or FAILED WATCH jobs that saw zero files and
+// are older than the cutoff timestamp, preventing unbounded table accumulation
+// across server restarts while preserving active or eventful jobs.
+func (q *Queries) PruneOldZeroEventWatchJobs(ctx context.Context, finishedAt sql.NullInt64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneOldZeroEventWatchJobs, finishedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const reconcileOrphanedScanJobs = `-- name: ReconcileOrphanedScanJobs :execrows
 UPDATE scan_jobs
 SET state = 'FAILED', last_error = ?1, finished_at = unixepoch(), updated_at = unixepoch()
