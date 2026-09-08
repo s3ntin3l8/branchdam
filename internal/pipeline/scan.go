@@ -810,23 +810,27 @@ func toGraphNode(n sqlcgen.MediaNode) graph.Node {
 }
 
 // needsFullHash decides whether Result.FullHash should be computed for this
-// file, per docs/schema.md fix #8's policy. tierReadOnly is true when the
-// file lives on a TIER3_MASTER_ARCHIVE location (the bit-for-bit
-// verification promise); hasCollision is true when another LIVE node
-// already shares this file's fast_hash at a different path (T1, spec 9.5 --
-// duplicate detection must never be decided by 64 bits alone). An
-// unrecognized policy string falls back to the same behavior as the
-// default "tier3_and_collision", not to "never" -- silently skipping
-// integrity verification because of a config typo would be the wrong
-// failure mode.
-func needsFullHash(policy string, tierReadOnly, hasCollision bool) bool {
+// file, per docs/schema.md fix #8's policy. tier is the location's tier
+// string (`storage.Location.Tier`) -- Tier 3 (`TIER3_MASTER_ARCHIVE`) always
+// escalates to a BLAKE3 read to back the bit-for-bit verification promise
+// pruning and dual-copy ingest both depend on. Keying on the tier (not
+// the `ReadOnly` config flag) keeps the verification promise intact
+// regardless of whether a Tier 3 location is mounted `:rw` for
+// server-governed ingest or `:ro` for archive-only deployments. hasCollision
+// is true when another LIVE node already shares this file's fast_hash at a
+// different path (T1, spec 9.5 -- duplicate detection must never be decided
+// by 64 bits alone). An unrecognized policy string falls back to the same
+// behavior as the default "tier3_and_collision", not to "never" -- silently
+// skipping integrity verification because of a config typo would be the
+// wrong failure mode.
+func needsFullHash(policy string, tier string, hasCollision bool) bool {
 	switch policy {
 	case "always":
 		return true
 	case "never":
 		return false
 	default:
-		return tierReadOnly || hasCollision
+		return tier == "TIER3_MASTER_ARCHIVE" || hasCollision
 	}
 }
 
@@ -870,7 +874,7 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		}
 	}
 
-	if needsFullHash(deps.FullHashPolicy, location.ReadOnly, hasCollision) {
+	if needsFullHash(deps.FullHashPolicy, location.Tier, hasCollision) {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek for full hash: %w", err)
 		}

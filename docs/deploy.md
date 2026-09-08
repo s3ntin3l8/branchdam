@@ -212,7 +212,10 @@ Exports, Immich, and `branchdam.db` all want to be local to one host — the arc
 thing that would argue for putting branchDAM on the NAS instead, and that argument is weak:
 
 - A full archive scan re-reads every byte regardless of which host runs branchDAM, since
-  `full_hash` is forced for any read-only tier under the default `fullHashPolicy`.
+  `full_hash` is forced for every `TIER3_MASTER_ARCHIVE` node under the default
+  `fullHashPolicy` (`tier3_and_collision` — keys on the tier, not the `readOnly` flag, so it
+  holds whether the location is mounted `:rw` for server-governed ingest or `:ro` for
+  archive-only deployments).
 - Thumbnail generation reads every node with a `PENDING` thumbnail state with no tier filter, so
   every master gets read once for its thumbnail regardless of where branchDAM runs.
 

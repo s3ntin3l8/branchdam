@@ -116,8 +116,9 @@ storageLocations:
     rootPath: /storage/archive
     tier: TIER3_MASTER_ARCHIVE
     readOnly: false               # Tier 3 is :rw by default for server-governed ingest; set readOnly: true and mount :ro for archive-only deployments
-    # watch and sweep are never honored here: the Tier 3 master archive is
-    # read-only by default, so nothing on it can ever be ingested
+    # watch and sweep are never honored on Tier 3 (the master archive is
+    # never watched or swept); a manual POST /api/v1/scan covers the
+    # MISSING-detection case.
 
   - name: staging
     rootPath: /storage/staging
@@ -134,31 +135,31 @@ storageLocations:
     tier: TIER2_EXPORTS
     # watch: false                # continuous ingest is opt-in, off by default
 
-  # PROJECTS: Not needed for the standard workflow. Project files (.dam.json, .drp,
-# .fcpxml) live on editing workstations (running branchdam-agent); only
-# configure this if the headless server needs direct access to project files
-# for Tier-1 introspection — both mount and entry required.
-#   - name: projects
-#     rootPath: /storage/projects
-#     tier: PROJECTS
+# PROJECTS: Not needed for the standard workflow. Project files (.dam.json, .drp,
+  # .fcpxml) live on editing workstations (running branchdam-agent); only
+  # configure this if the headless server needs direct access to project files
+  # for Tier-1 introspection — both mount and entry required.
+  # - name: projects
+  #   rootPath: /storage/projects
+  #   tier: PROJECTS
 
   # TIER1_LOCAL_SCRATCH: Typically workstation-local NVMe, not mounted into the
   # headless server. Only configure here if the server needs to manage scratch
   # files directly (e.g. offline queue drain scenarios) — both mount and entry
   # required.
-#   - name: scratch
-#     rootPath: /storage/scratch
-#     tier: TIER1_LOCAL_SCRATCH
-#     prunable: true                # only Tier 1 may be prunable
-#     # cacheTtlHours is the age (by mtime, not scan recency) past which an
-#     # ACTIVE node here becomes eligible for TTL cache pruning (#61) --
-#     # provided it also has a verified full_hash on a Tier-3 location.
-#     # prunable alone does not imply a TTL: zero (the default) means
-#     # "never eligible". Setting this on a non-prunable location is a
-#     # startup config error.
-#     cacheTtlHours: 720             # 30 days
-#     # watch: false                # off by default
-#     watch: true                   # example: watch continuous ingest on working tiers
+  # - name: scratch
+  #   rootPath: /storage/scratch
+  #   tier: TIER1_LOCAL_SCRATCH
+  #   prunable: true                # only Tier 1 may be prunable
+  #   # cacheTtlHours is the age (by mtime, not scan recency) past which an
+  #   # ACTIVE node here becomes eligible for TTL cache pruning (#61) --
+  #   # provided it also has a verified full_hash on a Tier-3 location.
+  #   # prunable alone does not imply a TTL: zero (the default) means
+  #   # "never eligible". Setting this on a non-prunable location is a
+  #   # startup config error.
+  #   cacheTtlHours: 720             # 30 days
+  #   # watch: false                # off by default
+  #   watch: true                   # example: watch continuous ingest on working tiers
 
   - name: nas-share
     rootPath: /storage/nas-share
