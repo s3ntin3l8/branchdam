@@ -587,3 +587,55 @@ func TestWebUpload_DedupRaceOrphanCleanup(t *testing.T) {
 	_, orphanErr := os.Stat(orphanPath)
 	assert.True(t, os.IsNotExist(orphanErr), "orphan file must be cleaned up on dedup match")
 }
+
+func TestWebUpload_NonArchiveLocationRejected(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	stagingDir := filepath.Join(tmpDir, "staging")
+	exportsDir := filepath.Join(tmpDir, "exports")
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+	require.NoError(t, os.MkdirAll(exportsDir, 0o755))
+
+	var stagingLoc, exportsLoc sqlcgen.StorageLocation
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		var err error
+		stagingLoc, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "Staging",
+			RootPath: stagingDir,
+			Tier:     "TIER0_LOCAL_STAGING",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		exportsLoc, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "Exports",
+			RootPath: exportsDir,
+			Tier:     "TIER2_EXPORTS",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+
+	// Upload targeting TIER0_LOCAL_STAGING -> 400 Bad Request
+	reqStaging, _ := createMultipartUploadRequest(t, "test.jpg", []byte("sample"), map[string]string{
+		"storageLocationId": strconv.FormatInt(stagingLoc.ID, 10),
+	})
+	recStaging := httptest.NewRecorder()
+	handler.ServeHTTP(recStaging, reqStaging)
+	assert.Equal(t, http.StatusBadRequest, recStaging.Code)
+
+	// Upload targeting TIER2_EXPORTS -> 400 Bad Request
+	reqExports, _ := createMultipartUploadRequest(t, "test.jpg", []byte("sample"), map[string]string{
+		"storageLocationId": strconv.FormatInt(exportsLoc.ID, 10),
+	})
+	recExports := httptest.NewRecorder()
+	handler.ServeHTTP(recExports, reqExports)
+	assert.Equal(t, http.StatusBadRequest, recExports.Code)
+}

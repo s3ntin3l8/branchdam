@@ -140,10 +140,13 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 			if locCopy.ReadOnly != 0 {
 				return nil, nil, &StorageLocationReadOnlyError{Location: locCopy.Name, Tier: locCopy.Tier}
 			}
+			if locCopy.Tier != "TIER3_MASTER_ARCHIVE" {
+				return nil, nil, fmt.Errorf("%w: location %q (id %d) has tier %s, uploads must target TIER3_MASTER_ARCHIVE", ErrInvalidStorageLocation, locCopy.Name, locationID, locCopy.Tier)
+			}
 			tgt := row
 			targetLoc = &tgt
-		} else if locationID == 0 && locCopy.ReadOnly == 0 && locCopy.IsActive != 0 {
-			if targetLoc == nil || locCopy.Tier == "TIER3_MASTER_ARCHIVE" {
+		} else if locationID == 0 && locCopy.Tier == "TIER3_MASTER_ARCHIVE" && locCopy.ReadOnly == 0 && locCopy.IsActive != 0 {
+			if targetLoc == nil {
 				tgt := row
 				targetLoc = &tgt
 			}
@@ -159,6 +162,9 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 	}
 	if targetLoc.ReadOnly {
 		return nil, nil, &StorageLocationReadOnlyError{Location: targetLoc.Name, Tier: targetLoc.Tier}
+	}
+	if targetLoc.Tier != "TIER3_MASTER_ARCHIVE" {
+		return nil, nil, fmt.Errorf("%w: target location %q has tier %s, uploads must target TIER3_MASTER_ARCHIVE", ErrInvalidStorageLocation, targetLoc.Name, targetLoc.Tier)
 	}
 
 	return targetLoc, exportLoc, nil

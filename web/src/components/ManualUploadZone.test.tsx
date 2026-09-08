@@ -30,13 +30,13 @@ const mockLocations: StorageLocation[] = [
 ];
 
 describe("ManualUploadZone", () => {
-  it("renders writable storage locations and defaults to master archive", async () => {
+  it("renders writable master archive storage locations only", async () => {
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
     renderWithClient(<ManualUploadZone />);
 
     expect(await screen.findByRole("option", { name: /archive \(TIER3_MASTER_ARCHIVE\)/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /exports \(TIER2_EXPORTS\)/ })).toBeInTheDocument();
-    // Read-only location must not be in the writable options
+    // Non-TIER3 locations and read-only locations must not be in the upload options
+    expect(screen.queryByRole("option", { name: /exports/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /ro_archive/ })).not.toBeInTheDocument();
   });
 

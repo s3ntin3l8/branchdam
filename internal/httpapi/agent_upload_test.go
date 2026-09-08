@@ -28,11 +28,11 @@ func TestAgentUploadStreaming(t *testing.T) {
 
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
-			Name:     "Tier1_Upload",
+			Name:     "MasterArchive",
 			RootPath: locDir,
-			Tier:     "TIER1_LOCAL_SCRATCH",
+			Tier:     "TIER3_MASTER_ARCHIVE",
 			ReadOnly: 0,
-			Prunable: 1,
+			Prunable: 0,
 		})
 		return err
 	})
@@ -96,11 +96,11 @@ func TestAgentUploadChecksumMismatch(t *testing.T) {
 
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
-			Name:     "Tier1_Upload",
+			Name:     "MasterArchive",
 			RootPath: locDir,
-			Tier:     "TIER1_LOCAL_SCRATCH",
+			Tier:     "TIER3_MASTER_ARCHIVE",
 			ReadOnly: 0,
-			Prunable: 1,
+			Prunable: 0,
 		})
 		return err
 	})
@@ -551,4 +551,48 @@ func TestAgentUpload_DedupRaceOrphanCleanup(t *testing.T) {
 	orphanFile := filepath.Join(dir, "TEST_ORPHAN_1.JPG")
 	_, statErr := os.Stat(orphanFile)
 	assert.True(t, os.IsNotExist(statErr), "orphan file must be cleaned up on dedup match")
+}
+
+func TestAgentUpload_AutoSelectOnlyTier3(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	stagingDir := filepath.Join(tmpDir, "staging")
+	exportsDir := filepath.Join(tmpDir, "exports")
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+	require.NoError(t, os.MkdirAll(exportsDir, 0o755))
+
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "Staging",
+			RootPath: stagingDir,
+			Tier:     "TIER0_LOCAL_STAGING",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name:     "Exports",
+			RootPath: exportsDir,
+			Tier:     "TIER2_EXPORTS",
+			ReadOnly: 0,
+			Prunable: 0,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+
+	// Since no TIER3_MASTER_ARCHIVE location exists, auto-selection must fail (503 Service Unavailable)
+	data := []byte("agent upload data")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "test.jpg")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
