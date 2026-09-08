@@ -140,6 +140,17 @@ func (s *Service) SystemUserID() int64 {
 	return s.SystemUser().ID
 }
 
+// SystemUserSafe is like SystemUser but returns (Attribution, error)
+// instead of panicking. Used by the audit log when writing background
+// events from inside a request handler that may have arrived before
+// EnsureSystemUser ran (test setups, very early boot paths).
+func (s *Service) SystemUserSafe() (Attribution, error) {
+	if !s.systemCache {
+		return Attribution{}, fmt.Errorf("users: system user not yet provisioned")
+	}
+	return s.systemUser, nil
+}
+
 // ResolveOrCreate turns a request Principal into a stable users.id.
 //
 // For a KindUser Principal with a non-empty ExternalUID (the normal

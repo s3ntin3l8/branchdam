@@ -21,6 +21,13 @@ type Kind string
 const (
 	KindUser    Kind = "user"
 	KindMachine Kind = "machine"
+	// KindSystem is reserved for background-worker attribution that
+	// never came in over the wire (sweeper INCREMENTAL passes, prune,
+	// anything that runs without a request Principal). It is NEVER
+	// attached by BrowserChain or AgentChain -- callers that want to
+	// log a system action must use internal/users.SystemActor (or pass
+	// this Kind directly) explicitly.
+	KindSystem Kind = "system"
 )
 
 // Principal is what a request is authenticated as. A machine Principal
