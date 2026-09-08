@@ -20,13 +20,19 @@ WHERE id = ?1;
 -- name: CreateAttributionUser :one
 -- Lazy-provisioning insert. The caller resolves auth_provider +
 -- external_uid from the Principal; username/email are denormalized
--- display fields refreshed on every ResolveOrCreate.
--- Returns the row id even on conflict (no-op) so the
+-- display fields refreshed on every ResolveOrCreate. source='forward-link'
+-- with NULL password_hash matches PR #407's existing CHECK constraint --
+-- these rows are attribution-only, not local-auth credentials.
+-- Returns the row id on both insert and on conflict (no-op) so the
 -- caller never has to distinguish "created" from "already existed" --
 -- matching the ResolveOrCreate contract: get-or-create with stable id.
-INSERT INTO users (auth_provider, external_uid, username, email, last_seen_at)
-VALUES (?1, ?2, ?3, ?4, unixepoch())
-ON CONFLICT (auth_provider, external_uid) DO NOTHING
+-- SQLite's RETURNING on ON CONFLICT DO NOTHING returns nothing for the
+-- no-op case; the workaround is DO UPDATE SET on the conflict target
+-- column with a no-op value so the row is "updated" (still returned) but
+-- nothing actually changes.
+INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
+VALUES (?1, ?2, ?3, ?4, 'forward-link', NULL, unixepoch(), unixepoch(), 'attribution-bootstrap')
+ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.external_uid
 RETURNING id;
 
 -- name: RefreshAttributionUserSeen :exec
@@ -40,15 +46,18 @@ SET username = ?2, email = ?3, last_seen_at = unixepoch()
 WHERE id = ?1;
 
 -- name: EnsureSystemUser :one
--- Lazy-provisions the "system" user used as the attribution owner for
--- background work (SweeperSupervisor's INCREMENTAL passes, prune, anything
--- that runs without a request principal). Idempotent: re-running returns
--- the same row. external_uid is a sentinel that can never collide with a
--- real Authentik uid (those are UUIDs); this is the canonical "no human
--- behind this" attribution in actor_audit and scan_jobs.started_by_user_id.
-INSERT INTO users (auth_provider, external_uid, username, email, last_seen_at)
-VALUES ('system', 'system', 'system', '', unixepoch())
-ON CONFLICT (auth_provider, external_uid) DO NOTHING
+-- Lazy-provisions the "system" attribution sentinel: background workers
+-- (SweeperSupervisor's INCREMENTAL passes, prune, anything that has no
+-- request Principal) attribute their writes to this user. Idempotent:
+-- re-running returns the same row. source='forward-link' with NULL
+-- password_hash matches PR #407's existing CHECK; auth_provider='system'
+-- / external_uid='system' can't collide with a real Authentik uid (those
+-- are UUIDs). This is the canonical "no human behind this" attribution in
+-- actor_audit and scan_jobs.started_by_user_id. The DO UPDATE SET trick
+-- (see CreateAttributionUser) keeps RETURNING returning a row on conflict.
+INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
+VALUES ('system', 'system', 'system', '', 'forward-link', NULL, unixepoch(), unixepoch(), 'attribution-bootstrap')
+ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.external_uid
 RETURNING id;
 
 -- name: GetSystemUserID :one

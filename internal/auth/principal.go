@@ -32,6 +32,13 @@ const (
 // Principal must gate display on p.Kind == KindUser to avoid printing
 // a string like "iphone-a3f9c2e1" in a place that expects a human name.
 //
+// ExternalUID is the stable identity key the multi-user attribution layer
+// (internal/users) uses to lazy-provision a row in `users` keyed on
+// (auth_provider, external_uid). For KindUser it comes from Authentik's
+// X-Authentik-Uid header (stable across username renames). For KindMachine
+// it is empty -- machine sessions never own user-attributed rows. Name
+// is the display label (X-Authentik-Username); ExternalUID is the key.
+//
 // Authenticated is true iff BrowserChain saw a non-empty
 // X-Authentik-Username (#164). BrowserChain always attaches a Principal --
 // even with zero Authentik headers -- so reads, /healthz, the SSE stream,
@@ -46,6 +53,7 @@ type Principal struct {
 	Name          string
 	Email         string
 	Groups        []string
+	ExternalUID   string
 	Authenticated bool
 }
 

@@ -21,10 +21,11 @@ func TestBrowserChainAttachesPrincipalFromHeaders(t *testing.T) {
 	req.Header.Set(authentikUsernameHeader, "alice")
 	req.Header.Set(authentikEmailHeader, "alice@example.com")
 	req.Header.Set(authentikGroupsHeader, "dam-admins|dam-users")
+	req.Header.Set(authentikUidHeader, "alice-uid-stable")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	want := Principal{Kind: KindUser, Name: "alice", Email: "alice@example.com", Groups: []string{"dam-admins", "dam-users"}, Authenticated: true}
+	want := Principal{Kind: KindUser, Name: "alice", Email: "alice@example.com", Groups: []string{"dam-admins", "dam-users"}, ExternalUID: "alice-uid-stable", Authenticated: true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Principal = %+v, want %+v", got, want)
 	}
@@ -91,6 +92,45 @@ func TestSplitGroups(t *testing.T) {
 		got := splitGroups(in)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("splitGroups(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestBrowserChainExternalUIDFallback: when X-Authentik-Uid is missing
+// (older Authentik deployments or dev setups that skip Traefik),
+// BrowserChain falls back to the username so the attribution layer still
+// has a non-empty key. The unique index on (auth_provider, external_uid)
+// means this is safe across the same Authentik instance -- only a rename
+// would fragment attribution, and that's exactly the case the
+// X-Authentik-Uid header is supposed to prevent.
+func TestBrowserChainExternalUIDFallback(t *testing.T) {
+	var got Principal
+	handler := BrowserChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = From(r.Context())
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/assets", nil)
+	req.Header.Set(authentikUsernameHeader, "alice")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if got.ExternalUID != "alice" {
+		t.Errorf("ExternalUID = %q, want %q (fallback to username)", got.ExternalUID, "alice")
+	}
+}
+
+func TestPickExternalUID(t *testing.T) {
+	cases := []struct {
+		uid, name, want string
+	}{
+		{"stable-uid", "alice", "stable-uid"}, // preferred: opaque id wins
+		{"", "alice", "alice"},                // fallback: missing uid uses name
+		{"", "", ""},                          // nothing in -> nothing out
+		{"stable-uid", "", "stable-uid"},      // uid alone still propagates
+	}
+	for _, c := range cases {
+		if got := pickExternalUID(c.uid, c.name); got != c.want {
+			t.Errorf("pickExternalUID(%q,%q) = %q, want %q", c.uid, c.name, got, c.want)
 		}
 	}
 }

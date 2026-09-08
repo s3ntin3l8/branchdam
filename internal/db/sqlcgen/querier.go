@@ -89,10 +89,16 @@ type Querier interface {
 	CountUsers(ctx context.Context) (int64, error)
 	// Lazy-provisioning insert. The caller resolves auth_provider +
 	// external_uid from the Principal; username/email are denormalized
-	// display fields refreshed on every ResolveOrCreate.
-	// Returns the row id even on conflict (no-op) so the
+	// display fields refreshed on every ResolveOrCreate. source='forward-link'
+	// with NULL password_hash matches PR #407's existing CHECK constraint --
+	// these rows are attribution-only, not local-auth credentials.
+	// Returns the row id on both insert and on conflict (no-op) so the
 	// caller never has to distinguish "created" from "already existed" --
 	// matching the ResolveOrCreate contract: get-or-create with stable id.
+	// SQLite's RETURNING on ON CONFLICT DO NOTHING returns nothing for the
+	// no-op case; the workaround is DO UPDATE SET on the conflict target
+	// column with a no-op value so the row is "updated" (still returned) but
+	// nothing actually changes.
 	CreateAttributionUser(ctx context.Context, arg CreateAttributionUserParams) (int64, error)
 	// Companion pairing queries. The handlers in internal/httpapi/companion_pairings.go
 	// and the KeyLookup callback in internal/pairing/service.go both go through
@@ -176,12 +182,15 @@ type Querier interface {
 	// workstation-agent increment -- this table and endpoint exist now so that
 	// increment is additive, not a schema migration.
 	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error)
-	// Lazy-provisions the "system" user used as the attribution owner for
-	// background work (SweeperSupervisor's INCREMENTAL passes, prune, anything
-	// that runs without a request principal). Idempotent: re-running returns
-	// the same row. external_uid is a sentinel that can never collide with a
-	// real Authentik uid (those are UUIDs); this is the canonical "no human
-	// behind this" attribution in actor_audit and scan_jobs.started_by_user_id.
+	// Lazy-provisions the "system" attribution sentinel: background workers
+	// (SweeperSupervisor's INCREMENTAL passes, prune, anything that has no
+	// request Principal) attribute their writes to this user. Idempotent:
+	// re-running returns the same row. source='forward-link' with NULL
+	// password_hash matches PR #407's existing CHECK; auth_provider='system'
+	// / external_uid='system' can't collide with a real Authentik uid (those
+	// are UUIDs). This is the canonical "no human behind this" attribution in
+	// actor_audit and scan_jobs.started_by_user_id. The DO UPDATE SET trick
+	// (see CreateAttributionUser) keeps RETURNING returning a row on conflict.
 	EnsureSystemUser(ctx context.Context) (int64, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
