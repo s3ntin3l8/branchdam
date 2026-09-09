@@ -174,6 +174,9 @@ type Querier interface {
 	// "Revert to config" deletes the row -- this is what makes provenance
 	// recoverable rather than merely resettable to some other stored value.
 	DeleteAppSetting(ctx context.Context, key string) error
+	DeleteDevicePairing(ctx context.Context, id int64) error
+	DeletePairingAuditForPairing(ctx context.Context, pairingID int64) error
+	DeletePairingKeysForPairing(ctx context.Context, pairingID int64) error
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// Sets disabled_at. Idempotent. Does NOT revoke existing sessions --

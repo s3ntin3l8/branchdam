@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
@@ -300,4 +302,85 @@ func TestLatestActiveKey_RevokedPairingReturnsNoRows(t *testing.T) {
 
 	_, err = svc.LatestActiveKey(ctx, pairing.AgentID, k1.ID)
 	assert.ErrorIs(t, err, sql.ErrNoRows)
+}
+
+func TestDeletePairing_RevokedPairingDeleted(t *testing.T) {
+	svc, database := newTestService(t)
+	ctx := context.Background()
+
+	pairing, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	_, _, err = svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
+	require.NoError(t, err)
+	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
+	require.NoError(t, err)
+
+	err = svc.DeletePairing(ctx, pairing.ID, "user:tester")
+	require.NoError(t, err)
+
+	// Pairing row must be gone
+	_, err = database.Reader.GetDevicePairingByID(ctx, pairing.ID)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+
+	// Keys must be gone
+	keys, err := database.Reader.ListKeysByPairing(ctx, pairing.ID)
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	// Pairing-scoped audit must be gone
+	count, err := database.Reader.CountPairingAudit(ctx, pairing.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+
+	// Global actor_audit must have the trace
+	traceCount, err := database.Reader.CountActorAudit(ctx, sqlcgen.CountActorAuditParams{
+		Event:        sql.NullString{String: audit.EventPairingDeleted, Valid: true},
+		ResourceType: sql.NullString{String: "companion_pairing", Valid: true},
+		ResourceID:   sql.NullString{String: fmt.Sprintf("%d", pairing.ID), Valid: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), traceCount)
+}
+
+func TestDeletePairing_ActivePairingReturnsNotRevoked(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	pairing, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+
+	err = svc.DeletePairing(ctx, pairing.ID, "user:tester")
+	assert.ErrorIs(t, err, ErrPairingNotRevoked)
+}
+
+func TestDeletePairing_NonexistentPairingReturnsNotFound(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	err := svc.DeletePairing(ctx, 99999, "user:tester")
+	assert.ErrorIs(t, err, ErrPairingNotFound)
+}
+
+func TestDeletePairing_KeysNotLookupableAfterDelete(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	_, _, err = svc.RotateKey(ctx, pairing.ID, "user:tester", 60, stubQRPayload)
+	require.NoError(t, err)
+	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
+	require.NoError(t, err)
+
+	// Keys should already fail lookup after revoke
+	agentID, err := svc.KeyLookup(ctx, key.Plaintext)
+	require.NoError(t, err)
+	assert.Empty(t, agentID)
+
+	// After delete, still fails (no regression)
+	err = svc.DeletePairing(ctx, pairing.ID, "user:tester")
+	require.NoError(t, err)
+	agentID, err = svc.KeyLookup(ctx, key.Plaintext)
+	require.NoError(t, err)
+	assert.Empty(t, agentID)
 }

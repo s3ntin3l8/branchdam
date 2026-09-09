@@ -117,6 +117,16 @@ type RevokePairingOutput struct {
 	}
 }
 
+type DeletePairingInput struct {
+	ID int64 `path:"id"`
+}
+
+type DeletePairingOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
 type PairingAuditInput struct {
 	ID     int64 `path:"id"`
 	Limit  int64 `query:"limit" minimum:"1" maximum:"500" default:"100"`
@@ -138,6 +148,7 @@ func (s *Server) registerCompanionPairings(api huma.API) {
 	huma.Get(api, "/api/v1/companion/pairings/{id}", s.handleGetPairing)
 	huma.Post(api, "/api/v1/companion/pairings/{id}/rotate", s.handleRotatePairing)
 	huma.Post(api, "/api/v1/companion/pairings/{id}/revoke", s.handleRevokePairing)
+	huma.Delete(api, "/api/v1/companion/pairings/{id}", s.handleDeletePairing)
 	huma.Get(api, "/api/v1/companion/pairings/{id}/audit", s.handlePairingAudit)
 }
 
@@ -325,6 +336,25 @@ func (s *Server) handleRevokePairing(ctx context.Context, in *RevokePairingInput
 	}
 	out := &RevokePairingOutput{}
 	out.Body.RevokedAtUnix = revokedAt
+	return out, nil
+}
+
+func (s *Server) handleDeletePairing(ctx context.Context, in *DeletePairingInput) (*DeletePairingOutput, error) {
+	svc, err := s.pairingSvc()
+	if err != nil {
+		return nil, err
+	}
+	if err := svc.DeletePairing(ctx, in.ID, actorFromCtx(ctx)); err != nil {
+		if errors.Is(err, pairing.ErrPairingNotFound) {
+			return nil, huma.Error404NotFound("pairing not found")
+		}
+		if errors.Is(err, pairing.ErrPairingNotRevoked) {
+			return nil, huma.Error409Conflict("pairing must be revoked before deletion")
+		}
+		return nil, huma.Error500InternalServerError("delete pairing", err)
+	}
+	out := &DeletePairingOutput{}
+	out.Body.OK = true
 	return out, nil
 }
 

@@ -186,3 +186,12 @@ WHERE id = ?1;
 
 -- name: CountPairingAudit :one
 SELECT COUNT(*) FROM companion_pairing_audit WHERE pairing_id = ?1;
+
+-- name: DeletePairingAuditForPairing :exec
+DELETE FROM companion_pairing_audit WHERE pairing_id = ?1;
+
+-- name: DeletePairingKeysForPairing :exec
+DELETE FROM device_pairing_keys WHERE pairing_id = ?1;
+
+-- name: DeleteDevicePairing :exec
+DELETE FROM device_pairings WHERE id = ?1;

@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AttributionUser, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AttributionUser, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, DeleteCompanionPairingResponse, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -185,6 +185,10 @@ export const api = {
   revokePairing: (id: number) =>
     request<RevokeCompanionPairingResponse>(`/api/v1/companion/pairings/${id}/revoke`, {
       method: "POST",
+    }),
+  deletePairing: (id: number) =>
+    request<DeleteCompanionPairingResponse>(`/api/v1/companion/pairings/${id}`, {
+      method: "DELETE",
     }),
   pairingAudit: (id: number, params: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();

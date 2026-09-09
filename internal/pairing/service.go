@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/qr"
@@ -96,6 +97,10 @@ var ErrPairingNotFound = errors.New("pairing: not found")
 // has no active key to render a QR for (all keys revoked/expired or the
 // pairing was created in a future where qr_svg was a required field).
 var ErrNoActiveKey = errors.New("pairing: no active key")
+
+// ErrPairingNotRevoked is returned by DeletePairing when the caller
+// attempts to hard-delete a pairing that hasn't been revoked first.
+var ErrPairingNotRevoked = errors.New("pairing: not revoked")
 
 // Service is the pairing package's only externally-constructed type.
 type Service struct {
@@ -395,6 +400,58 @@ func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor stri
 		})
 	})
 	return now, err
+}
+
+// DeletePairing hard-deletes a revoked pairing and all its child rows
+// (audit, keys). The pairing must already be revoked -- active pairings
+// cannot be deleted. A trace event is written to actor_audit (the
+// global cross-cutting audit table) before the pairing-scoped rows are
+// removed, so the action remains auditable after deletion.
+func (s *Service) DeletePairing(ctx context.Context, pairingID int64, actor string) error {
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		p, err := q.GetDevicePairingByID(ctx, pairingID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrPairingNotFound
+			}
+			return fmt.Errorf("load pairing: %w", err)
+		}
+		if !p.RevokedAt.Valid {
+			return ErrPairingNotRevoked
+		}
+		actorKind, actorName := parseActorString(actor)
+		if err := q.InsertActorAudit(ctx, sqlcgen.InsertActorAuditParams{
+			ActorUserID:  sql.NullInt64{},
+			ActorKind:    actorKind,
+			ActorName:    actorName,
+			Event:        audit.EventPairingDeleted,
+			ResourceType: "companion_pairing",
+			ResourceID:   sql.NullString{String: fmt.Sprintf("%d", pairingID), Valid: true},
+			DetailsJson:  "{}",
+		}); err != nil {
+			return fmt.Errorf("actor audit: %w", err)
+		}
+		if err := q.DeletePairingAuditForPairing(ctx, pairingID); err != nil {
+			return fmt.Errorf("delete audit: %w", err)
+		}
+		if err := q.DeletePairingKeysForPairing(ctx, pairingID); err != nil {
+			return fmt.Errorf("delete keys: %w", err)
+		}
+		return q.DeleteDevicePairing(ctx, pairingID)
+	})
+	return err
+}
+
+// parseActorString splits the actor string (e.g. "user:alice" or "system")
+// into (actor_kind, actor_name) for the actor_audit table.
+func parseActorString(actor string) (kind, name string) {
+	if strings.HasPrefix(actor, "user:") {
+		return "user", strings.TrimPrefix(actor, "user:")
+	}
+	if actor == "system" || actor == "" {
+		return "system", actor
+	}
+	return "user", actor
 }
 
 // LatestActiveKey returns the device's newest key that isn't the one

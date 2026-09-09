@@ -52,6 +52,7 @@ const (
 	EventPairingCreated     = "pairing.created"
 	EventPairingRotated     = "pairing.rotated"
 	EventPairingRevoked     = "pairing.revoked"
+	EventPairingDeleted     = "pairing.deleted"
 	EventActorAuditExported = "actor_audit.exported"
 )
 

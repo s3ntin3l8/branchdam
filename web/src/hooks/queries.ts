@@ -386,6 +386,16 @@ export function useRevokePairing() {
   });
 }
 
+export function useDeletePairing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deletePairing(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
+    },
+  });
+}
+
 export function usePairingAudit(id: number | undefined, params: { limit?: number; offset?: number } = {}) {
   return useQuery({
     queryKey: ["companion-pairing-audit", id, params],

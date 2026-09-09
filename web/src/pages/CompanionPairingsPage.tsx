@@ -3,6 +3,7 @@ import { ApiError } from "../api/client";
 import { api } from "../api/client";
 import {
   useCreatePairing,
+  useDeletePairing,
   usePairings,
   useRevokePairing,
   useRotatePairing,
@@ -117,6 +118,7 @@ export default function CompanionPairingsPage() {
   const create = useCreatePairing();
   const rotate = useRotatePairing();
   const revoke = useRevokePairing();
+  const deletePairing = useDeletePairing();
 
   const [createLabel, setCreateLabel] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -174,6 +176,13 @@ export default function CompanionPairingsPage() {
       return;
     }
     revoke.mutate(id);
+  };
+
+  const handleDelete = (id: number, label: string) => {
+    if (!window.confirm(`Permanently delete pairing "${label}"? This cannot be undone.`)) {
+      return;
+    }
+    deletePairing.mutate(id);
   };
 
   const errorMessage =
@@ -263,6 +272,14 @@ export default function CompanionPairingsPage() {
                         className="rounded border border-red-800/60 px-2 py-1 text-xs text-red-400 hover:border-red-700 disabled:opacity-50"
                       >
                         Revoke
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(p.id, p.friendlyLabel)}
+                        disabled={!p.revokedAtUnix}
+                        className="rounded border border-red-900 px-2 py-1 text-xs text-red-500 hover:border-red-800 disabled:opacity-50"
+                      >
+                        Delete
                       </button>
                     </div>
                   </td>
