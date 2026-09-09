@@ -1,5 +1,5 @@
 import { useSearchParams, Link } from "react-router";
-import { useAssetFacets, useAssets, useStorageLocations } from "../hooks/queries";
+import { useAssetFacets, useAssets, useMe, useStorageLocations, useUsers } from "../hooks/queries";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
@@ -19,12 +19,35 @@ export default function AssetListPage() {
   const graphStatus = (searchParams.get("graphStatus") as Asset["graphStatus"]) || "";
   const storageLocationId = searchParams.get("storageLocationId") ? Number(searchParams.get("storageLocationId")) : undefined;
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
+  const myUploads = searchParams.get("myUploads") === "true";
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
 
   const offset = (page - 1) * PAGE_SIZE;
 
   const { data: facetsData } = useAssetFacets();
   const { data: locsData } = useStorageLocations();
+  const { data: meData } = useMe();
+  const myUserID = meData?.attributionUserId ?? 0;
+  // "My uploads" requires both the toggle and a resolved attribution
+  // user id on the request Principal. Without a user id the toggle
+  // would silently show an empty list, which is misleading -- treat
+  // the toggle as off in that case.
+  const effectiveMyUploads = myUploads && myUserID > 0;
+  // Users cache (admin-only /api/v1/users). Used to render the
+  // "Uploaded by" column -- a row-level lookup against the cache is
+  // cheaper than embedding the full user in every asset row, and
+  // matches the SPA's existing pattern for resolving location /
+  // camera labels. Returns 503 in deployments without attribution
+  // wired; the SPA tolerates that as "empty users cache".
+  const { data: usersData } = useUsers();
+  const usersByID = new Map<number, string>();
+  for (const u of usersData?.users ?? []) {
+    usersByID.set(u.id, u.username);
+  }
+  const formatUploadedBy = (id: number | undefined): string => {
+    if (id === undefined || id === 0) return "—";
+    return usersByID.get(id) ?? `#${id}`;
+  };
   const { data, isLoading, isError, error } = useAssets({
     limit: PAGE_SIZE,
     offset,
@@ -32,6 +55,7 @@ export default function AssetListPage() {
     graphStatus: graphStatus || undefined,
     storageLocationId,
     unlinkedOnly: unlinkedOnly || undefined,
+    uploadedByUserId: effectiveMyUploads ? myUserID : undefined,
   });
 
   const cameraModels = facetsData?.cameraModels ?? [];
@@ -63,7 +87,7 @@ export default function AssetListPage() {
     setSearchParams(new URLSearchParams());
   };
 
-  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly);
+  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads);
 
   return (
     <div className="p-6 space-y-6">
@@ -161,6 +185,32 @@ export default function AssetListPage() {
               Unlinked Only
             </label>
           </div>
+
+          {/* My Uploads Checkbox. Disabled when the request has no
+              resolved attribution user id (machine/anonymous
+              principal, or a deployment that hasn't wired attribution)
+              -- the filter would be a no-op in that case. */}
+          <div className="flex items-center pb-2 space-x-2">
+            <input
+              type="checkbox"
+              id="my-uploads-checkbox"
+              checked={effectiveMyUploads}
+              disabled={myUserID === 0}
+              onChange={(e) =>
+                updateFilters({
+                  myUploads: e.target.checked ? "true" : null,
+                })
+              }
+              className="rounded border-neutral-700 bg-neutral-800 text-indigo-500 focus:ring-0 disabled:opacity-40"
+            />
+            <label
+              htmlFor="my-uploads-checkbox"
+              className={`font-medium select-none cursor-pointer ${myUserID === 0 ? "text-neutral-500" : "text-neutral-300"}`}
+              title={myUserID === 0 ? "Attribution isn't wired for this request" : undefined}
+            >
+              My Uploads
+            </label>
+          </div>
         </div>
       </div>
 
@@ -182,6 +232,7 @@ export default function AssetListPage() {
                 <th className="py-2 pr-4">Camera Model</th>
                 <th className="py-2 pr-4">Tier status</th>
                 <th className="py-2 pr-4">Graph status</th>
+                <th className="py-2 pr-4">Uploaded by</th>
                 <th className="py-2 pr-4">Fast Hash</th>
               </tr>
             </thead>
@@ -199,6 +250,7 @@ export default function AssetListPage() {
                   <td className="py-2 pr-4 text-neutral-400 text-xs">{a.cameraModel || "—"}</td>
                   <td className="py-2 pr-4 text-neutral-400 text-xs">{a.indexingStatus}</td>
                   <td className={`py-2 pr-4 text-xs ${statusColor[a.graphStatus] ?? ""}`}>{a.graphStatus}</td>
+                  <td className="py-2 pr-4 text-neutral-500 text-xs">{formatUploadedBy(a.uploadedByUserId)}</td>
                   <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{a.fastHash ?? "—"}</td>
                 </tr>
               ))}

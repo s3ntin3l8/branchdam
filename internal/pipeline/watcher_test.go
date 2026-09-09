@@ -269,7 +269,7 @@ func TestRebaseIfMovedBackfillsMetadata(t *testing.T) {
 	// before exiftool/ffprobe were on PATH.
 	if _, err := Commit(ctx, database, locationID, []Result{
 		{Path: oldPath, FileName: "old.txt", FileExt: "txt", Size: 15, ModTime: time.Now(), FastHash: "abababababababab"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit (seed): %v", err)
 	}
 	original := mustGetLiveNode(t, database, oldPath)
@@ -322,7 +322,7 @@ func TestRebaseIfMovedBackfillsMetadata(t *testing.T) {
 	// exercises the exact reconcileAllMetadata call rebaseIfMoved made, with
 	// Stats available to observe it. It must write nothing and leave values
 	// unchanged.
-	stats, err := Commit(ctx, database, locationID, []Result{*result})
+	stats, err := Commit(ctx, database, locationID, []Result{*result}, 0)
 	if err != nil {
 		t.Fatalf("Commit (touched, after rebase): %v", err)
 	}

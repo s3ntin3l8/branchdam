@@ -166,17 +166,18 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
-WHERE id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+WHERE id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND lifecycle_state <> 'ARCHIVED';
 
 -- name: ListEdgesForNodes :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        review_state, resolver
 FROM media_edges
-WHERE source_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
-  AND target_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+  AND target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND review_state <> 'REJECTED';
 
 -- name: ListEdgesByMultipleTargets :many
@@ -189,7 +190,7 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
 FROM media_edges
-WHERE target_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+WHERE target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND review_state <> 'REJECTED';
 
 -- name: ListEdgesByMultipleSources :many
@@ -199,5 +200,5 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
        created_at, updated_at
 FROM media_edges
-WHERE source_node_id IN (SELECT value FROM json_each(CAST(sqlc.arg(node_ids) AS TEXT)))
+WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND review_state <> 'REJECTED';

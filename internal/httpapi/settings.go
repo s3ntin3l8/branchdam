@@ -7,6 +7,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
@@ -53,6 +54,13 @@ func principalName(ctx context.Context) string {
 		return ""
 	}
 	return p.Name
+}
+
+// principalFromCtx is the same lookup but returns the full Principal so
+// audit writers can carry the ExternalUID through to attribution.
+func principalFromCtx(ctx context.Context) auth.Principal {
+	p, _ := auth.From(ctx)
+	return p
 }
 
 type SettingsFieldDTO struct {
@@ -265,6 +273,19 @@ func (s *Server) handlePutSettings(ctx context.Context, in *PutSettingsInput) (*
 			return nil, huma.Error422UnprocessableEntity(err.Error())
 		}
 		return nil, huma.Error500InternalServerError("apply settings", err)
+	}
+
+	if s.audit != nil {
+		// One actor_audit row per write, with the full diff in
+		// details_json. Best-effort: a failed audit write must not
+		// 500 a successful settings write.
+		details := map[string]any{
+			"set":   set,
+			"unset": in.Body.Unset,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventSettingsUpdated, "app_setting", "batch", details); err != nil {
+			s.log.Warn("audit: settings.updated write failed", "err", err)
+		}
 	}
 
 	if s.hub != nil {

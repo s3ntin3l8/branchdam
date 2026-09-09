@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -179,6 +180,17 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 
 	if s.hub != nil {
 		s.hub.Broadcast()
+	}
+
+	if s.audit != nil {
+		details := map[string]any{
+			"name":  loc.Name,
+			"set":   set,
+			"unset": in.Body.Unset,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventStorageLocationPut, "storage_location", loc.Name, details); err != nil {
+			s.log.Warn("audit: storage_location.upserted write failed", "err", err)
+		}
 	}
 
 	out := &PutStorageLocationOutput{}

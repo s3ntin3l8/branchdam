@@ -46,7 +46,16 @@ import (
 // MISSING-node fast_hash matches (move detection). The decision to escalate
 // to full_hash when a live collision is suspected happens before Commit is
 // ever called -- see scan.go's needsFullHash.
-func Commit(ctx context.Context, database *db.DB, locationID int64, results []Result, loggers ...*slog.Logger) (Stats, error) {
+//
+// uploadedByUserID is the resolved users.id that initiated this scan pass
+// (browser POST /api/v1/scan -> the request's actor; SweeperSupervisor ->
+// the system user; agent upload -> the pairing's owner_user_id). It is
+// stamped on the new media_nodes.uploaded_by_user_id column at insert
+// time so the "My uploads" filter and the "Uploaded by" column can render
+// a real attribution instead of NULL. The touched/moved branches don't
+// rewrite the column -- the original uploader is preserved across rescans
+// for the same file path.
+func Commit(ctx context.Context, database *db.DB, locationID int64, results []Result, uploadedByUserID int64, loggers ...*slog.Logger) (Stats, error) {
 	log := slog.New(slog.DiscardHandler)
 	if len(loggers) > 0 && loggers[0] != nil {
 		log = loggers[0]
@@ -54,7 +63,7 @@ func Commit(ctx context.Context, database *db.DB, locationID int64, results []Re
 	var stats Stats
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		for i := range results {
-			if err := commitOne(ctx, q, locationID, results[i], &stats, log); err != nil {
+			if err := commitOne(ctx, q, locationID, results[i], &stats, uploadedByUserID, log); err != nil {
 				return fmt.Errorf("commit %q: %w", results[i].Path, err)
 			}
 		}
@@ -63,7 +72,7 @@ func Commit(ctx context.Context, database *db.DB, locationID int64, results []Re
 	return stats, err
 }
 
-func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, stats *Stats, log *slog.Logger) error {
+func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, stats *Stats, uploadedByUserID int64, log *slog.Logger) error {
 	existing, err := q.GetLiveNodeByPath(ctx, r.Path)
 	switch {
 	case err == nil:
@@ -87,22 +96,22 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			// XMP-xmpMM:DerivedFrom from getting stuck invisible in the DB.
 			return reconcileAllMetadata(ctx, q, existing, r, stats, log)
 		}
-		return commitVersionCollision(ctx, q, locationID, existing, r, stats, log)
+		return commitVersionCollision(ctx, q, locationID, existing, r, stats, uploadedByUserID, log)
 
 	case errors.Is(err, sql.ErrNoRows):
-		return commitNoLiveNode(ctx, q, locationID, r, stats, log)
+		return commitNoLiveNode(ctx, q, locationID, r, stats, uploadedByUserID, log)
 
 	default:
 		return fmt.Errorf("get live node by path: %w", err)
 	}
 }
 
-func commitVersionCollision(ctx context.Context, q *sqlcgen.Queries, locationID int64, existing sqlcgen.MediaNode, r Result, stats *Stats, log *slog.Logger) error {
+func commitVersionCollision(ctx context.Context, q *sqlcgen.Queries, locationID int64, existing sqlcgen.MediaNode, r Result, stats *Stats, uploadedByUserID int64, log *slog.Logger) error {
 	// Archive first -- see Commit's doc comment for why the order matters.
 	if err := q.ArchiveMediaNode(ctx, existing.ID); err != nil {
 		return fmt.Errorf("archive superseded node: %w", err)
 	}
-	newNode, err := insertNewNode(ctx, q, locationID, r, log)
+	newNode, err := insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
 	if err != nil {
 		return fmt.Errorf("insert successor node: %w", err)
 	}
@@ -116,7 +125,7 @@ func commitVersionCollision(ctx context.Context, q *sqlcgen.Queries, locationID 
 	return nil
 }
 
-func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, stats *Stats, log *slog.Logger) error {
+func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, stats *Stats, uploadedByUserID int64, log *slog.Logger) error {
 	if r.FastHash != "" {
 		missing, err := q.GetMissingNodeByFastHash(ctx, &r.FastHash)
 		if err == nil {
@@ -155,11 +164,11 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 	}
 
 	stats.Inserted++
-	_, err := insertNewNode(ctx, q, locationID, r, log)
+	_, err := insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
 	return err
 }
 
-func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, log *slog.Logger) (sqlcgen.MediaNode, error) {
+func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, uploadedByUserID int64, log *slog.Logger) (sqlcgen.MediaNode, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("mint node_uuid: %w", err)
@@ -192,6 +201,7 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 		CameraSerial:       nullString(r.SerialNumber),
 		LensModel:          nullString(r.LensModel),
 		FilenameStem:       nullString(naming.Stem(r.FileName)),
+		UploadedByUserID:   sql.NullInt64{Int64: uploadedByUserID, Valid: uploadedByUserID != 0},
 	}
 	if r.PHash != nil {
 		params.Phash = sql.NullInt64{Int64: *r.PHash, Valid: true}

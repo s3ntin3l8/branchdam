@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router";
 import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
 import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
-import type { AuditEntry } from "../api/types";
+import type { EdgeAuditEntry } from "../api/types";
 
 const PAGE_SIZE = 50;
 
@@ -32,7 +32,7 @@ function formatEvidence(evidenceJson?: string): React.ReactNode {
   }
 }
 
-function AuditRow({ entry }: { entry: AuditEntry }) {
+function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
   const confirm = useConfirmEdge();
   const reject = useRejectEdge();
   const busy = confirm.isPending || reject.isPending;
@@ -188,7 +188,7 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
 function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const [sourceId, setSourceId] = useState("");
   const [targetId, setTargetId] = useState("");
-  const [relType, setRelType] = useState<AuditEntry["relationshipType"]>("DERIVED_FROM");
+  const [relType, setRelType] = useState<EdgeAuditEntry["relationshipType"]>("DERIVED_FROM");
   const [errorMsg, setErrorMsg] = useState("");
   const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false);
   const [isTargetPickerOpen, setIsTargetPickerOpen] = useState(false);
@@ -341,7 +341,7 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
               <label className="mb-1 block font-medium text-neutral-300">Relationship Type</label>
               <select
                 value={relType}
-                onChange={(e) => setRelType(e.target.value as AuditEntry["relationshipType"])}
+                onChange={(e) => setRelType(e.target.value as EdgeAuditEntry["relationshipType"])}
                 className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
                 <option value="DERIVED_FROM">DERIVED_FROM</option>

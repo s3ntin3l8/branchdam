@@ -285,6 +285,10 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	if _, err := writerDB.Exec("ALTER TABLE media_nodes ADD COLUMN source_path_hash TEXT CHECK (source_path_hash IS NULL OR length(source_path_hash) = 64);"); err != nil {
 		t.Fatalf("alter table add source_path_hash: %v", err)
 	}
+	// Add additive uploaded_by_user_id column (from migration 20) so GetMediaNodeByID succeeds.
+	if _, err := writerDB.Exec("ALTER TABLE media_nodes ADD COLUMN uploaded_by_user_id INTEGER REFERENCES users(id) ON DELETE RESTRICT;"); err != nil {
+		t.Fatalf("alter table add uploaded_by_user_id: %v", err)
+	}
 
 	gotIndex, err := q.GetMediaEdge(ctx, indexEdge.ID)
 	if err != nil {

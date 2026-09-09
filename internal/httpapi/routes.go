@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
+	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -31,6 +33,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	syncpkg "github.com/s3ntin3l8/branchdam/internal/sync"
+	attributionusers "github.com/s3ntin3l8/branchdam/internal/users"
 )
 
 func (s *Server) registerRoutes(api huma.API) {
@@ -64,6 +67,9 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
 	huma.Post(api, "/api/v1/edges/{id}/confirm", s.handleConfirmEdge)
 	huma.Post(api, "/api/v1/edges/{id}/reject", s.handleRejectEdge)
+
+	huma.Get(api, "/api/v1/audit", s.handleAudit)
+	huma.Get(api, "/api/v1/users", s.handleListUsers)
 
 	huma.Register(api, huma.Operation{
 		Method:        http.MethodPost,
@@ -149,6 +155,14 @@ type MeOutput struct {
 		// can't be logged out from branchDAM).
 		IsLocal     bool  `json:"isLocal,omitempty"`
 		LocalUserID int64 `json:"localUserId,omitempty"`
+		// AttributionUserID is the resolved users.id for this
+		// Principal (internal/users.ResolveOrCreate). Non-zero for any
+		// authenticated browser request; the SPA pins it on the
+		// /api/v1/assets?uploadedByUserId= filter for the "My uploads"
+		// view, and resolves it via /api/v1/users for row-level
+		// "uploaded by" display. 0 means attribution isn't wired or
+		// the principal isn't usable (machine, anonymous).
+		AttributionUserID int64 `json:"attributionUserId,omitempty"`
 	}
 }
 
@@ -169,6 +183,19 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 		if localView.UserID != 0 {
 			out.Body.IsLocal = true
 			out.Body.LocalUserID = localView.UserID
+		}
+		// Lazy-resolve the attribution user id so the SPA can pin the
+		// "My uploads" filter without a separate round-trip. The
+		// ResolveOrCreate itself is the write path: the first request
+		// from a new Authentik user inserts the users row; every later
+		// request from the same user is a refresh-on-sight of the
+		// denormalized username/email + last_seen_at. A failed
+		// resolve leaves AttributionUserID at 0, which the SPA treats
+		// as "My uploads disabled" -- never as "show everyone else's".
+		if s.attribution != nil && p.Kind == auth.KindUser && p.Authenticated && p.ExternalUID != "" {
+			if a, err := s.attribution.ResolveOrCreate(ctx, p); err == nil {
+				out.Body.AttributionUserID = a.ID
+			}
 		}
 	}
 	return out, nil
@@ -275,6 +302,13 @@ type assetDTO struct {
 	OriginalDocumentID string  `json:"originalDocumentId,omitempty"`
 	CameraModel        string  `json:"cameraModel,omitempty"`
 	ThumbState         string  `json:"thumbState"`
+	// UploadedByUserID is the nullable attribution FK
+	// (media_nodes.uploaded_by_user_id, migration 00020). NULL = no
+	// resolved attribution (legacy rows, background scans, system
+	// writes). The SPA renders this via the /api/v1/users lookup when
+	// non-null; the "My uploads" filter pins it to the request's own
+	// resolved id.
+	UploadedByUserID *int64 `json:"uploadedByUserId,omitempty"`
 }
 
 func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
@@ -293,6 +327,10 @@ func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
 		StorageLocationID: n.StorageLocationID,
 		ThumbState:        n.ThumbState,
 	}
+	if n.UploadedByUserID.Valid {
+		v := n.UploadedByUserID.Int64
+		dto.UploadedByUserID = &v
+	}
 	if n.OriginalDocumentID.Valid {
 		dto.OriginalDocumentID = n.OriginalDocumentID.String
 	}
@@ -310,6 +348,11 @@ type ListAssetsInput struct {
 	StorageLocationID int64  `query:"storageLocationId"`
 	LifecycleState    string `query:"lifecycleState"`
 	UnlinkedOnly      bool   `query:"unlinkedOnly"`
+	// UploadedByUserID, when > 0, restricts the list to assets the
+	// given user uploaded (media_nodes.uploaded_by_user_id). The SPA's
+	// "My uploads" filter pins it to the request's own id via the
+	// /api/v1/me + /api/v1/users round-trip. 0 disables the filter.
+	UploadedByUserID int64 `query:"uploadedByUserId" default:"0"`
 }
 
 type ListAssetsOutput struct {
@@ -342,7 +385,12 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		storageLocationID = sql.NullInt64{Int64: in.StorageLocationID, Valid: true}
 	}
 
-	hasFilters := lifecycleState.Valid || graphStatus.Valid || cameraModel.Valid || storageLocationID.Valid
+	var uploadedByUserID sql.NullInt64
+	if in.UploadedByUserID > 0 {
+		uploadedByUserID = sql.NullInt64{Int64: in.UploadedByUserID, Valid: true}
+	}
+
+	hasFilters := lifecycleState.Valid || graphStatus.Valid || cameraModel.Valid || storageLocationID.Valid || uploadedByUserID.Valid
 
 	var rows []sqlcgen.MediaNode
 	var total int64
@@ -365,6 +413,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
 			StorageLocationID: storageLocationID,
+			UploadedByUserID:  uploadedByUserID,
 		}
 		rows, err = s.db.Reader.ListMediaNodesFiltered(ctx, params)
 		if err != nil {
@@ -375,6 +424,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
 			StorageLocationID: storageLocationID,
+			UploadedByUserID:  uploadedByUserID,
 		})
 		if err != nil {
 			total = int64(len(rows))
@@ -1360,6 +1410,38 @@ func reviewerName(ctx context.Context) sql.NullString {
 	return sql.NullString{String: p.Name, Valid: true}
 }
 
+// resolveActorUserID resolves the request Principal to a stable
+// users.id for attribution (scan_jobs.started_by_user_id,
+// media_nodes.uploaded_by_user_id, device_pairings.user_id). Returns 0
+// when the request has no usable Principal (an anonymous or unauth'd
+// call) -- the caller is expected to leave the column NULL in that case.
+// Returns the system user id when attribution is wired but the request
+// is a KindMachine / background-attribution edge case the auth layer
+// doesn't otherwise expose.
+//
+// attribution may be nil in tests; the result is 0 in that case (the
+// routes that depend on attribution 503 before reaching this helper).
+func resolveActorUserID(ctx context.Context, attribution *attributionusers.Service, log *slog.Logger) int64 {
+	if attribution == nil {
+		return 0
+	}
+	p, ok := auth.From(ctx)
+	if !ok {
+		return 0
+	}
+	if p.Kind != auth.KindUser || !p.Authenticated || p.ExternalUID == "" {
+		return 0
+	}
+	a, err := attribution.ResolveOrCreate(ctx, p)
+	if err != nil {
+		if log != nil {
+			log.Warn("attribution: ResolveOrCreate failed, leaving started_by_user_id NULL", "err", err)
+		}
+		return 0
+	}
+	return a.ID
+}
+
 // recomputeGraphStatus delegates to graph.RecomputeStatusFromPersistedEdges,
 // which now also backs internal/agent's applyEdgeAttached -- see that
 // function's doc comment for why this is a distinct computation from
@@ -1483,6 +1565,7 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 				s.hub.Broadcast()
 			}
 		},
+		StartedByUserID: resolveActorUserID(ctx, s.attribution, s.log),
 	}
 
 	var jobID int64
@@ -1500,6 +1583,17 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 
 	if s.hub != nil {
 		s.hub.Broadcast()
+	}
+
+	if s.audit != nil {
+		details := map[string]any{
+			"jobId":             jobID,
+			"storageLocationId": in.Body.StorageLocationID,
+			"differential":      in.Body.Differential,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventScanStarted, "scan_job", strconv.FormatInt(jobID, 10), details); err != nil {
+			s.log.Warn("audit: scan.started write failed", "err", err)
+		}
 	}
 
 	out := &StartScanOutput{}
@@ -1852,7 +1946,8 @@ type AgentRebaseOutput struct {
 }
 
 func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+	p, ok := auth.From(ctx)
+	if !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
 	}
 	if in.Body.NodeUUID == "" {
@@ -1962,6 +2057,10 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			nullFullHash = in.Body.FullHash
 			indexingStatus = "INDEXED_FULL"
 		}
+		var rebaseUserID int64
+		if pairing, pairErr := q.GetDevicePairingByAgentID(ctx, p.Name); pairErr == nil && pairing.UserID.Valid {
+			rebaseUserID = pairing.UserID.Int64
+		}
 		newNode, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:           in.Body.NodeUUID,
 			StorageLocationID:  loc.ID,
@@ -1984,6 +2083,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			FilenameStem:       sql.NullString{},
 			CameraSerial:       sql.NullString{},
 			LensModel:          sql.NullString{},
+			UploadedByUserID:   sql.NullInt64{Int64: rebaseUserID, Valid: rebaseUserID != 0},
 		})
 		if err != nil {
 			return err
@@ -2890,5 +2990,280 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 	if s.hub != nil {
 		s.hub.Broadcast()
 	}
+	if s.audit != nil {
+		purged := 0
+		for _, r := range results {
+			if r.Purged {
+				purged++
+			}
+		}
+		details := map[string]any{
+			"storageLocationId":   loc.ID,
+			"storageLocationName": loc.Name,
+			"planned":             len(results),
+			"purged":              purged,
+			"cutoffUnix":          cutoffUnix,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventPruneExecuted, "storage_location", loc.Name, details); err != nil {
+			s.log.Warn("audit: prune.executed write failed", "err", err)
+		}
+	}
+	return out, nil
+}
+
+// --- /api/v1/audit ---
+
+// AuditInput is the merged audit read query. The activity/login split
+// mirrors the two underlying tables: actor_audit (cross-cutting admin
+// event log) and login_audit (PR #407's local-auth login/reset log).
+// type=login is only meaningful in local-auth deployments (it reads the
+// login_audit table that PR #407 ships) -- forward-only deployments
+// never write to it and a login query there returns an empty page.
+type AuditInput struct {
+	Type         string `query:"type" default:"activity" enum:"activity,login"`
+	ActorUserID  int64  `query:"actorUserId" default:"0"`
+	Event        string `query:"event"`
+	ResourceType string `query:"resourceType"`
+	ResourceID   string `query:"resourceId"`
+	SinceUnix    int64  `query:"sinceUnix" default:"0"`
+	UntilUnix    int64  `query:"untilUnix" default:"0"`
+	Limit        int64  `query:"limit" default:"50" minimum:"1" maximum:"200"`
+	Offset       int64  `query:"offset" default:"0" minimum:"0"`
+}
+
+type auditEntryOut struct {
+	ID           int64  `json:"id"`
+	Source       string `json:"source"`
+	ActorUserID  *int64 `json:"actorUserId,omitempty"`
+	ActorKind    string `json:"actorKind"`
+	ActorName    string `json:"actorName"`
+	Event        string `json:"event"`
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	DetailsJSON  string `json:"detailsJson,omitempty"`
+	CreatedAt    int64  `json:"createdAt"`
+}
+
+type AuditOutput struct {
+	Body struct {
+		Entries []auditEntryOut `json:"entries"`
+		Total   int64           `json:"total"`
+	}
+}
+
+// handleAudit is the merged actor_audit + login_audit read endpoint.
+// Returns 503 when no audit service is wired (every existing test).
+// The merge is in Go: actor_audit comes from internal/audit; login_audit
+// comes from internal/auth/users (PR #407). Newest-first, capped at 200.
+//
+// Admin-gated: login_audit exposes usernames, IPs, and user-agents; the
+// merged view also includes every actor_audit row. Same stricter check
+// as /api/v1/settings (#276) -- an unauthenticated reader or a machine
+// principal must never see either side.
+func (s *Server) handleAudit(ctx context.Context, in *AuditInput) (*AuditOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if s.audit == nil {
+		return nil, huma.Error503ServiceUnavailable("audit service not configured")
+	}
+	var entries []auditEntryOut
+	var total int64
+
+	switch in.Type {
+	case "activity":
+		filter := auditPkg.Filter{}
+		if in.ActorUserID > 0 {
+			filter.ActorUserID = sql.NullInt64{Int64: in.ActorUserID, Valid: true}
+		}
+		if in.Event != "" {
+			filter.Event = in.Event
+		}
+		if in.ResourceType != "" {
+			filter.ResourceType = in.ResourceType
+		}
+		if in.ResourceID != "" {
+			filter.ResourceID = in.ResourceID
+		}
+		if in.SinceUnix > 0 {
+			filter.SinceUnix = sql.NullInt64{Int64: in.SinceUnix, Valid: true}
+		}
+		if in.UntilUnix > 0 {
+			filter.UntilUnix = sql.NullInt64{Int64: in.UntilUnix, Valid: true}
+		}
+		rows, n, err := s.audit.ListActivity(ctx, filter, in.Limit, in.Offset)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list activity audit", err)
+		}
+		entries = make([]auditEntryOut, len(rows))
+		for i, r := range rows {
+			out := auditEntryOut{
+				ID:        r.ID,
+				Source:    "actor_audit",
+				ActorKind: r.ActorKind,
+				ActorName: r.ActorName,
+				Event:     r.Event,
+				CreatedAt: r.CreatedAt,
+			}
+			if r.ActorUserID.Valid {
+				v := r.ActorUserID.Int64
+				out.ActorUserID = &v
+			}
+			if r.ResourceID.Valid {
+				out.ResourceID = r.ResourceID.String
+				out.ResourceType = r.ResourceType
+			}
+			out.DetailsJSON = r.DetailsJSON
+			entries[i] = out
+		}
+		total = n
+
+	case "login":
+		// login_audit lives in internal/auth/users (PR #407). Read it
+		// directly through the same DB handle the audit package uses.
+		rows, n, err := s.listLoginAudit(ctx, in)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list login audit", err)
+		}
+		entries = rows
+		total = n
+
+	default:
+		return nil, huma.Error400BadRequest("type must be 'activity' or 'login'")
+	}
+
+	out := &AuditOutput{}
+	out.Body.Entries = entries
+	out.Body.Total = total
+	return out, nil
+}
+
+// marshalLoginDetails builds the login_audit details JSON safely.
+// Client-controlled fields (IP, UserAgent) are json.Marshal'd to prevent
+// injection of quotes or backslashes that would break the JSON envelope.
+func marshalLoginDetails(ip, userAgent string) string {
+	type loginDetails struct {
+		IP        string `json:"ip"`
+		UserAgent string `json:"userAgent"`
+	}
+	b, err := json.Marshal(loginDetails{IP: ip, UserAgent: userAgent})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// listLoginAudit reads login_audit directly through the db.Reader.
+// Lives in this file rather than internal/audit because login_audit
+// is owned by internal/auth/users (PR #407) -- this is the read side
+// of the merged /api/v1/audit route.
+func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEntryOut, int64, error) {
+	limit := in.Limit
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.db.Reader.ListLoginAudit(ctx, sqlcgen.ListLoginAuditParams{
+		Limit:  limit,
+		Offset: in.Offset,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.db.Reader.CountLoginAudit(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]auditEntryOut, len(rows))
+	for i, r := range rows {
+		e := auditEntryOut{
+			ID:           r.ID,
+			Source:       "login_audit",
+			ActorKind:    "user",
+			Event:        r.Outcome,
+			ResourceType: "login_source",
+			ResourceID:   r.Source,
+			ActorName:    r.UsernamePresented,
+			DetailsJSON:  marshalLoginDetails(r.Ip, r.UserAgent),
+			CreatedAt:    r.CreatedAt,
+		}
+		if r.UserID.Valid {
+			v := r.UserID.Int64
+			e.ActorUserID = &v
+		}
+		out[i] = e
+	}
+	return out, total, nil
+}
+
+// --- /api/v1/users ---
+
+// ListUsersInput backs GET /api/v1/users. The route is admin-only and
+// used by the pairing UI's "Owned by" selector + the attribution
+// column filter ("uploaded by") on the assets list.
+type ListUsersInput struct {
+	Limit  int64 `query:"limit" default:"50" minimum:"1" maximum:"200"`
+	Offset int64 `query:"offset" default:"0" minimum:"0"`
+}
+
+type attributionUserDTO struct {
+	ID           int64  `json:"id"`
+	AuthProvider string `json:"authProvider"`
+	ExternalUID  string `json:"externalUid"`
+	Username     string `json:"username"`
+	Email        string `json:"email,omitempty"`
+	CreatedAt    int64  `json:"createdAt"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+}
+
+type ListUsersOutput struct {
+	Body struct {
+		Users []attributionUserDTO `json:"users"`
+		Total int64                `json:"total"`
+	}
+}
+
+// handleListUsers is the admin-only read endpoint for the users
+// attribution table. Used by the pairing UI's "Owned by" selector and
+// the SPA's "Uploaded by" filter on /assets. Returns 503 when the
+// attribution service hasn't been wired (every existing test).
+//
+// Admin-gated: every row carries the stable external_uid (Authentik's
+// per-user id) and the optional email; that's the directory you'd want
+// to keep private in any non-solo deployment.
+func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*ListUsersOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if s.attribution == nil {
+		return nil, huma.Error503ServiceUnavailable("attribution service not configured")
+	}
+	rows, err := s.db.Reader.ListAttributionUsers(ctx, sqlcgen.ListAttributionUsersParams{
+		Limit:  in.Limit,
+		Offset: in.Offset,
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list users", err)
+	}
+	total, err := s.db.Reader.CountAttributionUsers(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("count users", err)
+	}
+	out := &ListUsersOutput{}
+	out.Body.Users = make([]attributionUserDTO, len(rows))
+	for i, r := range rows {
+		u := attributionUserDTO{
+			ID:           r.ID,
+			AuthProvider: r.AuthProvider,
+			ExternalUID:  r.ExternalUid,
+			Username:     r.Username,
+			CreatedAt:    r.CreatedAt,
+			LastSeenAt:   r.LastSeenAt,
+		}
+		if r.Email.Valid {
+			u.Email = r.Email.String
+		}
+		out.Body.Users[i] = u
+	}
+	out.Body.Total = total
 	return out, nil
 }

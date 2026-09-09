@@ -417,7 +417,7 @@ func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Loc
 	if moved {
 		hashed.Add(1)
 	} else {
-		stats, err := Commit(ctx, w.deps.DB, loc.ID, []Result{*result}, w.log)
+		stats, err := Commit(ctx, w.deps.DB, loc.ID, []Result{*result}, 0, w.log)
 		if err != nil {
 			failed.Add(1)
 			w.log.Warn("pipeline: watch commit", "path", item.rec.Path, "err", err)

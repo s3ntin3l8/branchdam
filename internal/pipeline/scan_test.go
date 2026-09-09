@@ -333,7 +333,7 @@ func TestScanSweepTriggersMoveDetectionRebase(t *testing.T) {
 	// Child node + edge on the original node -- must survive the rebase.
 	childStats, err := Commit(ctx, database, locationID, []Result{
 		{Path: filepath.Join(resolvedRoot, "a_proxy.txt"), FileName: "a_proxy.txt", FileExt: "txt", Size: 5, ModTime: time.Now(), FastHash: "cccccccccccccccc"},
-	})
+	}, 0)
 	if err != nil || childStats.Inserted != 1 {
 		t.Fatalf("Commit child: stats=%+v err=%v", childStats, err)
 	}
@@ -1707,7 +1707,7 @@ func TestDrainAndCommitAggregatesMetadataWritten(t *testing.T) {
 		Size: 10, ModTime: time.Now(), FastHash: "cccccccccccccccc",
 		ExifRaw: map[string]string{"EXIF:ISO": "100"},
 	}
-	if _, err := Commit(ctx, database, locationID, []Result{seeded}); err != nil {
+	if _, err := Commit(ctx, database, locationID, []Result{seeded}, 0); err != nil {
 		t.Fatalf("seed Commit: %v", err)
 	}
 

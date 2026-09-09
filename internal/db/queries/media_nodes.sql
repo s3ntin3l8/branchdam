@@ -8,7 +8,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
@@ -21,7 +22,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 -- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 -- sqlc's SQLite type inference only picks up the column's own (nullable)
@@ -31,6 +33,7 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (camera_model = sqlc.narg('camera_model') OR sqlc.narg('camera_model') IS NULL)
   AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
+  AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
@@ -44,7 +47,8 @@ FROM media_nodes
 WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_state') IS NULL)
   AND (camera_model = sqlc.narg('camera_model') OR sqlc.narg('camera_model') IS NULL)
   AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
-  AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL);
+  AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
+  AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL);
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes
@@ -67,7 +71,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE id = ?1;
 
@@ -81,7 +86,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -94,7 +100,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
 LIMIT 1;
@@ -109,7 +116,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -123,7 +131,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -142,7 +151,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
 LIMIT ?2;
@@ -157,7 +167,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE camera_serial = ?1
   AND captured_at_unix >= ?2
@@ -173,7 +184,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED';
 
@@ -188,6 +200,7 @@ INSERT INTO media_nodes (
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
     camera_serial, lens_model, source_path_hash,
+    uploaded_by_user_id,
     first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5,
@@ -195,6 +208,7 @@ INSERT INTO media_nodes (
     ?11, ?12, ?13,
     ?14, ?15, ?16,
     ?17, ?18, ?19, ?20, ?21, ?22,
+    ?23,
     unixepoch(), unixepoch(), unixepoch(), unixepoch()
 )
 RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -203,7 +217,8 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
           original_document_id, document_id, derived_from_id,
           captured_at_unix, camera_model, filename_stem,
           first_seen_at, last_seen_at, created_at, updated_at,
-          camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash;
+          camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+          uploaded_by_user_id;
 
 -- name: ArchiveMediaNode :exec
 -- Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
@@ -356,7 +371,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE node_uuid = ?1;
 

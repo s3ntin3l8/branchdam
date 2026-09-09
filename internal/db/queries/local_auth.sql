@@ -14,7 +14,7 @@
 SELECT COUNT(*) FROM users;
 
 -- name: GetUserByID :one
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 WHERE id = ?1;
 
@@ -22,7 +22,7 @@ WHERE id = ?1;
 -- Used by /api/v1/login to resolve the presented username to a user row.
 -- The lookup is username-only; password verification happens in Go against
 -- password_hash. Index: users.username UNIQUE already covers this.
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 WHERE username = ?1;
 
@@ -31,7 +31,7 @@ WHERE username = ?1;
 -- and source 'forward-jit' either matches an existing admin or triggers
 -- a fresh INSERT in CreateForwardJITUser. Partial unique index
 -- users_email_source_uniq covers this.
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 WHERE email = ?1 AND source = ?2;
 
@@ -41,11 +41,13 @@ WHERE email = ?1 AND source = ?2;
 -- registration flows (none in v1), or 'user:<principal name>' for admin-
 -- created users. Returns the inserted row.
 INSERT INTO users (
-    username, email, password_hash, is_admin, source, created_at, created_by
+    username, email, password_hash, is_admin, source, created_at, created_by,
+    auth_provider, external_uid
 ) VALUES (
-    ?1, ?2, ?3, ?4, 'local', ?5, ?6
+    ?1, ?2, ?3, ?4, 'local', ?5, ?6,
+    'local', ?1
 )
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at;
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at;
 
 -- name: CreateForwardJITUser :one
 -- Inserts a source='forward-jit' user with password_hash = NULL. The
@@ -53,11 +55,13 @@ RETURNING id, username, email, password_hash, is_admin, source, created_at, crea
 -- refuse the JIT when the forward-auth email header is empty). created_by is
 -- 'forward:<forward-auth username>'.
 INSERT INTO users (
-    username, email, password_hash, is_admin, source, created_at, created_by
+    username, email, password_hash, is_admin, source, created_at, created_by,
+    auth_provider, external_uid
 ) VALUES (
-    ?1, ?2, NULL, ?3, 'forward-jit', ?4, ?5
+    ?1, ?2, NULL, ?3, 'forward-jit', ?4, ?5,
+    'forward-jit', ?1
 )
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at;
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at;
 
 -- name: DisableUser :exec
 -- Sets disabled_at. Idempotent. Does NOT revoke existing sessions --
@@ -71,12 +75,12 @@ UPDATE users SET disabled_at = ?2 WHERE id = ?1;
 UPDATE users
 SET password_hash = ?2
 WHERE id = ?1
-RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at;
+RETURNING id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at;
 
 -- name: ListUsers :many
 -- Paginated user list for the admin UI. Order by id ASC so paging is
 -- stable across inserts (new users go to the END, not the middle).
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at
+SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
 FROM users
 ORDER BY id ASC
 LIMIT ?1 OFFSET ?2;

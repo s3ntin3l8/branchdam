@@ -310,8 +310,8 @@ WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
 
 // See ListEdgesByMultipleTargets above; this is the symmetric query for
 // children edges at depth d+1.
-func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, nodeIds string) ([]MediaEdge, error) {
-	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleSources, nodeIds)
+func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, dollar_1 string) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleSources, dollar_1)
 	if err != nil {
 		return nil, err
 	}
@@ -361,8 +361,8 @@ WHERE target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
 // in one query rather than one per node. Excludes REJECTED edges here (not
 // in Go) so a rejected lineage link can never re-admit its source node into
 // the traversal via a later level.
-func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, nodeIds string) ([]MediaEdge, error) {
-	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleTargets, nodeIds)
+func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, dollar_1 string) ([]MediaEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesByMultipleTargets, dollar_1)
 	if err != nil {
 		return nil, err
 	}
@@ -417,8 +417,8 @@ type ListEdgesForNodesRow struct {
 	Resolver         string
 }
 
-func (q *Queries) ListEdgesForNodes(ctx context.Context, nodeIds string) ([]ListEdgesForNodesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, nodeIds)
+func (q *Queries) ListEdgesForNodes(ctx context.Context, dollar_1 string) ([]ListEdgesForNodesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgesForNodes, dollar_1)
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +455,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        original_document_id, document_id, derived_from_id,
        captured_at_unix, camera_model, filename_stem,
        first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
 FROM media_nodes
 WHERE id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND lifecycle_state <> 'ARCHIVED'
@@ -464,8 +465,8 @@ WHERE id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
 // Column list matches the media_nodes table exactly (including
 // source_path_hash, added by 00015_source_path_hash.sql) so sqlc maps this
 // to the shared MediaNode struct instead of minting a one-off Row type.
-func (q *Queries) ListNodesByIDs(ctx context.Context, nodeIds string) ([]MediaNode, error) {
-	rows, err := q.db.QueryContext(ctx, listNodesByIDs, nodeIds)
+func (q *Queries) ListNodesByIDs(ctx context.Context, dollar_1 string) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listNodesByIDs, dollar_1)
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +505,7 @@ func (q *Queries) ListNodesByIDs(ctx context.Context, nodeIds string) ([]MediaNo
 			&i.ThumbState,
 			&i.ThumbAttempts,
 			&i.SourcePathHash,
+			&i.UploadedByUserID,
 		); err != nil {
 			return nil, err
 		}

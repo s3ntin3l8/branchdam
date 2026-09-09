@@ -21,6 +21,13 @@ type Kind string
 const (
 	KindUser    Kind = "user"
 	KindMachine Kind = "machine"
+	// KindSystem is reserved for background-worker attribution that
+	// never came in over the wire (sweeper INCREMENTAL passes, prune,
+	// anything that runs without a request Principal). It is NEVER
+	// attached by BrowserChain or AgentChain -- callers that want to
+	// log a system action must use internal/users.SystemActor (or pass
+	// this Kind directly) explicitly.
+	KindSystem Kind = "system"
 )
 
 // Principal is what a request is authenticated as. A machine Principal
@@ -31,6 +38,13 @@ const (
 // ForwardAuth) which is meaningless for a machine. Callers that render
 // Principal must gate display on p.Kind == KindUser to avoid printing
 // a string like "iphone-a3f9c2e1" in a place that expects a human name.
+//
+// ExternalUID is the stable identity key the multi-user attribution layer
+// (internal/users) uses to lazy-provision a row in `users` keyed on
+// (auth_provider, external_uid). For KindUser it comes from Authentik's
+// X-Authentik-Uid header (stable across username renames). For KindMachine
+// it is empty -- machine sessions never own user-attributed rows. Name
+// is the display label (X-Authentik-Username); ExternalUID is the key.
 //
 // Authenticated is true iff BrowserChain saw a non-empty
 // X-Authentik-Username (#164). BrowserChain always attaches a Principal --
@@ -46,6 +60,7 @@ type Principal struct {
 	Name          string
 	Email         string
 	Groups        []string
+	ExternalUID   string
 	Authenticated bool
 }
 

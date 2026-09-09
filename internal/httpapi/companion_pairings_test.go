@@ -186,7 +186,7 @@ func TestCompanionPairings_QRSVGReturns410WhenNoActiveKey(t *testing.T) {
 	ctx := context.Background()
 
 	// Create then revoke to ensure no active key remains.
-	p, _, err := pairSvc.CreatePairing(ctx, "iPhone", "test", func(agentID, apiKey string) []byte {
+	p, _, err := pairSvc.CreatePairing(ctx, "iPhone", "test", 0, func(agentID, apiKey string) []byte {
 		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
 	})
 	require.NoError(t, err)

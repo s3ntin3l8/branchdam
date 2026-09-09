@@ -165,13 +165,16 @@ func actorFromCtx(ctx context.Context) string {
 // --- handlers ---
 
 // handleCreatePairing mints a new pairing + initial key + QR SVG. The
-// plaintext key is returned exactly once.
+// plaintext key is returned exactly once. The pairing's owner_user_id
+// is set from the creating request's resolved attribution user id
+// (internal/users.ResolveOrCreate), so paired-device uploads attribute
+// back to the human who paired them.
 func (s *Server) handleCreatePairing(ctx context.Context, in *CreatePairingInput) (*CreatePairingOutput, error) {
 	svc, err := s.pairingSvc()
 	if err != nil {
 		return nil, err
 	}
-	pairing, key, err := svc.CreatePairing(ctx, in.Body.FriendlyLabel, actorFromCtx(ctx), s.qrPayloadFor(ctx))
+	pairing, key, err := svc.CreatePairing(ctx, in.Body.FriendlyLabel, actorFromCtx(ctx), resolveActorUserID(ctx, s.attribution, s.log), s.qrPayloadFor(ctx))
 	if err != nil {
 		return nil, huma.Error500InternalServerError("create pairing", err)
 	}

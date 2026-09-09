@@ -40,7 +40,7 @@ func TestPruneArchivedNodeMetadata(t *testing.T) {
 			},
 		}
 
-		stats, err := Commit(ctx, database, locationID, []Result{res})
+		stats, err := Commit(ctx, database, locationID, []Result{res}, 0)
 		if err != nil {
 			t.Fatalf("Commit version %d: %v", i, err)
 		}

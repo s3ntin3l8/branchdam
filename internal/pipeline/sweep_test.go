@@ -305,7 +305,7 @@ func TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch(t *testin
 	// decide is unchanged and queue for a touch.
 	stats, err := Commit(ctx, database, locationID, []Result{
 		{Path: path, FileName: "master.raw", FileExt: "raw", Size: 100, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
-	})
+	}, 0)
 	if err != nil || stats.Inserted != 1 {
 		t.Fatalf("Commit (baseline insert): stats=%+v err=%v", stats, err)
 	}
@@ -325,7 +325,7 @@ func TestConcurrentFullScanArchiveDoesNotResurrectViaDifferentialTouch(t *testin
 	// and a fresh node2 takes over the live path.
 	collisionStats, err := Commit(ctx, database, locationID, []Result{
 		{Path: path, FileName: "master.raw", FileExt: "raw", Size: 200, ModTime: time.Now(), FastHash: "bbbbbbbbbbbbbbbb"},
-	})
+	}, 0)
 	if err != nil || collisionStats.VersionCollisions != 1 {
 		t.Fatalf("Commit (concurrent version collision): stats=%+v err=%v", collisionStats, err)
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
@@ -34,6 +35,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 	"github.com/s3ntin3l8/branchdam/internal/thumbs"
+	attributionusers "github.com/s3ntin3l8/branchdam/internal/users"
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
@@ -112,6 +114,21 @@ type Deps struct {
 	// LocalAuth bundles the user service + login rate limiter +
 	// session middleware + auth mode. Nil in forward-only mode.
 	LocalAuth *LocalAuthDeps
+
+	// Attribution is the multi-user attribution service (lazy-provisioning
+	// of users rows from Principal.ExternalUID). cmd/branchdam wires it
+	// from internal/users.NewService(...).EnsureSystemUser at boot. The
+	// /api/v1/scan, /api/v1/settings, /api/v1/storage-locations/{id},
+	// /api/v1/restart, and pairing lifecycle routes use it to resolve
+	// the acting user id for media_nodes.uploaded_by_user_id,
+	// scan_jobs.started_by_user_id, device_pairings.user_id, and the
+	// actor_audit log. Nil in tests; routes that depend on it
+	// 503 when nil.
+	Attribution *attributionusers.Service
+
+	// Audit is the actor_audit writer. The /api/v1/audit route reads
+	// from it. Nil in tests; the route 503s when nil.
+	Audit *audit.Service
 }
 
 // LocalAuthDeps is the dependency bundle for local-auth endpoints.
@@ -164,6 +181,12 @@ type Server struct {
 	// Nil when auth.mode is "forward" -- see registerLocalAuthRoutes
 	// for the "503 / no-op" stubs that mount in that case.
 	localAuth *localAuthHandlers
+
+	// attribution + audit mirror Deps.Attribution / Deps.Audit.
+	// Stored on Server so the multi-user-attribution routes can reach
+	// them without re-resolving through Deps.
+	attribution *attributionusers.Service
+	audit       *audit.Service
 }
 
 // cfg returns the current effective config -- config.yaml/.env as loaded,
@@ -221,6 +244,8 @@ func New(d Deps) *Server {
 		thumbs:         d.ThumbCache,
 		requestRestart: d.RequestRestart,
 		pairingService: d.Pairing,
+		attribution:    d.Attribution,
+		audit:          d.Audit,
 	}
 	if d.LocalAuth != nil {
 		s.localAuth = &localAuthHandlers{

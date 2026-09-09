@@ -14,6 +14,12 @@ const (
 	authentikUsernameHeader = "X-Authentik-Username"
 	authentikEmailHeader    = "X-Authentik-Email"
 	authentikGroupsHeader   = "X-Authentik-Groups"
+	// authentikUidHeader is the stable per-user opaque id Authentik
+	// exposes; the multi-user attribution layer uses it as the
+	// users.external_uid key so an Authentik username rename doesn't
+	// fragment attribution rows (the display username stays in the
+	// denormalized `users.username` column, refreshed on every login).
+	authentikUidHeader = "X-Authentik-Uid"
 )
 
 // BrowserChain reads Authentik's identity headers and attaches a user
@@ -32,6 +38,13 @@ func BrowserChain(next http.Handler) http.Handler {
 			Name:   name,
 			Email:  r.Header.Get(authentikEmailHeader),
 			Groups: splitGroups(r.Header.Get(authentikGroupsHeader)),
+			// ExternalUID is the stable per-user key used by
+			// internal/users.ResolveOrCreate. Falls back to Name when
+			// ForwardAuth doesn't expose X-Authentik-Uid (older Authentik
+			// deployments, dev setups that skip Traefik). That fallback
+			// degrades attribution under username renames but keeps the
+			// system working.
+			ExternalUID: pickExternalUID(r.Header.Get(authentikUidHeader), name),
 			// #164: a request with none of the expected Authentik headers
 			// (misconfigured ForwardAuth, or a direct hit on this port) must
 			// not read as "authenticated with an empty username" on a write
@@ -40,6 +53,15 @@ func BrowserChain(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), principal)))
 	})
+}
+
+// pickExternalUID returns the Authentik-issued stable id, or falls back
+// to the username when the deployment doesn't forward X-Authentik-Uid.
+func pickExternalUID(uid, name string) string {
+	if uid != "" {
+		return uid
+	}
+	return name
 }
 
 func splitGroups(header string) []string {

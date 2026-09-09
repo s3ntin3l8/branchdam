@@ -24,7 +24,7 @@ func TestAgentHandshake_PairedDeviceCrossCheck(t *testing.T) {
 
 	// Create a paired device. The plaintext returned is the API key
 	// the device would use to authenticate.
-	p, key, err := pairSvc.CreatePairing(ctx, "iPhone A", "test-admin", func(agentID, apiKey string) []byte {
+	p, key, err := pairSvc.CreatePairing(ctx, "iPhone A", "test-admin", 0, func(agentID, apiKey string) []byte {
 		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
 	})
 	require.NoError(t, err)
@@ -72,7 +72,7 @@ func TestAgentHandshake_EnvBootstrapAllowsAnyAgentId(t *testing.T) {
 func TestAgentHandshake_PendingRotationHintAbsentWhenOnNewest(t *testing.T) {
 	srv, _, pairSvc := newPairingTestServer(t)
 	ctx := context.Background()
-	p, key, err := pairSvc.CreatePairing(ctx, "iPhone", "test", func(agentID, apiKey string) []byte {
+	p, key, err := pairSvc.CreatePairing(ctx, "iPhone", "test", 0, func(agentID, apiKey string) []byte {
 		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
 	})
 	require.NoError(t, err)
@@ -102,7 +102,7 @@ func TestAgentHandshake_PendingRotationHintAbsentWhenOnNewest(t *testing.T) {
 func TestAgentHandshake_PendingRotationHintPresentWhenBehind(t *testing.T) {
 	srv, _, pairSvc := newPairingTestServer(t)
 	ctx := context.Background()
-	p, k1, err := pairSvc.CreatePairing(ctx, "iPhone", "test", func(agentID, apiKey string) []byte {
+	p, k1, err := pairSvc.CreatePairing(ctx, "iPhone", "test", 0, func(agentID, apiKey string) []byte {
 		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
 	})
 	require.NoError(t, err)

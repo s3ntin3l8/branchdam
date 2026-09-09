@@ -35,11 +35,11 @@ func (q *Queries) CountPairingAudit(ctx context.Context, pairingID int64) (int64
 const createDevicePairing = `-- name: CreateDevicePairing :one
 
 INSERT INTO device_pairings (
-    agent_id, friendly_label, created_at, created_by, qr_svg
+    agent_id, friendly_label, created_at, created_by, qr_svg, user_id
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5
+    ?1, ?2, ?3, ?4, ?5, ?6
 )
-RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
 `
 
 type CreateDevicePairingParams struct {
@@ -48,6 +48,7 @@ type CreateDevicePairingParams struct {
 	CreatedAt     int64
 	CreatedBy     string
 	QrSvg         []byte
+	UserID        sql.NullInt64
 }
 
 // Companion pairing queries. The handlers in internal/httpapi/companion_pairings.go
@@ -59,6 +60,13 @@ type CreateDevicePairingParams struct {
 // "SQL Syntax Traps" note.
 // Inserts the pairing row and returns it. The HTTP layer wraps this with
 // the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
+// user_id is the owner FK from migration 00020; nullable so legacy
+// pairings pre-dating that migration stay valid.
+//
+// RETURNING includes user_id (the owner column) so the result struct
+// matches the new DevicePairing shape introduced by migration 00019
+// (otherwise sqlc creates a separate CreateDevicePairingRow struct that
+// breaks the service call sites, which expect the DevicePairing type).
 func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairingParams) (DevicePairing, error) {
 	row := q.db.QueryRowContext(ctx, createDevicePairing,
 		arg.AgentID,
@@ -66,6 +74,7 @@ func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairi
 		arg.CreatedAt,
 		arg.CreatedBy,
 		arg.QrSvg,
+		arg.UserID,
 	)
 	var i DevicePairing
 	err := row.Scan(
@@ -76,6 +85,7 @@ func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairi
 		&i.CreatedBy,
 		&i.RevokedAt,
 		&i.QrSvg,
+		&i.UserID,
 	)
 	return i, err
 }
@@ -118,7 +128,7 @@ func (q *Queries) CreateDevicePairingKey(ctx context.Context, arg CreateDevicePa
 }
 
 const getDevicePairingByAgentID = `-- name: GetDevicePairingByAgentID :one
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
 FROM device_pairings
 WHERE agent_id = ?1
 `
@@ -136,6 +146,7 @@ func (q *Queries) GetDevicePairingByAgentID(ctx context.Context, agentID string)
 		&i.CreatedBy,
 		&i.RevokedAt,
 		&i.QrSvg,
+		&i.UserID,
 	)
 	return i, err
 }
@@ -146,9 +157,19 @@ FROM device_pairings
 WHERE id = ?1
 `
 
-func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (DevicePairing, error) {
+type GetDevicePairingByIDRow struct {
+	ID            int64
+	AgentID       string
+	FriendlyLabel string
+	CreatedAt     int64
+	CreatedBy     string
+	RevokedAt     sql.NullInt64
+	QrSvg         []byte
+}
+
+func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (GetDevicePairingByIDRow, error) {
 	row := q.db.QueryRowContext(ctx, getDevicePairingByID, id)
-	var i DevicePairing
+	var i GetDevicePairingByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.AgentID,

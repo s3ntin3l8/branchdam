@@ -51,7 +51,8 @@ func (q *Queries) CompleteScanJobWithWarning(ctx context.Context, arg CompleteSc
 }
 
 const countRunningScanJobs = `-- name: CountRunningScanJobs :one
-SELECT COUNT(*) FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
+SELECT COUNT(*)
+       FROM scan_jobs WHERE state = 'RUNNING' AND kind != 'WATCH'
 `
 
 func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
@@ -62,7 +63,8 @@ func (q *Queries) CountRunningScanJobs(ctx context.Context) (int64, error) {
 }
 
 const countRunningScansForLocationByKind = `-- name: CountRunningScansForLocationByKind :one
-SELECT COUNT(*) FROM scan_jobs
+SELECT COUNT(*)
+       FROM scan_jobs
 WHERE storage_location_id = ?1 AND kind = ?2 AND state = 'RUNNING'
 `
 
@@ -110,19 +112,29 @@ func (q *Queries) CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFi
 }
 
 const createScanJob = `-- name: CreateScanJob :one
-INSERT INTO scan_jobs (storage_location_id, kind, state, started_at, updated_at)
-VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch())
+INSERT INTO scan_jobs (storage_location_id, kind, state, started_at, updated_at, started_by_user_id)
+VALUES (?1, ?2, 'RUNNING', unixepoch(), unixepoch(), ?3)
 RETURNING id, storage_location_id, kind, state, files_seen, files_hashed,
-          files_failed, edges_created, started_at, finished_at, last_error, updated_at
+          files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 `
 
 type CreateScanJobParams struct {
 	StorageLocationID sql.NullInt64
 	Kind              string
+	StartedByUserID   sql.NullInt64
 }
 
+// started_by_user_id (param 3) is the per-scan attribution FK: the
+// resolved user for POST /api/v1/scan, the system user for the
+// background SweeperSupervisor's INCREMENTAL passes, NULL for the
+// always-RUNNING WATCH rows (WatcherSupervisor never sets it; those are
+// long-lived server-owned rows, not user actions).
+//
+// RETURNING includes started_by_user_id so the result struct matches
+// ScanJob after migration 00018.
 func (q *Queries) CreateScanJob(ctx context.Context, arg CreateScanJobParams) (ScanJob, error) {
-	row := q.db.QueryRowContext(ctx, createScanJob, arg.StorageLocationID, arg.Kind)
+	row := q.db.QueryRowContext(ctx, createScanJob, arg.StorageLocationID, arg.Kind, arg.StartedByUserID)
 	var i ScanJob
 	err := row.Scan(
 		&i.ID,
@@ -137,6 +149,7 @@ func (q *Queries) CreateScanJob(ctx context.Context, arg CreateScanJobParams) (S
 		&i.FinishedAt,
 		&i.LastError,
 		&i.UpdatedAt,
+		&i.StartedByUserID,
 	)
 	return i, err
 }
@@ -157,7 +170,8 @@ func (q *Queries) FailScanJob(ctx context.Context, arg FailScanJobParams) error 
 
 const getScanJob = `-- name: GetScanJob :one
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
-       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 FROM scan_jobs
 WHERE id = ?1
 `
@@ -178,13 +192,15 @@ func (q *Queries) GetScanJob(ctx context.Context, id int64) (ScanJob, error) {
 		&i.FinishedAt,
 		&i.LastError,
 		&i.UpdatedAt,
+		&i.StartedByUserID,
 	)
 	return i, err
 }
 
 const listRecentScanJobs = `-- name: ListRecentScanJobs :many
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
-       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 FROM scan_jobs
 ORDER BY started_at DESC
 LIMIT ?1
@@ -212,6 +228,7 @@ func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJo
 			&i.FinishedAt,
 			&i.LastError,
 			&i.UpdatedAt,
+			&i.StartedByUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -228,7 +245,8 @@ func (q *Queries) ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJo
 
 const listScanJobsFiltered = `-- name: ListScanJobsFiltered :many
 SELECT id, storage_location_id, kind, state, files_seen, files_hashed,
-       files_failed, edges_created, started_at, finished_at, last_error, updated_at
+       files_failed, edges_created, started_at, finished_at, last_error, updated_at,
+       started_by_user_id
 FROM scan_jobs
 WHERE (?3 IS NULL OR kind = ?3)
   AND (?4 IS NULL OR state = ?4)
@@ -270,6 +288,7 @@ func (q *Queries) ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilt
 			&i.FinishedAt,
 			&i.LastError,
 			&i.UpdatedAt,
+			&i.StartedByUserID,
 		); err != nil {
 			return nil, err
 		}

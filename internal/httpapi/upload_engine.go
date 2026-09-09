@@ -82,6 +82,7 @@ type UploadParams struct {
 	ExpectedBlake3      string
 	SourcePathHash      string
 	MaxBytes            int64 // Maximum allowed bytes (<= 0 defaults to DefaultMaxUploadSizeBytes)
+	UserID              int64 // attribution: caller's user ID; 0 -> NULL (no attribution)
 }
 
 // UploadResult contains the result of a successful upload.
@@ -511,6 +512,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			DerivedFromID:      derivedFromID,
 			Phash:              pHashVal,
 			SourcePathHash:     nullSourcePathHash,
+			UploadedByUserID:   sql.NullInt64{Int64: params.UserID, Valid: params.UserID != 0},
 		})
 		if insErr != nil {
 			return insErr
@@ -548,13 +550,14 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				FastHash:          nullFast,
 				// FullHash is left nil for export hardlinks/copies so they do not conflict
 				// with the ux_media_nodes_live_full_hash unique index on the master archive node.
-				FullHash:       nil,
-				IndexingStatus: "INDEXED_SHALLOW",
-				GraphStatus:    "LINKED",
-				LifecycleState: "ACTIVE",
-				FilenameStem:   sql.NullString{String: stem, Valid: stem != ""},
-				CapturedAtUnix: sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
-				CameraModel:    cameraModelDB,
+				FullHash:         nil,
+				IndexingStatus:   "INDEXED_SHALLOW",
+				GraphStatus:      "LINKED",
+				LifecycleState:   "ACTIVE",
+				FilenameStem:     sql.NullString{String: stem, Valid: stem != ""},
+				CapturedAtUnix:   sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
+				CameraModel:      cameraModelDB,
+				UploadedByUserID: sql.NullInt64{Int64: params.UserID, Valid: params.UserID != 0},
 			})
 			if expInsErr != nil {
 				return fmt.Errorf("insert export media node: %w", expInsErr)
