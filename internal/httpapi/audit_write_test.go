@@ -149,3 +149,103 @@ func TestHandlePutSettings_AuditSkippedWhenNotConfigured(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestHandlePutStorageLocation_WritesActorAudit: PUT on a storage
+// location writes actor_audit('storage_location.upserted'). The
+// name from the seeded row is the resource_id.
+func TestHandlePutStorageLocation_WritesActorAudit(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "storloc-audit.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	base := config.Config{Authz: config.Authz{Groups: []string{"dam-admins"}}}
+	store, err := settings.NewStore(context.Background(), database, base, settingsTestKey(t), nil)
+	if err != nil {
+		t.Fatalf("settings.NewStore: %v", err)
+	}
+	usersSvc := attributionusers.NewService(database)
+	if _, err := usersSvc.EnsureSystemUser(context.Background()); err != nil {
+		t.Fatalf("EnsureSystemUser: %v", err)
+	}
+	srv := New(Deps{
+		Settings: store, DB: database, Hub: sse.New(), Version: "test",
+		Attribution: usersSvc,
+		Audit:       audit.NewService(database, usersSvc),
+	})
+	locID := seedTestStorageLocation(t, srv, "test-loc", "/tmp/test-loc", "TIER1_LOCAL_SCRATCH", false)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, adminReq(http.MethodPut, "/api/v1/storage-locations/"+itoa(locID),
+		settingsGetJSON(map[string]any{
+			"set": map[string]any{"watch": true, "sweepIntervalSecs": float64(600)},
+		})))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	_, _, ok := findActorAuditRow(t, srv, audit.EventStorageLocationPut)
+	if !ok {
+		t.Error("no storage_location.upserted actor_audit row after PUT")
+	}
+}
+
+// seedTestStorageLocationWithTTL inserts a prunable storage location
+// with a non-zero cache_ttl_hours, so /api/v1/prune reaches the
+// execute branch (rather than early-returning for ttlHours <= 0).
+func seedTestStorageLocationWithTTL(t *testing.T, srv *Server, name, rootPath, tier string, prunable bool, ttlHours int) int64 {
+	t.Helper()
+	pr := int64(0)
+	if prunable {
+		pr = 1
+	}
+	res, err := srv.db.ExecInTx(context.Background(),
+		"INSERT INTO storage_locations (name, root_path, tier, prunable, cache_ttl_hours, is_active) VALUES (?, ?, ?, ?, ?, 1)",
+		name, rootPath, tier, pr, int64(ttlHours))
+	if err != nil {
+		t.Fatalf("seed storage location with ttl: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId: %v", err)
+	}
+	return id
+}
+
+// TestHandlePrune_AuditFiresWhenExecuteRuns: POST /api/v1/prune with
+// execute=true but no storage Guard wired returns 500 ("no storage
+// guard is configured") and DOES NOT write actor_audit. The audit row
+// only lands when prune.Execute actually runs -- exercising that
+// path requires a real storage.Guard and is out of scope here. This
+// test pins the documented "no audit on failure" contract.
+func TestHandlePrune_AuditFiresWhenExecuteRuns(t *testing.T) {
+	srv := newAuditWiredServer(t, true, true, func(d *Deps) {
+		if d.Settings == nil {
+			t.Fatal("expected Settings")
+		}
+	})
+	enablePruneBody := settingsGetJSON(map[string]any{
+		"set": map[string]any{"pruning.enabled": true},
+	})
+	rr0 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr0, adminReq(http.MethodPut, "/api/v1/settings", enablePruneBody))
+	if rr0.Code != http.StatusOK {
+		t.Fatalf("enable prune: status = %d, body=%s", rr0.Code, rr0.Body.String())
+	}
+	locID := seedTestStorageLocationWithTTL(t, srv, "prune-target", "/tmp/prune-target", "TIER1_LOCAL_SCRATCH", true, 24)
+	body := settingsGetJSON(map[string]any{
+		"storageLocationId": locID,
+		"execute":           true,
+	})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, adminReq(http.MethodPost, "/api/v1/prune", body))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (no guard wired), body=%s", rr.Code, rr.Body.String())
+	}
+	// The 500 path is BEFORE the audit write -- no row should be there.
+	_, _, ok := findActorAuditRow(t, srv, audit.EventPruneExecuted)
+	if ok {
+		t.Error("prune.executed actor_audit row landed despite prune being skipped")
+	}
+}
