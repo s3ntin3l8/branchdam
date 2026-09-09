@@ -219,11 +219,3 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 	}
 	return out, nil
 }
-
-// ResolveOrCreateFull is ResolveOrCreate that returns the full attribution
-// row including denormalized display fields. Used by routes that need to
-// render the user's current display label (audit views, the "uploaded by"
-// column).
-func (s *Service) ResolveOrCreateFull(ctx context.Context, p auth.Principal) (Attribution, error) {
-	return s.ResolveOrCreate(ctx, p)
-}

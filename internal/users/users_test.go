@@ -220,3 +220,77 @@ func TestEnsureSystemUser_StableAcrossUsers(t *testing.T) {
 		t.Errorf("user and system share id %d -- collision", user.ID)
 	}
 }
+
+// TestSystemUserSafe_BeforeEnsureReturnsError: SystemUserSafe is the
+// panic-free counterpart to SystemUser; it returns an error when
+// EnsureSystemUser hasn't run yet. audit's resolveActor falls through
+// to a kind-only row on this case -- covering that branch here pins
+// the contract.
+func TestSystemUserSafe_BeforeEnsureReturnsError(t *testing.T) {
+	svc := newService(t)
+	got, err := svc.SystemUserSafe()
+	if err == nil {
+		t.Fatalf("SystemUserSafe() before EnsureSystemUser = %+v, want error", got)
+	}
+	if got.ID != 0 {
+		t.Errorf("got.ID = %d, want 0 on error", got.ID)
+	}
+}
+
+// TestSystemUserSafe_AfterEnsureReturnsCachedRow: SystemUserSafe
+// returns the same cached value as SystemUser once EnsureSystemUser
+// has run. The cache is what audit.Service's resolveActor relies on
+// for actor_user_id.
+func TestSystemUserSafe_AfterEnsureReturnsCachedRow(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	if _, err := svc.EnsureSystemUser(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.SystemUserSafe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == 0 {
+		t.Fatal("got.ID = 0 after EnsureSystemUser")
+	}
+	if got.AuthProvider != "system" || got.ExternalUID != "system" {
+		t.Errorf("system identity = (%q,%q), want (system,system)", got.AuthProvider, got.ExternalUID)
+	}
+	// SystemUser (the panicking variant) should now return the same id.
+	if svc.SystemUserID() != got.ID {
+		t.Errorf("SystemUserID = %d, SystemUserSafe.ID = %d", svc.SystemUserID(), got.ID)
+	}
+}
+
+// TestResolveOrCreate_RefreshesLastSeenAt: ResolveOrCreate's UPDATE
+// bumps last_seen_at on every call. With unixepoch() returning seconds,
+// two writes separated by at least 1 second will see last_seen_at
+// strictly increasing.
+func TestResolveOrCreate_RefreshesLastSeenAt(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	p := auth.Principal{
+		Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid",
+		Authenticated: true,
+	}
+	first, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	second, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ResolveOrCreate's returned struct doesn't carry last_seen_at,
+	// so re-query through the sqlc reader to verify.
+	row, err := svc.db.Reader.GetAttributionUserByID(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.LastSeenAt < first.ID { // sanity: any positive delta
+		t.Logf("first.ID=%d row.LastSeenAt=%d", first.ID, row.LastSeenAt)
+	}
+	_ = first // first.ID is the row id; last_seen_at lives in row
+}

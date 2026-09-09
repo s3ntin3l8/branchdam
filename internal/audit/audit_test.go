@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -204,5 +205,162 @@ func TestListActivity_NewestFirst(t *testing.T) {
 		if entries[i-1].CreatedAt < entries[i].CreatedAt {
 			t.Errorf("entries not newest-first at %d: %d < %d", i, entries[i-1].CreatedAt, entries[i].CreatedAt)
 		}
+	}
+}
+
+// TestListActivity_FilterByEvent: ListActivity's event filter clause
+// narrows the actor_audit query. The route handler maps the same
+// parameter through, but pinning the SQL clause here catches a
+// regression where the WHERE chain drifts between the two read paths.
+func TestListActivity_FilterByEvent(t *testing.T) {
+	svc, _ := newAuditService(t)
+	ctx := context.Background()
+	p := auth.Principal{Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid", Authenticated: true}
+	if err := svc.WriteActorAudit(ctx, p, EventSettingsUpdated, "app_setting", "k1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.WriteActorAudit(ctx, p, EventRestart, "system", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, total, err := svc.ListActivity(ctx, Filter{Event: EventSettingsUpdated}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("event-filtered total = %d, want 1", total)
+	}
+	if len(rows) != 1 || rows[0].Event != EventSettingsUpdated {
+		t.Errorf("rows = %+v, want one settings.updated row", rows)
+	}
+}
+
+// TestListActivity_FilterByResourceID: ListActivity's resource_id
+// filter clause narrows results. Exercises the LIKE/= comparison
+// for the narg-shaped column.
+func TestListActivity_FilterByResourceID(t *testing.T) {
+	svc, _ := newAuditService(t)
+	ctx := context.Background()
+	p := auth.Principal{Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid", Authenticated: true}
+	if err := svc.WriteActorAudit(ctx, p, EventSettingsUpdated, "app_setting", "alpha", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.WriteActorAudit(ctx, p, EventSettingsUpdated, "app_setting", "beta", nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, total, err := svc.ListActivity(ctx, Filter{ResourceID: "alpha"}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("resource_id-filtered total = %d, want 1", total)
+	}
+	if len(rows) != 1 || !rows[0].ResourceID.Valid || rows[0].ResourceID.String != "alpha" {
+		t.Errorf("rows = %+v", rows)
+	}
+}
+
+// TestListActivity_FilterBySinceUntilUnix: the since/until clauses
+// bound the result set by created_at. With since=tomorrow (a future
+// second), zero rows come back; with since=0, all rows do.
+func TestListActivity_FilterBySinceUntilUnix(t *testing.T) {
+	svc, _ := newAuditService(t)
+	ctx := context.Background()
+	p := auth.Principal{Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid", Authenticated: true}
+	if err := svc.WriteActorAudit(ctx, p, EventSettingsUpdated, "app_setting", "k1", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// since=0 returns the seeded row.
+	rows, total, err := svc.ListActivity(ctx, Filter{
+		SinceUnix: sql.NullInt64{Int64: 0, Valid: true},
+	}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("since=0 total = %d, want 1", total)
+	}
+	if len(rows) != 1 {
+		t.Errorf("rows = %d, want 1", len(rows))
+	}
+
+	// until=now+1h returns the seeded row (created_at < now+1h).
+	_, total, err = svc.ListActivity(ctx, Filter{
+		UntilUnix: sql.NullInt64{Int64: time.Now().Unix() + 3600, Valid: true},
+	}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("until=now+1h total = %d, want 1", total)
+	}
+
+	// since=now+1h (future) returns 0 rows -- the seeded row's
+	// created_at is in the past.
+	rows, _, err = svc.ListActivity(ctx, Filter{
+		SinceUnix: sql.NullInt64{Int64: time.Now().Unix() + 3600, Valid: true},
+	}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(rows))
+	}
+}
+
+// TestMarshalDetails_EmptyJSONObject: json.Marshal of a struct that
+// marshals to "{}" (empty struct value) returns "{}" not "null", so
+// the marshalDetails path falls through the empty-bytes branch.
+func TestMarshalDetails_EmptyJSONObject(t *testing.T) {
+	// An empty struct marshals to "{}" (2 bytes), not the zero/null
+	// case the function guards against.
+	if got, err := marshalDetails(struct{}{}); err != nil {
+		t.Fatalf("marshalDetails: %v", err)
+	} else if got != "{}" {
+		t.Errorf("marshalDetails(struct{}{}) = %q, want \"{}\"", got)
+	}
+}
+
+// TestEmptyToNil_BothBranches: emptyToNil returns nil for the empty
+// case and the original value otherwise. Cover both branches.
+func TestEmptyToNil_BothBranches(t *testing.T) {
+	if got := emptyToNil(""); got != nil {
+		t.Errorf("emptyToNil(\"\") = %v, want nil", got)
+	}
+	if got := emptyToNil("hello"); got != "hello" {
+		t.Errorf("emptyToNil(\"hello\") = %v, want hello", got)
+	}
+}
+
+// TestNullableToInterface_BothBranches: nullableToInterface returns
+// nil when the value is invalid and the int64 when valid.
+func TestNullableToInterface_BothBranches(t *testing.T) {
+	if got := nullableToInterface(sql.NullInt64{}); got != nil {
+		t.Errorf("nullableToInterface(invalid) = %v, want nil", got)
+	}
+	if got := nullableToInterface(sql.NullInt64{Int64: 42, Valid: true}); got != int64(42) {
+		t.Errorf("nullableToInterface(42) = %v, want 42", got)
+	}
+}
+
+// TestResolveActor_SystemWithUserSvcButNotProvisioned: when the
+// audit Service is built but EnsureSystemUser hasn't been called
+// yet (the audit writer is constructed before the boot sequence
+// finishes), resolveActor must fall through to a kind-only row
+// rather than panicking on a nil userSvc lookup.
+func TestResolveActor_SystemBeforeEnsure(t *testing.T) {
+	// Build the users service without calling EnsureSystemUser.
+	path := filepath.Join(t.TempDir(), "no-ensure.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	users := users.NewService(database)
+	_ = NewService(database, users)
+
+	_, gotKind, _ := resolveActor(auth.Principal{Kind: auth.KindSystem, Name: "system", ExternalUID: "system", Authenticated: true}, users)
+	if gotKind != "system" {
+		t.Errorf("system-before-ensure actorKind = %q, want system", gotKind)
 	}
 }
