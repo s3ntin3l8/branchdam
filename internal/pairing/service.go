@@ -403,10 +403,10 @@ func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor stri
 
 // DeletePairing hard-deletes a revoked pairing and all its child rows
 // (audit, keys). The pairing must already be revoked -- active pairings
-// cannot be deleted. A PAIR_DELETED audit event is written before the
-// rows are removed so the action is traceable.
+// cannot be deleted. A trace event is written to actor_audit (the
+// global cross-cutting audit table) before the pairing-scoped rows are
+// removed, so the action remains auditable after deletion.
 func (s *Service) DeletePairing(ctx context.Context, pairingID int64, actor string) error {
-	now := s.nowFn()
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		p, err := q.GetDevicePairingByID(ctx, pairingID)
 		if err != nil {
@@ -418,14 +418,17 @@ func (s *Service) DeletePairing(ctx context.Context, pairingID int64, actor stri
 		if !p.RevokedAt.Valid {
 			return ErrPairingNotRevoked
 		}
-		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
-			PairingID: pairingID,
-			Actor:     actor,
-			Event:     "PAIR_DELETED",
-			Details:   "{}",
-			CreatedAt: now,
+		actorKind, actorName := parseActorString(actor)
+		if err := q.InsertActorAudit(ctx, sqlcgen.InsertActorAuditParams{
+			ActorUserID:  sql.NullInt64{},
+			ActorKind:    actorKind,
+			ActorName:    actorName,
+			Event:        "pairing.deleted",
+			ResourceType: "companion_pairing",
+			ResourceID:   sql.NullString{String: fmt.Sprintf("%d", pairingID), Valid: true},
+			DetailsJson:  "{}",
 		}); err != nil {
-			return fmt.Errorf("audit: %w", err)
+			return fmt.Errorf("actor audit: %w", err)
 		}
 		if err := q.DeletePairingAuditForPairing(ctx, pairingID); err != nil {
 			return fmt.Errorf("delete audit: %w", err)
@@ -436,6 +439,18 @@ func (s *Service) DeletePairing(ctx context.Context, pairingID int64, actor stri
 		return q.DeleteDevicePairing(ctx, pairingID)
 	})
 	return err
+}
+
+// parseActorString splits the actor string (e.g. "user:alice" or "system")
+// into (actor_kind, actor_name) for the actor_audit table.
+func parseActorString(actor string) (kind, name string) {
+	if strings.HasPrefix(actor, "user:") {
+		return "user", strings.TrimPrefix(actor, "user:")
+	}
+	if actor == "system" || actor == "" {
+		return "system", actor
+	}
+	return "user", actor
 }
 
 // LatestActiveKey returns the device's newest key that isn't the one

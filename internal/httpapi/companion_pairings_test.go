@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -161,7 +162,7 @@ func TestCompanionPairings_CreateListGetRevoke(t *testing.T) {
 }
 
 func TestCompanionPairings_DeleteRevokedPairing(t *testing.T) {
-	srv, _, _ := newPairingTestServer(t)
+	srv, database, _ := newPairingTestServer(t)
 
 	// Create
 	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
@@ -209,6 +210,62 @@ func TestCompanionPairings_DeleteRevokedPairing(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listed))
 	assert.Equal(t, int64(0), listed.Total)
+
+	// actor_audit must contain a trace of the deletion that survives
+	// the pairing removal (the pairing-scoped companion_pairing_audit
+	// rows are gone, but the global actor_audit table is unbound).
+	auditCount, err := database.Reader.CountActorAudit(context.Background(), sqlcgen.CountActorAuditParams{
+		Event:        sql.NullString{String: "pairing.deleted", Valid: true},
+		ResourceType: sql.NullString{String: "companion_pairing", Valid: true},
+		ResourceID:   sql.NullString{String: pairingIDStr(created.PairingID), Valid: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), auditCount, "actor_audit should have exactly one trace of the deletion")
+}
+
+func TestCompanionPairings_DeleteNotFound(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+	rec := doAdmin(t, srv, http.MethodDelete,
+		"/api/v1/companion/pairings/99999", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestCompanionPairings_DeleteAfterRotateAndRevoke(t *testing.T) {
+	srv, _, pairSvc := newPairingTestServer(t)
+	ctx := context.Background()
+
+	// Create, rotate (so there are multiple keys), then revoke and delete.
+	p, _, err := pairSvc.CreatePairing(ctx, "Rotate-delete iPhone", "test", 0, func(agentID, apiKey string) []byte {
+		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
+	})
+	require.NoError(t, err)
+	_, _, err = pairSvc.RotateKey(ctx, p.ID, "test", 1440, func(agentID, apiKey string) []byte {
+		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
+	})
+	require.NoError(t, err)
+	_, err = pairSvc.RevokePairing(ctx, p.ID, "test")
+	require.NoError(t, err)
+
+	// Delete must clean up keys and audit without error
+	rec := doAdmin(t, srv, http.MethodDelete,
+		"/api/v1/companion/pairings/"+pairingIDStr(p.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	// Verify keys are gone
+	err = srv.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		keys, err := q.ListKeysByPairing(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		assert.Empty(t, keys, "all keys should be deleted")
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Verify pairing-scoped audit rows are gone
+	auditCount, err := srv.db.Reader.CountPairingAudit(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), auditCount, "pairing-scoped audit rows should be deleted")
 }
 
 func TestCompanionPairings_QRSVGReturnsCachedSVG(t *testing.T) {
