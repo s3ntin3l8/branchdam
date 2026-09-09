@@ -78,7 +78,7 @@ func TestVersionCollisionArchivesOldAndPreservesEdges(t *testing.T) {
 
 	stats, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/exports/render_v1.jpg", FileName: "render_v1.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (initial insert): %v", err)
 	}
@@ -93,7 +93,7 @@ func TestVersionCollisionArchivesOldAndPreservesEdges(t *testing.T) {
 	// child.
 	childStats, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/exports/render_v1_proxy.jpg", FileName: "render_v1_proxy.jpg", FileExt: "jpg", Size: 10, ModTime: time.Now(), FastHash: "cccccccccccccccc"},
-	})
+	}, 0)
 	if err != nil || childStats.Inserted != 1 {
 		t.Fatalf("Commit (child node): stats=%+v err=%v", childStats, err)
 	}
@@ -122,7 +122,7 @@ func TestVersionCollisionArchivesOldAndPreservesEdges(t *testing.T) {
 	// collision.
 	stats, err = Commit(ctx, database, locationID, []Result{
 		{Path: "/exports/render_v1.jpg", FileName: "render_v1.jpg", FileExt: "jpg", Size: 200, ModTime: time.Now(), FastHash: "bbbbbbbbbbbbbbbb"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (version collision): %v", err)
 	}
@@ -167,7 +167,7 @@ func TestVersionCollisionArchivesOldAndPreservesEdges(t *testing.T) {
 	// archived, not because uniqueness stopped being enforced.
 	stats, err = Commit(ctx, database, locationID, []Result{
 		{Path: "/exports/render_v1.jpg", FileName: "render_v1.jpg", FileExt: "jpg", Size: 300, ModTime: time.Now(), FastHash: "dddddddddddddddd"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (second version collision): %v", err)
 	}
@@ -198,7 +198,7 @@ func TestFastHashCollisionDoesNotMerge(t *testing.T) {
 	stats, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/a/one.jpg", FileName: "one.jpg", FileExt: "jpg", Size: 111, ModTime: time.Now(), FastHash: sharedFastHash, FullHash: fullHashA},
 		{Path: "/b/two.jpg", FileName: "two.jpg", FileExt: "jpg", Size: 222, ModTime: time.Now(), FastHash: sharedFastHash, FullHash: fullHashB},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestSameContentTouchesNotDuplicates(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		stats, err := Commit(ctx, database, locationID, []Result{
 			{Path: "/x/stable.jpg", FileName: "stable.jpg", FileExt: "jpg", Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff"},
-		})
+		}, 0)
 		if err != nil {
 			t.Fatalf("Commit (pass %d): %v", i, err)
 		}
@@ -281,7 +281,7 @@ func TestMissingNodeRebasesOnMove(t *testing.T) {
 
 	_, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/old/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (initial): %v", err)
 	}
@@ -295,7 +295,7 @@ func TestMissingNodeRebasesOnMove(t *testing.T) {
 
 	stats, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/new/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (after move): %v", err)
 	}
@@ -328,7 +328,7 @@ func TestRebasedNodeBackfillsMetadata(t *testing.T) {
 	// First pass: no probe data at all, as if exiftool/ffprobe were absent.
 	_, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/old/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (initial, probe-less): %v", err)
 	}
@@ -353,7 +353,7 @@ func TestRebasedNodeBackfillsMetadata(t *testing.T) {
 			Path: "/new/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee",
 			Make: "CANON", ExifRaw: map[string]string{"EXIF:ISO": "100"},
 		},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (after move): %v", err)
 	}
@@ -383,12 +383,12 @@ func TestMarkUnseenNodesMissingScopedToLocation(t *testing.T) {
 	locB := seedLocation(t, database, "PROJECTS", false)
 	if _, err := Commit(ctx, database, locA, []Result{
 		{Path: "/a/node.jpg", FileName: "node.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit A: %v", err)
 	}
 	if _, err := Commit(ctx, database, locB, []Result{
 		{Path: "/b/node.jpg", FileName: "node.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "bbbbbbbbbbbbbbbb"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit B: %v", err)
 	}
 	// Backdate both nodes so a sweep at before_unix=9 would catch them.
@@ -443,7 +443,7 @@ func TestCommitPersistsExifMetadataExactly(t *testing.T) {
 			"EXIF:Particularly": "also-must-not-persist",
 		},
 	}
-	if _, err := Commit(ctx, database, locationID, []Result{result}); err != nil {
+	if _, err := Commit(ctx, database, locationID, []Result{result}, 0); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	node := mustGetLiveNode(t, database, "/exports/shot.jpg")
@@ -493,7 +493,7 @@ func TestPersistExifMetadataWritesExiftoolRows(t *testing.T) {
 
 	if _, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/exports/inherited.jpg", FileName: "inherited.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	node := mustGetLiveNode(t, database, "/exports/inherited.jpg")
@@ -594,7 +594,7 @@ func TestCommitPersistsFFProbeMetadata(t *testing.T) {
 			VideoCodec: "h264", AudioCodec: "aac", Width: 320, Height: 240,
 		},
 	}
-	if _, err := Commit(ctx, database, locationID, []Result{result}); err != nil {
+	if _, err := Commit(ctx, database, locationID, []Result{result}, 0); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	node := mustGetLiveNode(t, database, "/exports/clip.mp4")
@@ -624,7 +624,7 @@ func TestCommitPersistsFFProbeMetadata(t *testing.T) {
 	if _, err := Commit(ctx, database, locationID, []Result{{
 		Path: "/exports/photo.jpg", FileName: "photo.jpg", FileExt: "jpg",
 		Size: 50, ModTime: time.Now(), FastHash: "cccccccccccccccc",
-	}}); err != nil {
+	}}, 0); err != nil {
 		t.Fatalf("Commit (photo): %v", err)
 	}
 	photo := mustGetLiveNode(t, database, "/exports/photo.jpg")
@@ -660,7 +660,7 @@ func TestCommitPersistsFFProbeMetadataForLRF(t *testing.T) {
 			VideoCodec: "h264", Width: 640, Height: 360,
 		},
 	}
-	if _, err := Commit(ctx, database, locationID, []Result{result}); err != nil {
+	if _, err := Commit(ctx, database, locationID, []Result{result}, 0); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	node := mustGetLiveNode(t, database, "/dcim/DJI_0001.LRF")
@@ -693,7 +693,7 @@ func TestPersistMetadataCapTruncates(t *testing.T) {
 	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
 	if _, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/cap.jpg", FileName: "cap.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	node := mustGetLiveNode(t, database, "/cap.jpg")
@@ -736,7 +736,7 @@ func TestSameContentTouchDoesNotDuplicateMetadata(t *testing.T) {
 		},
 	}
 	for i := 0; i < 2; i++ {
-		stats, err := Commit(ctx, database, locationID, []Result{result})
+		stats, err := Commit(ctx, database, locationID, []Result{result}, 0)
 		if err != nil {
 			t.Fatalf("Commit (pass %d): %v", i, err)
 		}
@@ -773,7 +773,7 @@ func TestTouchBackfillsMetadataForProbelessFirstScan(t *testing.T) {
 	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
 
 	bare := Result{Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg", Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff"}
-	stats, err := Commit(ctx, database, locationID, []Result{bare})
+	stats, err := Commit(ctx, database, locationID, []Result{bare}, 0)
 	if err != nil {
 		t.Fatalf("Commit (initial, probe-less): %v", err)
 	}
@@ -790,7 +790,7 @@ func TestTouchBackfillsMetadataForProbelessFirstScan(t *testing.T) {
 	withProbeData := bare
 	withProbeData.Make = "CANON"
 	withProbeData.ExifRaw = map[string]string{"EXIF:ISO": "100"}
-	stats, err = Commit(ctx, database, locationID, []Result{withProbeData})
+	stats, err = Commit(ctx, database, locationID, []Result{withProbeData}, 0)
 	if err != nil {
 		t.Fatalf("Commit (touched, with probe data): %v", err)
 	}
@@ -839,7 +839,7 @@ func TestTouchWithUnchangedMetadataWritesNothing(t *testing.T) {
 		Make:    "CANON",
 		ExifRaw: map[string]string{"EXIF:ISO": "100"},
 	}
-	stats, err := Commit(ctx, database, locationID, []Result{result})
+	stats, err := Commit(ctx, database, locationID, []Result{result}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 1, insert): %v", err)
 	}
@@ -853,7 +853,7 @@ func TestTouchWithUnchangedMetadataWritesNothing(t *testing.T) {
 
 	// Pass 2: identical Result, same content, same metadata -- the ordinary
 	// "re-scan an unchanged file" case.
-	stats, err = Commit(ctx, database, locationID, []Result{result})
+	stats, err = Commit(ctx, database, locationID, []Result{result}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched): %v", err)
 	}
@@ -890,7 +890,7 @@ func TestTouchWithChangedMetadataWritesOnlyTheDelta(t *testing.T) {
 		Make:    "CANON",
 		ExifRaw: map[string]string{"EXIF:ISO": "100", "XMP:Rating": "3"},
 	}
-	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+	if stats, err := Commit(ctx, database, locationID, []Result{first}, 0); err != nil {
 		t.Fatalf("Commit (pass 1, insert): %v", err)
 	} else if stats.Inserted != 1 || stats.MetadataWritten != 0 {
 		// insertNewNode uses persistAllMetadata, not the counted
@@ -900,7 +900,7 @@ func TestTouchWithChangedMetadataWritesOnlyTheDelta(t *testing.T) {
 
 	changed := first
 	changed.ExifRaw = map[string]string{"EXIF:ISO": "100", "XMP:Rating": "5"} // only the rating changed
-	stats, err := Commit(ctx, database, locationID, []Result{changed})
+	stats, err := Commit(ctx, database, locationID, []Result{changed}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched, changed rating): %v", err)
 	}
@@ -949,7 +949,7 @@ func TestTouchRefreshesPromotedColumnsWhenValueDiffers(t *testing.T) {
 		Path: "/inherit/child.jpg", FileName: "child.jpg", FileExt: "jpg",
 		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
 	}
-	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+	if stats, err := Commit(ctx, database, locationID, []Result{first}, 0); err != nil {
 		t.Fatalf("Commit (pass 1, probe-less insert): %v", err)
 	} else if stats.Inserted != 1 {
 		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
@@ -972,7 +972,7 @@ func TestTouchRefreshesPromotedColumnsWhenValueDiffers(t *testing.T) {
 	second.LensModel = "FE 24-70mm F2.8 GM"
 	second.SerialNumber = "1234567"
 	second.CapturedAt = &capturedAt
-	stats, err := Commit(ctx, database, locationID, []Result{second})
+	stats, err := Commit(ctx, database, locationID, []Result{second}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched): %v", err)
 	}
@@ -1024,7 +1024,7 @@ func TestTouchPromotedColumnsCapturedAtNullToValue(t *testing.T) {
 		Path: "/timeless.jpg", FileName: "timeless.jpg", FileExt: "jpg",
 		Size: 50, ModTime: time.Now(), FastHash: "cccccccccccccccc",
 	}
-	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+	if stats, err := Commit(ctx, database, locationID, []Result{first}, 0); err != nil {
 		t.Fatalf("Commit (pass 1, probe-less insert): %v", err)
 	} else if stats.Inserted != 1 {
 		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
@@ -1037,7 +1037,7 @@ func TestTouchPromotedColumnsCapturedAtNullToValue(t *testing.T) {
 	capturedAt := time.Date(2026, 3, 4, 8, 0, 0, 0, time.UTC)
 	second := first
 	second.CapturedAt = &capturedAt
-	stats, err := Commit(ctx, database, locationID, []Result{second})
+	stats, err := Commit(ctx, database, locationID, []Result{second}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched): %v", err)
 	}
@@ -1075,7 +1075,7 @@ func TestTouchPromotedColumnsCapturedAtNilDoesNotClear(t *testing.T) {
 		Size: 50, ModTime: time.Now(), FastHash: "dddddddddddddddd",
 		CapturedAt: &capturedAt,
 	}
-	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+	if stats, err := Commit(ctx, database, locationID, []Result{first}, 0); err != nil {
 		t.Fatalf("Commit (pass 1, insert): %v", err)
 	} else if stats.Inserted != 1 {
 		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
@@ -1087,7 +1087,7 @@ func TestTouchPromotedColumnsCapturedAtNilDoesNotClear(t *testing.T) {
 		Path: "/loses-probe.jpg", FileName: "loses-probe.jpg", FileExt: "jpg",
 		Size: 50, ModTime: time.Now(), FastHash: "dddddddddddddddd",
 	}
-	stats, err := Commit(ctx, database, locationID, []Result{probeLess})
+	stats, err := Commit(ctx, database, locationID, []Result{probeLess}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched, probe-less): %v", err)
 	}
@@ -1120,7 +1120,7 @@ func TestTouchPromotedColumnsUnchangedWritesNothing(t *testing.T) {
 		DocumentID:   "doc-abc-123",
 		CapturedAt:   &stableCapturedAt,
 	}
-	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+	if stats, err := Commit(ctx, database, locationID, []Result{first}, 0); err != nil {
 		t.Fatalf("Commit (pass 1, insert): %v", err)
 	} else if stats.Inserted != 1 || stats.PromotedColumnsRefreshed != 0 {
 		t.Fatalf("pass 1: stats = %+v, want Inserted=1, PromotedColumnsRefreshed=0 (insert sets columns, reconcile only runs on touch/rebase)", stats)
@@ -1128,7 +1128,7 @@ func TestTouchPromotedColumnsUnchangedWritesNothing(t *testing.T) {
 
 	// Pass 2: identical Result, same content, same promoted values -- the
 	// ordinary "re-scan an unchanged file" case.
-	stats, err := Commit(ctx, database, locationID, []Result{first})
+	stats, err := Commit(ctx, database, locationID, []Result{first}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched): %v", err)
 	}
@@ -1162,7 +1162,7 @@ func TestTouchPromotedColumnsEmptyFreshValueDoesNotClear(t *testing.T) {
 		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
 		CameraModel: "ILCE-7M4",
 	}
-	if stats, err := Commit(ctx, database, locationID, []Result{first}); err != nil {
+	if stats, err := Commit(ctx, database, locationID, []Result{first}, 0); err != nil {
 		t.Fatalf("Commit (pass 1, insert): %v", err)
 	} else if stats.Inserted != 1 {
 		t.Fatalf("pass 1: stats = %+v, want Inserted=1", stats)
@@ -1174,7 +1174,7 @@ func TestTouchPromotedColumnsEmptyFreshValueDoesNotClear(t *testing.T) {
 		Path: "/stable.jpg", FileName: "stable.jpg", FileExt: "jpg",
 		Size: 50, ModTime: time.Now(), FastHash: "ffffffffffffffff",
 	}
-	stats, err := Commit(ctx, database, locationID, []Result{probeLess})
+	stats, err := Commit(ctx, database, locationID, []Result{probeLess}, 0)
 	if err != nil {
 		t.Fatalf("Commit (pass 2, touched, probe-less): %v", err)
 	}
@@ -1200,7 +1200,7 @@ func TestRebasedNodeRefreshesPromotedColumns(t *testing.T) {
 	// First pass: no probe data at all, as if exiftool/ffprobe were absent.
 	if _, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/old/place.jpg", FileName: "place.jpg", FileExt: "jpg", Size: 77, ModTime: time.Now(), FastHash: "eeeeeeeeeeeeeeee"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit (initial, probe-less): %v", err)
 	}
 	original := mustGetLiveNode(t, database, "/old/place.jpg")
@@ -1218,7 +1218,7 @@ func TestRebasedNodeRefreshesPromotedColumns(t *testing.T) {
 			CameraModel:  "ILCE-7M4",
 			SerialNumber: "1234567",
 		},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("Commit (after move): %v", err)
 	}
@@ -1261,7 +1261,7 @@ func TestCapTruncatedMetadataIsStableAcrossPasses(t *testing.T) {
 	// TestPersistMetadataCapTruncates does.
 	if _, err := Commit(ctx, database, locationID, []Result{
 		{Path: "/capstable.jpg", FileName: "capstable.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "aaaaaaaaaaaaaaaa"},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("Commit (insert): %v", err)
 	}
 	node := mustGetLiveNode(t, database, "/capstable.jpg")
@@ -1300,4 +1300,145 @@ func TestCapTruncatedMetadataIsStableAcrossPasses(t *testing.T) {
 	if written2 != 0 {
 		t.Fatalf("pass 2 written = %d, want 0 (identical, capped set is stable)", written2)
 	}
+}
+
+// TestCommit_PopulatesUploadedByUserID_ForNewNodes: the new
+// media_nodes.uploaded_by_user_id column is stamped on insert when
+// the caller (drainAndCommit / RunScan / etc.) supplies a non-zero
+// user id. NULL otherwise -- scanner/sweeper paths that haven't
+// wired attribution leave the column NULL by design.
+func TestCommit_PopulatesUploadedByUserID_ForNewNodes(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	aliceID := seedAttributionUser(t, database, "alice", "alice-uid")
+
+	_, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/alice-upload.jpg", FileName: "alice-upload.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "1111111111111111"},
+	}, aliceID)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/alice-upload.jpg")
+	if !node.UploadedByUserID.Valid {
+		t.Fatalf("uploaded_by_user_id is NULL; want %d", aliceID)
+	}
+	if node.UploadedByUserID.Int64 != aliceID {
+		t.Errorf("uploaded_by_user_id = %d, want %d", node.UploadedByUserID.Int64, aliceID)
+	}
+}
+
+// TestCommit_ZeroUserIDMeansNull: 0 is the sentinel for "no attribution";
+// the inserted row gets NULL for uploaded_by_user_id. Background scans
+// (SweeperSupervisor before EnsureSystemUser runs, for example) pass 0.
+func TestCommit_ZeroUserIDMeansNull(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	_, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/system-scan.jpg", FileName: "system-scan.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "2222222222222222"},
+	}, 0)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/system-scan.jpg")
+	if node.UploadedByUserID.Valid {
+		t.Errorf("uploaded_by_user_id = %d, want NULL (0 sentinel)", node.UploadedByUserID.Int64)
+	}
+}
+
+// TestCommit_PreservesUploadedByUserID_AcrossRescan: a file seen on a
+// later scan takes the touched branch (commitOne's same-fast_hash
+// path). The column must NOT be rewritten -- the original uploader
+// owns the row, not the rescan's actor.
+func TestCommit_PreservesUploadedByUserID_AcrossRescan(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	aliceID := seedAttributionUser(t, database, "alice", "alice-uid")
+
+	// First scan: alice uploaded it.
+	_, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/same.jpg", FileName: "same.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "3333333333333333"},
+	}, aliceID)
+	if err != nil {
+		t.Fatalf("Commit (first): %v", err)
+	}
+	// Second scan: same content (same fast_hash) under no user (sweeper).
+	_, err = Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/same.jpg", FileName: "same.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "3333333333333333"},
+	}, 0)
+	if err != nil {
+		t.Fatalf("Commit (rescan): %v", err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/same.jpg")
+	if !node.UploadedByUserID.Valid || node.UploadedByUserID.Int64 != aliceID {
+		t.Errorf("uploaded_by_user_id = %v, want %d (alice's, not overwritten by 0 rescan)", node.UploadedByUserID, aliceID)
+	}
+}
+
+// TestCommit_VersionCollisionStampsNewUploader: when a file's
+// content changes (different fast_hash at the same path), commitOne
+// archives the old row and inserts a new one. The successor carries
+// the *new* scan's actor -- the v2's content belongs to whoever
+// produced it, not whoever produced v1. The v1 row's uploader
+// stays on the archived predecessor (no UPDATE rewrites it). This
+// pins the "uploader follows the content, not the scan" contract.
+func TestCommit_VersionCollisionStampsNewUploader(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	aliceID := seedAttributionUser(t, database, "alice", "alice-uid")
+	bobID := seedAttributionUser(t, database, "bob", "bob-uid")
+
+	_, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/evolves.jpg", FileName: "evolves.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "4444444444444444"},
+	}, aliceID)
+	if err != nil {
+		t.Fatalf("Commit (v1): %v", err)
+	}
+	_, err = Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/evolves.jpg", FileName: "evolves.jpg", FileExt: "jpg", Size: 200, ModTime: time.Now(), FastHash: "5555555555555555"},
+	}, bobID)
+	if err != nil {
+		t.Fatalf("Commit (v2): %v", err)
+	}
+
+	// The successor (active row at /exports/evolves.jpg) carries bob's
+	// id -- the v2's actor.
+	active := mustGetLiveNode(t, database, "/exports/evolves.jpg")
+	if !active.UploadedByUserID.Valid {
+		t.Fatal("active row has NULL uploaded_by_user_id")
+	}
+	if active.UploadedByUserID.Int64 != bobID {
+		t.Errorf("active uploaded_by_user_id = %d, want %d (v2 author)", active.UploadedByUserID.Int64, bobID)
+	}
+
+	// Sanity: the active row is itself NOT superseded (it has no
+	// successor yet). What got superseded is the v1 (alice) row --
+	// SupersededBy is set on the v1 side, not v2. The key check
+	// here is the v2's uploader follows the v2 scan's actor, which
+	// we already verified above. Just confirm v2 doesn't have its
+	// own SupersededBy set.
+	if active.SupersededBy.Valid {
+		t.Error("v2 active row has SupersededBy set; the version-collision chain is on the v1 row, not v2")
+	}
+}
+
+// seedAttributionUser inserts a minimal attribution row directly via
+// sqlcgen so the FK on media_nodes.uploaded_by_user_id is satisfied.
+// Uses source='forward-link' + NULL password_hash to match the
+// attribution upsert path (see PR #407's CHECK constraint).
+func seedAttributionUser(t *testing.T, database *db.DB, username, externalUID string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	res, err := database.ExecInTx(ctx,
+		"INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid, last_seen_at) VALUES (?, NULL, NULL, 0, 'forward-link', unixepoch(), 'test', 'authentik', ?, unixepoch())",
+		username, externalUID)
+	if err != nil {
+		t.Fatalf("seed attribution user: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return id
 }

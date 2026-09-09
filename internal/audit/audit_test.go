@@ -359,7 +359,7 @@ func TestResolveActor_SystemBeforeEnsure(t *testing.T) {
 	users := users.NewService(database)
 	_ = NewService(database, users)
 
-	_, gotKind, _ := resolveActor(auth.Principal{Kind: auth.KindSystem, Name: "system", ExternalUID: "system", Authenticated: true}, users)
+	_, gotKind, _ := resolveActor(context.Background(), auth.Principal{Kind: auth.KindSystem, Name: "system", ExternalUID: "system", Authenticated: true}, users)
 	if gotKind != "system" {
 		t.Errorf("system-before-ensure actorKind = %q, want system", gotKind)
 	}

@@ -123,7 +123,7 @@ type Filter struct {
 // want to log a background event without a Principal should pass
 // SystemActor instead of a Principal.
 func (s *Service) WriteActorAudit(ctx context.Context, p auth.Principal, event, resourceType, resourceID string, details any) error {
-	userID, kind, name := resolveActor(p, s.users)
+	userID, kind, name := resolveActor(ctx, p, s.users)
 	detailsJSON, err := marshalDetails(details)
 	if err != nil {
 		return fmt.Errorf("audit: marshal details: %w", err)
@@ -168,7 +168,7 @@ var SystemActor = auth.Principal{
 // resolveActor returns (user_id, kind, name) for the Principal.
 // Handles the special SystemActor mapping (above) and falls back to
 // anonymous for empty Authenticated User principals.
-func resolveActor(p auth.Principal, userSvc *users.Service) (int64, string, string) {
+func resolveActor(ctx context.Context, p auth.Principal, userSvc *users.Service) (int64, string, string) {
 	switch {
 	case p.Kind == auth.KindSystem:
 		if userSvc != nil {
@@ -186,7 +186,7 @@ func resolveActor(p auth.Principal, userSvc *users.Service) (int64, string, stri
 		return 0, ActorKindMachine, p.Name
 	case p.Kind == auth.KindUser && p.Authenticated && p.ExternalUID != "":
 		if userSvc != nil {
-			a, err := userSvc.ResolveOrCreate(context.Background(), p)
+			a, err := userSvc.ResolveOrCreate(ctx, p)
 			if err == nil {
 				return a.ID, ActorKindUser, p.Name
 			}

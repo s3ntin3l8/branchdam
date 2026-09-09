@@ -50,6 +50,20 @@ ALTER TABLE users
 
 -- Backfill external_uid for existing rows (use username as a stable proxy
 -- until the user re-authenticates and ResolveOrCreate updates it).
+--
+-- KNOWN FRAGMENTATION WINDOW: this backfill means a pre-existing user
+-- is keyed on external_uid = their current username. If that user
+-- later renames in Authentik BEFORE re-authenticating against branchDAM,
+-- the next ResolveOrCreate sees a NEW (auth_provider, external_uid)
+-- triple -- the new stable id from Authentik's stable-id header -- and
+-- inserts a SECOND users row rather than upserting the original. The
+-- original row stays with external_uid = old-username; audit rows that
+-- referenced it still resolve through the old row; the new row
+-- accumulates fresh attribution. The two rows collapse back to one on
+-- the next Authentik rename or on a manual cleanup. Acceptable as a
+-- documented proxy -- the alternative (forcing a re-login at deploy
+-- time) is more disruptive than two-rows-per-rename for the few
+-- deployments with frequent renames.
 UPDATE users SET external_uid = username WHERE external_uid = '';
 
 CREATE UNIQUE INDEX ix_users_auth_provider_external_uid

@@ -3039,7 +3039,15 @@ type AuditOutput struct {
 // Returns 503 when no audit service is wired (every existing test).
 // The merge is in Go: actor_audit comes from internal/audit; login_audit
 // comes from internal/auth/users (PR #407). Newest-first, capped at 200.
+//
+// Admin-gated: login_audit exposes usernames, IPs, and user-agents; the
+// merged view also includes every actor_audit row. Same stricter check
+// as /api/v1/settings (#276) -- an unauthenticated reader or a machine
+// principal must never see either side.
 func (s *Server) handleAudit(ctx context.Context, in *AuditInput) (*AuditOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
 	if s.audit == nil {
 		return nil, huma.Error503ServiceUnavailable("audit service not configured")
 	}
@@ -3183,7 +3191,14 @@ type ListUsersOutput struct {
 // attribution table. Used by the pairing UI's "Owned by" selector and
 // the SPA's "Uploaded by" filter on /assets. Returns 503 when the
 // attribution service hasn't been wired (every existing test).
+//
+// Admin-gated: every row carries the stable external_uid (Authentik's
+// per-user id) and the optional email; that's the directory you'd want
+// to keep private in any non-solo deployment.
 func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*ListUsersOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
 	if s.attribution == nil {
 		return nil, huma.Error503ServiceUnavailable("attribution service not configured")
 	}

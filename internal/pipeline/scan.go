@@ -702,7 +702,7 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 	flush := func() {
 		committedBatch := len(buf) > 0
 		if committedBatch {
-			stats, err := Commit(ctx, deps.DB, locationID, buf, log)
+			stats, err := Commit(ctx, deps.DB, locationID, buf, deps.StartedByUserID, log)
 			total.Inserted += stats.Inserted
 			total.Touched += stats.Touched
 			total.VersionCollisions += stats.VersionCollisions

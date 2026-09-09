@@ -11,7 +11,10 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/settings"
+	"github.com/s3ntin3l8/branchdam/internal/sse"
 	attributionusers "github.com/s3ntin3l8/branchdam/internal/users"
 )
 
@@ -19,6 +22,23 @@ import (
 // audit so handleAudit / handleListUsers can be exercised. Returns
 // the Server and the attribution/audit services so tests can seed
 // rows.
+// adminPrincipal returns a Principal that satisfies requireSettingsAdmin:
+// an authenticated KindUser with a stable ExternalUID and a dam-admins
+// group membership. The handlers under test don't actually use the
+// Principal's identity (they read from auth.From purely to check admin
+// status); the group membership is the gate that flips IsAdmin to true
+// for Settings-wired test servers.
+func adminPrincipal() auth.Principal {
+	return auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "admin",
+		Email:         "admin@example.com",
+		ExternalUID:   "admin-uid",
+		Groups:        []string{"dam-admins"},
+		Authenticated: true,
+	}
+}
+
 func newAuditHandlerServer(t *testing.T) (*Server, *audit.Service, *attributionusers.Service) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "audit-handler.db")
@@ -78,7 +98,8 @@ func TestHandleAudit_ActivityTypeReturnsActorAuditRows(t *testing.T) {
 	srv, auditSvc, usersSvc := newAuditHandlerServer(t)
 	aliceID, _ := writeActivityRows(t, auditSvc, usersSvc)
 
-	out, err := srv.handleAudit(context.Background(), &AuditInput{Type: "activity", Limit: 50, Offset: 0})
+	ctx := auth.WithPrincipal(context.Background(), adminPrincipal())
+	out, err := srv.handleAudit(ctx, &AuditInput{Type: "activity", Limit: 50, Offset: 0})
 	if err != nil {
 		t.Fatalf("handleAudit: %v", err)
 	}
@@ -99,7 +120,7 @@ func TestHandleAudit_ActivityTypeReturnsActorAuditRows(t *testing.T) {
 		// at least one and empty on at least one entry.
 	}
 	// Filter by alice.
-	filtered, err := srv.handleAudit(context.Background(), &AuditInput{
+	filtered, err := srv.handleAudit(auth.WithPrincipal(context.Background(), adminPrincipal()), &AuditInput{
 		Type: "activity", ActorUserID: aliceID, Limit: 50, Offset: 0,
 	})
 	if err != nil {
@@ -122,7 +143,7 @@ func TestHandleAudit_ActivityFiltersResourceType(t *testing.T) {
 	srv, auditSvc, usersSvc := newAuditHandlerServer(t)
 	writeActivityRows(t, auditSvc, usersSvc)
 
-	out, err := srv.handleAudit(context.Background(), &AuditInput{
+	out, err := srv.handleAudit(auth.WithPrincipal(context.Background(), adminPrincipal()), &AuditInput{
 		Type: "activity", ResourceType: "app_setting", Limit: 50, Offset: 0,
 	})
 	if err != nil {
@@ -141,7 +162,7 @@ func TestHandleAudit_ActivityFiltersResourceType(t *testing.T) {
 // the route should return an empty page + total=0, not 5xx.
 func TestHandleAudit_LoginTypeReadsLoginAudit(t *testing.T) {
 	srv, _, _ := newAuditHandlerServer(t)
-	out, err := srv.handleAudit(context.Background(), &AuditInput{Type: "login", Limit: 50, Offset: 0})
+	out, err := srv.handleAudit(auth.WithPrincipal(context.Background(), adminPrincipal()), &AuditInput{Type: "login", Limit: 50, Offset: 0})
 	if err != nil {
 		t.Fatalf("handleAudit login: %v", err)
 	}
@@ -158,7 +179,7 @@ func TestHandleAudit_LoginTypeReadsLoginAudit(t *testing.T) {
 // must hit it.
 func TestHandleAudit_RejectsInvalidType(t *testing.T) {
 	srv, _, _ := newAuditHandlerServer(t)
-	_, err := srv.handleAudit(context.Background(), &AuditInput{Type: "neither"})
+	_, err := srv.handleAudit(auth.WithPrincipal(context.Background(), adminPrincipal()), &AuditInput{Type: "neither"})
 	if err == nil {
 		t.Fatal("expected error for invalid type")
 	}
@@ -179,7 +200,7 @@ func TestHandleAudit_503WhenAuditNotWired(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	srv := New(Deps{Log: nil, DB: database, Version: "test"})
-	_, err = srv.handleAudit(context.Background(), &AuditInput{Type: "activity"})
+	_, err = srv.handleAudit(auth.WithPrincipal(context.Background(), adminPrincipal()), &AuditInput{Type: "activity"})
 	if err == nil {
 		t.Fatal("expected 503 when audit not wired")
 	}
@@ -196,7 +217,7 @@ func TestHandleListUsers_ReturnsAttributionRows(t *testing.T) {
 	srv, auditSvc, usersSvc := newAuditHandlerServer(t)
 	writeActivityRows(t, auditSvc, usersSvc)
 
-	out, err := srv.handleListUsers(context.Background(), &ListUsersInput{Limit: 50, Offset: 0})
+	out, err := srv.handleListUsers(auth.WithPrincipal(context.Background(), adminPrincipal()), &ListUsersInput{Limit: 50, Offset: 0})
 	if err != nil {
 		t.Fatalf("handleListUsers: %v", err)
 	}
@@ -234,6 +255,64 @@ func TestHandleListUsers_ReturnsAttributionRows(t *testing.T) {
 	}
 }
 
+// TestHandleAudit_RejectsNonAdminPrincipal: requireSettingsAdmin gates
+// /api/v1/audit to admins. A KindUser with no admin group (and a
+// non-empty Settings.Authz.Groups) is rejected with 403 -- the merged
+// audit view exposes login_audit rows with usernames + IPs that must
+// not leak to every authenticated browser principal.
+func TestHandleAudit_RejectsNonAdminPrincipal(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "audit-admin.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	usersSvc := attributionusers.NewService(database)
+	if _, err := usersSvc.EnsureSystemUser(context.Background()); err != nil {
+		t.Fatalf("EnsureSystemUser: %v", err)
+	}
+	auditSvc := audit.NewService(database, usersSvc)
+
+	// Settings wired with a non-empty admin group so IsAdmin doesn't
+	// short-circuit to "permit all" via the empty-group fallback.
+	store, err := settings.NewStore(context.Background(), database,
+		config.Config{Authz: config.Authz{Groups: []string{"dam-admins"}}},
+		settingsTestKey(t), nil)
+	if err != nil {
+		t.Fatalf("settings.NewStore: %v", err)
+	}
+	srv := New(Deps{
+		Settings: store, DB: database, Hub: sse.New(), Version: "test",
+		Attribution: usersSvc, Audit: auditSvc,
+	})
+
+	nonAdmin := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "alice",
+		ExternalUID:   "alice-uid",
+		Groups:        []string{"dam-users"},
+		Authenticated: true,
+	}
+	ctx := auth.WithPrincipal(context.Background(), nonAdmin)
+
+	_, err = srv.handleAudit(ctx, &AuditInput{Type: "activity"})
+	if err == nil {
+		t.Fatal("expected 403 for non-admin principal")
+	}
+	var humaErr huma.StatusError
+	if !errors.As(err, &humaErr) || humaErr.GetStatus() != 403 {
+		t.Errorf("err = %v, want 403 StatusError", err)
+	}
+
+	_, err = srv.handleListUsers(ctx, &ListUsersInput{})
+	if err == nil {
+		t.Fatal("expected 403 for non-admin principal on /api/v1/users")
+	}
+	if !errors.As(err, &humaErr) || humaErr.GetStatus() != 403 {
+		t.Errorf("users err = %v, want 403", err)
+	}
+}
+
 // TestHandleListUsers_503WhenAttributionNotWired: matching the audit
 // route's 503 contract.
 func TestHandleListUsers_503WhenAttributionNotWired(t *testing.T) {
@@ -244,7 +323,7 @@ func TestHandleListUsers_503WhenAttributionNotWired(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	srv := New(Deps{Log: nil, DB: database, Version: "test"})
-	_, err = srv.handleListUsers(context.Background(), &ListUsersInput{})
+	_, err = srv.handleListUsers(auth.WithPrincipal(context.Background(), adminPrincipal()), &ListUsersInput{})
 	if err == nil {
 		t.Fatal("expected 503 when attribution not wired")
 	}
@@ -402,7 +481,7 @@ func TestResolveOrCreate_StoresSourceForwardLinkForAttributionUsers(t *testing.T
 // kinds and exercises the filter through the route handler.
 func TestListActivity_FilterByActorKind(t *testing.T) {
 	srv, auditSvc, usersSvc := newAuditHandlerServer(t)
-	ctx := context.Background()
+	ctx := auth.WithPrincipal(context.Background(), adminPrincipal())
 	aliceID, _ := writeActivityRows(t, auditSvc, usersSvc)
 
 	// system filter should yield 1 row.
@@ -508,7 +587,7 @@ func TestHandleMe_ExternalUIDFallsBackToName(t *testing.T) {
 // exercise the read.
 func TestLoginAuditRead_ShapeMapping(t *testing.T) {
 	srv, _, _ := newAuditHandlerServer(t)
-	ctx := context.Background()
+	ctx := auth.WithPrincipal(context.Background(), adminPrincipal())
 
 	// Insert a login_audit row through ExecInTx (raw SQL on the
 	// writer pool). login_audit is written by internal/auth/users;
