@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.20.0](https://github.com/s3ntin3l8/branchdam/compare/v0.19.0...v0.20.0) (2026-09-09)
+
+
+### Features
+
+* 'My uploads' filter + uploaded_by on asset DTO ([1d17fa2](https://github.com/s3ntin3l8/branchdam/commit/1d17fa2a7c1dfac3e5a5427ff1a2df193e5d1ff9))
+* /api/v1/audit + /api/v1/users routes + scan attribution ([2c01abb](https://github.com/s3ntin3l8/branchdam/commit/2c01abbcce60160bd660bda1dfd9c088c7cf9755))
+* actor_audit writes on settings/restart/storage-location/prune/scan ([7e4a889](https://github.com/s3ntin3l8/branchdam/commit/7e4a889acd0287d05f3808157f0fef94e2e16409))
+* docs/multi-user-attribution.md + /api/v1/me attribution tests ([7a90784](https://github.com/s3ntin3l8/branchdam/commit/7a90784e2793de98bb0aa0cfc1006a5b1112b07b))
+* internal/audit actor_audit service + Principal.KindSystem ([ca1cabe](https://github.com/s3ntin3l8/branchdam/commit/ca1cabe94e40cb71b81390c43bb7a6116c8a4e90))
+* internal/users attribution service + Principal.ExternalUID ([29379a7](https://github.com/s3ntin3l8/branchdam/commit/29379a78fb1328197bc507ae16356d0a5c70b27d))
+* multi-user attribution schema + queries (post [#413](https://github.com/s3ntin3l8/branchdam/issues/413) rebase) ([a50b71c](https://github.com/s3ntin3l8/branchdam/commit/a50b71cb5839cdb98b83d731c96d4bcbfba21254))
+* **multi-user-attribution:** first-class user attribution ([359ae14](https://github.com/s3ntin3l8/branchdam/commit/359ae1418c74b9a9fc19da3826103bb5ab26f0d1))
+* pairing owner_user_id inheritance ([71375f4](https://github.com/s3ntin3l8/branchdam/commit/71375f4300ab5fd8a9dc6879e82382fd53301ea9))
+* SPA 'My uploads' filter + 'Uploaded by' column + /api/v1/me attributionUserId ([4a0d0ab](https://github.com/s3ntin3l8/branchdam/commit/4a0d0aba13e10b19ee539c708e593aaf3d1b3d0f))
+
+
+### Bug Fixes
+
+* **attribution:** populate uploaded_by_user_id in agent/upload paths ([e429172](https://github.com/s3ntin3l8/branchdam/commit/e429172412879379df0aab6d6f05e5dd9c8ed071))
+* **security:** address Hermes review -- admin gate audit/users + populate uploaded_by_user_id ([1eeb2f7](https://github.com/s3ntin3l8/branchdam/commit/1eeb2f73e9556e4cfccbe17f4fe35e0a7d59ba3c))
+* **security:** JSON injection in login audit + align page size caps ([23abbd9](https://github.com/s3ntin3l8/branchdam/commit/23abbd901ca5eb056b53dcd11c252e91ac16ca0b))
+
 ## [0.19.0](https://github.com/s3ntin3l8/branchdam/compare/v0.18.0...v0.19.0) (2026-09-08)
 
 
