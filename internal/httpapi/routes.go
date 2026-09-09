@@ -3017,7 +3017,7 @@ type AuditInput struct {
 	ResourceID   string `query:"resourceId"`
 	SinceUnix    int64  `query:"sinceUnix" default:"0"`
 	UntilUnix    int64  `query:"untilUnix" default:"0"`
-	Limit        int64  `query:"limit" default:"50" minimum:"1" maximum:"500"`
+	Limit        int64  `query:"limit" default:"50" minimum:"1" maximum:"200"`
 	Offset       int64  `query:"offset" default:"0" minimum:"0"`
 }
 
@@ -3128,13 +3128,32 @@ func (s *Server) handleAudit(ctx context.Context, in *AuditInput) (*AuditOutput,
 	return out, nil
 }
 
+// marshalLoginDetails builds the login_audit details JSON safely.
+// Client-controlled fields (IP, UserAgent) are json.Marshal'd to prevent
+// injection of quotes or backslashes that would break the JSON envelope.
+func marshalLoginDetails(ip, userAgent string) string {
+	type loginDetails struct {
+		IP        string `json:"ip"`
+		UserAgent string `json:"userAgent"`
+	}
+	b, err := json.Marshal(loginDetails{IP: ip, UserAgent: userAgent})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // listLoginAudit reads login_audit directly through the db.Reader.
 // Lives in this file rather than internal/audit because login_audit
 // is owned by internal/auth/users (PR #407) -- this is the read side
 // of the merged /api/v1/audit route.
 func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEntryOut, int64, error) {
+	limit := in.Limit
+	if limit > 200 {
+		limit = 200
+	}
 	rows, err := s.db.Reader.ListLoginAudit(ctx, sqlcgen.ListLoginAuditParams{
-		Limit:  in.Limit,
+		Limit:  limit,
 		Offset: in.Offset,
 	})
 	if err != nil {
@@ -3154,7 +3173,7 @@ func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEnt
 			ResourceType: "login_source",
 			ResourceID:   r.Source,
 			ActorName:    r.UsernamePresented,
-			DetailsJSON:  fmt.Sprintf("{\"ip\":\"%s\",\"userAgent\":\"%s\"}", r.Ip, r.UserAgent),
+			DetailsJSON:  marshalLoginDetails(r.Ip, r.UserAgent),
 			CreatedAt:    r.CreatedAt,
 		}
 		if r.UserID.Valid {

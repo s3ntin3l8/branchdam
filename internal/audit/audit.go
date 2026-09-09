@@ -214,8 +214,7 @@ func marshalDetails(details any) (string, error) {
 }
 
 // ListActivity returns actor_audit rows matching filter, newest first.
-// Pagination is offset-based; the route caps it at 200 rows + 10000
-// row count ceiling.
+// Pagination is offset-based; the route caps limit at 200 rows.
 func (s *Service) ListActivity(ctx context.Context, f Filter, limit, offset int64) ([]Entry, int64, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 200
