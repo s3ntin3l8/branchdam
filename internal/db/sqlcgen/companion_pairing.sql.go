@@ -127,6 +127,33 @@ func (q *Queries) CreateDevicePairingKey(ctx context.Context, arg CreateDevicePa
 	return i, err
 }
 
+const deleteDevicePairing = `-- name: DeleteDevicePairing :exec
+DELETE FROM device_pairings WHERE id = ?1
+`
+
+func (q *Queries) DeleteDevicePairing(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, deleteDevicePairing, id)
+	return err
+}
+
+const deletePairingAuditForPairing = `-- name: DeletePairingAuditForPairing :exec
+DELETE FROM companion_pairing_audit WHERE pairing_id = ?1
+`
+
+func (q *Queries) DeletePairingAuditForPairing(ctx context.Context, pairingID int64) error {
+	_, err := q.db.ExecContext(ctx, deletePairingAuditForPairing, pairingID)
+	return err
+}
+
+const deletePairingKeysForPairing = `-- name: DeletePairingKeysForPairing :exec
+DELETE FROM device_pairing_keys WHERE pairing_id = ?1
+`
+
+func (q *Queries) DeletePairingKeysForPairing(ctx context.Context, pairingID int64) error {
+	_, err := q.db.ExecContext(ctx, deletePairingKeysForPairing, pairingID)
+	return err
+}
+
 const getDevicePairingByAgentID = `-- name: GetDevicePairingByAgentID :one
 SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
 FROM device_pairings

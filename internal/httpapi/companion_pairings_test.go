@@ -160,6 +160,57 @@ func TestCompanionPairings_CreateListGetRevoke(t *testing.T) {
 	require.NotNil(t, afterRevoke.RevokedAtUnix)
 }
 
+func TestCompanionPairings_DeleteRevokedPairing(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+
+	// Create
+	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
+		map[string]string{"friendlyLabel": "Delete-me iPhone"})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var created struct {
+		PairingID int64 `json:"pairingId"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.NotZero(t, created.PairingID)
+
+	// Delete before revoke -- must fail with 409
+	rec = doAdmin(t, srv, http.MethodDelete,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID), nil)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	// Revoke
+	rec = doAdmin(t, srv, http.MethodPost,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/revoke", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Delete after revoke -- must succeed
+	rec = doAdmin(t, srv, http.MethodDelete,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var deleted struct {
+		OK bool `json:"ok"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &deleted))
+	assert.True(t, deleted.OK)
+
+	// Get-after-delete -- must 404
+	rec = doAdmin(t, srv, http.MethodGet,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// List must no longer include the deleted pairing
+	rec = doAdmin(t, srv, http.MethodGet, "/api/v1/companion/pairings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var listed struct {
+		Pairings []struct {
+			ID int64 `json:"id"`
+		} `json:"pairings"`
+		Total int64 `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listed))
+	assert.Equal(t, int64(0), listed.Total)
+}
+
 func TestCompanionPairings_QRSVGReturnsCachedSVG(t *testing.T) {
 	srv, _, _ := newPairingTestServer(t)
 	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",

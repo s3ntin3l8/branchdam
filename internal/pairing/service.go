@@ -97,6 +97,10 @@ var ErrPairingNotFound = errors.New("pairing: not found")
 // pairing was created in a future where qr_svg was a required field).
 var ErrNoActiveKey = errors.New("pairing: no active key")
 
+// ErrPairingNotRevoked is returned by DeletePairing when the caller
+// attempts to hard-delete a pairing that hasn't been revoked first.
+var ErrPairingNotRevoked = errors.New("pairing: not revoked")
+
 // Service is the pairing package's only externally-constructed type.
 type Service struct {
 	db    *db.DB
@@ -395,6 +399,43 @@ func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor stri
 		})
 	})
 	return now, err
+}
+
+// DeletePairing hard-deletes a revoked pairing and all its child rows
+// (audit, keys). The pairing must already be revoked -- active pairings
+// cannot be deleted. A PAIR_DELETED audit event is written before the
+// rows are removed so the action is traceable.
+func (s *Service) DeletePairing(ctx context.Context, pairingID int64, actor string) error {
+	now := s.nowFn()
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		p, err := q.GetDevicePairingByID(ctx, pairingID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrPairingNotFound
+			}
+			return fmt.Errorf("load pairing: %w", err)
+		}
+		if !p.RevokedAt.Valid {
+			return ErrPairingNotRevoked
+		}
+		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
+			PairingID: pairingID,
+			Actor:     actor,
+			Event:     "PAIR_DELETED",
+			Details:   "{}",
+			CreatedAt: now,
+		}); err != nil {
+			return fmt.Errorf("audit: %w", err)
+		}
+		if err := q.DeletePairingAuditForPairing(ctx, pairingID); err != nil {
+			return fmt.Errorf("delete audit: %w", err)
+		}
+		if err := q.DeletePairingKeysForPairing(ctx, pairingID); err != nil {
+			return fmt.Errorf("delete keys: %w", err)
+		}
+		return q.DeleteDevicePairing(ctx, pairingID)
+	})
+	return err
 }
 
 // LatestActiveKey returns the device's newest key that isn't the one

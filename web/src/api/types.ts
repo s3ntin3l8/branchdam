@@ -443,6 +443,10 @@ export interface RevokeCompanionPairingResponse {
   revokedAtUnix: number;
 }
 
+export interface DeleteCompanionPairingResponse {
+  ok: boolean;
+}
+
 export interface ListPairingsResponse {
   pairings: CompanionPairingListItem[];
   total: number;
