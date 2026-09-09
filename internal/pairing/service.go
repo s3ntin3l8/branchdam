@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/qr"
@@ -423,7 +424,7 @@ func (s *Service) DeletePairing(ctx context.Context, pairingID int64, actor stri
 			ActorUserID:  sql.NullInt64{},
 			ActorKind:    actorKind,
 			ActorName:    actorName,
-			Event:        "pairing.deleted",
+			Event:        audit.EventPairingDeleted,
 			ResourceType: "companion_pairing",
 			ResourceID:   sql.NullString{String: fmt.Sprintf("%d", pairingID), Valid: true},
 			DetailsJson:  "{}",

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -215,7 +216,7 @@ func TestCompanionPairings_DeleteRevokedPairing(t *testing.T) {
 	// the pairing removal (the pairing-scoped companion_pairing_audit
 	// rows are gone, but the global actor_audit table is unbound).
 	auditCount, err := database.Reader.CountActorAudit(context.Background(), sqlcgen.CountActorAuditParams{
-		Event:        sql.NullString{String: "pairing.deleted", Valid: true},
+		Event:        sql.NullString{String: audit.EventPairingDeleted, Valid: true},
 		ResourceType: sql.NullString{String: "companion_pairing", Valid: true},
 		ResourceID:   sql.NullString{String: pairingIDStr(created.PairingID), Valid: true},
 	})

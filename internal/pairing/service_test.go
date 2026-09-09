@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
@@ -333,7 +334,7 @@ func TestDeletePairing_RevokedPairingDeleted(t *testing.T) {
 
 	// Global actor_audit must have the trace
 	traceCount, err := database.Reader.CountActorAudit(ctx, sqlcgen.CountActorAuditParams{
-		Event:        sql.NullString{String: "pairing.deleted", Valid: true},
+		Event:        sql.NullString{String: audit.EventPairingDeleted, Valid: true},
 		ResourceType: sql.NullString{String: "companion_pairing", Valid: true},
 		ResourceID:   sql.NullString{String: fmt.Sprintf("%d", pairing.ID), Valid: true},
 	})
