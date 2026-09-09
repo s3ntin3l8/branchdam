@@ -210,7 +210,7 @@ type Querier interface {
 	GetAttributionUserByID(ctx context.Context, id int64) (GetAttributionUserByIDRow, error)
 	// Used by the handshake's pendingRotation hint to load the pairing by
 	// the agent_id attached to the request's Principal.
-	GetDevicePairingByAgentID(ctx context.Context, agentID string) (GetDevicePairingByAgentIDRow, error)
+	GetDevicePairingByAgentID(ctx context.Context, agentID string) (DevicePairing, error)
 	GetDevicePairingByID(ctx context.Context, id int64) (GetDevicePairingByIDRow, error)
 	// The hot path: KeyLookup runs this on every authenticated agent request.
 	// UNIQUE index on key_lookup_hash keeps it O(log n). Active means

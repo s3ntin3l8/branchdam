@@ -29,6 +29,16 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the paired user's ID for uploaded_by_user_id attribution.
+	// Agent principals are KindMachine with no ExternalUID, so the
+	// user_id comes from the device_pairings row keyed on agent_id.
+	var agentUserID int64
+	if p.Kind == auth.KindMachine {
+		if pairing, err := s.db.Reader.GetDevicePairingByAgentID(r.Context(), p.Name); err == nil && pairing.UserID.Valid {
+			agentUserID = pairing.UserID.Int64
+		}
+	}
+
 	filename := r.Header.Get("X-Filename")
 	cameraModel := r.Header.Get("X-Camera-Model")
 	expectedBlake3 := r.Header.Get("X-Blake3-Hash")
@@ -47,6 +57,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		CapturedAtUnix:      capturedAtUnix,
 		ExpectedBlake3:      expectedBlake3,
 		SourcePathHash:      sourcePathHash,
+		UserID:              agentUserID,
 	})
 	if err != nil {
 		s.writeUploadError(w, err)

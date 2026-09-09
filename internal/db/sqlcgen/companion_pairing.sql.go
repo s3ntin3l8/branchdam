@@ -128,26 +128,16 @@ func (q *Queries) CreateDevicePairingKey(ctx context.Context, arg CreateDevicePa
 }
 
 const getDevicePairingByAgentID = `-- name: GetDevicePairingByAgentID :one
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
 FROM device_pairings
 WHERE agent_id = ?1
 `
 
-type GetDevicePairingByAgentIDRow struct {
-	ID            int64
-	AgentID       string
-	FriendlyLabel string
-	CreatedAt     int64
-	CreatedBy     string
-	RevokedAt     sql.NullInt64
-	QrSvg         []byte
-}
-
 // Used by the handshake's pendingRotation hint to load the pairing by
 // the agent_id attached to the request's Principal.
-func (q *Queries) GetDevicePairingByAgentID(ctx context.Context, agentID string) (GetDevicePairingByAgentIDRow, error) {
+func (q *Queries) GetDevicePairingByAgentID(ctx context.Context, agentID string) (DevicePairing, error) {
 	row := q.db.QueryRowContext(ctx, getDevicePairingByAgentID, agentID)
-	var i GetDevicePairingByAgentIDRow
+	var i DevicePairing
 	err := row.Scan(
 		&i.ID,
 		&i.AgentID,
@@ -156,6 +146,7 @@ func (q *Queries) GetDevicePairingByAgentID(ctx context.Context, agentID string)
 		&i.CreatedBy,
 		&i.RevokedAt,
 		&i.QrSvg,
+		&i.UserID,
 	)
 	return i, err
 }

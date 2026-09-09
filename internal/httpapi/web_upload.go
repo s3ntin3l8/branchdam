@@ -108,6 +108,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 				CapturedAtUnix:      capturedAtUnix,
 				ExpectedBlake3:      expectedBlake3,
 				SourcePathHash:      sourcePathHash,
+				UserID:              resolveActorUserID(r.Context(), s.attribution, s.log),
 			})
 			_ = part.Close()
 			if procErr != nil {

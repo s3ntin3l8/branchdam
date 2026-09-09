@@ -391,6 +391,21 @@ func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen
 	}
 }
 
+// resolveAgentUserID looks up the device_pairings row for agentID and
+// returns the paired user's ID. Returns 0 (NULL) when the pairing is
+// missing, revoked, or has no linked user — the caller treats 0 as
+// "no attribution" and writes NULL for uploaded_by_user_id.
+func (d *Drainer) resolveAgentUserID(ctx context.Context, q *sqlcgen.Queries, agentID string) int64 {
+	pairing, err := q.GetDevicePairingByAgentID(ctx, agentID)
+	if err != nil {
+		return 0
+	}
+	if pairing.RevokedAt.Valid || !pairing.UserID.Valid {
+		return 0
+	}
+	return pairing.UserID.Int64
+}
+
 func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) (int64, error) {
 	var p NodeCreatedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
@@ -514,6 +529,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		mtime = time.Now().Unix()
 	}
 
+	agentUserID := d.resolveAgentUserID(ctx, q, ev.AgentID)
 	inserted, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           p.NodeUUID,
 		StorageLocationID:  locID,
@@ -537,6 +553,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		CameraSerial:       nullCameraSerial,
 		LensModel:          nullLensModel,
 		SourcePathHash:     nullSourcePathHash,
+		UploadedByUserID:   sql.NullInt64{Int64: agentUserID, Valid: agentUserID != 0},
 	})
 	if err != nil {
 		if p.FullHash != nil && *p.FullHash != "" {
@@ -1009,6 +1026,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		indexingStatus = "INDEXED_FULL"
 	}
 
+	agentUserID := d.resolveAgentUserID(ctx, q, ev.AgentID)
 	inserted, insertErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           p.NodeUUID,
 		StorageLocationID:  locID,
@@ -1031,6 +1049,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		FilenameStem:       sql.NullString{},
 		CameraSerial:       sql.NullString{},
 		LensModel:          sql.NullString{},
+		UploadedByUserID:   sql.NullInt64{Int64: agentUserID, Valid: agentUserID != 0},
 	})
 	if insertErr != nil {
 		return 0, insertErr

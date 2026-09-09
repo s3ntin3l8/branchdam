@@ -1944,7 +1944,8 @@ type AgentRebaseOutput struct {
 }
 
 func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+	p, ok := auth.From(ctx)
+	if !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
 	}
 	if in.Body.NodeUUID == "" {
@@ -2054,6 +2055,10 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			nullFullHash = in.Body.FullHash
 			indexingStatus = "INDEXED_FULL"
 		}
+		var rebaseUserID int64
+		if pairing, pairErr := q.GetDevicePairingByAgentID(ctx, p.Name); pairErr == nil && pairing.UserID.Valid {
+			rebaseUserID = pairing.UserID.Int64
+		}
 		newNode, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:           in.Body.NodeUUID,
 			StorageLocationID:  loc.ID,
@@ -2076,6 +2081,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			FilenameStem:       sql.NullString{},
 			CameraSerial:       sql.NullString{},
 			LensModel:          sql.NullString{},
+			UploadedByUserID:   sql.NullInt64{Int64: rebaseUserID, Valid: rebaseUserID != 0},
 		})
 		if err != nil {
 			return err

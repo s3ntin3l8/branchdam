@@ -31,7 +31,7 @@ WHERE id = ?1;
 -- name: GetDevicePairingByAgentID :one
 -- Used by the handshake's pendingRotation hint to load the pairing by
 -- the agent_id attached to the request's Principal.
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
 FROM device_pairings
 WHERE agent_id = ?1;
 
