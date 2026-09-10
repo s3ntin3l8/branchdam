@@ -366,13 +366,13 @@ A lightweight connectivity and version check endpoint for agent clients. Does no
 
 ## 9. Content Verification Pre-Flight (`GET /api/v1/agent/check-content`)
 
-Allows companion applications and workstation agents to perform a pre-flight content hash check before streaming multi-gigabyte uploads. If a file with the identical BLAKE3-256 hash already exists in active storage, the agent can skip the upload entirely.
+Allows companion applications and workstation agents to perform a pre-flight content hash check before streaming multi-gigabyte uploads. If a file with the identical BLAKE3-256 hash already exists as an active or hidden node (excludes ARCHIVED and MISSING), the agent can skip the upload entirely.
 
 **Authentication:** Requires an Agent Machine Principal.
 
 **Query Parameters:**
 - `fullHash` (required): 64-character lowercase hex BLAKE3-256 digest of the candidate file content.
-- `fastHash` (optional): 16-character lowercase hex xxHash64 pre-screening digest.
+- `fastHash` (optional): 16-character lowercase hex xxHash64 digest (accepted and format-validated for forward compatibility, but currently ignored; lookup is performed solely by `fullHash`).
 
 **Response When Found (Status 200 OK):**
 ```json
@@ -439,6 +439,6 @@ All management endpoints require an authenticated administrator session (`auth.R
 | `/api/v1/companion/pairings/{id}` | `GET` | Retrieve details for a specific companion pairing. |
 | `/api/v1/companion/pairings/{id}/rotate` | `POST` | Rotate device API key. Invalidates previous key and returns a new plaintext token. |
 | `/api/v1/companion/pairings/{id}/revoke` | `POST` | Revoke device access immediately. Enforces a 401 Unauthorized response on subsequent agent calls. |
-| `/api/v1/companion/pairings/{id}` | `DELETE` | Delete device pairing record and its key history. |
+| `/api/v1/companion/pairings/{id}` | `DELETE` | Delete device pairing record and its key history. Requires the pairing to be revoked first (`POST /revoke`), returning `409 Conflict` otherwise. |
 | `/api/v1/companion/pairings/{id}/audit` | `GET` | Retrieve audit events (creation, key rotation, revocation, IP changes) for a pairing. |
 | `/api/v1/companion/pairings/{id}/qr.svg` | `GET` | Raw `image/svg+xml` QR code for seamless optical onboarding from mobile companion cameras. |

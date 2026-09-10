@@ -165,7 +165,7 @@ Every migration after `00001_init.sql`, in order:
 | `00013_dedup_existing_hashes.sql` | Data cleanup migration | Archives duplicate `full_hash` rows prior to applying unique partial index |
 | `00014_full_hash_unique_index.sql` | Unique partial index `ux_media_nodes_live_full_hash` | Enforces full hash uniqueness across active media nodes (`lifecycle_state IN ('ACTIVE', 'HIDDEN')`) |
 | `00015_source_path_hash.sql` | `media_nodes.source_path_hash` column and `ix_media_nodes_source_path_hash` index | Pre-flight content tracking by original source path hash |
-| `00016_source_path_hash_id_idx.sql` | Compound index `idx_media_nodes_source_path_hash_id` on `(source_path_hash, id)` | Accelerates `GetMediaNodeBySourcePathHash` queries during agent duplicate detection |
+| `00016_source_path_hash_id_idx.sql` | Compound index `idx_media_nodes_source_path_hash_id` on `(source_path_hash, id DESC)` | Accelerates `GetMediaNodeBySourcePathHash` queries during agent duplicate detection |
 | `00017_companion_pairing.sql` | `device_pairings`, `device_pairing_keys`, `companion_pairing_audit` | Per-device API keys and QR onboarding for mobile/companion apps |
 | `00018_local_auth.sql` | `users`, `sessions`, `login_audit` | Local password authentication (argon2id) and session cookie management |
 | `00019_password_reset.sql` | `password_reset_tokens` table | Single-use password reset tokens with SHA-256 token hashing and rate limiting |

@@ -165,7 +165,7 @@ reference (an editing workstation's `D:\Footage\...` or `/Volumes/Video/...`, no
 `/storage/projects/...`). Full resolution strategy, ambiguity policy, and worked examples:
 [`integrations.md#2-nle-timelines--path-rewrites`](integrations.md#2-nle-timelines--path-rewrites).
 Without at least one matching rule, project-file references fall through to basename-only fallback matching.
-Commented out by default in `config.example.yaml` and `config.dev.yaml` — uncomment and adapt for your workstations.
+Commented out by default in `config.example.yaml` (and omitted entirely from `config.dev.yaml`) — uncomment and adapt for your workstations.
 
 ```yaml
 pathRewrites:
