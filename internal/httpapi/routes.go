@@ -811,6 +811,24 @@ type InheritMetadataOutput struct {
 	}
 }
 
+func (s *Server) inheritDeps() pipeline.InheritDeps {
+	return pipeline.InheritDeps{
+		DB:     s.db,
+		Guard:  s.guard,
+		Prober: s.prober,
+		Log:    s.log,
+	}
+}
+
+func (s *Server) autoInherit(ctx context.Context, childNodeID int64) {
+	if cfg := s.cfg(); cfg != nil && !cfg.Metadata.AutoInherit {
+		return
+	}
+	if _, err := pipeline.InheritMetadata(ctx, s.inheritDeps(), childNodeID); err != nil {
+		s.log.Warn("auto-inherit metadata failed", "targetNodeID", childNodeID, "err", err)
+	}
+}
+
 // handleInheritMetadata copies identity metadata (EXIF/XMP, spec Pillar 4)
 // from a node's winning parent edge into the child's file on disk, on demand.
 // This is the project's first real filesystem writer: storage.Guard.CheckWrite
@@ -818,13 +836,7 @@ type InheritMetadataOutput struct {
 // is writable by default; readOnly: true is opt-in for archive-only
 // deployments) or a Tier-3-resolved parent edge is refused with 409.
 func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataInput) (*InheritMetadataOutput, error) {
-	deps := pipeline.InheritDeps{
-		DB:     s.db,
-		Guard:  s.guard,
-		Prober: s.prober,
-		Log:    s.log,
-	}
-	tags, err := pipeline.InheritMetadata(ctx, deps, in.ID)
+	tags, err := pipeline.InheritMetadata(ctx, s.inheritDeps(), in.ID)
 	if err != nil {
 		if errors.Is(err, pipeline.ErrNodeNotFound) {
 			return nil, huma.Error404NotFound("asset not found")
@@ -1001,15 +1013,7 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		return nil, huma.Error500InternalServerError("create manual edge", err)
 	}
 
-	autoInherit := true
-	if cfg := s.cfg(); cfg != nil {
-		autoInherit = cfg.Metadata.AutoInherit
-	}
-	if autoInherit {
-		if _, err := s.handleInheritMetadata(ctx, &InheritMetadataInput{ID: in.Body.TargetNodeID}); err != nil {
-			s.log.Warn("create manual edge: auto-inherit metadata", "edgeID", createdEdge.ID, "targetNodeID", in.Body.TargetNodeID, "err", err)
-		}
-	}
+	s.autoInherit(ctx, in.Body.TargetNodeID)
 
 	out := &CreateEdgeOutput{}
 	out.Body = edgeDTO{
@@ -1241,15 +1245,7 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 		return nil, huma.Error500InternalServerError("confirm edge", err)
 	}
 
-	autoInherit := true
-	if cfg := s.cfg(); cfg != nil {
-		autoInherit = cfg.Metadata.AutoInherit
-	}
-	if autoInherit {
-		if _, err := s.handleInheritMetadata(ctx, &InheritMetadataInput{ID: targetNodeID}); err != nil {
-			s.log.Warn("confirm-edge: auto-inherit metadata", "edgeID", in.ID, "targetNodeID", targetNodeID, "err", err)
-		}
-	}
+	s.autoInherit(ctx, targetNodeID)
 
 	out := &EdgeReviewOutput{}
 	out.Body.OK = true
@@ -1337,17 +1333,14 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 
 	fullHashPolicy := "tier3_and_collision"
 	disablePHash := false
-	autoInherit := true
 	if cfg := s.cfg(); cfg != nil {
 		fullHashPolicy = cfg.Workers.FullHashPolicy
 		disablePHash = !cfg.Workers.PerceptualHash
-		autoInherit = cfg.Metadata.AutoInherit
 	}
 
 	deps := pipeline.ScanDeps{
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
 		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
-		AutoInheritMetadata: autoInherit,
 		AutoInheritFn: func() bool {
 			if cfg := s.cfg(); cfg != nil {
 				return cfg.Metadata.AutoInherit

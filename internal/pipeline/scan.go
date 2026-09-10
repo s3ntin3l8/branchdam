@@ -843,7 +843,7 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 	}
 	if deps.shouldAutoInherit() && hasEligibleAutoAcceptedParent(edges) {
 		if _, err := InheritMetadata(ctx, deps.InheritDeps(), node.ID); err != nil {
-			log.Warn("pipeline: auto-inherit metadata failed", "path", path, "nodeID", node.ID, "err", err)
+			log.Error("pipeline: auto-inherit metadata failed (possible disk!=DB mismatch)", "path", path, "nodeID", node.ID, "err", err)
 		}
 	}
 	return n

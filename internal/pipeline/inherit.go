@@ -150,7 +150,8 @@ func LoadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode)
 // regions) after an in-place exiftool write, and persists all three onto the
 // node's row.
 func RefreshNodeAfterInPlaceWrite(ctx context.Context, database *db.DB, guard *storage.Guard, node sqlcgen.MediaNode) error {
-	rctx := context.WithoutCancel(ctx)
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), InheritWriteTimeout)
+	defer cancel()
 	var f *os.File
 	var stat os.FileInfo
 	var err error

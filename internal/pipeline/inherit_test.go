@@ -238,3 +238,35 @@ func TestInheritMetadataPreconditions(t *testing.T) {
 		}
 	})
 }
+
+func TestScanDepsShouldAutoInherit(t *testing.T) {
+	t.Run("uses AutoInheritMetadata when AutoInheritFn is nil", func(t *testing.T) {
+		depsTrue := ScanDeps{AutoInheritMetadata: true}
+		if !depsTrue.shouldAutoInherit() {
+			t.Errorf("expected shouldAutoInherit = true when AutoInheritMetadata = true")
+		}
+
+		depsFalse := ScanDeps{AutoInheritMetadata: false}
+		if depsFalse.shouldAutoInherit() {
+			t.Errorf("expected shouldAutoInherit = false when AutoInheritMetadata = false")
+		}
+	})
+
+	t.Run("AutoInheritFn takes precedence over AutoInheritMetadata", func(t *testing.T) {
+		depsFnTrue := ScanDeps{
+			AutoInheritMetadata: false,
+			AutoInheritFn:       func() bool { return true },
+		}
+		if !depsFnTrue.shouldAutoInherit() {
+			t.Errorf("expected shouldAutoInherit = true when AutoInheritFn returns true")
+		}
+
+		depsFnFalse := ScanDeps{
+			AutoInheritMetadata: true,
+			AutoInheritFn:       func() bool { return false },
+		}
+		if depsFnFalse.shouldAutoInherit() {
+			t.Errorf("expected shouldAutoInherit = false when AutoInheritFn returns false")
+		}
+	})
+}
