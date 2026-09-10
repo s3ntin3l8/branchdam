@@ -355,6 +355,7 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 			return exportExts[strings.ToLower(strings.TrimPrefix(ext, "."))]
 		}
 
+		rawSwapped := false
 		if isProxy(parent) && !isProxy(child) {
 			childNode, parentNode = parent, child
 			proxySwapped = true
@@ -362,8 +363,9 @@ func (FilenameStemResolver) Resolve(ctx context.Context, child Node, lookup Look
 			childNode, parentNode = parent, child
 		} else if !isProxy(parent) && !isProxy(child) && isRaw(child.FileExt) && isExport(parent.FileExt) {
 			childNode, parentNode = parent, child
+			rawSwapped = true
 		}
-		if proxySwapped && indexGated {
+		if (proxySwapped || rawSwapped) && indexGated {
 			continue
 		}
 

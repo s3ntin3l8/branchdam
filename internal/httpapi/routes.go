@@ -1736,16 +1736,8 @@ func (s *Server) handleCancelJob(ctx context.Context, in *CancelJobInput) (*Canc
 		return nil, huma.Error409Conflict(fmt.Sprintf("cannot cancel scan job in state %s", job.State))
 	}
 
-	cancelled := false
-	if s.tracker != nil {
-		cancelled = s.tracker.Cancel(in.ID)
-	}
-	if !cancelled {
-		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-			return q.CancelScanJob(ctx, in.ID)
-		}); err != nil {
-			return nil, huma.Error500InternalServerError("cancel scan job", err)
-		}
+	if s.tracker == nil || !s.tracker.Cancel(in.ID) {
+		return nil, huma.Error409Conflict("scan job is not currently cancellable")
 	}
 
 	if s.hub != nil {
@@ -1753,7 +1745,9 @@ func (s *Server) handleCancelJob(ctx context.Context, in *CancelJobInput) (*Canc
 	}
 
 	if s.audit != nil {
-		_ = s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), "scan.cancelled", "scan_job", strconv.FormatInt(in.ID, 10), map[string]any{"jobId": in.ID})
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventScanCancelled, "scan_job", strconv.FormatInt(in.ID, 10), map[string]any{"jobId": in.ID}); err != nil {
+			return nil, huma.Error500InternalServerError("write actor audit", err)
+		}
 	}
 
 	out := &CancelJobOutput{}
@@ -2653,8 +2647,8 @@ type storageLocationHealthDTO struct {
 	FreeBytes            uint64   `json:"freeBytes"`
 	IsDegraded           bool     `json:"isDegraded"`
 	DegradedMessage      *string  `json:"degradedMessage,omitempty"`
-	WatcherBacklog       int      `json:"watcherBacklog,omitempty"`
-	WatcherDroppedEvents int64    `json:"watcherDroppedEvents,omitempty"`
+	WatcherBacklog       int      `json:"watcherBacklog"`
+	WatcherDroppedEvents int64    `json:"watcherDroppedEvents"`
 }
 
 type storageQueueHealthDTO struct {
@@ -2663,7 +2657,7 @@ type storageQueueHealthDTO struct {
 	WorkerPoolCapacity  int   `json:"workerPoolCapacity"`
 	WorkerCount         int   `json:"workerCount"`
 	RunningScanJobs     int64 `json:"runningScanJobs"`
-	WatcherBacklogTotal int   `json:"watcherBacklogTotal,omitempty"`
+	WatcherBacklogTotal int   `json:"watcherBacklogTotal"`
 }
 
 type storageHealthDTO struct {

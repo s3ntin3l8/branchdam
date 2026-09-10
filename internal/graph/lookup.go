@@ -18,7 +18,8 @@ import (
 // comment). High enough to never fire on any legitimate shoot (even a
 // large one), low enough that hitting it is worth a WARN log rather than
 // scoring an unbounded candidate set every scan.
-const filenameStemCandidateCap = 500
+const FilenameStemCandidateCap = 500
+const filenameStemCandidateCap = FilenameStemCandidateCap
 
 // querier is the subset of sqlcgen.Querier lookup.go needs -- narrowed so
 // this package doesn't need the full generated interface just to read two

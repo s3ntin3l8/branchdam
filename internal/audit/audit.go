@@ -44,6 +44,7 @@ const (
 const (
 	EventScanStarted        = "scan.started"
 	EventScanFinished       = "scan.finished"
+	EventScanCancelled      = "scan.cancelled"
 	EventRestart            = "restart.executed"
 	EventSettingsUpdated    = "settings.updated"
 	EventStorageLocationPut = "storage_location.upserted"

@@ -24,6 +24,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -2274,7 +2275,20 @@ func TestCancelScanJobEndpoint(t *testing.T) {
 		t.Fatalf("POST /api/v1/jobs/%d/cancel: status = %d, want 409", jobCompletedID, rr.Code)
 	}
 
-	// 3. Cancel succeeds on RUNNING job
+	// 3. Conflict on untracked RUNNING job
+	rr = doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/jobs/%d/cancel", jobRunningID), nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("POST /api/v1/jobs/%d/cancel (untracked): status = %d, want 409", jobRunningID, rr.Code)
+	}
+
+	// 4. Cancel succeeds when registered in ScanTracker
+	tracker := &pipeline.ScanTracker{}
+	srv.tracker = tracker
+	cancelledCalled := false
+	tracker.Register(jobRunningID, func() {
+		cancelledCalled = true
+	})
+
 	rr = doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/jobs/%d/cancel", jobRunningID), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("POST /api/v1/jobs/%d/cancel: status = %d, want 200, body = %s", jobRunningID, rr.Code, rr.Body.String())
@@ -2289,14 +2303,8 @@ func TestCancelScanJobEndpoint(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("resp.OK = false, want true")
 	}
-
-	// Verify state in DB
-	jobAfter, err := database.Reader.GetScanJob(ctx, jobRunningID)
-	if err != nil {
-		t.Fatalf("GetScanJob: %v", err)
-	}
-	if jobAfter.State != "CANCELLED" {
-		t.Fatalf("job state = %q, want CANCELLED", jobAfter.State)
+	if !cancelledCalled {
+		t.Fatalf("tracker cancel func was not called")
 	}
 }
 
@@ -2306,6 +2314,7 @@ func TestMutatingRoutesAuthorization(t *testing.T) {
 
 	mutatingPaths := []string{
 		"/api/v1/scan",
+		"/api/v1/jobs/1/cancel",
 		"/api/v1/edges/1/confirm",
 		"/api/v1/edges/1/reject",
 		"/api/v1/prune",

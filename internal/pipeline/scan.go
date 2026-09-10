@@ -112,13 +112,17 @@ type ScanTracker struct {
 func (t *ScanTracker) add()  { t.wg.Add(1) }
 func (t *ScanTracker) done() { t.wg.Done() }
 
-func (t *ScanTracker) register(jobID int64, cancel context.CancelFunc) {
+func (t *ScanTracker) Register(jobID int64, cancel context.CancelFunc) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.cancels == nil {
 		t.cancels = make(map[int64]context.CancelFunc)
 	}
 	t.cancels[jobID] = cancel
+}
+
+func (t *ScanTracker) register(jobID int64, cancel context.CancelFunc) {
+	t.Register(jobID, cancel)
 }
 
 func (t *ScanTracker) unregister(jobID int64) {
@@ -872,16 +876,20 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 	if node.FilenameStem.Valid && node.FilenameStem.String != "" {
 		siblings, err := deps.DB.Reader.ListLiveNodesByFilenameStem(ctx, sqlcgen.ListLiveNodesByFilenameStemParams{
 			FilenameStem: node.FilenameStem,
-			Limit:        50,
+			Limit:        graph.FilenameStemCandidateCap,
 		})
-		if err == nil {
+		if err != nil {
+			deps.Log.Warn("pipeline.scan: reverse lineage stem lookup failed", "node_id", node.ID, "stem", node.FilenameStem.String, "err", err)
+		} else {
 			for _, sib := range siblings {
-				if sib.ID == node.ID {
+				if sib.ID == node.ID || sib.StorageLocationID != node.StorageLocationID {
 					continue
 				}
 				if sib.GraphStatus == "UNLINKED" {
 					_, sibCreated, sibErr := deps.Engine.ResolveAndCommit(ctx, toGraphNode(sib))
-					if sibErr == nil {
+					if sibErr != nil {
+						deps.Log.Warn("pipeline.scan: reverse lineage resolve failed", "sibling_id", sib.ID, "parent_id", node.ID, "err", sibErr)
+					} else {
 						created += sibCreated
 					}
 				}
