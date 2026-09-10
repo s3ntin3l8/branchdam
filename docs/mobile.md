@@ -17,7 +17,7 @@ graph TD
 
     subgraph Server["branchDAM Server"]
         UploadAPI["POST /api/v1/agent/upload"]
-        HandshakeAPI["GET /api/v1/agent/handshake"]
+        HandshakeAPI["POST /api/v1/agent/handshake"]
         NamingEngine["Server Naming Engine"]
         MasterArchive["Tier 3: Master Archive (/storage/archive)"]
         ImmichExports["Tier 2: Immich Exports (/storage/exports/immich)"]
@@ -47,7 +47,7 @@ graph TD
    - Files are indexed in the local SQLite queue (`queue.db`) with an initial `PENDING_UPLOAD` status.
 
 2. **Handshake & Configuration Sync**:
-   - On connection, the client calls `GET /api/v1/agent/handshake` to verify machine credentials, server version, and server-configured naming templates (`ingest.namingTemplate`).
+   - On connection, the client calls `POST /api/v1/agent/handshake` to verify machine credentials, server version, and server-configured naming templates (`ingest.namingTemplate`).
 
 3. **Direct-to-Archive Streaming Upload**:
    - The device streams binary payloads directly to `POST /api/v1/agent/upload` using HTTP headers:

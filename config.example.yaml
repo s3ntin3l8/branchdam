@@ -97,7 +97,7 @@ immich:
 # Operator-declared host-path -> container-path prefix rewrites for Tier-1
 # project-file introspection (.dam.json, .drp, .fcpxml, .edl) -- without at
 # least one matching rule, project files fall through to basename+size
-# fallback matching only. See docs/project-paths.md for the full resolution
+# fallback matching only. See docs/integrations.md#2-nle-timelines--path-rewrites for the full resolution
 # strategy and docs/configuration.md for the field reference. Commented out
 # by default -- uncomment and adjust to your editing workstations' paths.
 # pathRewrites:

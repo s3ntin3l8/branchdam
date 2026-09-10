@@ -157,6 +157,21 @@ Every migration after `00001_init.sql`, in order:
 | `00005_remote_sync_state_retry_count.sql` | `remote_sync_state.retry_count` | #182/#207 — bounds Immich push retries so a permanently-failing row (e.g. a stale `libraryId`) surfaces as exhausted rather than retrying forever |
 | `00006_downgrade_index_suffix_stem_edges.sql` | one-time `UPDATE` (not a schema change) | Issue #132's data-correction migration — see below |
 | `00007_media_nodes_thumb_state.sql` | `media_nodes.thumb_state` (`PENDING`/`READY`/`UNSUPPORTED`/`FAILED`, default `PENDING`), `.thumb_attempts`; partial index `idx_media_nodes_thumb_pending ON media_nodes(id) WHERE thumb_state = 'PENDING'` | Thumbnail cache work — every existing row defaults to `PENDING`, so `internal/thumbs.Worker` backfills the whole library on first start after the upgrade; no data-correction migration needed, unlike `00006` |
+| `00008_storage_locations_cache_ttl.sql` | `storage_locations.cache_ttl_hours` | Persists TTL on the database row instead of relying solely on config joins |
+| `00009_storage_locations_drop_name_unique.sql` | Drops UNIQUE constraint on `storage_locations.name` | Permits changing root paths across runs without crashing on unchanged display names |
+| `00010_app_settings.sql` | `app_settings` table (`key`, `value`, `updated_at`) | Backs UI-configurable runtime overrides on top of `config.yaml` / `.env` without restart |
+| `00011_agent_scratch_telemetry.sql` | `agent_scratch_telemetry` table | Stores workstation scratch capacity breakdowns and prune stats for dashboard cards |
+| `00012_storage_locations_allow_writable_archive.sql` | Removes `read_only = 1` CHECK constraint on `TIER3_MASTER_ARCHIVE` | Allows Tier 3 archive storage locations to be writable for server-governed ingest |
+| `00013_dedup_existing_hashes.sql` | Data cleanup migration | Archives duplicate `full_hash` rows prior to applying unique partial index |
+| `00014_full_hash_unique_index.sql` | Unique partial index `ux_media_nodes_live_full_hash` | Enforces full hash uniqueness across active media nodes (`lifecycle_state IN ('ACTIVE', 'HIDDEN')`) |
+| `00015_source_path_hash.sql` | `media_nodes.source_path_hash` column and `ix_media_nodes_source_path_hash` index | Pre-flight content tracking by original source path hash |
+| `00016_source_path_hash_id_idx.sql` | Compound index `idx_media_nodes_source_path_hash_id` on `(source_path_hash, id)` | Accelerates `GetMediaNodeBySourcePathHash` queries during agent duplicate detection |
+| `00017_companion_pairing.sql` | `device_pairings`, `device_pairing_keys`, `companion_pairing_audit` | Per-device API keys and QR onboarding for mobile/companion apps |
+| `00018_local_auth.sql` | `users`, `sessions`, `login_audit` | Local password authentication (argon2id) and session cookie management |
+| `00019_password_reset.sql` | `password_reset_tokens` table | Single-use password reset tokens with SHA-256 token hashing and rate limiting |
+| `00020_users_and_audit.sql` | `actor_audit` table; attribution FKs on nodes (`uploaded_by_user_id`), scan jobs (`started_by_user_id`), and pairings (`user_id`) | First-class multi-user attribution and administrative audit trail |
+| `00021_login_audit_password_reset_source.sql` | Extends `login_audit.source` CHECK constraint | Integrates password-reset events into the unified login audit log |
+| `00022_storage_locations_is_virtual.sql` | `storage_locations.is_virtual` column | Virtual storage namespaces for agent offline staging locations |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.
