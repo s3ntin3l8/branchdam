@@ -206,3 +206,70 @@ func TestLocalAuthAdminResetPassword_StillGated(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rr.Code, "anonymous POST to admin reset must 403; the no-auth allowlist must not include admin paths")
 }
+
+func TestLocalAuthAdminCreateUser_GatedWhenAnonymous(t *testing.T) {
+	srv := localAuthTestServer(t)
+	req := noAuthRequest(t, http.MethodPost, "/api/v1/admin/users", []byte(`{"username":"bob"}`))
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusForbidden, rr.Code, "anonymous POST to admin create user must 403")
+}
+
+func TestLocalAuthAdminCreateUser_Success(t *testing.T) {
+	srv := localAuthTestServer(t)
+	body := []byte(`{"username":"bob","email":"bob@example.com","password":"password123","isAdmin":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := auth.WithPrincipal(req.Context(), adminPrincipal())
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "response: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"username":"bob"`)
+	assert.Contains(t, rr.Body.String(), `"email":"bob@example.com"`)
+	assert.Contains(t, rr.Body.String(), `"isAdmin":true`)
+}
+
+func TestLocalAuthAdminCreateUser_AutoGeneratePassword(t *testing.T) {
+	srv := localAuthTestServer(t)
+	body := []byte(`{"username":"charlie"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := auth.WithPrincipal(req.Context(), adminPrincipal())
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "response: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"temporaryPassword":`)
+	assert.Contains(t, rr.Body.String(), `"shownOnceNotice":`)
+}
+
+func TestLocalAuthAdminDisableUser_Success(t *testing.T) {
+	srv := localAuthTestServer(t)
+	// Create user first
+	createBody := []byte(`{"username":"dan","password":"password123"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createCtx := auth.WithPrincipal(createReq.Context(), adminPrincipal())
+	createReq = createReq.WithContext(createCtx)
+
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	// Disable user
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/disable", nil)
+	ctx := auth.WithPrincipal(req.Context(), adminPrincipal())
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "response: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"ok":true`)
+}

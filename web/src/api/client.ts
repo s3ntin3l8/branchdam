@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AttributionUser, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, DeleteCompanionPairingResponse, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, CreateUserInput, CreateUserResponse, DeleteCompanionPairingResponse, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, ListUsersResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -42,11 +42,25 @@ export const api = {
   listStorageLocations: () => request<{ locations: StorageLocation[] }>("/api/v1/storage-locations"),
 
   // Multi-user attribution: list of all users (admin-only). Backs the
-  // pairing UI's "Owned by" selector and the asset list's "uploaded by"
-  // display. Returns 503 when the server hasn't wired attribution --
-  // matches the route's 503 contract (test setups, forward-only
-  // deployments without users). The SPA treats that as "list is empty".
-  listUsers: () => request<{ users: AttributionUser[]; total: number }>("/api/v1/users"),
+  // pairing UI's "Owned by" selector, the asset list's "uploaded by"
+  // display, and the Users administration page. Returns 503 when the
+  // server hasn't wired attribution -- matches the route's 503 contract.
+  listUsers: (params: { limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return request<ListUsersResponse>(`/api/v1/users${q ? `?${q}` : ""}`);
+  },
+  createUser: (input: CreateUserInput) =>
+    request<CreateUserResponse>("/api/v1/admin/users", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  disableUser: (userId: number) =>
+    request<{ ok: boolean; id: number; disabledAt: number }>(`/api/v1/admin/users/${userId}/disable`, {
+      method: "POST",
+    }),
   listAudit: (params: AuditQueryParams = {}) => {
     const qs = new URLSearchParams();
     if (params.type) qs.set("type", params.type);

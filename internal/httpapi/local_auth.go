@@ -60,6 +60,8 @@ func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/password-reset/request", s.handlePasswordResetRequestNoLocal)
 		mux.HandleFunc("POST /api/v1/password-reset/confirm", s.handlePasswordResetConfirmNoLocal)
 		mux.HandleFunc("POST /api/v1/admin/users/{id}/reset-password", s.handleAdminResetPasswordNoLocal)
+		mux.HandleFunc("POST /api/v1/admin/users", s.handleAdminCreateUserNoLocal)
+		mux.HandleFunc("POST /api/v1/admin/users/{id}/disable", s.handleAdminDisableUserNoLocal)
 		return
 	}
 	mux.HandleFunc("GET /api/v1/setup/status", s.handleSetupStatus)
@@ -69,6 +71,8 @@ func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/password-reset/request", s.handlePasswordResetRequest)
 	mux.HandleFunc("POST /api/v1/password-reset/confirm", s.handlePasswordResetConfirm)
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/reset-password", s.handleAdminResetPassword)
+	mux.HandleFunc("POST /api/v1/admin/users", s.handleAdminCreateUser)
+	mux.HandleFunc("POST /api/v1/admin/users/{id}/disable", s.handleAdminDisableUser)
 }
 
 // --- /api/v1/setup/status ---
@@ -299,6 +303,110 @@ func (s *Server) handlePasswordResetConfirmNoLocal(w http.ResponseWriter, _ *htt
 }
 func (s *Server) handleAdminResetPasswordNoLocal(w http.ResponseWriter, _ *http.Request) {
 	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+}
+func (s *Server) handleAdminCreateUserNoLocal(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+}
+func (s *Server) handleAdminDisableUserNoLocal(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+}
+
+// handleAdminCreateUser: POST /api/v1/admin/users
+// (admin-only, gated by RequireAdmin upstream)
+func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	if s.localAuth == nil || s.localAuth.users == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		IsAdmin  bool   `json:"isAdmin"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	username := strings.TrimSpace(body.Username)
+	email := strings.TrimSpace(body.Email)
+	if username == "" {
+		writeJSONError(w, http.StatusUnprocessableEntity, "username is required")
+		return
+	}
+	password := body.Password
+	var temporaryPassword string
+	if password == "" {
+		var err error
+		temporaryPassword, err = users.RandomStrongPassword(16)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "generate password: "+err.Error())
+			return
+		}
+		password = temporaryPassword
+	} else if len(password) < 8 {
+		writeJSONError(w, http.StatusUnprocessableEntity, "password must be at least 8 characters")
+		return
+	}
+
+	actor := adminActorName(r)
+	now := time.Now().Unix()
+	user, err := s.localAuth.users.CreateLocalUser(r.Context(), username, email, password, body.IsAdmin, now, actor)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeJSONError(w, http.StatusConflict, "username is already taken")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "create user: "+err.Error())
+		return
+	}
+
+	respUser := map[string]any{
+		"id":           user.ID,
+		"username":     user.Username,
+		"isAdmin":      user.IsAdmin == 1,
+		"source":       user.Source,
+		"authProvider": user.AuthProvider,
+		"externalUid":  user.ExternalUid,
+		"createdAt":    user.CreatedAt,
+		"createdBy":    user.CreatedBy,
+		"lastSeenAt":   user.LastSeenAt,
+	}
+	if user.Email.Valid {
+		respUser["email"] = user.Email.String
+	}
+	resp := map[string]any{
+		"user": respUser,
+	}
+	if temporaryPassword != "" {
+		resp["temporaryPassword"] = temporaryPassword
+		resp["shownOnceNotice"] = "Copy this password now; we won't show it again."
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// handleAdminDisableUser: POST /api/v1/admin/users/{id}/disable
+// (admin-only, gated by RequireAdmin upstream)
+func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) {
+	if s.localAuth == nil || s.localAuth.users == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+		return
+	}
+	id, ok := pathInt64Param(r, "id")
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "missing or invalid user id")
+		return
+	}
+	now := time.Now()
+	if err := s.localAuth.users.DisableUser(r.Context(), id, now); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "disable user: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"id":         id,
+		"disabledAt": now.Unix(),
+	})
 }
 
 // --- helpers ---

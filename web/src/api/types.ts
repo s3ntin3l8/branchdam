@@ -601,6 +601,27 @@ export interface AttributionUser {
   email?: string;
   createdAt: number;
   lastSeenAt: number;
+  isAdmin?: boolean;
+  source?: string;
+  disabledAt?: number;
+}
+
+export interface ListUsersResponse {
+  users: AttributionUser[];
+  total: number;
+}
+
+export interface CreateUserInput {
+  username: string;
+  email?: string;
+  password?: string;
+  isAdmin?: boolean;
+}
+
+export interface CreateUserResponse {
+  user: AttributionUser;
+  temporaryPassword?: string;
+  shownOnceNotice?: string;
 }
 
 // AuditEntry is the merged row shape returned by /api/v1/audit. Source
