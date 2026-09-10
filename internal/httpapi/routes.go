@@ -511,7 +511,9 @@ func (s *Server) handleDeleteAsset(ctx context.Context, in *AssetPathInput) (*De
 				"filePath": node.FilePath,
 				"fileName": node.FileName,
 			}
-			_ = s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), "asset.archived", "asset", strconv.FormatInt(in.ID, 10), details)
+			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetArchived, "asset", strconv.FormatInt(in.ID, 10), details); err != nil {
+				s.log.Warn("failed to write actor audit for asset archive", "error", err)
+			}
 		}
 	}
 

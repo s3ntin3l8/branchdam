@@ -25,7 +25,8 @@ const SELECT_OPTIONS: Record<string, string[]> = {
   "workers.fullHashPolicy": ["always", "tier3_and_collision", "never"],
 };
 
-const CATEGORIES: SettingsCategory[] = [
+// eslint-disable-next-line react-refresh/only-export-components
+export const CATEGORIES: SettingsCategory[] = [
   { id: "server", label: "Server & Storage" },
   { id: "workers", label: "Workers & Indexing" },
   { id: "integrations", label: "Integrations" },
@@ -35,7 +36,8 @@ const CATEGORIES: SettingsCategory[] = [
 ];
 
 // Maps each settings group name to its parent category id.
-const GROUP_TO_CATEGORY: Record<string, string> = {
+// eslint-disable-next-line react-refresh/only-export-components
+export const GROUP_TO_CATEGORY: Record<string, string> = {
   Server: "server",
   HTTP: "server",
   Workers: "workers",
@@ -426,7 +428,8 @@ export default function SettingsPage() {
     }
     for (const [group, fields] of grouped) {
       const catId = GROUP_TO_CATEGORY[group] || "server";
-      byCategory.get(catId)?.push([group, fields]);
+      const targetCatId = byCategory.has(catId) ? catId : "server";
+      byCategory.get(targetCatId)!.push([group, fields]);
     }
     return byCategory;
   }, [grouped]);

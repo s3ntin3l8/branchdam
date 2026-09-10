@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router";
 import {
   useAsset,
@@ -197,9 +197,20 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
   const [isOpen, setIsOpen] = useState(false);
   const deleteAsset = useDeleteAsset();
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !deleteAsset.isPending) {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, deleteAsset.isPending]);
+
   if (asset.lifecycleState === "ARCHIVED") {
     return (
-      <span className="rounded border border-neutral-800 bg-neutral-900 px-2.5 py-1 text-xs text-neutral-500 font-medium">
+      <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
         Archived
       </span>
     );
@@ -217,12 +228,19 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
       </button>
 
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="archive-asset-title"
+        >
           <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
-            <h3 className="text-base font-semibold text-neutral-100">Archive Asset</h3>
+            <h3 id="archive-asset-title" className="text-base font-semibold text-neutral-100">Archive Asset</h3>
             <p className="text-xs text-neutral-300 leading-relaxed">
               Are you sure you want to soft-delete (archive) <strong className="text-white">{asset.fileName}</strong>?
-              The media node will be marked <code className="text-amber-400">ARCHIVED</code> and will no longer participate in live version lineage.
+              The media node will be marked <code className="text-amber-400">ARCHIVED</code> and removed from active lineage.
+              Note: Extracted metadata (EXIF/ffprobe tags) for this node will be pruned on the next background scan.
+              The underlying file on disk is never deleted.
             </p>
             {deleteAsset.isError && (
               <p className="text-xs text-red-400">Failed to archive: {String(deleteAsset.error)}</p>

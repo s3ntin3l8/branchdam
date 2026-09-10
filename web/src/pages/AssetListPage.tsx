@@ -19,7 +19,6 @@ export default function AssetListPage() {
   const graphStatus = (searchParams.get("graphStatus") as Asset["graphStatus"]) || "";
   const storageLocationId = searchParams.get("storageLocationId") ? Number(searchParams.get("storageLocationId")) : undefined;
   const lifecycleState = (searchParams.get("lifecycleState") as Asset["lifecycleState"]) || "";
-  const searchQuery = searchParams.get("q") || "";
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
   const myUploads = searchParams.get("myUploads") === "true";
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
@@ -90,14 +89,7 @@ export default function AssetListPage() {
     setSearchParams(new URLSearchParams());
   };
 
-  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState || searchQuery);
-
-  const displayedAssets = searchQuery.trim()
-    ? assets.filter((a) =>
-        a.fileName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        a.filePath.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : assets;
+  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState);
 
   return (
     <div className="p-6 space-y-6">
@@ -239,18 +231,6 @@ export default function AssetListPage() {
             </label>
           </div>
 
-          {/* Search Query */}
-          <div className="sm:col-span-2">
-            <label htmlFor="search-filter" className="block text-neutral-400 mb-1">Search Path / Filename</label>
-            <input
-              id="search-filter"
-              type="text"
-              placeholder="Search filename or path..."
-              value={searchQuery}
-              onChange={(e) => updateFilters({ q: e.target.value })}
-              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500"
-            />
-          </div>
         </div>
       </div>
 
@@ -258,7 +238,7 @@ export default function AssetListPage() {
         <div className="p-6 text-neutral-400">Loading assets…</div>
       ) : isError ? (
         <div className="p-6 text-red-400">Failed to load assets: {String(error)}</div>
-      ) : displayedAssets.length === 0 ? (
+      ) : assets.length === 0 ? (
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
           No assets match the selected filters.
         </div>
@@ -278,7 +258,7 @@ export default function AssetListPage() {
               </tr>
             </thead>
             <tbody>
-              {displayedAssets.map((a) => (
+              {assets.map((a) => (
                 <tr key={a.id} className="border-b border-neutral-900 hover:bg-neutral-900">
                   <td className="py-2 pr-4">
                     <Thumbnail assetId={a.id} thumbState={a.thumbState} alt={a.fileName} />

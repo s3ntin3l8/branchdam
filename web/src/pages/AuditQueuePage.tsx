@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
-import { api } from "../api/client";
 import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
 import type { EdgeAuditEntry } from "../api/types";
@@ -415,6 +414,19 @@ function BatchConfirmModal({
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
+  const confirmMutation = useConfirmEdge();
+  const rejectMutation = useRejectEdge();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !running) {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, running, onClose]);
 
   if (!isOpen) return null;
 
@@ -423,36 +435,47 @@ function BatchConfirmModal({
     setErrorMsg("");
     let completed = 0;
     let failed = 0;
-    for (const edge of edges) {
-      try {
-        if (action === "confirm") {
-          await api.confirmEdge(edge.id);
-        } else {
-          await api.rejectEdge(edge.id);
+    try {
+      for (const edge of edges) {
+        try {
+          if (action === "confirm") {
+            await confirmMutation.mutateAsync(edge.id);
+          } else {
+            await rejectMutation.mutateAsync(edge.id);
+          }
+        } catch {
+          failed++;
         }
-      } catch {
-        failed++;
+        completed++;
+        setProgress(completed);
       }
-      completed++;
-      setProgress(completed);
-    }
-    setRunning(false);
-    if (failed > 0) {
-      setErrorMsg(`${failed} of ${edges.length} edges failed to ${action}.`);
-    } else {
-      onComplete();
+    } finally {
+      setRunning(false);
+      if (completed > 0) {
+        onComplete();
+      }
+      if (failed > 0) {
+        setErrorMsg(`${failed} of ${edges.length} edges failed to ${action}.`);
+      }
     }
   };
 
+  const percent = edges.length > 0 ? Math.round((progress / edges.length) * 100) : 0;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="batch-confirm-modal-title"
+    >
       <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
-        <h3 className="text-base font-semibold text-neutral-100">
+        <h3 id="batch-confirm-modal-title" className="text-base font-semibold text-neutral-100">
           Batch {action === "confirm" ? "Confirm" : "Reject"} Edges
         </h3>
         <p className="text-xs text-neutral-300">
           Are you sure you want to <strong>{action}</strong> all{" "}
-          <strong className="text-white">{edges.length}</strong> currently filtered edge candidates?
+          <strong className="text-white">{edges.length}</strong> currently filtered edge candidates on this page?
         </p>
 
         {running && (
@@ -464,7 +487,7 @@ function BatchConfirmModal({
             <div className="h-1.5 w-full bg-neutral-800 rounded-full overflow-hidden">
               <div
                 className={`h-full ${action === "confirm" ? "bg-emerald-500" : "bg-red-500"}`}
-                style={{ width: `${(progress / edges.length) * 100}%` }}
+                style={{ width: `${percent}%` }}
               />
             </div>
           </div>
@@ -639,14 +662,14 @@ export default function AuditQueuePage() {
                 onClick={() => setBatchAction("confirm")}
                 className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 shadow"
               >
-                Accept Filtered ({filteredEntries.length})
+                Accept Filtered ({filteredEntries.length} on page)
               </button>
               <button
                 type="button"
                 onClick={() => setBatchAction("reject")}
                 className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-neutral-700 border border-red-900/60"
               >
-                Decline Filtered ({filteredEntries.length})
+                Decline Filtered ({filteredEntries.length} on page)
               </button>
             </div>
           )}

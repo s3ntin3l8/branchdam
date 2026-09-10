@@ -71,4 +71,22 @@ describe("AuditLogPage", () => {
       expect(screen.getByText(/no audit entries recorded/i)).toBeInTheDocument();
     });
   });
+
+  it("queries with event and resourceType server-side filters", async () => {
+    vi.mocked(api.listAudit).mockResolvedValue({
+      entries: [],
+      total: 0,
+    });
+
+    renderWithClient(<AuditLogPage />);
+
+    const eventInput = screen.getByLabelText(/filter event/i);
+    await userEvent.type(eventInput, "scan.started");
+
+    await waitFor(() => {
+      expect(api.listAudit).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "scan.started" })
+      );
+    });
+  });
 });

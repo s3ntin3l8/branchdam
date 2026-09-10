@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import SettingsPage from "./SettingsPage";
+import SettingsPage, { CATEGORIES, GROUP_TO_CATEGORY } from "./SettingsPage";
 import { ThemeProvider } from "../components/theme/ThemeProvider";
 import { api, ApiError } from "../api/client";
 import type { SettingsField, SettingsResponse } from "../api/types";
@@ -465,5 +465,15 @@ describe("SettingsPage", () => {
         unset: ["pathRewrites"],
       });
     });
+  });
+
+  it("ensures every group in GROUP_TO_CATEGORY maps to a valid category in CATEGORIES", () => {
+    const validCategoryIds = new Set(CATEGORIES.map((c) => c.id));
+    for (const [group, categoryId] of Object.entries(GROUP_TO_CATEGORY)) {
+      expect(
+        validCategoryIds.has(categoryId),
+        `Group "${group}" maps to unknown category "${categoryId}"`
+      ).toBe(true);
+    }
   });
 });

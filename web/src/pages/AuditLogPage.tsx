@@ -43,7 +43,8 @@ function DetailsCell({ detailsJson }: { detailsJson?: string }) {
 export default function AuditLogPage() {
   const [type, setType] = useState<"activity" | "login">("activity");
   const [page, setPage] = useState(1);
-  const [filterText, setFilterText] = useState("");
+  const [eventFilter, setEventFilter] = useState("");
+  const [resourceTypeFilter, setResourceTypeFilter] = useState("");
 
   const offset = (page - 1) * PAGE_SIZE;
 
@@ -51,21 +52,15 @@ export default function AuditLogPage() {
     type,
     limit: PAGE_SIZE,
     offset,
+    event: eventFilter.trim() || undefined,
+    resourceType: resourceTypeFilter.trim() || undefined,
   });
 
   const entries = data?.entries ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const filteredEntries = filterText.trim()
-    ? entries.filter(
-        (e) =>
-          e.event.toLowerCase().includes(filterText.toLowerCase()) ||
-          e.actorName.toLowerCase().includes(filterText.toLowerCase()) ||
-          (e.resourceType && e.resourceType.toLowerCase().includes(filterText.toLowerCase())) ||
-          (e.resourceId && e.resourceId.toLowerCase().includes(filterText.toLowerCase())),
-      )
-    : entries;
+  const hasActiveFilters = Boolean(eventFilter.trim() || resourceTypeFilter.trim());
 
   return (
     <div className="p-6 space-y-6">
@@ -98,16 +93,48 @@ export default function AuditLogPage() {
           </div>
 
           <div>
-            <label htmlFor="log-filter-input" className="block text-neutral-400 mb-1">Filter Events</label>
+            <label htmlFor="log-event-filter" className="block text-neutral-400 mb-1">Filter Event</label>
             <input
-              id="log-filter-input"
+              id="log-event-filter"
               type="text"
-              placeholder="Search event, actor, resource..."
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500 min-w-[220px]"
+              placeholder="e.g. scan.started, asset.archived"
+              value={eventFilter}
+              onChange={(e) => {
+                setEventFilter(e.target.value);
+                setPage(1);
+              }}
+              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500 min-w-[200px]"
             />
           </div>
+
+          <div>
+            <label htmlFor="log-resource-filter" className="block text-neutral-400 mb-1">Filter Resource Type</label>
+            <input
+              id="log-resource-filter"
+              type="text"
+              placeholder="e.g. asset, scan_job"
+              value={resourceTypeFilter}
+              onChange={(e) => {
+                setResourceTypeFilter(e.target.value);
+                setPage(1);
+              }}
+              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500 min-w-[160px]"
+            />
+          </div>
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={() => {
+                setEventFilter("");
+                setResourceTypeFilter("");
+                setPage(1);
+              }}
+              className="self-end text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
+            >
+              Clear Filters
+            </button>
+          )}
         </div>
 
         <div className="text-neutral-400">
@@ -122,11 +149,7 @@ export default function AuditLogPage() {
         <div className="p-6 text-red-400">Failed to load audit entries: {String(error)}</div>
       ) : entries.length === 0 ? (
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
-          No audit entries recorded for this stream.
-        </div>
-      ) : filteredEntries.length === 0 ? (
-        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
-          No entries match &quot;{filterText}&quot;.
+          {hasActiveFilters ? "No audit entries match the specified filters." : "No audit entries recorded for this stream."}
         </div>
       ) : (
         <>
@@ -141,7 +164,7 @@ export default function AuditLogPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-900">
-              {filteredEntries.map((e: AuditEntry) => (
+              {entries.map((e: AuditEntry) => (
                 <tr key={e.id} className="hover:bg-neutral-900/50">
                   <td className="py-2 pr-4 font-mono text-xs text-neutral-400 whitespace-nowrap">
                     {formatTimestamp(e.createdAt)}

@@ -54,6 +54,7 @@ const (
 	EventPairingRevoked     = "pairing.revoked"
 	EventPairingDeleted     = "pairing.deleted"
 	EventActorAuditExported = "actor_audit.exported"
+	EventAssetArchived      = "asset.archived"
 )
 
 // Event is a typed event name. Anything that wants to write a new kind
