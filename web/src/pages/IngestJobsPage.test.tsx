@@ -8,6 +8,7 @@ import { api } from "../api/client";
 vi.mock("../api/client", () => ({
   api: {
     listJobs: vi.fn(),
+    cancelJob: vi.fn(),
   },
 }));
 
@@ -122,6 +123,40 @@ describe("IngestJobsPage", () => {
     await user.click(screen.getByRole("button", { name: "All Types" }));
     await waitFor(() => {
       expect(api.listJobs).toHaveBeenCalledWith(expect.objectContaining({ kind: undefined }));
+    });
+  });
+
+  it("cancels a running scan job when clicking Cancel", async () => {
+    vi.mocked(api.listJobs).mockResolvedValueOnce({
+      jobs: [
+        {
+          id: 42,
+          kind: "FULL_SCAN",
+          state: "RUNNING",
+          filesSeen: 10,
+          filesHashed: 5,
+          filesFailed: 0,
+          edgesCreated: 0,
+        },
+      ],
+      total: 1,
+    });
+    vi.mocked(api.cancelJob).mockResolvedValueOnce({ ok: true });
+
+    renderWithClient(<IngestJobsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("#42")).toBeInTheDocument();
+    });
+
+    const cancelButton = screen.getByRole("button", { name: "Cancel" });
+    expect(cancelButton).toBeInTheDocument();
+
+    const user = (await import("@testing-library/user-event")).default.setup();
+    await user.click(cancelButton);
+
+    await waitFor(() => {
+      expect(api.cancelJob).toHaveBeenCalledWith(42);
     });
   });
 });

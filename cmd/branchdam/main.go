@@ -417,6 +417,7 @@ func main() {
 		LocalAuth:      localAuthDeps,
 		Attribution:    attributionSvc,
 		Audit:          auditSvc,
+		Watcher:        supervisor,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,

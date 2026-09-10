@@ -327,6 +327,18 @@ export function useJobs(params: import("../api/types").JobsQueryParams = {}) {
   });
 }
 
+export function useCancelJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.cancelJob(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["progress"] });
+      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+    },
+  });
+}
+
 // Companion pairing hooks. All four mutations invalidate the list query
 // on success so the SPA's pairings table stays in sync without manual
 // refetch. Detail-view reads aren't auto-invalidated -- those are only
