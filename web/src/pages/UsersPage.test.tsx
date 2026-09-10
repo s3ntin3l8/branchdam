@@ -9,15 +9,18 @@ import type {
   CreateUserInput,
   CreateUserResponse,
   ListUsersResponse,
+  Me,
 } from "../api/types";
 
 const listUsersMock = vi.fn<(params?: { limit?: number; offset?: number }) => Promise<ListUsersResponse>>();
 const createUserMock = vi.fn<(input: CreateUserInput) => Promise<CreateUserResponse>>();
 const adminResetPasswordMock = vi.fn<(id: number) => Promise<AdminResetPasswordResponse>>();
 const disableUserMock = vi.fn<(id: number) => Promise<Record<string, never>>>();
+const meMock = vi.fn<() => Promise<Me>>();
 
 vi.mock("../api/client", () => ({
   api: {
+    me: () => meMock(),
     listUsers: (params?: { limit?: number; offset?: number }) => listUsersMock(params),
     createUser: (input: CreateUserInput) => createUserMock(input),
     adminResetPassword: (id: number) => adminResetPasswordMock(id),
@@ -89,6 +92,14 @@ function renderWithClient(ui: React.ReactElement) {
 describe("UsersPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    meMock.mockResolvedValue({
+      kind: "user",
+      name: "alice",
+      authenticated: true,
+      isAdmin: true,
+      isLocal: true,
+      localUserId: 1,
+    });
     listUsersMock.mockResolvedValue({
       users: sampleUsers,
       total: sampleUsers.length,
@@ -210,7 +221,7 @@ describe("UsersPage", () => {
     });
   });
 
-  it("disables an active user", async () => {
+  it("disables an active user and hides disable button for current user", async () => {
     disableUserMock.mockResolvedValue({});
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -220,8 +231,12 @@ describe("UsersPage", () => {
       expect(screen.getByText("bob")).toBeInTheDocument();
     });
 
+    // Alice is localUserId: 1 (current user) so she has no Disable button.
+    // Carol is already disabled so she has no Disable button.
+    // Only Bob (id: 2) has a Disable button.
     const disableButtons = screen.getAllByText("Disable");
-    fireEvent.click(disableButtons[1]); // bob is index 1
+    expect(disableButtons.length).toBe(1);
+    fireEvent.click(disableButtons[0]);
 
     expect(confirmSpy).toHaveBeenCalledWith("Disable logins for bob?");
     await waitFor(() => {

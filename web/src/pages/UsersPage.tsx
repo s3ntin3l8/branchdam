@@ -3,6 +3,7 @@ import {
   useAdminResetPassword,
   useCreateUser,
   useDisableUser,
+  useMe,
   useUsers,
 } from "../hooks/queries";
 import { ApiError } from "../api/client";
@@ -57,6 +58,7 @@ export default function UsersPage() {
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
   const pageSize = 25;
+  const { data: me } = useMe();
   const { data, isLoading, error } = useUsers({ limit: pageSize, offset: page * pageSize });
 
   const createUserMutation = useCreateUser();
@@ -170,19 +172,19 @@ export default function UsersPage() {
     }
   };
 
-  const users = data?.users || [];
   const total = data?.total || 0;
   const totalPages = Math.ceil(total / pageSize);
 
   const filteredUsers = useMemo(() => {
-    if (!search.trim()) return users;
+    const list = data?.users || [];
+    if (!search.trim()) return list;
     const q = search.toLowerCase();
-    return users.filter(
+    return list.filter(
       (u) =>
         u.username.toLowerCase().includes(q) ||
         (u.email && u.email.toLowerCase().includes(q)),
     );
-  }, [users, search]);
+  }, [data?.users, search]);
 
   return (
     <div className="p-6">
@@ -247,6 +249,7 @@ export default function UsersPage() {
               {filteredUsers.map((user) => {
                 const isSystem = user.authProvider === "system" || user.username === "system";
                 const isDisabled = Boolean(user.disabledAt);
+                const isSelf = me?.localUserId !== undefined && user.id === me.localUserId;
 
                 return (
                   <tr key={user.id} className="hover:bg-neutral-900/30">
@@ -299,7 +302,7 @@ export default function UsersPage() {
                           >
                             Reset Password
                           </button>
-                          {!isDisabled && (
+                          {!isDisabled && !isSelf && (
                             <button
                               type="button"
                               onClick={() => handleDisable(user)}

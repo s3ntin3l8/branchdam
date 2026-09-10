@@ -273,3 +273,158 @@ func TestLocalAuthAdminDisableUser_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code, "response: %s", rr.Body.String())
 	assert.Contains(t, rr.Body.String(), `"ok":true`)
 }
+
+func localAuthTestServerWithGroups(t *testing.T, groups []string) *Server {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "local-auth-routes-groups.db")
+	database, err := db.Open(context.Background(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+
+	svc := users.NewService(database, usersCookieTestBase64, users.ServiceOptions{
+		CookieKey: usersCookieTestKey,
+	})
+	loginLimiter := ratelimit.New()
+	resetLimiter := ratelimit.New()
+	sessionMw := session.New(svc, session.Config{
+		CookieName: "branchdam_session",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	pool := workers.New[string](2, 16)
+	pool.Run(ctx)
+
+	return New(Deps{
+		Config: &config.Config{
+			Agent: config.Agent{APIKey: localAuthTestAgentKey},
+			Auth:  config.Auth{Mode: string(auth.AuthModeLocal)},
+			Authz: config.Authz{Groups: groups},
+		},
+		DB:      database,
+		Prober:  probe.New(),
+		Pool:    pool,
+		Engine:  graph.NewEngine(database, nil),
+		Hub:     sse.New(),
+		Version: "test",
+		LocalAuth: &LocalAuthDeps{
+			Users:        svc,
+			LoginLimiter: loginLimiter,
+			ResetLimiter: resetLimiter,
+			SessionMw:    sessionMw,
+			Reset:        users.NewPasswordResetService(svc, users.PasswordResetServiceOptions{TokenTTL: time.Hour}),
+			AuthMode:     auth.AuthModeLocal,
+		},
+	})
+}
+
+func TestLocalAuthAdminRoutes_RejectsNonAdminPrincipal(t *testing.T) {
+	srv := localAuthTestServerWithGroups(t, []string{"dam-admins"})
+	nonAdmin := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "regular",
+		Email:         "regular@example.com",
+		Groups:        []string{"regular-users"},
+		Authenticated: true,
+	}
+
+	endpoints := []struct {
+		method string
+		path   string
+		body   []byte
+	}{
+		{http.MethodPost, "/api/v1/admin/users", []byte(`{"username":"newguy"}`)},
+		{http.MethodPost, "/api/v1/admin/users/1/disable", nil},
+		{http.MethodPost, "/api/v1/admin/users/1/reset-password", nil},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
+			var rdr *bytes.Reader
+			if ep.body != nil {
+				rdr = bytes.NewReader(ep.body)
+			} else {
+				rdr = bytes.NewReader(nil)
+			}
+			req := httptest.NewRequest(ep.method, ep.path, rdr)
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(auth.WithPrincipal(req.Context(), nonAdmin))
+
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusForbidden, rr.Code, "expected 403 Forbidden for non-admin principal on %s, got %d (body: %s)", ep.path, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), "admin authorization required")
+		})
+	}
+}
+
+func TestLocalAuthAdminCreateUser_ConflictDifferentiation(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	// Create initial user
+	body1 := []byte(`{"username":"user1","email":"user1@example.com","password":"password123"}`)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body1))
+	req1.Header.Set("Content-Type", "application/json")
+	req1 = req1.WithContext(auth.WithPrincipal(req1.Context(), adminPrincipal()))
+	rr1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr1, req1)
+	require.Equal(t, http.StatusCreated, rr1.Code)
+
+	// Duplicate username
+	body2 := []byte(`{"username":"user1","email":"other@example.com","password":"password123"}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2 = req2.WithContext(auth.WithPrincipal(req2.Context(), adminPrincipal()))
+	rr2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr2, req2)
+	assert.Equal(t, http.StatusConflict, rr2.Code)
+	assert.Contains(t, rr2.Body.String(), "username is already taken")
+
+	// Duplicate email
+	body3 := []byte(`{"username":"user2","email":"user1@example.com","password":"password123"}`)
+	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body3))
+	req3.Header.Set("Content-Type", "application/json")
+	req3 = req3.WithContext(auth.WithPrincipal(req3.Context(), adminPrincipal()))
+	rr3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr3, req3)
+	assert.Equal(t, http.StatusConflict, rr3.Code)
+	assert.Contains(t, rr3.Body.String(), "email is already taken")
+}
+
+func TestLocalAuthAdminDisableUser_NotFound(t *testing.T) {
+	srv := localAuthTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/99999/disable", nil)
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Contains(t, rr.Body.String(), "user not found")
+}
+
+func TestLocalAuthAdminDisableUser_CannotDisableSelf(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	// Create user
+	createBody := []byte(`{"username":"adminuser","password":"password123"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	// Disable self (UserID 1 matches target 1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/disable", nil)
+	ctx := auth.WithPrincipal(req.Context(), adminPrincipal())
+	ctx = auth.WithLocalUserView(ctx, auth.LocalUserView{UserID: 1, IsAdmin: true})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "cannot disable current user")
+}

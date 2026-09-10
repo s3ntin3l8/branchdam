@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
@@ -312,8 +314,17 @@ func (s *Server) handleAdminDisableUserNoLocal(w http.ResponseWriter, _ *http.Re
 }
 
 // handleAdminCreateUser: POST /api/v1/admin/users
-// (admin-only, gated by RequireAdmin upstream)
+// (admin-only, gated by requireSettingsAdmin)
 func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireSettingsAdmin(r.Context()); err != nil {
+		var statusErr huma.StatusError
+		if errors.As(err, &statusErr) {
+			writeJSONError(w, statusErr.GetStatus(), statusErr.Error())
+		} else {
+			writeJSONError(w, http.StatusForbidden, err.Error())
+		}
+		return
+	}
 	if s.localAuth == nil || s.localAuth.users == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 		return
@@ -354,6 +365,10 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	user, err := s.localAuth.users.CreateLocalUser(r.Context(), username, email, password, body.IsAdmin, now, actor)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			if strings.Contains(err.Error(), "email") {
+				writeJSONError(w, http.StatusConflict, "email is already taken")
+				return
+			}
 			writeJSONError(w, http.StatusConflict, "username is already taken")
 			return
 		}
@@ -386,8 +401,17 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminDisableUser: POST /api/v1/admin/users/{id}/disable
-// (admin-only, gated by RequireAdmin upstream)
+// (admin-only, gated by requireSettingsAdmin)
 func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireSettingsAdmin(r.Context()); err != nil {
+		var statusErr huma.StatusError
+		if errors.As(err, &statusErr) {
+			writeJSONError(w, statusErr.GetStatus(), statusErr.Error())
+		} else {
+			writeJSONError(w, http.StatusForbidden, err.Error())
+		}
+		return
+	}
 	if s.localAuth == nil || s.localAuth.users == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 		return
@@ -395,6 +419,18 @@ func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) 
 	id, ok := pathInt64Param(r, "id")
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest, "missing or invalid user id")
+		return
+	}
+	if localUser, ok := auth.FromUser(r.Context()); ok && localUser.UserID == id {
+		writeJSONError(w, http.StatusBadRequest, "cannot disable current user")
+		return
+	}
+	if _, err := s.localAuth.users.GetUserByID(r.Context(), id); err != nil {
+		if errors.Is(err, users.ErrUserNotFound) {
+			writeJSONError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "get user: "+err.Error())
 		return
 	}
 	now := time.Now()
