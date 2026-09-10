@@ -3055,6 +3055,300 @@ func TestConfirmEdgeRecomputesGraphStatus(t *testing.T) {
 	}
 }
 
+func TestConfirmEdgeTriggersAutoInherit(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parentPath := filepath.Join(resolved, "parent.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, parentPath, map[string]string{
+		"EXIF:Make": "SONY", "EXIF:LensModel": "FE 24-70mm F2.8 GM", "EXIF:SerialNumber": "1234567",
+	})
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil)
+
+	path := filepath.Join(t.TempDir(), "confirm-inherit.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var parent, child sqlcgen.MediaNode
+	var edge sqlcgen.MediaEdge
+	ctx := context.Background()
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "confirm-inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		parentHash, parentSize, parentMtime := fastHashOf(t, parentPath)
+		parent, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-confirm-parent", StorageLocationID: locID, FilePath: parentPath, FileName: "parent.jpg",
+			FileExt: "jpg", SizeBytes: parentSize, MtimeUnix: parentMtime, FastHash: &parentHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+			CameraModel: sql.NullString{String: "ILCE-7M4", Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		for _, kv := range []struct{ k, v string }{
+			{"EXIF:Make", "SONY"}, {"EXIF:LensModel", "FE 24-70mm F2.8 GM"}, {"EXIF:SerialNumber", "1234567"},
+		} {
+			if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+				NodeID: parent.ID, Source: "exiftool", Key: kv.k, Value: kv.v,
+			}); err != nil {
+				return err
+			}
+		}
+
+		childHash, childSize, childMtime := fastHashOf(t, childPath)
+		child, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-confirm-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSize, MtimeUnix: childMtime, FastHash: &childHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		edge, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.65, Tier: 2, Resolver: "stem", ReviewState: "NEEDS_REVIEW",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{
+			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Metadata: config.Metadata{AutoInherit: true},
+		},
+		DB: database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("list child node metadata: %v", err)
+	}
+	tagMap := map[string]string{}
+	for _, r := range rows {
+		tagMap[r.Key] = r.Value
+	}
+	if tagMap["EXIF:Make"] != "SONY" {
+		t.Errorf("child EXIF:Make = %q, want SONY", tagMap["EXIF:Make"])
+	}
+	if tagMap["EXIF:LensModel"] != "FE 24-70mm F2.8 GM" {
+		t.Errorf("child EXIF:LensModel = %q, want FE 24-70mm F2.8 GM", tagMap["EXIF:LensModel"])
+	}
+}
+
+func TestConfirmEdgeTier3DoesNotInherit(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parentPath := filepath.Join(resolved, "parent.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, parentPath, map[string]string{"EXIF:Make": "SONY"})
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil)
+
+	path := filepath.Join(t.TempDir(), "confirm-t3.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var parent, child sqlcgen.MediaNode
+	var edge sqlcgen.MediaEdge
+	ctx := context.Background()
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "confirm-t3-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		parentHash, parentSize, parentMtime := fastHashOf(t, parentPath)
+		parent, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-t3-parent", StorageLocationID: locID, FilePath: parentPath, FileName: "parent.jpg",
+			FileExt: "jpg", SizeBytes: parentSize, MtimeUnix: parentMtime, FastHash: &parentHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: parent.ID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+		}); err != nil {
+			return err
+		}
+
+		childHash, childSize, childMtime := fastHashOf(t, childPath)
+		child, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-t3-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSize, MtimeUnix: childMtime, FastHash: &childHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		edge, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.65, Tier: 3, Resolver: "heuristic", ReviewState: "NEEDS_REVIEW",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-t3-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{
+			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Metadata: config.Metadata{AutoInherit: true},
+		},
+		DB: database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, want 200", rr.Code)
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("list child node metadata: %v", err)
+	}
+	for _, r := range rows {
+		if r.Key == "EXIF:Make" {
+			t.Errorf("child should not have inherited EXIF:Make from Tier 3 parent")
+		}
+	}
+}
+
+func TestConfirmEdgeAutoInheritDisabled(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parentPath := filepath.Join(resolved, "parent.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, parentPath, map[string]string{"EXIF:Make": "SONY"})
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil)
+
+	path := filepath.Join(t.TempDir(), "confirm-disabled.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var parent, child sqlcgen.MediaNode
+	var edge sqlcgen.MediaEdge
+	ctx := context.Background()
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "confirm-disabled-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		parentHash, parentSize, parentMtime := fastHashOf(t, parentPath)
+		parent, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-dis-parent", StorageLocationID: locID, FilePath: parentPath, FileName: "parent.jpg",
+			FileExt: "jpg", SizeBytes: parentSize, MtimeUnix: parentMtime, FastHash: &parentHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: parent.ID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+		}); err != nil {
+			return err
+		}
+
+		childHash, childSize, childMtime := fastHashOf(t, childPath)
+		child, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-dis-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSize, MtimeUnix: childMtime, FastHash: &childHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		edge, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: parent.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.65, Tier: 2, Resolver: "stem", ReviewState: "NEEDS_REVIEW",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-disabled-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{
+			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Metadata: config.Metadata{AutoInherit: false},
+		},
+		DB: database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, want 200", rr.Code)
+	}
+
+	rows, err := database.Reader.ListNodeMetadata(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("list child node metadata: %v", err)
+	}
+	for _, r := range rows {
+		if r.Key == "EXIF:Make" {
+			t.Errorf("child should not have inherited EXIF:Make when AutoInherit is false")
+		}
+	}
+}
+
 // TestRejectEdgeRecomputesGraphStatus backs M3: rejecting a node's only
 // AUTO_ACCEPTED edge must revert graph_status to UNLINKED, not leave it
 // stuck at LINKED with nothing in the audit queue to explain why.

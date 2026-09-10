@@ -818,120 +818,42 @@ type InheritMetadataOutput struct {
 // is writable by default; readOnly: true is opt-in for archive-only
 // deployments) or a Tier-3-resolved parent edge is refused with 409.
 func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataInput) (*InheritMetadataOutput, error) {
-	child, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, huma.Error404NotFound("asset not found")
+	deps := pipeline.InheritDeps{
+		DB:     s.db,
+		Guard:  s.guard,
+		Prober: s.prober,
+		Log:    s.log,
 	}
+	tags, err := pipeline.InheritMetadata(ctx, deps, in.ID)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("get asset", err)
-	}
-	if child.LifecycleState == "ARCHIVED" {
-		return nil, huma.Error404NotFound("asset not found")
-	}
-
-	// #199: the child of an inherit-metadata write must be a real media file,
-	// never a project archive (.drp/.fcpxml/.edl/.dam.json/.prproj). A
-	// manual edge created before handleCreateEdge's guard shipped, or a
-	// filename-stem/XMP match that lands a project file as the child of a
-	// DERIVED_FROM/FINAL_EXPORT/PROXY_OF edge, would otherwise clear
-	// pickWinningParent and run exiftool in-place against a container file
-	// that isn't an image or video. Refuse before any exiftool subprocess
-	// spawns.
-	if _, ok := projectfile.GetParser(child.FilePath); ok {
-		return nil, huma.Error409Conflict("cannot inherit metadata into a project file")
-	}
-
-	// Refuse a write into a read-only location BEFORE spawning exiftool.
-	if s.guard != nil {
-		if err := s.guard.CheckWrite(child.FilePath); err != nil {
-			var roErr *storage.ErrReadOnlyTier
-			if errors.As(err, &roErr) {
-				return nil, huma.Error409Conflict("cannot inherit metadata into a read-only location (tier " + roErr.Tier + ")")
-			}
-			return nil, huma.Error422UnprocessableEntity(err.Error())
+		if errors.Is(err, pipeline.ErrNodeNotFound) {
+			return nil, huma.Error404NotFound("asset not found")
 		}
-	}
-
-	parents, err := s.db.Reader.ListEdgesByTarget(ctx, child.ID)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("list parent edges", err)
-	}
-	winning := pickWinningParent(parents)
-	if winning == nil {
-		if hasResolvedButIneligibleParent(parents) {
+		if errors.Is(err, pipeline.ErrIsProjectFile) {
+			return nil, huma.Error409Conflict("cannot inherit metadata into a project file")
+		}
+		var roErr *storage.ErrReadOnlyTier
+		if errors.As(err, &roErr) {
+			return nil, huma.Error409Conflict("cannot inherit metadata into a read-only location (tier " + roErr.Tier + ")")
+		}
+		var unkErr *storage.ErrUnknownLocation
+		if errors.As(err, &unkErr) {
+			return nil, huma.Error422UnprocessableEntity(unkErr.Error())
+		}
+		if errors.Is(err, pipeline.ErrIneligibleParent) {
 			return nil, huma.Error409Conflict("cannot inherit from a Tier-3-resolved or non-ancestry (duplicate/sidecar) parent edge")
 		}
-		return nil, huma.Error409Conflict("asset has no resolved parent edge to inherit from")
-	}
-
-	parent, err := s.db.Reader.GetMediaNodeByID(ctx, winning.SourceNodeID)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("get parent asset", err)
-	}
-	// A parent that has since been archived or gone missing is not a usable
-	// identity source, even though the edge pointing at it may still be
-	// AUTO_ACCEPTED/CONFIRMED -- archiving never touches media_edges.
-	if parent.LifecycleState == "ARCHIVED" || parent.LifecycleState == "MISSING" {
-		return nil, huma.Error409Conflict("parent asset is " + parent.LifecycleState + ", not a usable identity source")
-	}
-
-	parentTags, err := loadTagSet(ctx, s.db.Reader, parent)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("read parent metadata", err)
-	}
-	childTags, err := loadTagSet(ctx, s.db.Reader, child)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("read child metadata", err)
-	}
-	childTags.DerivedFrom = parent.NodeUuid // XMP-xmpMM:DerivedFrom = parent node_uuid
-
-	tags := metadata.Plan(parentTags, childTags)
-	// Plan always emits the two identity tags (XMP-dc:Identifier /
-	// XMP-xmpMM:DerivedFrom), so this write is idempotent in value: repeating
-	// it leaves the file's inheritable metadata unchanged and re-asserts the
-	// child's identity tags.
-
-	wctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
-	defer cancel()
-	if err := s.prober.WriteTags(wctx, child.FilePath, tags); err != nil {
+		if errors.Is(err, pipeline.ErrNoParent) {
+			return nil, huma.Error409Conflict("asset has no resolved parent edge to inherit from")
+		}
+		var parentErr *pipeline.ErrParentUnavailable
+		if errors.As(err, &parentErr) {
+			return nil, huma.Error409Conflict("parent asset is " + parentErr.State + ", not a usable identity source")
+		}
 		if errors.Is(err, probe.ErrToolUnavailable) {
 			return nil, huma.Error503ServiceUnavailable("exiftool not available")
 		}
-		return nil, huma.Error500InternalServerError("write metadata", err)
-	}
-
-	// The write just changed size_bytes/mtime_unix/fast_hash on disk. Unlike
-	// the node_metadata backfill below, this update is NOT best-effort: if it
-	// doesn't happen, the next scan's commitOne sees a changed fast_hash at
-	// this path and treats it as a version collision -- archiving this node
-	// and inserting a successor under a new node_uuid, which strands every
-	// media_edges row (including a human CONFIRMED/REJECTED review decision)
-	// on the now-archived row. A failure here is therefore a hard error, not
-	// a warning, even though the file write itself already succeeded.
-	if err := s.refreshNodeAfterInPlaceWrite(ctx, child); err != nil {
-		return nil, huma.Error500InternalServerError("refresh node after metadata write", err)
-	}
-
-	// The file on disk now carries the inherited tags; backfill the child's
-	// node_metadata so the DB reflects it. Best-effort -- the write already
-	// succeeded, so a re-read/backfill failure is surfaced as a warning, not
-	// an error response. Without this, node_metadata stays stale (empty)
-	// until the next scan, and a second inherit call would re-plan from
-	// stale values instead of seeing the child's own tags (#157).
-	// Bounded with its own inheritWriteTimeout: a hung exiftool re-read on a
-	// stalled mount must not hang the request after the write already
-	// succeeded. Derived from context.WithoutCancel(ctx), not ctx directly:
-	// the write itself already committed by this point, so a client
-	// disconnecting now must not cancel a backfill that exists specifically
-	// to keep the DB in sync with a change that already happened -- the
-	// disconnect is exactly the case most likely to leave node_metadata
-	// stale, which is the failure this backfill exists to avoid.
-	bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), inheritWriteTimeout)
-	defer bcancel()
-	if exif, err := s.prober.Exif(bctx, child.FilePath); err != nil {
-		s.log.Warn("inherit-metadata: re-read child for backfill failed", "nodeID", child.ID, "err", err)
-	} else if err := pipeline.PersistExifMetadata(bctx, s.db, child.ID, exif, s.log); err != nil {
-		s.log.Warn("inherit-metadata: backfill node_metadata failed", "nodeID", child.ID, "err", err)
+		return nil, huma.Error500InternalServerError("inherit metadata", err)
 	}
 
 	out := &InheritMetadataOutput{}
@@ -939,177 +861,18 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 	return out, nil
 }
 
-// inheritWriteTimeout bounds the exiftool write subprocess, mirroring the
-// scan path's per-file probe deadline -- a hung exiftool on a stalled network
-// mount must not hang the HTTP request indefinitely.
-const inheritWriteTimeout = 30 * time.Second
+var validParentRelationships = pipeline.ValidParentRelationships
 
-// refreshNodeAfterInPlaceWrite re-reads the file's size and re-hashes it
-// (the same fast_hash a scan would compute -- xxHash64 over the same sample
-// regions) after an in-place exiftool write, and persists all three onto the
-// node's row. This is what keeps the DB and the file in agreement: without
-// it, the next scan observes a changed fast_hash at an unchanged path and
-// runs commitVersionCollision (see internal/pipeline/commit.go), archiving
-// this node and inserting a successor under a new node_uuid.
-//
-// This is also the one place a node's fast_hash changes while its node_uuid
-// is preserved -- internal/pipeline's Touched and rebase branches only ever
-// reach reconcilePromotedColumns when fast_hash is unchanged/already-matched,
-// by construction. So the thumbnail-invalidation reset lives here, not
-// there: any cached thumbnail was generated from the bytes before this
-// write and no longer represents the file, and it's committed in the same
-// transaction as the hash refresh so the two can't disagree.
-func (s *Server) refreshNodeAfterInPlaceWrite(ctx context.Context, node sqlcgen.MediaNode) error {
-	rctx, cancel := context.WithTimeout(ctx, inheritWriteTimeout)
-	defer cancel()
-
-	f, err := s.guard.OpenRead(node.FilePath)
-	if err != nil {
-		return fmt.Errorf("open for re-hash: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	stat, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("stat for re-hash: %w", err)
-	}
-
-	fastHash, err := hashing.FastHash(f, stat.Size())
-	if err != nil {
-		return fmt.Errorf("re-hash: %w", err)
-	}
-
-	return s.db.InTx(rctx, func(q *sqlcgen.Queries) error {
-		if err := q.RefreshMediaNodeAfterInPlaceWrite(rctx, sqlcgen.RefreshMediaNodeAfterInPlaceWriteParams{
-			ID:        node.ID,
-			SizeBytes: stat.Size(),
-			MtimeUnix: stat.ModTime().Unix(),
-			FastHash:  &fastHash,
-		}); err != nil {
-			return err
-		}
-		return q.InvalidateThumbnail(rctx, node.ID)
-	})
-}
-
-// validParentRelationships is the closed set of relationship types that
-// represent identity ancestry -- the only kinds of edge inherit-metadata may
-// treat as "this child's parent". DUPLICATE_OF is a content match, not
-// ancestry: stamping a duplicate's node_uuid into XMP-xmpMM:DerivedFrom would
-// fabricate a false lineage. PROJECT_SIDECAR's "parent" is the project file
-// itself (the resolver makes the project file the edge's source), not a
-// media ancestor whose EXIF is meaningful to inherit.
-var validParentRelationships = map[string]bool{
-	"DERIVED_FROM": true,
-	"FINAL_EXPORT": true,
-	"PROXY_OF":     true,
-}
-
-// pickWinningParent returns the highest-confidence Tier-1/2 parent edge that
-// is AUTO_ACCEPTED or CONFIRMED and represents identity ancestry (see
-// validParentRelationships), or nil when the node has none. A NEEDS_REVIEW
-// (unconfirmed) or REJECTED edge is never a valid identity source: stamping
-// an unconfirmed parent's metadata into the child's file would cement a
-// possibly-wrong lineage with no recovery path. Tier-3 (heuristic) matches
-// are excluded from selection entirely, not merely rejected after one is
-// picked -- a Tier-3 edge existing alongside a valid Tier-1/2 parent must
-// never prevent inheriting from the valid one. Equal-confidence ties break by
-// lowest edge id (ListEdgesByTarget has no ORDER BY), keeping the result
-// deterministic.
 func pickWinningParent(edges []sqlcgen.MediaEdge) *sqlcgen.MediaEdge {
-	var best *sqlcgen.MediaEdge
-	for i := range edges {
-		e := &edges[i]
-		if e.ReviewState != "AUTO_ACCEPTED" && e.ReviewState != "CONFIRMED" {
-			continue
-		}
-		if e.Tier == 3 || !validParentRelationships[e.RelationshipType] {
-			continue
-		}
-		// Highest confidence wins; on a tie, the lowest edge id (deterministic,
-		// since ListEdgesByTarget has no ORDER BY).
-		if best == nil || e.Confidence > best.Confidence || (e.Confidence == best.Confidence && e.ID < best.ID) {
-			best = e
-		}
-	}
-	return best
+	return pipeline.PickWinningParent(edges)
 }
 
-// hasResolvedButIneligibleParent reports whether edges contains any
-// AUTO_ACCEPTED/CONFIRMED edge at all. Only meaningful as a follow-up check
-// after pickWinningParent(edges) has already returned nil: at that point any
-// resolved edge found here must be one pickWinningParent excluded (Tier-3, or
-// not an identity-ancestry relationship type) -- since if it were eligible,
-// pickWinningParent would have picked it. Used only to give the caller a more
-// specific refusal message than "no resolved parent edge at all" when that's
-// not actually true. Calling this without first confirming pickWinningParent
-// returned nil would not carry that meaning.
 func hasResolvedButIneligibleParent(edges []sqlcgen.MediaEdge) bool {
-	for i := range edges {
-		e := &edges[i]
-		if e.ReviewState == "AUTO_ACCEPTED" || e.ReviewState == "CONFIRMED" {
-			return true
-		}
-	}
-	return false
+	return pipeline.HasResolvedButIneligibleParent(edges)
 }
 
-// loadTagSet assembles a node's inheritable tag values from its promoted
-// columns and node_metadata rows (source='exiftool'). A read failure is
-// surfaced, not swallowed -- a partial/empty tagset would silently produce a
-// partial inheritance.
 func loadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) (metadata.TagSet, error) {
-	ts := metadata.TagSet{
-		Identifier: node.NodeUuid, // XMP-dc:Identifier is always the node's own uuid
-		Model:      node.CameraModel.String,
-	}
-	rows, err := q.ListNodeMetadata(ctx, node.ID)
-	if err != nil {
-		return ts, err
-	}
-	for _, r := range rows {
-		if r.Source != "exiftool" {
-			continue
-		}
-		switch r.Key {
-		case "EXIF:Make":
-			ts.Make = r.Value
-		case "EXIF:LensModel":
-			ts.LensModel = r.Value
-		case "EXIF:SerialNumber":
-			ts.SerialNumber = r.Value
-		case "EXIF:DateTimeOriginal":
-			ts.DateTimeOriginal = r.Value
-		case "EXIF:OffsetTimeOriginal":
-			ts.OffsetTimeOriginal = r.Value
-		case "Composite:GPSLatitude":
-			if f, err := strconv.ParseFloat(r.Value, 64); err == nil {
-				ts.GPSLatitude = &f
-			}
-		case "Composite:GPSLongitude":
-			if f, err := strconv.ParseFloat(r.Value, 64); err == nil {
-				ts.GPSLongitude = &f
-			}
-		}
-	}
-	// Fall back to the promoted captured_at_unix column when node_metadata
-	// has no EXIF:DateTimeOriginal row -- a pre-#54 catalog, or any
-	// agent-ingested node (internal/agent writes Composite:GPSLatitude/
-	// Longitude node_metadata rows as of #229, but no EXIF:DateTimeOriginal --
-	// NodeCreatedPayload carries no capture-time field). captured_at_unix is
-	// an absolute instant (see
-	// internal/probe/probe.go's capturedAt), so it's paired with an
-	// explicit +00:00 offset rather than a bare wall clock, which exiftool
-	// would misread as local time -- on the PARENT side that wrong value is
-	// exactly what Plan below writes into the child's file. The overwrite
-	// is unconditional (not gated on ts.OffsetTimeOriginal already being
-	// set) deliberately: DateTimeOriginal here is always the UTC rendering,
-	// so pairing it with any other offset would misname the instant.
-	if ts.DateTimeOriginal == "" && node.CapturedAtUnix.Valid {
-		ts.DateTimeOriginal = time.Unix(node.CapturedAtUnix.Int64, 0).UTC().Format("2006:01:02 15:04:05")
-		ts.OffsetTimeOriginal = "+00:00"
-	}
-	return ts, nil
+	return pipeline.LoadTagSet(ctx, q, node)
 }
 
 // --- /api/v1/edges ---
@@ -1236,6 +999,16 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 			return nil, humaErr
 		}
 		return nil, huma.Error500InternalServerError("create manual edge", err)
+	}
+
+	autoInherit := true
+	if cfg := s.cfg(); cfg != nil {
+		autoInherit = cfg.Metadata.AutoInherit
+	}
+	if autoInherit {
+		if _, err := s.handleInheritMetadata(ctx, &InheritMetadataInput{ID: in.Body.TargetNodeID}); err != nil {
+			s.log.Warn("create manual edge: auto-inherit metadata", "edgeID", createdEdge.ID, "targetNodeID", in.Body.TargetNodeID, "err", err)
+		}
 	}
 
 	out := &CreateEdgeOutput{}
@@ -1452,8 +1225,10 @@ func recomputeGraphStatus(ctx context.Context, q *sqlcgen.Queries, nodeID int64)
 }
 
 func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
+	var targetNodeID int64
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		targetNodeID, err := q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		var err error
+		targetNodeID, err = q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
 		if err != nil {
 			return err
 		}
@@ -1465,6 +1240,17 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 		}
 		return nil, huma.Error500InternalServerError("confirm edge", err)
 	}
+
+	autoInherit := true
+	if cfg := s.cfg(); cfg != nil {
+		autoInherit = cfg.Metadata.AutoInherit
+	}
+	if autoInherit {
+		if _, err := s.handleInheritMetadata(ctx, &InheritMetadataInput{ID: targetNodeID}); err != nil {
+			s.log.Warn("confirm-edge: auto-inherit metadata", "edgeID", in.ID, "targetNodeID", targetNodeID, "err", err)
+		}
+	}
+
 	out := &EdgeReviewOutput{}
 	out.Body.OK = true
 	return out, nil
@@ -1551,14 +1337,23 @@ func (s *Server) handleStartScan(ctx context.Context, in *StartScanInput) (*Star
 
 	fullHashPolicy := "tier3_and_collision"
 	disablePHash := false
+	autoInherit := true
 	if cfg := s.cfg(); cfg != nil {
 		fullHashPolicy = cfg.Workers.FullHashPolicy
 		disablePHash = !cfg.Workers.PerceptualHash
+		autoInherit = cfg.Metadata.AutoInherit
 	}
 
 	deps := pipeline.ScanDeps{
 		DB: s.db, Guard: s.guard, Prober: s.prober, Pool: s.pool, Engine: s.engine,
 		FullHashPolicy: fullHashPolicy, DisablePerceptualHash: disablePHash, Log: s.log,
+		AutoInheritMetadata: autoInherit,
+		AutoInheritFn: func() bool {
+			if cfg := s.cfg(); cfg != nil {
+				return cfg.Metadata.AutoInherit
+			}
+			return true
+		},
 		Tracker: s.tracker, Shutdown: s.shutdown,
 		Nudge: func() {
 			if s.hub != nil {

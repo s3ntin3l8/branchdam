@@ -80,6 +80,14 @@ type Config struct {
 	Pruning    Pruning    `yaml:"pruning"`
 	Ingest     Ingest     `yaml:"ingest"`
 	Trash      Trash      `yaml:"trash"`
+	Metadata   Metadata   `yaml:"metadata"`
+}
+
+// Metadata configures EXIF/XMP identity metadata inheritance.
+type Metadata struct {
+	// AutoInherit enables automated metadata inheritance (EXIF/XMP tags)
+	// from winning parent edge to child on edge confirmation or auto-acceptance (default true).
+	AutoInherit bool `yaml:"autoInherit"`
 }
 
 // Trash configures the soft-delete trash buffer and automated retention.
@@ -368,6 +376,9 @@ func defaultConfig() Config {
 		},
 		Trash: Trash{
 			RetentionDays: 30,
+		},
+		Metadata: Metadata{
+			AutoInherit: true,
 		},
 	}
 }

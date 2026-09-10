@@ -607,9 +607,23 @@ var trashFields = []Field{
 	},
 }
 
+var metadataFields = []Field{
+	{
+		Key:      "metadata.autoInherit",
+		Type:     KindBool,
+		Label:    "Auto Inherit Metadata",
+		Group:    "Metadata",
+		Apply:    ApplyLive,
+		Get:      func(cfg *config.Config) any { return cfg.Metadata.AutoInherit },
+		Set:      func(cfg *config.Config, v any) error { cfg.Metadata.AutoInherit = v.(bool); return nil },
+		Editable: true,
+		Doc:      "Automatically propagate EXIF/XMP identity metadata from parent to child on edge confirmation or auto-acceptance.",
+	},
+}
+
 // Fields returns every registered field, in registration order.
 func Fields() []Field {
-	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, ingestFields, trashFields, httpFields, agentFields, authzFields, pathRewriteFields}
+	groups := [][]Field{immichFields, serverFields, workersFields, thumbnailsFields, pruningFields, ingestFields, trashFields, metadataFields, httpFields, agentFields, authzFields, pathRewriteFields}
 	n := 0
 	for _, g := range groups {
 		n += len(g)
