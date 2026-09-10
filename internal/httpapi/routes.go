@@ -55,6 +55,8 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
+	huma.Delete(api, "/api/v1/assets/{id}", s.handleDeleteAsset)
+	huma.Get(api, "/api/v1/assets/{id}/metadata", s.handleGetAssetMetadata)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
 	huma.Get(api, "/api/v1/assets/{id}/sync-status", s.handleAssetSyncStatus)
@@ -477,6 +479,85 @@ func (s *Server) handleGetAsset(ctx context.Context, in *AssetPathInput) (*GetAs
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
 	return &GetAssetOutput{Body: toAssetDTO(node)}, nil
+}
+
+type DeleteAssetOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+// handleDeleteAsset marks the media node ARCHIVED (soft-delete). Media node rows
+// are never removed from SQLite (Invariant 1: No CASCADE, rows are never deleted).
+func (s *Server) handleDeleteAsset(ctx context.Context, in *AssetPathInput) (*DeleteAssetOutput, error) {
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+
+	if node.LifecycleState != "ARCHIVED" {
+		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.ArchiveMediaNode(ctx, in.ID)
+		}); err != nil {
+			return nil, huma.Error500InternalServerError("archive asset", err)
+		}
+
+		if s.audit != nil {
+			details := map[string]any{
+				"assetId":  in.ID,
+				"filePath": node.FilePath,
+				"fileName": node.FileName,
+			}
+			_ = s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), "asset.archived", "asset", strconv.FormatInt(in.ID, 10), details)
+		}
+	}
+
+	out := &DeleteAssetOutput{}
+	out.Body.OK = true
+	return out, nil
+}
+
+type nodeMetadatumDTO struct {
+	NodeID int64  `json:"nodeId"`
+	Source string `json:"source"`
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+}
+
+type GetAssetMetadataOutput struct {
+	Body struct {
+		Metadata []nodeMetadatumDTO `json:"metadata"`
+	}
+}
+
+func (s *Server) handleGetAssetMetadata(ctx context.Context, in *AssetPathInput) (*GetAssetMetadataOutput, error) {
+	_, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+
+	rows, err := s.db.Reader.ListNodeMetadata(ctx, in.ID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list node metadata", err)
+	}
+
+	out := &GetAssetMetadataOutput{}
+	out.Body.Metadata = make([]nodeMetadatumDTO, len(rows))
+	for i, r := range rows {
+		out.Body.Metadata[i] = nodeMetadatumDTO{
+			NodeID: r.NodeID,
+			Source: r.Source,
+			Key:    r.Key,
+			Value:  r.Value,
+		}
+	}
+	return out, nil
 }
 
 // --- /api/v1/assets/{id}/graph ---

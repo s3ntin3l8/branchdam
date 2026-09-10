@@ -40,6 +40,7 @@ const GROUP_TO_CATEGORY: Record<string, string> = {
   HTTP: "server",
   Workers: "workers",
   Thumbnails: "workers",
+  Metadata: "workers",
   Immich: "integrations",
   "Path Resolution": "integrations",
   Agent: "security",
@@ -424,10 +425,8 @@ export default function SettingsPage() {
       byCategory.set(cat.id, []);
     }
     for (const [group, fields] of grouped) {
-      const catId = GROUP_TO_CATEGORY[group];
-      if (catId) {
-        byCategory.get(catId)?.push([group, fields]);
-      }
+      const catId = GROUP_TO_CATEGORY[group] || "server";
+      byCategory.get(catId)?.push([group, fields]);
     }
     return byCategory;
   }, [grouped]);

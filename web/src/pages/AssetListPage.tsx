@@ -18,6 +18,8 @@ export default function AssetListPage() {
   const cameraModel = searchParams.get("cameraModel") || "";
   const graphStatus = (searchParams.get("graphStatus") as Asset["graphStatus"]) || "";
   const storageLocationId = searchParams.get("storageLocationId") ? Number(searchParams.get("storageLocationId")) : undefined;
+  const lifecycleState = (searchParams.get("lifecycleState") as Asset["lifecycleState"]) || "";
+  const searchQuery = searchParams.get("q") || "";
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
   const myUploads = searchParams.get("myUploads") === "true";
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
@@ -54,6 +56,7 @@ export default function AssetListPage() {
     cameraModel: cameraModel || undefined,
     graphStatus: graphStatus || undefined,
     storageLocationId,
+    lifecycleState: lifecycleState || undefined,
     unlinkedOnly: unlinkedOnly || undefined,
     uploadedByUserId: effectiveMyUploads ? myUserID : undefined,
   });
@@ -87,7 +90,14 @@ export default function AssetListPage() {
     setSearchParams(new URLSearchParams());
   };
 
-  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads);
+  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState || searchQuery);
+
+  const displayedAssets = searchQuery.trim()
+    ? assets.filter((a) =>
+        a.fileName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        a.filePath.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : assets;
 
   return (
     <div className="p-6 space-y-6">
@@ -146,6 +156,23 @@ export default function AssetListPage() {
               <option value="LINKED">LINKED</option>
               <option value="NEEDS_REVIEW">NEEDS_REVIEW</option>
               <option value="ROOT">ROOT</option>
+            </select>
+          </div>
+
+          {/* Lifecycle State */}
+          <div>
+            <label htmlFor="lifecycle-state-filter" className="block text-neutral-400 mb-1">Lifecycle State</label>
+            <select
+              id="lifecycle-state-filter"
+              value={lifecycleState}
+              onChange={(e) => updateFilters({ lifecycleState: e.target.value })}
+              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none focus:border-neutral-500"
+            >
+              <option value="">All States</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="MISSING">MISSING</option>
+              <option value="ARCHIVED">ARCHIVED</option>
+              <option value="HIDDEN">HIDDEN</option>
             </select>
           </div>
 
@@ -211,6 +238,19 @@ export default function AssetListPage() {
               My Uploads
             </label>
           </div>
+
+          {/* Search Query */}
+          <div className="sm:col-span-2">
+            <label htmlFor="search-filter" className="block text-neutral-400 mb-1">Search Path / Filename</label>
+            <input
+              id="search-filter"
+              type="text"
+              placeholder="Search filename or path..."
+              value={searchQuery}
+              onChange={(e) => updateFilters({ q: e.target.value })}
+              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500"
+            />
+          </div>
         </div>
       </div>
 
@@ -218,7 +258,7 @@ export default function AssetListPage() {
         <div className="p-6 text-neutral-400">Loading assets…</div>
       ) : isError ? (
         <div className="p-6 text-red-400">Failed to load assets: {String(error)}</div>
-      ) : assets.length === 0 ? (
+      ) : displayedAssets.length === 0 ? (
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
           No assets match the selected filters.
         </div>
@@ -229,6 +269,7 @@ export default function AssetListPage() {
               <tr>
                 <th className="py-2 pr-4"></th>
                 <th className="py-2 pr-4">Path</th>
+                <th className="py-2 pr-4">Lifecycle</th>
                 <th className="py-2 pr-4">Camera Model</th>
                 <th className="py-2 pr-4">Tier status</th>
                 <th className="py-2 pr-4">Graph status</th>
@@ -237,7 +278,7 @@ export default function AssetListPage() {
               </tr>
             </thead>
             <tbody>
-              {assets.map((a) => (
+              {displayedAssets.map((a) => (
                 <tr key={a.id} className="border-b border-neutral-900 hover:bg-neutral-900">
                   <td className="py-2 pr-4">
                     <Thumbnail assetId={a.id} thumbState={a.thumbState} alt={a.fileName} />
@@ -246,6 +287,16 @@ export default function AssetListPage() {
                     <Link to={`/assets/${a.id}`} className="text-sky-400 hover:underline font-mono text-xs">
                       {a.filePath}
                     </Link>
+                  </td>
+                  <td className="py-2 pr-4 text-xs">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      a.lifecycleState === "ACTIVE" ? "bg-emerald-950 text-emerald-300 border border-emerald-800/60" :
+                      a.lifecycleState === "MISSING" ? "bg-red-950 text-red-300 border border-red-800/60" :
+                      a.lifecycleState === "ARCHIVED" ? "bg-neutral-800 text-neutral-400 border border-neutral-700" :
+                      "bg-amber-950 text-amber-300 border border-amber-800/60"
+                    }`}>
+                      {a.lifecycleState}
+                    </span>
                   </td>
                   <td className="py-2 pr-4 text-neutral-400 text-xs">{a.cameraModel || "—"}</td>
                   <td className="py-2 pr-4 text-neutral-400 text-xs">{a.indexingStatus}</td>

@@ -3,7 +3,9 @@ import { useParams, useSearchParams } from "react-router";
 import {
   useAsset,
   useAssetLineage,
+  useAssetMetadata,
   useAssetSyncStatus,
+  useDeleteAsset,
   useInheritMetadata,
   usePruneCache,
   useRetrySync,
@@ -191,6 +193,133 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
   );
 }
 
+function AssetDeleteControl({ asset }: { asset: Asset }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const deleteAsset = useDeleteAsset();
+
+  if (asset.lifecycleState === "ARCHIVED") {
+    return (
+      <span className="rounded border border-neutral-800 bg-neutral-900 px-2.5 py-1 text-xs text-neutral-500 font-medium">
+        Archived
+      </span>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        disabled={deleteAsset.isPending}
+        className="rounded border border-red-800/80 bg-red-950/60 px-2.5 py-1 text-xs font-medium text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+      >
+        {deleteAsset.isPending ? "Archiving…" : "Archive Asset"}
+      </button>
+
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
+            <h3 className="text-base font-semibold text-neutral-100">Archive Asset</h3>
+            <p className="text-xs text-neutral-300 leading-relaxed">
+              Are you sure you want to soft-delete (archive) <strong className="text-white">{asset.fileName}</strong>?
+              The media node will be marked <code className="text-amber-400">ARCHIVED</code> and will no longer participate in live version lineage.
+            </p>
+            {deleteAsset.isError && (
+              <p className="text-xs text-red-400">Failed to archive: {String(deleteAsset.error)}</p>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                disabled={deleteAsset.isPending}
+                className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteAsset.mutate(asset.id, {
+                    onSuccess: () => setIsOpen(false),
+                  });
+                }}
+                disabled={deleteAsset.isPending}
+                className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {deleteAsset.isPending ? "Archiving…" : "Confirm Archive"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function AssetMetadataInspector({ assetId }: { assetId: number }) {
+  const { data, isLoading, isError } = useAssetMetadata(assetId);
+  const [filter, setFilter] = useState("");
+  const metadata = data?.metadata ?? [];
+
+  const filtered = filter.trim()
+    ? metadata.filter((m) =>
+        m.key.toLowerCase().includes(filter.toLowerCase()) ||
+        m.value.toLowerCase().includes(filter.toLowerCase()) ||
+        m.source.toLowerCase().includes(filter.toLowerCase())
+      )
+    : metadata;
+
+  return (
+    <section>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-medium text-neutral-400">
+          Extracted Tags & EXIF ({metadata.length})
+        </h2>
+        {metadata.length > 0 && (
+          <input
+            type="text"
+            placeholder="Filter tags..."
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-600"
+          />
+        )}
+      </div>
+
+      <div className="rounded border border-neutral-800 p-3 max-h-96 overflow-y-auto">
+        {isLoading ? (
+          <p className="text-xs text-neutral-500">Loading extracted metadata…</p>
+        ) : isError ? (
+          <p className="text-xs text-red-400">Failed to load metadata tags.</p>
+        ) : metadata.length === 0 ? (
+          <p className="text-xs text-neutral-500">No extracted metadata rows found for this asset.</p>
+        ) : filtered.length === 0 ? (
+          <p className="text-xs text-neutral-500">No tags match &quot;{filter}&quot;.</p>
+        ) : (
+          <table className="w-full text-left text-xs font-mono">
+            <thead className="border-b border-neutral-800 text-neutral-500">
+              <tr>
+                <th className="py-1 pr-3">Source</th>
+                <th className="py-1 pr-3">Key</th>
+                <th className="py-1">Value</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-900">
+              {filtered.map((m, idx) => (
+                <tr key={`${m.source}-${m.key}-${idx}`} className="hover:bg-neutral-900/50">
+                  <td className="py-1 pr-3 text-indigo-400">{m.source}</td>
+                  <td className="py-1 pr-3 text-neutral-300 font-semibold">{m.key}</td>
+                  <td className="py-1 text-neutral-200 break-all">{m.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const assetId = id ? Number(id) : undefined;
@@ -230,7 +359,10 @@ export default function AssetDetailPage() {
             <p className="text-sm text-neutral-500">{asset.filePath}</p>
           </div>
         </div>
-        <AssetPruneControl asset={asset} />
+        <div className="flex items-center gap-2">
+          <AssetPruneControl asset={asset} />
+          <AssetDeleteControl asset={asset} />
+        </div>
       </div>
 
       <section>
@@ -249,6 +381,8 @@ export default function AssetDetailPage() {
           <Field label="Full hash (BLAKE3-256)" value={asset.fullHash} />
         </dl>
       </section>
+
+      <AssetMetadataInspector assetId={asset.id} />
 
       <section>
         <h2 className="mb-2 text-sm font-medium text-neutral-400">Sync status</h2>

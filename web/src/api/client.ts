@@ -1,4 +1,4 @@
-import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AttributionUser, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, DeleteCompanionPairingResponse, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
+import type { Asset, AssetGraph, AssetQueryParams, AssetSyncStatus, AttributionUser, AuditEntry, AuditQueryParams, CheckContentResult, CompanionPairingDetail, Config, CreateCompanionPairingRequest, CreateCompanionPairingResponse, CreateEdgeInput, DeleteCompanionPairingResponse, Edge, EdgeAuditEntry, JobsQueryParams, LineageResponse, ListPairingsResponse, LoginInput, Me, NodeMetadatum, PairingAuditResponse, PasswordResetRequestInput, PasswordResetRequestResponse, PasswordResetConfirmInput, PasswordResetConfirmResponse, PathRewrite, PostRestartResponse, PruneRequest, PruneResponse, PutSettingsRequest, PutStorageLocationRequest, RevokeCompanionPairingResponse, RotateCompanionPairingRequest, RotateCompanionPairingResponse, ScanJob, SettingsResponse, SetupAdminInput, SetupStatus, SourceStatusResult, StartScanRequest, StorageHealth, StorageLocation, UploadOptions, UploadProgressEvent, WebUploadResponse, AdminResetPasswordInput, AdminResetPasswordResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -112,6 +112,8 @@ export const api = {
   },
   getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
+  deleteAsset: (id: number) => request<{ ok: boolean }>(`/api/v1/assets/${id}`, { method: "DELETE" }),
+  getAssetMetadata: (id: number) => request<{ metadata: NodeMetadatum[] }>(`/api/v1/assets/${id}/metadata`),
   getAssetGraph: (id: number) => request<AssetGraph>(`/api/v1/assets/${id}/graph`),
   getAssetLineage: (id: number | string, depth = 2) => request<LineageResponse>(`/api/v1/assets/${id}/lineage?depth=${depth}`),
   getAssetSyncStatus: (id: number) => request<AssetSyncStatus>(`/api/v1/assets/${id}/sync-status`),

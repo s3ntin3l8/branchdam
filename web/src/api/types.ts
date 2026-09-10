@@ -146,6 +146,13 @@ export interface Asset {
   uploadedByUserId?: number;
 }
 
+export interface NodeMetadatum {
+  nodeId: number;
+  source: string;
+  key: string;
+  value: string;
+}
+
 export interface Edge {
   id: number;
   sourceNodeId: number;

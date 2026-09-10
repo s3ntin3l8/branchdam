@@ -1183,6 +1183,150 @@ func TestGetAssetNotFound(t *testing.T) {
 	}
 }
 
+func TestDeleteAsset(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "delete-test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "aaaaaaaaaaaaaaaa"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-to-delete", StorageLocationID: loc.ID, FilePath: "/media/to_delete.jpg",
+			FileName: "to_delete.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Verify initially ACTIVE
+	rr := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var before struct {
+		LifecycleState string `json:"lifecycleState"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &before); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if before.LifecycleState != "ACTIVE" {
+		t.Fatalf("expected ACTIVE, got %s", before.LifecycleState)
+	}
+
+	// Delete asset (soft-delete to ARCHIVED)
+	rrDel := doJSON(t, srv.Handler(), http.MethodDelete, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrDel.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, body = %s", rrDel.Code, rrDel.Body.String())
+	}
+
+	// Verify state is now ARCHIVED
+	rrAfter := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrAfter.Code != http.StatusOK {
+		t.Fatalf("GET after status = %d, body = %s", rrAfter.Code, rrAfter.Body.String())
+	}
+	var after struct {
+		LifecycleState string `json:"lifecycleState"`
+	}
+	if err := json.Unmarshal(rrAfter.Body.Bytes(), &after); err != nil {
+		t.Fatalf("unmarshal after: %v", err)
+	}
+	if after.LifecycleState != "ARCHIVED" {
+		t.Fatalf("expected ARCHIVED after soft-delete, got %s", after.LifecycleState)
+	}
+
+	// Soft-deleting an already ARCHIVED asset is an idempotent 200
+	rrDelAgain := doJSON(t, srv.Handler(), http.MethodDelete, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrDelAgain.Code != http.StatusOK {
+		t.Fatalf("DELETE idempotent status = %d, body = %s", rrDelAgain.Code, rrDelAgain.Body.String())
+	}
+
+	// Deleting non-existent asset is 404
+	rr404 := doJSON(t, srv.Handler(), http.MethodDelete, "/api/v1/assets/999999", nil)
+	if rr404.Code != http.StatusNotFound {
+		t.Fatalf("DELETE 999999 status = %d, want 404", rr404.Code)
+	}
+}
+
+func TestGetAssetMetadata(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "meta-test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "bbbbbbbbbbbbbbbb"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-meta-test", StorageLocationID: loc.ID, FilePath: "/media/meta_test.jpg",
+			FileName: "meta_test.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: node.ID,
+			Source: "exiftool",
+			Key:    "Make",
+			Value:  "Sony",
+		}); err != nil {
+			return err
+		}
+		return q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: node.ID,
+			Source: "exiftool",
+			Key:    "Model",
+			Value:  "ILCE-7RM5",
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/metadata", node.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET metadata status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var got struct {
+		Metadata []struct {
+			NodeID int64  `json:"nodeId"`
+			Source string `json:"source"`
+			Key    string `json:"key"`
+			Value  string `json:"value"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Metadata) != 2 {
+		t.Fatalf("got %d metadata items, want 2", len(got.Metadata))
+	}
+	if got.Metadata[0].Key != "Make" || got.Metadata[0].Value != "Sony" {
+		t.Errorf("metadata[0] = %+v, want Make=Sony", got.Metadata[0])
+	}
+	if got.Metadata[1].Key != "Model" || got.Metadata[1].Value != "ILCE-7RM5" {
+		t.Errorf("metadata[1] = %+v, want Model=ILCE-7RM5", got.Metadata[1])
+	}
+
+	// 404 for non-existent node
+	rr404 := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/999999/metadata", nil)
+	if rr404.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr404.Code)
+	}
+}
+
 func TestAuditQueueEmpty(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/edges/audit", nil)
