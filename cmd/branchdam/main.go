@@ -263,6 +263,7 @@ func main() {
 		supervisor = pipeline.NewWatcherSupervisor(pipeline.ScanDeps{
 			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
 			FullHashPolicy: cfg.Workers.FullHashPolicy, DisablePerceptualHash: !cfg.Workers.PerceptualHash, Log: log,
+			AutoInheritFn: func() bool { return settingsStore.Effective().Metadata.AutoInherit },
 		}, func() { hub.Broadcast() })
 		supervisor.Start(ctx, watchedLocs, 0)
 	}
@@ -277,7 +278,9 @@ func main() {
 		sweeper = pipeline.NewSweeperSupervisor(pipeline.ScanDeps{
 			DB: database, Guard: guard, Prober: prober, Pool: pool, Engine: engine,
 			FullHashPolicy: cfg.Workers.FullHashPolicy, DisablePerceptualHash: !cfg.Workers.PerceptualHash, Log: log,
-			Nudge: func() { hub.Broadcast() }, Shutdown: ctx.Done(),
+			AutoInheritFn:   func() bool { return settingsStore.Effective().Metadata.AutoInherit },
+			Nudge:           func() { hub.Broadcast() },
+			Shutdown:        ctx.Done(),
 			StartedByUserID: attributionSvc.SystemUserID(),
 		})
 		sweeper.Start(ctx, sweptLocs)

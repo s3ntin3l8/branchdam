@@ -42,6 +42,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Thumbnails.CacheDir != "/data/thumbs" {
 		t.Errorf("Thumbnails.CacheDir default = %q, want /data/thumbs", cfg.Thumbnails.CacheDir)
 	}
+	if !cfg.Metadata.AutoInherit {
+		t.Error("Metadata.AutoInherit default = false, want true")
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
@@ -307,5 +310,19 @@ storageLocations:
 	}
 	if !strings.Contains(err.Error(), "must be an absolute path") {
 		t.Errorf("error = %q, want mention of absolute path", err.Error())
+	}
+}
+
+func TestLoadMetadataAutoInheritConfigured(t *testing.T) {
+	path := writeConfig(t, `
+metadata:
+  autoInherit: false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metadata.AutoInherit {
+		t.Errorf("Metadata.AutoInherit = true, want false")
 	}
 }
