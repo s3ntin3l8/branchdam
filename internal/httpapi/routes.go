@@ -3060,6 +3060,9 @@ type attributionUserDTO struct {
 	Email        string `json:"email,omitempty"`
 	CreatedAt    int64  `json:"createdAt"`
 	LastSeenAt   int64  `json:"lastSeenAt"`
+	IsAdmin      bool   `json:"isAdmin"`
+	Source       string `json:"source"`
+	DisabledAt   *int64 `json:"disabledAt,omitempty"`
 }
 
 type ListUsersOutput struct {
@@ -3070,8 +3073,8 @@ type ListUsersOutput struct {
 }
 
 // handleListUsers is the admin-only read endpoint for the users
-// attribution table. Used by the pairing UI's "Owned by" selector and
-// the SPA's "Uploaded by" filter on /assets. Returns 503 when the
+// attribution table. Used by the pairing UI's "Owned by" selector,
+// the SPA's "Uploaded by" filter on /assets, and the Admin Users UI. Returns 503 when the
 // attribution service hasn't been wired (every existing test).
 //
 // Admin-gated: every row carries the stable external_uid (Authentik's
@@ -3084,7 +3087,7 @@ func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*List
 	if s.attribution == nil {
 		return nil, huma.Error503ServiceUnavailable("attribution service not configured")
 	}
-	rows, err := s.db.Reader.ListAttributionUsers(ctx, sqlcgen.ListAttributionUsersParams{
+	rows, err := s.db.Reader.ListUsers(ctx, sqlcgen.ListUsersParams{
 		Limit:  in.Limit,
 		Offset: in.Offset,
 	})
@@ -3105,9 +3108,15 @@ func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*List
 			Username:     r.Username,
 			CreatedAt:    r.CreatedAt,
 			LastSeenAt:   r.LastSeenAt,
+			IsAdmin:      r.IsAdmin == 1,
+			Source:       r.Source,
 		}
 		if r.Email.Valid {
 			u.Email = r.Email.String
+		}
+		if r.DisabledAt.Valid {
+			v := r.DisabledAt.Int64
+			u.DisabledAt = &v
 		}
 		out.Body.Users[i] = u
 	}
