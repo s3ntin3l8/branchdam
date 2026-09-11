@@ -23,6 +23,8 @@ function getVideoMimeType(ext: string): string {
       return "video/quicktime";
     case "ogv":
       return "video/ogg";
+    case "mkv":
+      return "video/x-matroska";
     default:
       return "video/mp4";
   }

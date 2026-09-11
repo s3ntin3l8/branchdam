@@ -98,6 +98,45 @@ func TestStreamAssetSuccess(t *testing.T) {
 	}
 }
 
+func TestStreamAssetWebMContentType(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "clip.webm")
+	if err := os.WriteFile(filePath, []byte("webm-bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	srv, database, locID := streamTestServer(t, dir)
+	var node sqlcgen.MediaNode
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		var err error
+		node, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "0198abcd-0000-7000-8000-000000000095",
+			StorageLocationID: locID,
+			FilePath:          filePath,
+			FileName:          "clip.webm",
+			FileExt:           "webm",
+			IndexingStatus:    "INDEXED_FULL",
+			GraphStatus:       "LINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("InsertMediaNode: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/stream", node.ID), nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "video/webm" {
+		t.Errorf("Content-Type = %q, want video/webm (must not fall back to audio/webm)", ct)
+	}
+}
+
 func TestStreamAssetRangeRequest(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "video.mp4")
