@@ -113,6 +113,48 @@ func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (Ge
 	return i, err
 }
 
+const getAgentEventByUUIDAndAgent = `-- name: GetAgentEventByUUIDAndAgent :one
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
+FROM event_queue
+WHERE event_uuid = ?1 AND agent_id = ?2
+`
+
+type GetAgentEventByUUIDAndAgentParams struct {
+	EventUuid string
+	AgentID   string
+}
+
+type GetAgentEventByUUIDAndAgentRow struct {
+	ID          int64
+	EventUuid   string
+	AgentID     string
+	EventType   string
+	PayloadJson string
+	Status      string
+	RetryCount  int64
+	ErrorLog    sql.NullString
+	CreatedAt   int64
+	ProcessedAt sql.NullInt64
+}
+
+func (q *Queries) GetAgentEventByUUIDAndAgent(ctx context.Context, arg GetAgentEventByUUIDAndAgentParams) (GetAgentEventByUUIDAndAgentRow, error) {
+	row := q.db.QueryRowContext(ctx, getAgentEventByUUIDAndAgent, arg.EventUuid, arg.AgentID)
+	var i GetAgentEventByUUIDAndAgentRow
+	err := row.Scan(
+		&i.ID,
+		&i.EventUuid,
+		&i.AgentID,
+		&i.EventType,
+		&i.PayloadJson,
+		&i.Status,
+		&i.RetryCount,
+		&i.ErrorLog,
+		&i.CreatedAt,
+		&i.ProcessedAt,
+	)
+	return i, err
+}
+
 const getLatestProcessedAgentEventByAgent = `-- name: GetLatestProcessedAgentEventByAgent :one
 SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue

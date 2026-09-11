@@ -1750,7 +1750,24 @@ func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
 		t.Errorf("pending event count = %d, want 1 (idempotency violated)", count)
 	}
 
-	// 4. Invalid UUID format returns 400 Bad Request.
+	// 4. Submission with same eventUuid but differing eventType returns 409 Conflict.
+	conflictBody := map[string]string{
+		"eventUuid": eventUUID,
+		"agentId":   "workstation-1",
+		"eventType": "EVENT_NODE_MOVED",
+		"payload":   `{"path":"/tmp/conflict.jpg"}`,
+	}
+	confReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytesOfJSON(t, conflictBody))
+	confReq.Header.Set("Content-Type", "application/json")
+	confReq.Header.Set("X-API-Key", routeTestAgentKey)
+	confRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(confRR, confReq)
+
+	if confRR.Code != http.StatusConflict {
+		t.Errorf("conflicting eventType status = %d, want 409", confRR.Code)
+	}
+
+	// 5. Invalid UUID format returns 400 Bad Request.
 	badBody := map[string]string{
 		"eventUuid": "not-a-valid-uuid",
 		"agentId":   "workstation-1",

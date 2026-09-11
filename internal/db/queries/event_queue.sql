@@ -34,6 +34,11 @@ SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, 
 FROM event_queue
 WHERE event_uuid = ?1;
 
+-- name: GetAgentEventByUUIDAndAgent :one
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
+FROM event_queue
+WHERE event_uuid = ?1 AND agent_id = ?2;
+
 -- name: GetLatestProcessedAgentEventByAgent :one
 SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
