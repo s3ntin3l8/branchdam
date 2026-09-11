@@ -280,10 +280,12 @@ func TestNodeLockerSerializesSameNodeAndCleansUp(t *testing.T) {
 	unlock1 := locker.lock(nodeID)
 
 	acquired2 := make(chan bool)
+	done2 := make(chan struct{})
 	go func() {
 		unlock2 := locker.lock(nodeID)
 		acquired2 <- true
 		unlock2()
+		close(done2)
 	}()
 
 	// Ensure goroutine 2 is blocked waiting for lock on node 42
@@ -301,6 +303,12 @@ func TestNodeLockerSerializesSameNodeAndCleansUp(t *testing.T) {
 	case <-acquired2:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("goroutine 2 timed out waiting for lock")
+	}
+
+	select {
+	case <-done2:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("goroutine 2 timed out waiting to finish unlock")
 	}
 
 	// Verify the lock entry was cleaned up after both released
