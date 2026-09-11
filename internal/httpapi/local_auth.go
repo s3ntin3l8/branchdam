@@ -15,6 +15,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
@@ -397,6 +398,19 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		resp["temporaryPassword"] = temporaryPassword
 		resp["shownOnceNotice"] = "Copy this password now; we won't show it again."
 	}
+	if s.audit != nil {
+		details := map[string]any{
+			"username": user.Username,
+			"isAdmin":  user.IsAdmin == 1,
+			"source":   user.Source,
+		}
+		if user.Email.Valid {
+			details["email"] = user.Email.String
+		}
+		if err := s.audit.WriteActorAudit(r.Context(), principalFromCtx(r.Context()), audit.EventUserCreated, "user", strconv.FormatInt(user.ID, 10), details); err != nil {
+			s.log.Warn("failed to write actor audit for user create", "error", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -437,6 +451,14 @@ func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) 
 	if err := s.localAuth.users.DisableUser(r.Context(), id, now); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "disable user: "+err.Error())
 		return
+	}
+	if s.audit != nil {
+		details := map[string]any{
+			"id": id,
+		}
+		if err := s.audit.WriteActorAudit(r.Context(), principalFromCtx(r.Context()), audit.EventUserDisabled, "user", strconv.FormatInt(id, 10), details); err != nil {
+			s.log.Warn("failed to write actor audit for user disable", "error", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
