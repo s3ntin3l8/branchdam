@@ -1183,6 +1183,275 @@ func TestGetAssetNotFound(t *testing.T) {
 	}
 }
 
+func TestDeleteAsset(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "delete-test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "aaaaaaaaaaaaaaaa"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-to-delete", StorageLocationID: loc.ID, FilePath: "/media/to_delete.jpg",
+			FileName: "to_delete.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Verify initially ACTIVE
+	rr := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var before struct {
+		LifecycleState string `json:"lifecycleState"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &before); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if before.LifecycleState != "ACTIVE" {
+		t.Fatalf("expected ACTIVE, got %s", before.LifecycleState)
+	}
+
+	// Delete asset (soft-delete to ARCHIVED)
+	rrDel := doJSON(t, srv.Handler(), http.MethodDelete, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrDel.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, body = %s", rrDel.Code, rrDel.Body.String())
+	}
+
+	// Verify state is now ARCHIVED
+	rrAfter := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrAfter.Code != http.StatusOK {
+		t.Fatalf("GET after status = %d, body = %s", rrAfter.Code, rrAfter.Body.String())
+	}
+	var after struct {
+		LifecycleState string `json:"lifecycleState"`
+	}
+	if err := json.Unmarshal(rrAfter.Body.Bytes(), &after); err != nil {
+		t.Fatalf("unmarshal after: %v", err)
+	}
+	if after.LifecycleState != "ARCHIVED" {
+		t.Fatalf("expected ARCHIVED after soft-delete, got %s", after.LifecycleState)
+	}
+
+	// Soft-deleting an already ARCHIVED asset is an idempotent 200
+	rrDelAgain := doJSON(t, srv.Handler(), http.MethodDelete, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrDelAgain.Code != http.StatusOK {
+		t.Fatalf("DELETE idempotent status = %d, body = %s", rrDelAgain.Code, rrDelAgain.Body.String())
+	}
+
+	// Deleting non-existent asset is 404
+	rr404 := doJSON(t, srv.Handler(), http.MethodDelete, "/api/v1/assets/999999", nil)
+	if rr404.Code != http.StatusNotFound {
+		t.Fatalf("DELETE 999999 status = %d, want 404", rr404.Code)
+	}
+}
+
+func TestRestoreAsset(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	var loc sqlcgen.StorageLocation
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "restore-test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "aaaaaaaaaaaaaaaa"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-to-restore", StorageLocationID: loc.ID, FilePath: "/media/to_restore.jpg",
+			FileName: "to_restore.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// 1. Restore asset -> 200
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", node.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST restore status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Verify state is now ACTIVE
+	rrGet := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("GET status = %d", rrGet.Code)
+	}
+	var after struct {
+		LifecycleState string `json:"lifecycleState"`
+	}
+	if err := json.Unmarshal(rrGet.Body.Bytes(), &after); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Fatalf("expected ACTIVE after restore, got %s", after.LifecycleState)
+	}
+
+	// 3. Restoring an already ACTIVE asset is an idempotent 200
+	rrAgain := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", node.ID), nil)
+	if rrAgain.Code != http.StatusOK {
+		t.Fatalf("POST restore idempotent status = %d", rrAgain.Code)
+	}
+
+	// 4. Restoring non-existent asset is 404
+	rr404 := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/999999/restore", nil)
+	if rr404.Code != http.StatusNotFound {
+		t.Fatalf("POST 999999 restore status = %d, want 404", rr404.Code)
+	}
+
+	// 5. Conflict: if another live asset occupies the same path, restore returns 409
+	var archivedNode sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		hash2 := "bbbbbbbbbbbbbbbb"
+		var err error
+		archivedNode, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-archived-dup", StorageLocationID: loc.ID, FilePath: "/media/to_restore.jpg",
+			FileName: "to_restore.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash2,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert archivedNode: %v", err)
+	}
+	rr409 := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", archivedNode.ID), nil)
+	if rr409.Code != http.StatusConflict {
+		t.Fatalf("POST restore conflict status = %d, want 409, body = %s", rr409.Code, rr409.Body.String())
+	}
+
+	// 6. Conflict: if an archived asset has been superseded by a newer version, restore returns 409
+	var supersededNode sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		hash3 := "cccccccccccccccc"
+		var err error
+		supersededNode, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-superseded", StorageLocationID: loc.ID, FilePath: "/media/different_path.jpg",
+			FileName: "different_path.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash3,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		if err != nil {
+			return err
+		}
+		return q.SetSupersededBy(ctx, sqlcgen.SetSupersededByParams{
+			ID:           supersededNode.ID,
+			SupersededBy: sql.NullInt64{Int64: node.ID, Valid: true},
+		})
+	})
+	if err != nil {
+		t.Fatalf("insert supersededNode: %v", err)
+	}
+	rrSuperseded := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", supersededNode.ID), nil)
+	if rrSuperseded.Code != http.StatusConflict {
+		t.Fatalf("POST restore superseded asset status = %d, want 409, body = %s", rrSuperseded.Code, rrSuperseded.Body.String())
+	}
+
+	// 7. Conflict: attempting to restore an asset with MISSING state returns 409
+	var missingNode sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		hash4 := "dddddddddddddddd"
+		var err error
+		missingNode, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-missing", StorageLocationID: loc.ID, FilePath: "/media/missing_node.jpg",
+			FileName: "missing_node.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash4,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "MISSING",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert missingNode: %v", err)
+	}
+	rrMissing := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", missingNode.ID), nil)
+	if rrMissing.Code != http.StatusConflict {
+		t.Fatalf("POST restore missing asset status = %d, want 409, body = %s", rrMissing.Code, rrMissing.Body.String())
+	}
+}
+
+func TestGetAssetMetadata(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "meta-test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "bbbbbbbbbbbbbbbb"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-meta-test", StorageLocationID: loc.ID, FilePath: "/media/meta_test.jpg",
+			FileName: "meta_test.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: node.ID,
+			Source: "exiftool",
+			Key:    "Make",
+			Value:  "Sony",
+		}); err != nil {
+			return err
+		}
+		return q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: node.ID,
+			Source: "exiftool",
+			Key:    "Model",
+			Value:  "ILCE-7RM5",
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/metadata", node.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET metadata status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var got struct {
+		Metadata []struct {
+			NodeID int64  `json:"nodeId"`
+			Source string `json:"source"`
+			Key    string `json:"key"`
+			Value  string `json:"value"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Metadata) != 2 {
+		t.Fatalf("got %d metadata items, want 2", len(got.Metadata))
+	}
+	if got.Metadata[0].Key != "Make" || got.Metadata[0].Value != "Sony" {
+		t.Errorf("metadata[0] = %+v, want Make=Sony", got.Metadata[0])
+	}
+	if got.Metadata[1].Key != "Model" || got.Metadata[1].Value != "ILCE-7RM5" {
+		t.Errorf("metadata[1] = %+v, want Model=ILCE-7RM5", got.Metadata[1])
+	}
+
+	// 404 for non-existent node
+	rr404 := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/999999/metadata", nil)
+	if rr404.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr404.Code)
+	}
+}
+
 func TestAuditQueueEmpty(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/edges/audit", nil)
@@ -3975,6 +4244,57 @@ func TestFilteredAssetsAndFacets(t *testing.T) {
 	}
 	if len(cameraRes.Assets) != 1 || cameraRes.Assets[0].CameraModel != "Canon R5" {
 		t.Errorf("camera filter got %+v, want Canon R5", cameraRes.Assets)
+	}
+}
+
+func TestListAssetsExcludesArchivedFromTotalCount(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash1 := "1111111111111111"
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-active", StorageLocationID: loc.ID, FilePath: "/media/active.jpg",
+			FileName: "active.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash1,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		hash2 := "2222222222222222"
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-archived", StorageLocationID: loc.ID, FilePath: "/media/archived.jpg",
+			FileName: "archived.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash2,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/assets status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var res struct {
+		Assets []assetDTO `json:"assets"`
+		Total  int64      `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(res.Assets) != 1 {
+		t.Errorf("got %d assets, want 1", len(res.Assets))
+	}
+	if res.Total != 1 {
+		t.Errorf("got total = %d, want 1 (archived node must be excluded from total)", res.Total)
 	}
 }
 

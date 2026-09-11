@@ -12,8 +12,16 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
+
+-- name: CountMediaNodes :one
+-- Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
+SELECT COUNT(*)
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL;
 
 -- name: ListMediaNodesFiltered :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -34,6 +42,7 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
@@ -48,7 +57,8 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (camera_model = sqlc.narg('camera_model') OR sqlc.narg('camera_model') IS NULL)
   AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
-  AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL);
+  AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
+  AND superseded_by IS NULL;
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes
@@ -227,6 +237,10 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 -- row can never share file_path even for an instant within the
 -- transaction -- archiving first, not after, is what keeps that true.
 UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?1;
+
+-- name: UnarchiveMediaNode :exec
+-- Restores an archived media node back to ACTIVE state.
+UPDATE media_nodes SET lifecycle_state = 'ACTIVE', updated_at = unixepoch() WHERE id = ?1;
 
 -- name: SetSupersededBy :exec
 -- Step 3 of a version collision: link the archived row to its successor,
@@ -530,3 +544,18 @@ SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
 FROM media_nodes n
 LEFT JOIN storage_locations s ON s.id = n.storage_location_id
 WHERE n.node_uuid IN (SELECT value FROM json_each(CAST(sqlc.arg(node_uuids) AS TEXT)));
+
+-- name: GetLatestNodeByPath :one
+-- Retrieves the most recent media node at a given path, including archived rows.
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE file_path = ?1
+ORDER BY id DESC
+LIMIT 1;

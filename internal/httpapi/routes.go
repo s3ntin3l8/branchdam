@@ -55,6 +55,9 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
+	huma.Delete(api, "/api/v1/assets/{id}", s.handleDeleteAsset)
+	huma.Post(api, "/api/v1/assets/{id}/restore", s.handleRestoreAsset)
+	huma.Get(api, "/api/v1/assets/{id}/metadata", s.handleGetAssetMetadata)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
 	huma.Get(api, "/api/v1/assets/{id}/sync-status", s.handleAssetSyncStatus)
@@ -309,6 +312,7 @@ type assetDTO struct {
 	// non-null; the "My uploads" filter pins it to the request's own
 	// resolved id.
 	UploadedByUserID *int64 `json:"uploadedByUserId,omitempty"`
+	SupersededBy     *int64 `json:"supersededBy,omitempty"`
 }
 
 func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
@@ -326,6 +330,10 @@ func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
 		LifecycleState:    n.LifecycleState,
 		StorageLocationID: n.StorageLocationID,
 		ThumbState:        n.ThumbState,
+	}
+	if n.SupersededBy.Valid {
+		v := n.SupersededBy.Int64
+		dto.SupersededBy = &v
 	}
 	if n.UploadedByUserID.Valid {
 		v := n.UploadedByUserID.Int64
@@ -401,7 +409,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		if err != nil {
 			return nil, huma.Error500InternalServerError("list assets", err)
 		}
-		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{})
+		total, err = s.db.Reader.CountMediaNodes(ctx)
 		if err != nil {
 			total = int64(len(rows))
 		}
@@ -477,6 +485,159 @@ func (s *Server) handleGetAsset(ctx context.Context, in *AssetPathInput) (*GetAs
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
 	return &GetAssetOutput{Body: toAssetDTO(node)}, nil
+}
+
+type DeleteAssetOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+// handleDeleteAsset marks the media node ARCHIVED (soft-delete). Media node rows
+// are never removed from SQLite (Invariant 1: No CASCADE, rows are never deleted).
+func (s *Server) handleDeleteAsset(ctx context.Context, in *AssetPathInput) (*DeleteAssetOutput, error) {
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+
+	if node.LifecycleState != "ARCHIVED" {
+		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.ArchiveMediaNode(ctx, in.ID)
+		}); err != nil {
+			return nil, huma.Error500InternalServerError("archive asset", err)
+		}
+
+		if s.audit != nil {
+			details := map[string]any{
+				"assetId":  in.ID,
+				"filePath": node.FilePath,
+				"fileName": node.FileName,
+			}
+			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetArchived, "asset", strconv.FormatInt(in.ID, 10), details); err != nil {
+				s.log.Warn("failed to write actor audit for asset archive", "error", err)
+			}
+		}
+	}
+
+	out := &DeleteAssetOutput{}
+	out.Body.OK = true
+	return out, nil
+}
+
+type RestoreAssetOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+// handleRestoreAsset transitions an ARCHIVED media node back to ACTIVE.
+// If another live node currently occupies the file path, returns 409 Conflict.
+func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*RestoreAssetOutput, error) {
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+
+	if node.LifecycleState != "ARCHIVED" && node.LifecycleState != "ACTIVE" {
+		return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset lifecycle state is %s (expected ARCHIVED)", node.LifecycleState))
+	}
+
+	if node.LifecycleState == "ARCHIVED" {
+		if node.SupersededBy.Valid && node.SupersededBy.Int64 != 0 {
+			return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset has been superseded by asset ID %d", node.SupersededBy.Int64))
+		}
+
+		if s.guard != nil {
+			exists, err := s.guard.Exists(node.FilePath)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("check file on disk", err)
+			}
+			if !exists {
+				return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: file %s does not exist on disk", node.FilePath))
+			}
+		}
+
+		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			live, err := q.GetLiveNodeByPath(ctx, node.FilePath)
+			if err == nil && live.ID != node.ID {
+				return huma.Error409Conflict(fmt.Sprintf("cannot restore asset: another live asset (ID %d) already occupies %s", live.ID, node.FilePath))
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return huma.Error500InternalServerError("check live node by path", err)
+			}
+			return q.UnarchiveMediaNode(ctx, in.ID)
+		}); err != nil {
+			var hErr huma.StatusError
+			if errors.As(err, &hErr) {
+				return nil, hErr
+			}
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: another live asset already occupies %s", node.FilePath))
+			}
+			return nil, huma.Error500InternalServerError("restore asset", err)
+		}
+
+		if s.audit != nil {
+			details := map[string]any{
+				"assetId":  in.ID,
+				"filePath": node.FilePath,
+				"fileName": node.FileName,
+			}
+			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetRestored, "asset", strconv.FormatInt(in.ID, 10), details); err != nil {
+				s.log.Warn("failed to write actor audit for asset restore", "error", err)
+			}
+		}
+	}
+
+	out := &RestoreAssetOutput{}
+	out.Body.OK = true
+	return out, nil
+}
+
+type nodeMetadatumDTO struct {
+	NodeID int64  `json:"nodeId"`
+	Source string `json:"source"`
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+}
+
+type GetAssetMetadataOutput struct {
+	Body struct {
+		Metadata []nodeMetadatumDTO `json:"metadata"`
+	}
+}
+
+func (s *Server) handleGetAssetMetadata(ctx context.Context, in *AssetPathInput) (*GetAssetMetadataOutput, error) {
+	_, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+
+	rows, err := s.db.Reader.ListNodeMetadata(ctx, in.ID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list node metadata", err)
+	}
+
+	out := &GetAssetMetadataOutput{}
+	out.Body.Metadata = make([]nodeMetadatumDTO, len(rows))
+	for i, r := range rows {
+		out.Body.Metadata[i] = nodeMetadatumDTO{
+			NodeID: r.NodeID,
+			Source: r.Source,
+			Key:    r.Key,
+			Value:  r.Value,
+		}
+	}
+	return out, nil
 }
 
 // --- /api/v1/assets/{id}/graph ---

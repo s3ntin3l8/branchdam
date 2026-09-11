@@ -126,6 +126,38 @@ func commitVersionCollision(ctx context.Context, q *sqlcgen.Queries, locationID 
 }
 
 func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, stats *Stats, uploadedByUserID int64, log *slog.Logger) error {
+	// If there is an ARCHIVED row at this path, check if the file content is unchanged.
+	// User soft-deleted this asset; if the file on disk was not modified (same fast_hash),
+	// keep it archived (skip re-inserting a duplicate node or rebasing a missing node over it).
+	// If the file was modified, insert the new node and link it via superseded_by.
+	latest, err := q.GetLatestNodeByPath(ctx, r.Path)
+	if err == nil && latest.LifecycleState == "ARCHIVED" {
+		if r.FastHash == "" || (latest.FastHash != nil && *latest.FastHash == r.FastHash) {
+			// Unchanged content (or no fast_hash available): respect user soft-delete, do not resurrect or create duplicate node.
+			return nil
+		}
+		// File content changed at this path: insert new successor and link superseded_by.
+		// Preserves archive delete intent on successor so file touch or tool metadata
+		// rewrites do not silently resurrect a user-deleted asset into active lineage.
+		newNode, err := insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
+		if err != nil {
+			return fmt.Errorf("insert successor node: %w", err)
+		}
+		if err := q.ArchiveMediaNode(ctx, newNode.ID); err != nil {
+			return fmt.Errorf("archive successor node: %w", err)
+		}
+		if err := q.SetSupersededBy(ctx, sqlcgen.SetSupersededByParams{
+			ID:           latest.ID,
+			SupersededBy: sql.NullInt64{Int64: newNode.ID, Valid: true},
+		}); err != nil {
+			return fmt.Errorf("link superseded_by: %w", err)
+		}
+		stats.Inserted++
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("get latest node by path: %w", err)
+	}
+
 	if r.FastHash != "" {
 		missing, err := q.GetMissingNodeByFastHash(ctx, &r.FastHash)
 		if err == nil {
@@ -164,7 +196,7 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 	}
 
 	stats.Inserted++
-	_, err := insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
+	_, err = insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
 	return err
 }
 

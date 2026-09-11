@@ -15,6 +15,7 @@ const IngestJobsPage = lazy(() => import("./pages/IngestJobsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const StorageHealthPage = lazy(() => import("./pages/StorageHealthPage"));
 const CompanionPairingsPage = lazy(() => import("./pages/CompanionPairingsPage"));
+const AuditLogPage = lazy(() => import("./pages/AuditLogPage"));
 const UsersPage = lazy(() => import("./pages/UsersPage"));
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
@@ -64,6 +65,7 @@ export function Layout() {
           <NavItem to="/jobs">Ingest Jobs</NavItem>
           <NavItem to="/storage-health">Storage Health</NavItem>
           <NavItem to="/companion">Companion Pairing</NavItem>
+          {me?.isAdmin && <NavItem to="/audit-log">Audit Log</NavItem>}
           <NavItem to="/settings">Settings</NavItem>
           {me?.isAdmin && <NavItem to="/users">Users</NavItem>}
         </div>
@@ -142,6 +144,11 @@ export default function App() {
         <Route path="/companion" element={
           <Suspense fallback={<div className="p-6 text-neutral-400">Loading companion pairings…</div>}>
             <CompanionPairingsPage />
+          </Suspense>
+        } />
+        <Route path="/audit-log" element={
+          <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit log…</div>}>
+            <AuditLogPage />
           </Suspense>
         } />
         <Route path="/users" element={

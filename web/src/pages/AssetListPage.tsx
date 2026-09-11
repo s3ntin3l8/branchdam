@@ -18,6 +18,7 @@ export default function AssetListPage() {
   const cameraModel = searchParams.get("cameraModel") || "";
   const graphStatus = (searchParams.get("graphStatus") as Asset["graphStatus"]) || "";
   const storageLocationId = searchParams.get("storageLocationId") ? Number(searchParams.get("storageLocationId")) : undefined;
+  const lifecycleState = (searchParams.get("lifecycleState") as Asset["lifecycleState"]) || "";
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
   const myUploads = searchParams.get("myUploads") === "true";
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
@@ -54,6 +55,7 @@ export default function AssetListPage() {
     cameraModel: cameraModel || undefined,
     graphStatus: graphStatus || undefined,
     storageLocationId,
+    lifecycleState: lifecycleState || undefined,
     unlinkedOnly: unlinkedOnly || undefined,
     uploadedByUserId: effectiveMyUploads ? myUserID : undefined,
   });
@@ -87,7 +89,7 @@ export default function AssetListPage() {
     setSearchParams(new URLSearchParams());
   };
 
-  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads);
+  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState);
 
   return (
     <div className="p-6 space-y-6">
@@ -146,6 +148,23 @@ export default function AssetListPage() {
               <option value="LINKED">LINKED</option>
               <option value="NEEDS_REVIEW">NEEDS_REVIEW</option>
               <option value="ROOT">ROOT</option>
+            </select>
+          </div>
+
+          {/* Lifecycle State */}
+          <div>
+            <label htmlFor="lifecycle-state-filter" className="block text-neutral-400 mb-1">Lifecycle State</label>
+            <select
+              id="lifecycle-state-filter"
+              value={lifecycleState}
+              onChange={(e) => updateFilters({ lifecycleState: e.target.value })}
+              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none focus:border-neutral-500"
+            >
+              <option value="">All States</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="MISSING">MISSING</option>
+              <option value="ARCHIVED">ARCHIVED</option>
+              <option value="HIDDEN">HIDDEN</option>
             </select>
           </div>
 
@@ -211,6 +230,7 @@ export default function AssetListPage() {
               My Uploads
             </label>
           </div>
+
         </div>
       </div>
 
@@ -229,6 +249,7 @@ export default function AssetListPage() {
               <tr>
                 <th className="py-2 pr-4"></th>
                 <th className="py-2 pr-4">Path</th>
+                <th className="py-2 pr-4">Lifecycle</th>
                 <th className="py-2 pr-4">Camera Model</th>
                 <th className="py-2 pr-4">Tier status</th>
                 <th className="py-2 pr-4">Graph status</th>
@@ -246,6 +267,16 @@ export default function AssetListPage() {
                     <Link to={`/assets/${a.id}`} className="text-sky-400 hover:underline font-mono text-xs">
                       {a.filePath}
                     </Link>
+                  </td>
+                  <td className="py-2 pr-4 text-xs">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      a.lifecycleState === "ACTIVE" ? "bg-emerald-950 text-emerald-300 border border-emerald-800/60" :
+                      a.lifecycleState === "MISSING" ? "bg-red-950 text-red-300 border border-red-800/60" :
+                      a.lifecycleState === "ARCHIVED" ? "bg-neutral-800 text-neutral-400 border border-neutral-700" :
+                      "bg-amber-950 text-amber-300 border border-amber-800/60"
+                    }`}>
+                      {a.lifecycleState}
+                    </span>
                   </td>
                   <td className="py-2 pr-4 text-neutral-400 text-xs">{a.cameraModel || "—"}</td>
                   <td className="py-2 pr-4 text-neutral-400 text-xs">{a.indexingStatus}</td>

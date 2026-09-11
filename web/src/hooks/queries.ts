@@ -179,6 +179,46 @@ export function useRetrySync() {
   });
 }
 
+export function useAssetMetadata(id: number | undefined) {
+  return useQuery({
+    queryKey: ["asset-metadata", id],
+    queryFn: () => api.getAssetMetadata(id as number),
+    enabled: id !== undefined && !Number.isNaN(id),
+  });
+}
+
+export function useDeleteAsset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deleteAsset(id),
+    onSuccess: (_data, id) => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+    },
+  });
+}
+
+export function useRestoreAsset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.restoreAsset(id),
+    onSuccess: (_data, id) => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+    },
+  });
+}
+
+export function useAuditEntries(params: import("../api/types").AuditQueryParams = {}, enabled: boolean = true) {
+  return useQuery({
+    queryKey: ["audit-entries", params],
+    queryFn: () => api.listAudit(params),
+    enabled,
+  });
+}
+
 export function useInheritMetadata() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -189,6 +229,7 @@ export function useInheritMetadata() {
       // refreshNodeAfterInPlaceWrite) -- re-fetch the asset so the Metadata
       // panel reflects the new file state, not the pre-write one.
       void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
     },
   });
 }
