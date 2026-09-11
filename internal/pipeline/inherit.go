@@ -101,14 +101,29 @@ func HasResolvedButIneligibleParent(edges []sqlcgen.MediaEdge) bool {
 	return false
 }
 
+// ErrPostWriteRefreshFailed indicates that WriteTags modified the file on disk,
+// but the subsequent RefreshNodeAfterInPlaceWrite failed to re-read or re-hash it.
+type ErrPostWriteRefreshFailed struct {
+	Err error
+}
+
+func (e *ErrPostWriteRefreshFailed) Error() string {
+	return fmt.Sprintf("metadata written to disk but node state refresh failed: %v", e.Err)
+}
+
+func (e *ErrPostWriteRefreshFailed) Unwrap() error {
+	return e.Err
+}
+
 // LoadTagSet assembles a node's inheritable tag values from its promoted
 // columns and node_metadata rows (source='exiftool'). A read failure is
 // surfaced, not swallowed -- a partial/empty tagset would silently produce a
 // partial inheritance.
 func LoadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) (metadata.TagSet, error) {
 	ts := metadata.TagSet{
-		Identifier: node.NodeUuid, // XMP-dc:Identifier is always the node's own uuid
-		Model:      node.CameraModel.String,
+		Identifier:  node.NodeUuid, // XMP-dc:Identifier is always the node's own uuid
+		DerivedFrom: node.DerivedFromID.String,
+		Model:       node.CameraModel.String,
 	}
 	rows, err := q.ListNodeMetadata(ctx, node.ID)
 	if err != nil {
@@ -149,36 +164,41 @@ func LoadTagSet(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode)
 // RefreshNodeAfterInPlaceWrite re-reads the file's size and re-hashes it
 // (the same fast_hash a scan would compute -- xxHash64 over the same sample
 // regions) after an in-place exiftool write, and persists all three onto the
-// node's row.
+// node's row. Retries up to 3 times to ride out transient file-locks or mount lag
+// immediately following subprocess termination.
 func RefreshNodeAfterInPlaceWrite(ctx context.Context, database *db.DB, guard *storage.Guard, node sqlcgen.MediaNode) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), InheritWriteTimeout)
 	defer cancel()
 	var f *os.File
 	var stat os.FileInfo
-	var err error
-	if guard != nil {
-		gf, err := guard.OpenRead(node.FilePath)
-		if err != nil {
-			return fmt.Errorf("open for re-hash: %w", err)
+	var openErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-rctx.Done():
+				return rctx.Err()
+			case <-time.After(time.Duration(attempt*50) * time.Millisecond):
+			}
 		}
-		defer func() { _ = gf.Close() }()
-		f = gf
-		stat, err = gf.Stat()
-		if err != nil {
-			return fmt.Errorf("stat for re-hash: %w", err)
+		if guard != nil {
+			f, openErr = guard.OpenRead(node.FilePath)
+		} else {
+			f, openErr = os.OpenFile(node.FilePath, os.O_RDONLY, 0)
 		}
-	} else {
-		of, err := os.OpenFile(node.FilePath, os.O_RDONLY, 0)
-		if err != nil {
-			return fmt.Errorf("open for re-hash: %w", err)
+		if openErr != nil {
+			continue
 		}
-		defer func() { _ = of.Close() }()
-		f = of
-		stat, err = of.Stat()
-		if err != nil {
-			return fmt.Errorf("stat for re-hash: %w", err)
+		stat, openErr = f.Stat()
+		if openErr != nil {
+			_ = f.Close()
+			continue
 		}
+		break
 	}
+	if openErr != nil {
+		return fmt.Errorf("open for re-hash (after retries): %w", openErr)
+	}
+	defer func() { _ = f.Close() }()
 
 	fastHash, err := hashing.FastHash(f, stat.Size())
 	if err != nil {
@@ -309,6 +329,15 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 
 	tags := metadata.Plan(parentTags, childTags)
 
+	// Short-circuit if planned tags already match child's current state:
+	// Plan unconditionally emits XMP-dc:Identifier and XMP-xmpMM:DerivedFrom once a child has a parent.
+	// If the child already has this parent recorded as derived_from_id and no
+	// other missing tags were planned (len(tags) <= 2), nothing has changed --
+	// do not spawn an exiftool write or rewrite the file on disk.
+	if child.DerivedFromID.Valid && child.DerivedFromID.String == parent.NodeUuid && len(tags) <= 2 {
+		return tags, nil
+	}
+
 	if deps.Prober == nil {
 		return nil, probe.ErrToolUnavailable
 	}
@@ -320,7 +349,7 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 	}
 
 	if err := RefreshNodeAfterInPlaceWrite(ctx, deps.DB, deps.Guard, child); err != nil {
-		return nil, fmt.Errorf("refresh node after metadata write: %w", err)
+		return nil, &ErrPostWriteRefreshFailed{Err: err}
 	}
 
 	bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), InheritWriteTimeout)
@@ -329,10 +358,44 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 		if deps.Log != nil {
 			deps.Log.Warn("inherit-metadata: re-read child for backfill failed", "nodeID", child.ID, "err", err)
 		}
-	} else if err := PersistExifMetadata(bctx, deps.DB, child.ID, exif, deps.Log); err != nil {
-		if deps.Log != nil {
-			deps.Log.Warn("inherit-metadata: backfill node_metadata failed", "nodeID", child.ID, "err", err)
+	} else {
+		if err := PersistExifMetadata(bctx, deps.DB, child.ID, exif, deps.Log); err != nil {
+			if deps.Log != nil {
+				deps.Log.Warn("inherit-metadata: backfill node_metadata failed", "nodeID", child.ID, "err", err)
+			}
 		}
+		derivedFrom := child.DerivedFromID
+		if parent.NodeUuid != "" {
+			derivedFrom = sql.NullString{String: parent.NodeUuid, Valid: true}
+		}
+		cameraModel := child.CameraModel
+		if (!cameraModel.Valid || cameraModel.String == "") && exif.Model != "" {
+			cameraModel = sql.NullString{String: exif.Model, Valid: true}
+		}
+		lensModel := child.LensModel
+		if (!lensModel.Valid || lensModel.String == "") && exif.LensModel != "" {
+			lensModel = sql.NullString{String: exif.LensModel, Valid: true}
+		}
+		cameraSerial := child.CameraSerial
+		if (!cameraSerial.Valid || cameraSerial.String == "") && exif.SerialNumber != "" {
+			cameraSerial = sql.NullString{String: exif.SerialNumber, Valid: true}
+		}
+		capturedAt := child.CapturedAtUnix
+		if !capturedAt.Valid && exif.CapturedAt != nil {
+			capturedAt = sql.NullInt64{Int64: exif.CapturedAt.Unix(), Valid: true}
+		}
+		_ = deps.DB.InTx(bctx, func(q *sqlcgen.Queries) error {
+			return q.UpdateMediaNodePromotedColumns(bctx, sqlcgen.UpdateMediaNodePromotedColumnsParams{
+				ID:                 child.ID,
+				OriginalDocumentID: child.OriginalDocumentID,
+				DocumentID:         child.DocumentID,
+				DerivedFromID:      derivedFrom,
+				CameraModel:        cameraModel,
+				CameraSerial:       cameraSerial,
+				LensModel:          lensModel,
+				CapturedAtUnix:     capturedAt,
+			})
+		})
 	}
 
 	return tags, nil

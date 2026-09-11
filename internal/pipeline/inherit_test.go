@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -317,5 +318,86 @@ func TestNodeLockerSerializesSameNodeAndCleansUp(t *testing.T) {
 	locker.mu.Unlock()
 	if remaining != 0 {
 		t.Errorf("expected 0 remaining locks, got %d", remaining)
+	}
+}
+
+func TestInheritMetadataShortCircuitsWhenTagsAlreadyMatch(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	var parent, child sqlcgen.MediaNode
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		fastHashParent := "0123456789abcdef"
+		fastHashChild := "fedcba9876543210"
+		parent, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "parent-uuid-1",
+			StorageLocationID: locID,
+			FilePath:          "/tmp/parent.jpg",
+			FileName:          "parent.jpg",
+			FileExt:           "jpg",
+			SizeBytes:         100,
+			MtimeUnix:         time.Now().Unix(),
+			FastHash:          &fastHashParent,
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "LINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		child, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "child-uuid-1",
+			StorageLocationID: locID,
+			FilePath:          "/tmp/child.jpg",
+			FileName:          "child.jpg",
+			FileExt:           "jpg",
+			SizeBytes:         100,
+			MtimeUnix:         time.Now().Unix(),
+			FastHash:          &fastHashChild,
+			IndexingStatus:    "INDEXED_SHALLOW",
+			GraphStatus:       "LINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		// Set child.derived_from_id = parent-uuid-1 (already inherited)
+		err = q.UpdateMediaNodePromotedColumns(ctx, sqlcgen.UpdateMediaNodePromotedColumnsParams{
+			ID:            child.ID,
+			DerivedFromID: sql.NullString{String: parent.NodeUuid, Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID:     parent.ID,
+			TargetNodeID:     child.ID,
+			RelationshipType: "DERIVED_FROM",
+			Confidence:       0.95,
+			Tier:             2,
+			Resolver:         "test",
+			ReviewState:      "AUTO_ACCEPTED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("setup nodes: %v", err)
+	}
+
+	// Deps with prober=nil: if it does NOT short-circuit, it would fail with probe.ErrToolUnavailable.
+	// Since tags already match (DerivedFromID == parent.NodeUuid and no extra metadata to inherit),
+	// it must short-circuit and succeed without calling exiftool.
+	deps := InheritDeps{
+		DB:     database,
+		Prober: nil,
+	}
+	tags, err := InheritMetadata(ctx, deps, child.ID)
+	if err != nil {
+		t.Fatalf("InheritMetadata failed: %v (expected short-circuit without needing prober)", err)
+	}
+	if tags["XMP-xmpMM:DerivedFrom"] != parent.NodeUuid {
+		t.Errorf("got DerivedFrom %q, want %q", tags["XMP-xmpMM:DerivedFrom"], parent.NodeUuid)
 	}
 }

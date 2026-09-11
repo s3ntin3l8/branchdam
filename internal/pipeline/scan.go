@@ -99,7 +99,8 @@ type ScanDeps struct {
 	StartedByUserID int64
 
 	// AutoInheritMetadata controls whether newly-created AUTO_ACCEPTED Tier 1/2
-	// edges automatically trigger EXIF/XMP metadata inheritance.
+	// edges automatically trigger EXIF/XMP metadata inheritance. Test hook:
+	// static override when AutoInheritFn is nil.
 	AutoInheritMetadata bool
 
 	// AutoInheritFn, if provided, dynamically resolves whether automated metadata
@@ -843,7 +844,13 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 	}
 	if deps.shouldAutoInherit() && hasEligibleAutoAcceptedParent(edges) {
 		if _, err := InheritMetadata(ctx, deps.InheritDeps(), node.ID); err != nil {
-			log.Error("pipeline: auto-inherit metadata failed (possible disk!=DB mismatch)", "path", path, "nodeID", node.ID, "err", err)
+			var rErr *ErrPostWriteRefreshFailed
+			if errors.As(err, &rErr) {
+				log.Error("pipeline: CRITICAL: auto-inherit wrote file but post-write refresh failed; retrying immediate fallback refresh to prevent version collision", "path", path, "nodeID", node.ID, "err", err)
+				_ = RefreshNodeAfterInPlaceWrite(ctx, deps.DB, deps.Guard, node)
+			} else {
+				log.Error("pipeline: auto-inherit metadata failed", "path", path, "nodeID", node.ID, "err", err)
+			}
 		}
 	}
 	return n

@@ -825,7 +825,12 @@ func (s *Server) autoInherit(ctx context.Context, childNodeID int64) {
 		return
 	}
 	if _, err := pipeline.InheritMetadata(ctx, s.inheritDeps(), childNodeID); err != nil {
-		s.log.Warn("auto-inherit metadata failed", "targetNodeID", childNodeID, "err", err)
+		var rErr *pipeline.ErrPostWriteRefreshFailed
+		if errors.As(err, &rErr) {
+			s.log.Error("auto-inherit: CRITICAL: metadata written to disk but post-write refresh failed", "targetNodeID", childNodeID, "err", err)
+		} else {
+			s.log.Warn("auto-inherit metadata failed", "targetNodeID", childNodeID, "err", err)
+		}
 	}
 }
 
