@@ -366,22 +366,26 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 	// Plan unconditionally emits XMP-dc:Identifier and XMP-xmpMM:DerivedFrom once a child has a parent.
 	// If the child already has this parent recorded as derived_from_id and no
 	// other missing tags were planned (len(tags) <= 2), nothing has changed --
-	// do not spawn an exiftool write or rewrite the file on disk.
+	// do not spawn an exiftool write or rewrite the file on disk. Return empty map
+	// so callers accurately observe that no tags were written.
 	if child.DerivedFromID.Valid && child.DerivedFromID.String == parent.NodeUuid && len(tags) <= 2 {
-		return tags, nil
+		return map[string]string{}, nil
 	}
 
 	if deps.Prober == nil {
 		return nil, probe.ErrToolUnavailable
 	}
 
-	wctx, cancel := context.WithTimeout(ctx, InheritWriteTimeout)
+	// Detach write and refresh context from caller/request context so client
+	// disconnects cannot cancel the file write after the edge transaction committed.
+	writeCtx := context.WithoutCancel(ctx)
+	wctx, cancel := context.WithTimeout(writeCtx, InheritWriteTimeout)
 	defer cancel()
 	if err := deps.Prober.WriteTags(wctx, child.FilePath, tags); err != nil {
 		return nil, err
 	}
 
-	if err := RefreshNodeAfterInPlaceWrite(ctx, deps.DB, deps.Guard, child); err != nil {
+	if err := RefreshNodeAfterInPlaceWrite(writeCtx, deps.DB, deps.Guard, child); err != nil {
 		return nil, &ErrPostWriteRefreshFailed{Err: err}
 	}
 

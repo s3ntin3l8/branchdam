@@ -419,8 +419,8 @@ func TestInheritMetadataShortCircuitsWhenTagsAlreadyMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InheritMetadata failed: %v (expected short-circuit without needing prober)", err)
 	}
-	if tags["XMP-xmpMM:DerivedFrom"] != parent.NodeUuid {
-		t.Errorf("got DerivedFrom %q, want %q", tags["XMP-xmpMM:DerivedFrom"], parent.NodeUuid)
+	if len(tags) != 0 {
+		t.Errorf("expected 0 inherited tags on short-circuit (no-op), got %v", tags)
 	}
 }
 

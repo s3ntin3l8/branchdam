@@ -824,13 +824,14 @@ func (s *Server) autoInherit(ctx context.Context, childNodeID int64) {
 	if cfg := s.cfg(); cfg != nil && !cfg.Metadata.AutoInherit {
 		return
 	}
-	if _, err := pipeline.InheritMetadata(ctx, s.inheritDeps(), childNodeID); err != nil {
+	detachedCtx := context.WithoutCancel(ctx)
+	if _, err := pipeline.InheritMetadata(detachedCtx, s.inheritDeps(), childNodeID); err != nil {
 		var rErr *pipeline.ErrPostWriteRefreshFailed
 		if errors.As(err, &rErr) {
 			s.log.Error("auto-inherit: CRITICAL: metadata written to disk but post-write refresh failed; retrying immediate fallback refresh to prevent version collision", "targetNodeID", childNodeID, "err", err)
-			node, nErr := s.db.Reader.GetMediaNodeByID(ctx, childNodeID)
+			node, nErr := s.db.Reader.GetMediaNodeByID(detachedCtx, childNodeID)
 			if nErr == nil {
-				_ = pipeline.RefreshNodeAfterInPlaceWrite(ctx, s.db, s.guard, node)
+				_ = pipeline.RefreshNodeAfterInPlaceWrite(detachedCtx, s.db, s.guard, node)
 			}
 		} else {
 			s.log.Warn("auto-inherit metadata failed", "targetNodeID", childNodeID, "err", err)
