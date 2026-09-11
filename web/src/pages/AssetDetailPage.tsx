@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, useSearchParams } from "react-router";
+import { useParams, useSearchParams, Link } from "react-router";
 import {
   useAsset,
   useAssetLineage,
@@ -211,6 +211,21 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
   }, [isOpen, deleteAsset.isPending]);
 
   if (asset.lifecycleState === "ARCHIVED") {
+    if (asset.supersededBy) {
+      return (
+        <div className="flex items-center gap-2">
+          <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
+            Archived (Superseded)
+          </span>
+          <Link
+            to={`/assets/${asset.supersededBy}`}
+            className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-700"
+          >
+            View Successor (Asset #{asset.supersededBy})
+          </Link>
+        </div>
+      );
+    }
     return (
       <div className="flex items-center gap-2">
         <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">

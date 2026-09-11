@@ -181,10 +181,11 @@ export function useRestoreAsset() {
   });
 }
 
-export function useAuditEntries(params: import("../api/types").AuditQueryParams = {}) {
+export function useAuditEntries(params: import("../api/types").AuditQueryParams = {}, enabled: boolean = true) {
   return useQuery({
     queryKey: ["audit-entries", params],
     queryFn: () => api.listAudit(params),
+    enabled,
   });
 }
 

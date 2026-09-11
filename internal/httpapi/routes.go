@@ -312,6 +312,7 @@ type assetDTO struct {
 	// non-null; the "My uploads" filter pins it to the request's own
 	// resolved id.
 	UploadedByUserID *int64 `json:"uploadedByUserId,omitempty"`
+	SupersededBy     *int64 `json:"supersededBy,omitempty"`
 }
 
 func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
@@ -329,6 +330,10 @@ func toAssetDTO(n sqlcgen.MediaNode) assetDTO {
 		LifecycleState:    n.LifecycleState,
 		StorageLocationID: n.StorageLocationID,
 		ThumbState:        n.ThumbState,
+	}
+	if n.SupersededBy.Valid {
+		v := n.SupersededBy.Int64
+		dto.SupersededBy = &v
 	}
 	if n.UploadedByUserID.Valid {
 		v := n.UploadedByUserID.Int64

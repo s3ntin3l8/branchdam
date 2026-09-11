@@ -46,7 +46,7 @@ type Querier interface {
 	CountAttributionUsers(ctx context.Context) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
 	CountLoginAudit(ctx context.Context) (int64, error)
-	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED.
+	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
 	CountMediaNodes(ctx context.Context) (int64, error)
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAuditEntries } from "../hooks/queries";
+import { useAuditEntries, useMe } from "../hooks/queries";
 import type { AuditEntry } from "../api/types";
 
 const PAGE_SIZE = 50;
@@ -62,6 +62,9 @@ export default function AuditLogPage() {
     return () => clearTimeout(t);
   }, [resourceTypeFilter]);
 
+  const { data: me, isLoading: isMeLoading } = useMe();
+  const isAdmin = Boolean(me?.isAdmin);
+
   const offset = (page - 1) * PAGE_SIZE;
 
   const { data, isLoading, isError, error } = useAuditEntries({
@@ -70,13 +73,24 @@ export default function AuditLogPage() {
     offset,
     event: debouncedEventFilter.trim() || undefined,
     resourceType: debouncedResourceTypeFilter.trim() || undefined,
-  });
+  }, isAdmin);
 
   const entries = data?.entries ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const hasActiveFilters = Boolean(eventFilter.trim() || resourceTypeFilter.trim());
+
+  if (!isMeLoading && !isAdmin) {
+    return (
+      <div className="p-6">
+        <div className="rounded-lg border border-neutral-800 bg-neutral-900/80 p-8 text-center text-sm text-neutral-400">
+          <p className="font-medium text-neutral-200 mb-1">Access Restricted</p>
+          <p className="text-xs">Administrator privileges are required to view the audit log.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">

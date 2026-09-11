@@ -12,14 +12,16 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
 -- name: CountMediaNodes :one
--- Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED.
+-- Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
 SELECT COUNT(*)
 FROM media_nodes
-WHERE lifecycle_state != 'ARCHIVED';
+WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL;
 
 -- name: ListMediaNodesFiltered :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -40,6 +42,7 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
@@ -54,7 +57,8 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (camera_model = sqlc.narg('camera_model') OR sqlc.narg('camera_model') IS NULL)
   AND (graph_status = sqlc.narg('graph_status') OR sqlc.narg('graph_status') IS NULL)
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
-  AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL);
+  AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
+  AND superseded_by IS NULL;
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes

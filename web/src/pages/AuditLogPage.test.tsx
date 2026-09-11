@@ -9,6 +9,7 @@ import { api } from "../api/client";
 vi.mock("../api/client", () => ({
   api: {
     listAudit: vi.fn(),
+    me: vi.fn().mockResolvedValue({ isAdmin: true, kind: "user", name: "admin" }),
   },
 }));
 
@@ -88,5 +89,22 @@ describe("AuditLogPage", () => {
         expect.objectContaining({ event: "scan.started" })
       );
     });
+  });
+
+  it("shows access restricted when user is not admin", async () => {
+    vi.mocked(api.me).mockResolvedValueOnce({
+      authenticated: true,
+      isAdmin: false,
+      kind: "user",
+      name: "regular_user",
+    });
+
+    renderWithClient(<AuditLogPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Access Restricted/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Administrator privileges are required/i)).toBeInTheDocument();
+    expect(api.listAudit).not.toHaveBeenCalled();
   });
 });

@@ -132,8 +132,8 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 	// If the file was modified, insert the new node and link it via superseded_by.
 	latest, err := q.GetLatestNodeByPath(ctx, r.Path)
 	if err == nil && latest.LifecycleState == "ARCHIVED" {
-		if r.FastHash != "" && latest.FastHash != nil && *latest.FastHash == r.FastHash {
-			// Unchanged content: respect user soft-delete, do not resurrect or create duplicate node.
+		if r.FastHash == "" || (latest.FastHash != nil && *latest.FastHash == r.FastHash) {
+			// Unchanged content (or no fast_hash available): respect user soft-delete, do not resurrect or create duplicate node.
 			return nil
 		}
 		// File content changed at this path: insert new successor and link superseded_by.

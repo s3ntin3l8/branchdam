@@ -28,9 +28,10 @@ const countMediaNodes = `-- name: CountMediaNodes :one
 SELECT COUNT(*)
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL
 `
 
-// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED.
+// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
 func (q *Queries) CountMediaNodes(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countMediaNodes)
 	var count int64
@@ -46,6 +47,7 @@ WHERE (lifecycle_state = ?1 OR ?1 IS NULL)
   AND (graph_status = ?3 OR ?3 IS NULL)
   AND (storage_location_id = ?4 OR ?4 IS NULL)
   AND (uploaded_by_user_id = ?5 OR ?5 IS NULL)
+  AND superseded_by IS NULL
 `
 
 type CountMediaNodesFilteredParams struct {
@@ -946,6 +948,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2
 `
@@ -1028,6 +1031,7 @@ WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
   AND (graph_status = ?5 OR ?5 IS NULL)
   AND (storage_location_id = ?6 OR ?6 IS NULL)
   AND (uploaded_by_user_id = ?7 OR ?7 IS NULL)
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2
 `
