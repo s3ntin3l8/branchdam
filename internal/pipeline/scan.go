@@ -97,6 +97,32 @@ type ScanDeps struct {
 	// callers (existing tests, the SweeperSupervisor if it doesn't wire
 	// the system user yet).
 	StartedByUserID int64
+
+	// AutoInheritMetadata controls whether newly-created AUTO_ACCEPTED Tier 1/2
+	// edges automatically trigger EXIF/XMP metadata inheritance. Test hook:
+	// static override when AutoInheritFn is nil.
+	AutoInheritMetadata bool
+
+	// AutoInheritFn, if provided, dynamically resolves whether automated metadata
+	// inheritance is enabled (e.g. from a live settings.Store). Takes precedence over
+	// AutoInheritMetadata when non-nil.
+	AutoInheritFn func() bool
+}
+
+func (d ScanDeps) shouldAutoInherit() bool {
+	if d.AutoInheritFn != nil {
+		return d.AutoInheritFn()
+	}
+	return d.AutoInheritMetadata
+}
+
+func (d ScanDeps) InheritDeps() InheritDeps {
+	return InheritDeps{
+		DB:     d.DB,
+		Guard:  d.Guard,
+		Prober: d.Prober,
+		Log:    d.Log,
+	}
 }
 
 // ScanTracker joins every in-flight RunScan goroutine, mirroring
@@ -816,12 +842,33 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 		log.Warn("pipeline: resolve edges: re-fetch node", "path", path, "err", err)
 		return 0
 	}
-	_, n, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node))
+	edges, n, err := deps.Engine.ResolveAndCommit(ctx, toGraphNode(node))
 	if err != nil {
 		log.Warn("pipeline: resolve edges", "path", path, "err", err)
 		return 0
 	}
+	if deps.shouldAutoInherit() && hasEligibleInheritanceParent(edges) {
+		if _, err := InheritMetadata(ctx, deps.InheritDeps(), node.ID); err != nil {
+			var rErr *ErrPostWriteRefreshFailed
+			if errors.As(err, &rErr) {
+				log.Error("pipeline: CRITICAL: auto-inherit wrote file but post-write refresh failed; retrying immediate fallback refresh to prevent version collision", "path", path, "nodeID", node.ID, "err", err)
+				_ = RefreshNodeAfterInPlaceWrite(ctx, deps.DB, deps.Guard, node)
+			} else {
+				log.Error("pipeline: auto-inherit metadata failed", "path", path, "nodeID", node.ID, "err", err)
+			}
+		}
+	}
 	return n
+}
+
+func hasEligibleInheritanceParent(edges []sqlcgen.MediaEdge) bool {
+	for i := range edges {
+		e := &edges[i]
+		if (e.ReviewState == "AUTO_ACCEPTED" || e.ReviewState == "CONFIRMED") && e.Tier != 3 && ValidParentRelationships[e.RelationshipType] {
+			return true
+		}
+	}
+	return false
 }
 
 func toGraphNode(n sqlcgen.MediaNode) graph.Node {

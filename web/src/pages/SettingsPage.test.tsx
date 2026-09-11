@@ -467,13 +467,37 @@ describe("SettingsPage", () => {
     });
   });
 
-  it("ensures every group in GROUP_TO_CATEGORY maps to a valid category in CATEGORIES", () => {
+  it("maps every group in GROUP_TO_CATEGORY to an existing category", () => {
     const validCategoryIds = new Set(CATEGORIES.map((c) => c.id));
-    for (const [group, categoryId] of Object.entries(GROUP_TO_CATEGORY)) {
-      expect(
-        validCategoryIds.has(categoryId),
-        `Group "${group}" maps to unknown category "${categoryId}"`
-      ).toBe(true);
+    for (const [group, catId] of Object.entries(GROUP_TO_CATEGORY)) {
+      expect(validCategoryIds.has(catId), `group "${group}" mapped to unknown category "${catId}"`).toBe(true);
     }
+  });
+
+  it("renders fields in the Metadata group under Workers & Indexing category", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(
+      settingsResponse({
+        fields: [
+          field({
+            key: "metadata.autoInherit",
+            type: "bool",
+            label: "Auto-Inherit Metadata",
+            group: "Metadata",
+            value: true,
+            source: "config",
+            applyMode: "live",
+            editable: true,
+          }),
+        ],
+      })
+    );
+
+    renderWithClient(<SettingsPage />);
+
+    // Verify Metadata group and setting label are rendered
+    expect(await screen.findByRole("heading", { name: "Metadata" })).toBeInTheDocument();
+    expect(screen.getByText("Auto-Inherit Metadata")).toBeInTheDocument();
   });
 });

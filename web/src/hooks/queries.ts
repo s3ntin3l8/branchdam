@@ -13,18 +13,48 @@ export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: api.me });
 }
 
-// useUsers backs the asset list's "uploaded by" column lookup + the
-// pairing UI's "Owned by" selector. /api/v1/users is admin-only and
-// returns 503 in deployments without attribution wired; the SPA
-// tolerates that as "empty cache" (the table falls back to "#id").
-export function useUsers() {
+// useUsers backs the asset list's "uploaded by" column lookup, the
+// pairing UI's "Owned by" selector, and the Users administration page.
+// /api/v1/users is admin-only and returns 503 in deployments without
+// attribution wired; the SPA tolerates that as "empty cache".
+export function useUsers(params: { limit?: number; offset?: number } = {}) {
   return useQuery({
-    queryKey: ["users"],
-    queryFn: () => api.listUsers(),
+    queryKey: ["users", params],
+    queryFn: () => api.listUsers(params),
     retry: (failureCount, error) => {
       // 503 = feature disabled; don't retry, don't pollute the console.
       if (error instanceof Error && /503/.test(error.message)) return false;
       return failureCount < 2;
+    },
+  });
+}
+
+export function useCreateUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: import("../api/types").CreateUserInput) => api.createUser(input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useAdminResetPassword() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: number) => api.adminResetPassword(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useDisableUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: number) => api.disableUser(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
     },
   });
 }

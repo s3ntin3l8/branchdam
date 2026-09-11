@@ -56,6 +56,8 @@ const (
 	EventActorAuditExported = "actor_audit.exported"
 	EventAssetArchived      = "asset.archived"
 	EventAssetRestored      = "asset.restored"
+	EventUserCreated        = "user.created"
+	EventUserDisabled       = "user.disabled"
 )
 
 // Event is a typed event name. Anything that wants to write a new kind

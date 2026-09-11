@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/danielgtaylor/huma/v2"
+
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 )
@@ -164,7 +166,7 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 }
 
 // handleAdminResetPassword: POST /api/v1/admin/users/{id}/reset-password
-// (admin-only, gated by RequireAdmin upstream)
+// (admin-only, gated by requireSettingsAdmin)
 //
 // Rotates the target user's password hash and returns the new
 // plaintext exactly once. The response is the ONLY place the
@@ -174,6 +176,15 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 // again" pattern (PR #408 builds the admin UI panel that surfaces
 // this).
 func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireSettingsAdmin(r.Context()); err != nil {
+		var statusErr huma.StatusError
+		if errors.As(err, &statusErr) {
+			writeJSONError(w, statusErr.GetStatus(), statusErr.Error())
+		} else {
+			writeJSONError(w, http.StatusForbidden, err.Error())
+		}
+		return
+	}
 	if s.localAuth == nil || s.localAuth.reset == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 		return

@@ -42,6 +42,7 @@ export const GROUP_TO_CATEGORY: Record<string, string> = {
   HTTP: "server",
   Workers: "workers",
   Thumbnails: "workers",
+  Metadata: "workers",
   Immich: "integrations",
   "Path Resolution": "integrations",
   Agent: "security",
@@ -426,6 +427,9 @@ export default function SettingsPage() {
       byCategory.set(cat.id, []);
     }
     for (const [group, fields] of grouped) {
+      if (!GROUP_TO_CATEGORY[group]) {
+        console.warn(`[SettingsPage] Unrecognized settings group "${group}", defaulting to "server" category`);
+      }
       const catId = GROUP_TO_CATEGORY[group] || "server";
       const targetCatId = byCategory.has(catId) ? catId : "server";
       byCategory.get(targetCatId)!.push([group, fields]);

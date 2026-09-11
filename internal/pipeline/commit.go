@@ -588,7 +588,7 @@ func ffprobeMetadata(r Result) map[string]string {
 // file that was just rewritten in place -- otherwise the DB metadata store
 // and a second inheritance would re-plan from stale (empty) values until the
 // next scan. The caller owns bounding ctx (the httpapi handler wraps the
-// exiftool re-read in inheritWriteTimeout): this function does no deadline
+// exiftool re-read in InheritWriteTimeout): this function does no deadline
 // of its own, matching probe.Exif's contract.
 //
 // Deliberately does NOT touch media_nodes' promoted columns at all,
