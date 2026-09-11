@@ -827,7 +827,11 @@ func (s *Server) autoInherit(ctx context.Context, childNodeID int64) {
 	if _, err := pipeline.InheritMetadata(ctx, s.inheritDeps(), childNodeID); err != nil {
 		var rErr *pipeline.ErrPostWriteRefreshFailed
 		if errors.As(err, &rErr) {
-			s.log.Error("auto-inherit: CRITICAL: metadata written to disk but post-write refresh failed", "targetNodeID", childNodeID, "err", err)
+			s.log.Error("auto-inherit: CRITICAL: metadata written to disk but post-write refresh failed; retrying immediate fallback refresh to prevent version collision", "targetNodeID", childNodeID, "err", err)
+			node, nErr := s.db.Reader.GetMediaNodeByID(ctx, childNodeID)
+			if nErr == nil {
+				_ = pipeline.RefreshNodeAfterInPlaceWrite(ctx, s.db, s.guard, node)
+			}
 		} else {
 			s.log.Warn("auto-inherit metadata failed", "targetNodeID", childNodeID, "err", err)
 		}
@@ -1018,7 +1022,9 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		return nil, huma.Error500InternalServerError("create manual edge", err)
 	}
 
-	s.autoInherit(ctx, in.Body.TargetNodeID)
+	if createdEdge.Tier != 3 && pipeline.ValidParentRelationships[createdEdge.RelationshipType] {
+		s.autoInherit(ctx, in.Body.TargetNodeID)
+	}
 
 	out := &CreateEdgeOutput{}
 	out.Body = edgeDTO{
@@ -1235,12 +1241,17 @@ func recomputeGraphStatus(ctx context.Context, q *sqlcgen.Queries, nodeID int64)
 
 func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
 	var targetNodeID int64
+	var confirmedEdge sqlcgen.MediaEdge
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		var err error
+		edge, err := q.GetMediaEdge(ctx, in.ID)
+		if err != nil {
+			return err
+		}
 		targetNodeID, err = q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
 		if err != nil {
 			return err
 		}
+		confirmedEdge = edge
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
@@ -1250,7 +1261,9 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 		return nil, huma.Error500InternalServerError("confirm edge", err)
 	}
 
-	s.autoInherit(ctx, targetNodeID)
+	if confirmedEdge.Tier != 3 && pipeline.ValidParentRelationships[confirmedEdge.RelationshipType] {
+		s.autoInherit(ctx, targetNodeID)
+	}
 
 	out := &EdgeReviewOutput{}
 	out.Body.OK = true

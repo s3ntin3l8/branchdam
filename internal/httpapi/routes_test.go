@@ -3255,6 +3255,122 @@ func TestConfirmEdgeTier3DoesNotInherit(t *testing.T) {
 	}
 }
 
+func TestConfirmTier3EdgeDoesNotTriggerAutoInheritEvenWithEligibleTier1Parent(t *testing.T) {
+	exiftoolPath := requireExiftoolAndFFmpeg(t)
+
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	parent1Path := filepath.Join(resolved, "parent1.jpg")
+	parent2Path := filepath.Join(resolved, "parent2.jpg")
+	childPath := filepath.Join(resolved, "child.jpg")
+	makeTaggedFixtureJPEG(t, exiftoolPath, parent1Path, map[string]string{"EXIF:Make": "SONY"})
+	makeTaggedFixtureJPEG(t, exiftoolPath, parent2Path, map[string]string{"EXIF:Make": "NIKON"})
+	makeTaggedFixtureJPEG(t, exiftoolPath, childPath, nil)
+
+	path := filepath.Join(t.TempDir(), "confirm-t3-gate.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var locID int64
+	var child sqlcgen.MediaNode
+	var t3Edge sqlcgen.MediaEdge
+	ctx := context.Background()
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "confirm-t3-gate-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+
+		p1Hash, p1Size, p1Mtime := fastHashOf(t, parent1Path)
+		p1, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-gate-p1", StorageLocationID: locID, FilePath: parent1Path, FileName: "parent1.jpg",
+			FileExt: "jpg", SizeBytes: p1Size, MtimeUnix: p1Mtime, FastHash: &p1Hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: p1.ID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+		}); err != nil {
+			return err
+		}
+
+		p2Hash, p2Size, p2Mtime := fastHashOf(t, parent2Path)
+		p2, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-gate-p2", StorageLocationID: locID, FilePath: parent2Path, FileName: "parent2.jpg",
+			FileExt: "jpg", SizeBytes: p2Size, MtimeUnix: p2Mtime, FastHash: &p2Hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		childHash, childSize, childMtime := fastHashOf(t, childPath)
+		child, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-gate-child", StorageLocationID: locID, FilePath: childPath, FileName: "child.jpg",
+			FileExt: "jpg", SizeBytes: childSize, MtimeUnix: childMtime, FastHash: &childHash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+
+		// Existing eligible Tier-1 parent (e.g. AUTO_ACCEPTED when autoInherit was disabled)
+		if _, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: p1.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.95, Tier: 1, Resolver: "sidecar", ReviewState: "AUTO_ACCEPTED",
+		}); err != nil {
+			return err
+		}
+
+		// Unconfirmed Tier-3 edge being acted on
+		t3Edge, err = q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{
+			SourceNodeID: p2.ID, TargetNodeID: child.ID, RelationshipType: "DERIVED_FROM",
+			Confidence: 0.65, Tier: 3, Resolver: "heuristic", ReviewState: "NEEDS_REVIEW",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-t3-gate-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
+	srv := New(Deps{
+		Config: &config.Config{
+			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Metadata: config.Metadata{AutoInherit: true},
+		},
+		DB: database, Prober: probe.New(), Guard: guard,
+		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
+	})
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", t3Edge.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, want 200", rr.Code)
+	}
+
+	// Confirming the Tier-3 edge must NOT trigger autoInherit even though an eligible Tier-1 parent exists
+	rows, err := database.Reader.ListNodeMetadata(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("list child node metadata: %v", err)
+	}
+	for _, r := range rows {
+		if r.Key == "EXIF:Make" {
+			t.Errorf("child unexpectedly inherited EXIF:Make when confirming a Tier-3 edge")
+		}
+	}
+}
+
 func TestConfirmEdgeAutoInheritDisabled(t *testing.T) {
 	exiftoolPath := requireExiftoolAndFFmpeg(t)
 
