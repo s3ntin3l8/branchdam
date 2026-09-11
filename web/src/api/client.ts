@@ -136,6 +136,7 @@ export const api = {
   // Huma's JSON response path. The browser's own session cookie carries
   // auth, same as any other same-origin image request.
   thumbnailUrl: (id: number) => `/api/v1/assets/${id}/thumbnail`,
+  streamUrl: (id: number) => `/api/v1/assets/${id}/stream`,
 
   listAuditQueue: (params: { limit?: number; beforeId?: number } = {}) => {
     const qs = new URLSearchParams();
