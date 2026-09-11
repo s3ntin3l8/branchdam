@@ -10,6 +10,7 @@ import {
   useStorageLocations,
 } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
+import AssetMediaPreview from "../components/AssetMediaPreview";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
@@ -232,6 +233,11 @@ export default function AssetDetailPage() {
         </div>
         <AssetPruneControl asset={asset} />
       </div>
+
+      <section>
+        <h2 className="mb-2 text-sm font-medium text-neutral-400">Media Preview</h2>
+        <AssetMediaPreview asset={asset} lineage={lineage} />
+      </section>
 
       <section>
         <div className="mb-2 flex items-center justify-between">
