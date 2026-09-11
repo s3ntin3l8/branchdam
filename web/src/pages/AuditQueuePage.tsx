@@ -433,7 +433,7 @@ function BatchConfirmModal({
   const handleExecute = async () => {
     setRunning(true);
     setErrorMsg("");
-    let completed = 0;
+    let succeeded = 0;
     let failed = 0;
     try {
       for (const edge of edges) {
@@ -443,19 +443,18 @@ function BatchConfirmModal({
           } else {
             await rejectMutation.mutateAsync(edge.id);
           }
+          succeeded++;
         } catch {
           failed++;
         }
-        completed++;
-        setProgress(completed);
+        setProgress(succeeded + failed);
       }
     } finally {
       setRunning(false);
-      if (completed > 0) {
-        onComplete();
-      }
       if (failed > 0) {
         setErrorMsg(`${failed} of ${edges.length} edges failed to ${action}.`);
+      } else {
+        onComplete();
       }
     }
   };
@@ -721,7 +720,10 @@ export default function AuditQueuePage() {
           isOpen={true}
           action={batchAction}
           edges={filteredEntries}
-          onClose={() => setBatchAction(null)}
+          onClose={() => {
+            setBatchAction(null);
+            void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+          }}
           onComplete={() => {
             setBatchAction(null);
             void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });

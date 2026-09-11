@@ -164,6 +164,7 @@ export function useDeleteAsset() {
     onSuccess: (_data, id) => {
       void queryClient.invalidateQueries({ queryKey: ["assets"] });
       void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
     },
   });
 }
