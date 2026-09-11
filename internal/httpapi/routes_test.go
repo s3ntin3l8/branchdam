@@ -1684,6 +1684,90 @@ func TestAgentEventEnqueues(t *testing.T) {
 	}
 }
 
+func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
+	srv, database := fullTestServer(t)
+	eventUUID := "018f3a9b-8d76-7890-a123-456789abcdef"
+	body := map[string]string{
+		"eventUuid": eventUUID,
+		"agentId":   "workstation-1",
+		"eventType": "EVENT_NODE_CREATED",
+		"payload":   `{"path":"/tmp/idempotent.jpg"}`,
+	}
+
+	// 1. First submission: succeeds with 202 and returns eventUUID.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytesOfJSON(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		EventID string `json:"eventId"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.EventID != eventUUID {
+		t.Errorf("got eventId = %q, want %q", got.EventID, eventUUID)
+	}
+
+	// 2. Duplicate submission with identical eventUuid: returns 202 idempotently.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytesOfJSON(t, body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	rr2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusAccepted {
+		t.Fatalf("duplicate status = %d, body = %s", rr2.Code, rr2.Body.String())
+	}
+	var got2 struct {
+		EventID string `json:"eventId"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &got2); err != nil {
+		t.Fatalf("unmarshal duplicate: %v", err)
+	}
+	if got2.EventID != eventUUID {
+		t.Errorf("duplicate got eventId = %q, want %q", got2.EventID, eventUUID)
+	}
+
+	// 3. Verify exactly one row was created in event_queue.
+	event, err := database.Reader.GetAgentEventByUUID(context.Background(), eventUUID)
+	if err != nil {
+		t.Fatalf("GetAgentEventByUUID: %v", err)
+	}
+	if event.EventUuid != eventUUID {
+		t.Errorf("event.EventUuid = %q, want %q", event.EventUuid, eventUUID)
+	}
+	count, err := database.Reader.CountPendingAgentEvents(context.Background())
+	if err != nil {
+		t.Fatalf("CountPendingAgentEvents: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("pending event count = %d, want 1 (idempotency violated)", count)
+	}
+
+	// 4. Invalid UUID format returns 400 Bad Request.
+	badBody := map[string]string{
+		"eventUuid": "not-a-valid-uuid",
+		"agentId":   "workstation-1",
+		"eventType": "EVENT_NODE_CREATED",
+		"payload":   `{"path":"/tmp/bad.jpg"}`,
+	}
+	badReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytesOfJSON(t, badBody))
+	badReq.Header.Set("Content-Type", "application/json")
+	badReq.Header.Set("X-API-Key", routeTestAgentKey)
+	badRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(badRR, badReq)
+
+	if badRR.Code != http.StatusBadRequest {
+		t.Errorf("invalid UUID status = %d, want 400", badRR.Code)
+	}
+}
+
 func bytesOfJSON(t *testing.T, v any) *bytes.Reader {
 	t.Helper()
 	b, err := json.Marshal(v)
