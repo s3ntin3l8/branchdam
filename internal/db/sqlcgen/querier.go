@@ -200,6 +200,7 @@ type Querier interface {
 	EnsureSystemUser(ctx context.Context) (int64, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
+	GetAgentEventByUUIDAndAgent(ctx context.Context, arg GetAgentEventByUUIDAndAgentParams) (GetAgentEventByUUIDAndAgentRow, error)
 	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
 	// users: one row per human principal that has ever authenticated via
 	// Authentik ForwardAuth. Lazily provisioned on first sight by

@@ -1726,6 +1726,7 @@ func (s *Server) handleAgentHello(_ context.Context, _ *struct{}) (*AgentHelloOu
 
 type AgentEventInput struct {
 	Body struct {
+		EventUUID string `json:"eventUuid,omitempty"` // Client-minted UUID for idempotent transport retry
 		AgentID   string `json:"agentId" required:"true"`
 		EventType string `json:"eventType" required:"true" enum:"EVENT_NODE_CREATED,EVENT_EDGE_ATTACHED,EVENT_NODE_MOVED,EVENT_NODE_DELETED,EVENT_PATH_REBASED"`
 		Payload   string `json:"payload" required:"true"` // opaque JSON, applied asynchronously by internal/agent.Drainer (#166)
@@ -1755,14 +1756,38 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
 
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, huma.Error500InternalServerError("mint event id", err)
+	eventUUID := in.Body.EventUUID
+	if eventUUID != "" {
+		if _, err := uuid.Parse(eventUUID); err != nil {
+			return nil, huma.Error400BadRequest("invalid eventUuid format", err)
+		}
+		// Idempotency check: if this event_uuid was already enqueued for this agent, return 202 Accepted
+		// with the existing event id without inserting a duplicate row.
+		existing, err := s.db.Reader.GetAgentEventByUUIDAndAgent(ctx, sqlcgen.GetAgentEventByUUIDAndAgentParams{
+			EventUuid: eventUUID,
+			AgentID:   in.Body.AgentID,
+		})
+		if err == nil {
+			if existing.EventType != in.Body.EventType {
+				return nil, huma.Error409Conflict("eventUuid already exists with different eventType", nil)
+			}
+			out := &AgentEventOutput{}
+			out.Body.EventID = existing.EventUuid
+			return out, nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error500InternalServerError("lookup agent event", err)
+		}
+	} else {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return nil, huma.Error500InternalServerError("mint event id", err)
+		}
+		eventUUID = id.String()
 	}
 
-	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		_, err := q.EnqueueAgentEvent(ctx, sqlcgen.EnqueueAgentEventParams{
-			EventUuid:   id.String(),
+			EventUuid:   eventUUID,
 			AgentID:     in.Body.AgentID,
 			EventType:   in.Body.EventType,
 			PayloadJson: in.Body.Payload,
@@ -1770,11 +1795,26 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 		return err
 	})
 	if err != nil {
+		// Handle concurrent race: if another request enqueued this eventUUID concurrently,
+		// the UNIQUE constraint fires. Check if it was enqueued by the same agent and return 202 idempotently.
+		if in.Body.EventUUID != "" {
+			if existing, lookupErr := s.db.Reader.GetAgentEventByUUIDAndAgent(ctx, sqlcgen.GetAgentEventByUUIDAndAgentParams{
+				EventUuid: eventUUID,
+				AgentID:   in.Body.AgentID,
+			}); lookupErr == nil {
+				if existing.EventType != in.Body.EventType {
+					return nil, huma.Error409Conflict("eventUuid already exists with different eventType", nil)
+				}
+				out := &AgentEventOutput{}
+				out.Body.EventID = existing.EventUuid
+				return out, nil
+			}
+		}
 		return nil, huma.Error500InternalServerError("enqueue agent event", fmt.Errorf("%w", err))
 	}
 
 	out := &AgentEventOutput{}
-	out.Body.EventID = id.String()
+	out.Body.EventID = eventUUID
 	return out, nil
 }
 

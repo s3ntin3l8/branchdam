@@ -49,6 +49,7 @@ succeeded."
 **Request (`AgentEventInput`):**
 ```json
 {
+  "eventUuid": "018f2346-789a-7bcd-ef01-23456789abcd",
   "agentId": "workstation-macbook-01",
   "eventType": "EVENT_NODE_CREATED",
   "payload": "{\"nodeUuid\":\"018f...\",\"filePath\":\"/storage/staging/clip.mov\",\"fastHash\":\"a1b2c3d4e5f60718\"}"
@@ -62,15 +63,12 @@ succeeded."
 }
 ```
 
-**Submission is not idempotent at the transport level.** `AgentEventInput` has no `eventUuid`
-field; the server mints `eventId` itself (`uuid.NewV7()` in `handleAgentEvent`,
-`internal/httpapi/routes.go`) on every call, including a retry of an identical request. A
-timed-out request that actually succeeded server-side and is retried therefore enqueues a
-**second**, distinct row -- there is no request-level dedup. The only idempotency available
-today is entity-level: re-sending `EVENT_NODE_CREATED` for a `nodeUuid` that already exists is a
-no-op in the drainer, but a retry that also *corrects* a field is silently ignored, since the
-first write already won. A real `eventUuid` field closing this gap is a possible follow-up, not
-implemented today.
+**Transport-level Idempotency:** Clients may supply a client-minted `eventUuid` (UUIDv7 recommended).
+When `eventUuid` is provided, `POST /api/v1/agent/events` performs duplicate detection backed by the
+`event_queue.event_uuid` unique constraint. If an event with the same `eventUuid` was already accepted,
+the endpoint returns `202 Accepted` with the existing `eventId` without enqueuing a duplicate row.
+If `eventUuid` is omitted (legacy callers), the server mints a new UUIDv7.
+
 
 ---
 
