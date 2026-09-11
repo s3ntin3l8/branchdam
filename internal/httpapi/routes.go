@@ -404,7 +404,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		if err != nil {
 			return nil, huma.Error500InternalServerError("list assets", err)
 		}
-		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{})
+		total, err = s.db.Reader.CountMediaNodes(ctx)
 		if err != nil {
 			total = int64(len(rows))
 		}
@@ -541,16 +541,23 @@ func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*R
 	}
 
 	if node.LifecycleState == "ARCHIVED" {
-		live, err := s.db.Reader.GetLiveNodeByPath(ctx, node.FilePath)
-		if err == nil && live.ID != node.ID {
-			return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: another live asset (ID %d) already occupies %s", live.ID, node.FilePath))
-		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, huma.Error500InternalServerError("check live node by path", err)
+		if node.SupersededBy.Valid && node.SupersededBy.Int64 != 0 {
+			return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset has been superseded by asset ID %d", node.SupersededBy.Int64))
 		}
 
 		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			live, err := q.GetLiveNodeByPath(ctx, node.FilePath)
+			if err == nil && live.ID != node.ID {
+				return huma.Error409Conflict(fmt.Sprintf("cannot restore asset: another live asset (ID %d) already occupies %s", live.ID, node.FilePath))
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return huma.Error500InternalServerError("check live node by path", err)
+			}
 			return q.UnarchiveMediaNode(ctx, in.ID)
 		}); err != nil {
+			var hErr huma.StatusError
+			if errors.As(err, &hErr) {
+				return nil, hErr
+			}
 			return nil, huma.Error500InternalServerError("restore asset", err)
 		}
 

@@ -1332,6 +1332,32 @@ func TestRestoreAsset(t *testing.T) {
 	if rr409.Code != http.StatusConflict {
 		t.Fatalf("POST restore conflict status = %d, want 409, body = %s", rr409.Code, rr409.Body.String())
 	}
+
+	// 6. Conflict: if an archived asset has been superseded by a newer version, restore returns 409
+	var supersededNode sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		hash3 := "cccccccccccccccc"
+		var err error
+		supersededNode, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-superseded", StorageLocationID: loc.ID, FilePath: "/media/different_path.jpg",
+			FileName: "different_path.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash3,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		if err != nil {
+			return err
+		}
+		return q.SetSupersededBy(ctx, sqlcgen.SetSupersededByParams{
+			ID:           supersededNode.ID,
+			SupersededBy: sql.NullInt64{Int64: node.ID, Valid: true},
+		})
+	})
+	if err != nil {
+		t.Fatalf("insert supersededNode: %v", err)
+	}
+	rrSuperseded := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", supersededNode.ID), nil)
+	if rrSuperseded.Code != http.StatusConflict {
+		t.Fatalf("POST restore superseded asset status = %d, want 409, body = %s", rrSuperseded.Code, rrSuperseded.Body.String())
+	}
 }
 
 func TestGetAssetMetadata(t *testing.T) {
@@ -3687,6 +3713,57 @@ func TestFilteredAssetsAndFacets(t *testing.T) {
 	}
 	if len(cameraRes.Assets) != 1 || cameraRes.Assets[0].CameraModel != "Canon R5" {
 		t.Errorf("camera filter got %+v, want Canon R5", cameraRes.Assets)
+	}
+}
+
+func TestListAssetsExcludesArchivedFromTotalCount(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash1 := "1111111111111111"
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-active", StorageLocationID: loc.ID, FilePath: "/media/active.jpg",
+			FileName: "active.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash1,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		hash2 := "2222222222222222"
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-archived", StorageLocationID: loc.ID, FilePath: "/media/archived.jpg",
+			FileName: "archived.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash2,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/assets status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var res struct {
+		Assets []assetDTO `json:"assets"`
+		Total  int64      `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(res.Assets) != 1 {
+		t.Errorf("got %d assets, want 1", len(res.Assets))
+	}
+	if res.Total != 1 {
+		t.Errorf("got total = %d, want 1 (archived node must be excluded from total)", res.Total)
 	}
 }
 

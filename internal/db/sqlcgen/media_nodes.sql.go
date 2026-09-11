@@ -24,6 +24,20 @@ func (q *Queries) ArchiveMediaNode(ctx context.Context, id int64) error {
 	return err
 }
 
+const countMediaNodes = `-- name: CountMediaNodes :one
+SELECT COUNT(*)
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+`
+
+// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED.
+func (q *Queries) CountMediaNodes(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMediaNodes)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
 SELECT COUNT(*)
 FROM media_nodes

@@ -15,6 +15,12 @@ WHERE lifecycle_state != 'ARCHIVED'
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
 
+-- name: CountMediaNodes :one
+-- Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED.
+SELECT COUNT(*)
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED';
+
 -- name: ListMediaNodesFiltered :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
