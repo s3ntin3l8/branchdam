@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -197,6 +198,44 @@ func RefreshNodeAfterInPlaceWrite(ctx context.Context, database *db.DB, guard *s
 	})
 }
 
+// nodeLocker serializes concurrent in-place writes to the same child node file
+// across scan workers and HTTP handlers (edge confirm, edge create, manual inherit).
+type nodeLocker struct {
+	mu    sync.Mutex
+	locks map[int64]*refCountedLock
+}
+
+type refCountedLock struct {
+	mu       sync.Mutex
+	refCount int
+}
+
+var globalNodeLocker = &nodeLocker{
+	locks: make(map[int64]*refCountedLock),
+}
+
+func (l *nodeLocker) lock(id int64) func() {
+	l.mu.Lock()
+	entry, ok := l.locks[id]
+	if !ok {
+		entry = &refCountedLock{}
+		l.locks[id] = entry
+	}
+	entry.refCount++
+	l.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.refCount--
+		if entry.refCount <= 0 {
+			delete(l.locks, id)
+		}
+		l.mu.Unlock()
+	}
+}
+
 // InheritDeps bundles dependencies required for metadata inheritance execution.
 type InheritDeps struct {
 	DB     *db.DB
@@ -234,6 +273,9 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 			return nil, err
 		}
 	}
+
+	unlock := globalNodeLocker.lock(child.ID)
+	defer unlock()
 
 	parents, err := deps.DB.Reader.ListEdgesByTarget(ctx, child.ID)
 	if err != nil {

@@ -270,3 +270,44 @@ func TestScanDepsShouldAutoInherit(t *testing.T) {
 		}
 	})
 }
+
+func TestNodeLockerSerializesSameNodeAndCleansUp(t *testing.T) {
+	locker := &nodeLocker{
+		locks: make(map[int64]*refCountedLock),
+	}
+
+	nodeID := int64(42)
+	unlock1 := locker.lock(nodeID)
+
+	acquired2 := make(chan bool)
+	go func() {
+		unlock2 := locker.lock(nodeID)
+		acquired2 <- true
+		unlock2()
+	}()
+
+	// Ensure goroutine 2 is blocked waiting for lock on node 42
+	select {
+	case <-acquired2:
+		t.Fatal("goroutine 2 acquired lock before unlock1 was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release lock 1
+	unlock1()
+
+	// Now goroutine 2 should acquire and release
+	select {
+	case <-acquired2:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("goroutine 2 timed out waiting for lock")
+	}
+
+	// Verify the lock entry was cleaned up after both released
+	locker.mu.Lock()
+	remaining := len(locker.locks)
+	locker.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("expected 0 remaining locks, got %d", remaining)
+	}
+}
