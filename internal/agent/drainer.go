@@ -814,8 +814,11 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 
 	// Schema fix #6 / Spec Pillar 5: never delete row from database; set lifecycle_state='MISSING'.
-	if err := q.MarkNodeMissing(ctx, node.ID); err != nil {
-		return err
+	// Preserves soft-delete state if the node is already ARCHIVED.
+	if node.LifecycleState != "ARCHIVED" {
+		if err := q.MarkNodeMissing(ctx, node.ID); err != nil {
+			return err
+		}
 	}
 
 	// Purge remote sync state for this deleted node
