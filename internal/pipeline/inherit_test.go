@@ -423,3 +423,68 @@ func TestInheritMetadataShortCircuitsWhenTagsAlreadyMatch(t *testing.T) {
 		t.Errorf("got DerivedFrom %q, want %q", tags["XMP-xmpMM:DerivedFrom"], parent.NodeUuid)
 	}
 }
+
+func TestHasEligibleInheritanceParent(t *testing.T) {
+	tests := []struct {
+		name     string
+		edges    []sqlcgen.MediaEdge
+		expected bool
+	}{
+		{
+			name: "AUTO_ACCEPTED Tier 1 DERIVED_FROM",
+			edges: []sqlcgen.MediaEdge{
+				{ReviewState: "AUTO_ACCEPTED", Tier: 1, RelationshipType: "DERIVED_FROM"},
+			},
+			expected: true,
+		},
+		{
+			name: "CONFIRMED Tier 2 FINAL_EXPORT",
+			edges: []sqlcgen.MediaEdge{
+				{ReviewState: "CONFIRMED", Tier: 2, RelationshipType: "FINAL_EXPORT"},
+			},
+			expected: true,
+		},
+		{
+			name: "REJECTED Tier 1 DERIVED_FROM",
+			edges: []sqlcgen.MediaEdge{
+				{ReviewState: "REJECTED", Tier: 1, RelationshipType: "DERIVED_FROM"},
+			},
+			expected: false,
+		},
+		{
+			name: "PENDING Tier 2 DERIVED_FROM",
+			edges: []sqlcgen.MediaEdge{
+				{ReviewState: "PENDING", Tier: 2, RelationshipType: "DERIVED_FROM"},
+			},
+			expected: false,
+		},
+		{
+			name: "CONFIRMED Tier 3 DERIVED_FROM",
+			edges: []sqlcgen.MediaEdge{
+				{ReviewState: "CONFIRMED", Tier: 3, RelationshipType: "DERIVED_FROM"},
+			},
+			expected: false,
+		},
+		{
+			name: "CONFIRMED Tier 1 non-parent relationship",
+			edges: []sqlcgen.MediaEdge{
+				{ReviewState: "CONFIRMED", Tier: 1, RelationshipType: "DUPLICATE_OF"},
+			},
+			expected: false,
+		},
+		{
+			name:     "Empty edges list",
+			edges:    nil,
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasEligibleInheritanceParent(tc.edges)
+			if got != tc.expected {
+				t.Errorf("hasEligibleInheritanceParent() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}

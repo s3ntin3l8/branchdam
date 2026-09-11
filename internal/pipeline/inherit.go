@@ -243,7 +243,16 @@ func RefreshNodeAfterInPlaceWrite(ctx context.Context, database *db.DB, guard *s
 }
 
 // nodeLocker serializes concurrent in-place writes to the same child node file
-// across scan workers and HTTP handlers (edge confirm, edge create, manual inherit).
+// across concurrent mutation triggers (e.g. concurrent HTTP handlers or scan workers
+// invoking InheritMetadata for the same asset).
+//
+// File-level read/write atomicity against concurrent scan worker hashing is guaranteed
+// by exiftool: exiftool writes tag modifications to a temporary file (<path>_exiftool_tmp)
+// and updates the target path via an atomic rename(2) syscall. Thus, any concurrent reader
+// or scanner hashing the file will observe either the complete original file or the
+// complete post-write file, never a partial or corrupted state. If a concurrent scanner
+// hashes the pre-write file right before the rename, the post-write RefreshNodeAfterInPlaceWrite
+// subsequently runs to update SQLite with the post-rename fast_hash and mtime.
 type nodeLocker struct {
 	mu    sync.Mutex
 	locks map[int64]*refCountedLock

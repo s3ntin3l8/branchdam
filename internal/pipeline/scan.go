@@ -842,7 +842,7 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 		log.Warn("pipeline: resolve edges", "path", path, "err", err)
 		return 0
 	}
-	if deps.shouldAutoInherit() && hasEligibleAutoAcceptedParent(edges) {
+	if deps.shouldAutoInherit() && hasEligibleInheritanceParent(edges) {
 		if _, err := InheritMetadata(ctx, deps.InheritDeps(), node.ID); err != nil {
 			var rErr *ErrPostWriteRefreshFailed
 			if errors.As(err, &rErr) {
@@ -856,10 +856,10 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 	return n
 }
 
-func hasEligibleAutoAcceptedParent(edges []sqlcgen.MediaEdge) bool {
+func hasEligibleInheritanceParent(edges []sqlcgen.MediaEdge) bool {
 	for i := range edges {
 		e := &edges[i]
-		if e.ReviewState == "AUTO_ACCEPTED" && e.Tier != 3 && ValidParentRelationships[e.RelationshipType] {
+		if (e.ReviewState == "AUTO_ACCEPTED" || e.ReviewState == "CONFIRMED") && e.Tier != 3 && ValidParentRelationships[e.RelationshipType] {
 			return true
 		}
 	}
