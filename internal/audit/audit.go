@@ -55,6 +55,8 @@ const (
 	EventPairingRevoked     = "pairing.revoked"
 	EventPairingDeleted     = "pairing.deleted"
 	EventActorAuditExported = "actor_audit.exported"
+	EventAssetArchived      = "asset.archived"
+	EventAssetRestored      = "asset.restored"
 	EventUserCreated        = "user.created"
 	EventUserDisabled       = "user.disabled"
 )

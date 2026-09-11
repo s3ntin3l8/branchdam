@@ -46,6 +46,8 @@ type Querier interface {
 	CountAttributionUsers(ctx context.Context) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
 	CountLoginAudit(ctx context.Context) (int64, error)
+	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
+	CountMediaNodes(ctx context.Context) (int64, error)
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -224,6 +226,8 @@ type Querier interface {
 	// Returns just the qr_svg column for the ActiveQRSVG hot path. Skips
 	// the row-wide scan if all the caller wants is the bytes.
 	GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error)
+	// Retrieves the most recent media node at a given path, including archived rows.
+	GetLatestNodeByPath(ctx context.Context, filePath string) (MediaNode, error)
 	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
@@ -749,6 +753,8 @@ type Querier interface {
 	// request, but the WHERE matches the active-set partial index path
 	// already loaded above so the planner is happy.
 	TouchSession(ctx context.Context, arg TouchSessionParams) error
+	// Restores an archived media node back to ACTIVE state.
+	UnarchiveMediaNode(ctx context.Context, id int64) error
 	// Refresh the cached QR SVG after a key rotation. The SVG is computed
 	// outside the transaction (in pairing.Service) so this UPDATE is a
 	// pure byte-write with no rendering dependency.

@@ -886,6 +886,11 @@ func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log 
 func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog.Logger) int {
 	node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, path)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if latest, lErr := deps.DB.Reader.GetLatestNodeByPath(ctx, path); lErr == nil && latest.LifecycleState == "ARCHIVED" {
+				return 0
+			}
+		}
 		log.Warn("pipeline: resolve edges: re-fetch node", "path", path, "err", err)
 		return 0
 	}

@@ -144,6 +144,14 @@ export interface Asset {
   // filter pins it to the request's own id; the row-level render
   // resolves it via /api/v1/users when present.
   uploadedByUserId?: number;
+  supersededBy?: number;
+}
+
+export interface NodeMetadatum {
+  nodeId: number;
+  source: string;
+  key: string;
+  value: string;
 }
 
 export interface Edge {

@@ -1,11 +1,14 @@
-import { useState } from "react";
-import { useParams, useSearchParams } from "react-router";
+import { useEffect, useState } from "react";
+import { useParams, useSearchParams, Link } from "react-router";
 import {
   useAsset,
   useAssetLineage,
+  useAssetMetadata,
   useAssetSyncStatus,
+  useDeleteAsset,
   useInheritMetadata,
   usePruneCache,
+  useRestoreAsset,
   useRetrySync,
   useStorageLocations,
 } from "../hooks/queries";
@@ -192,6 +195,182 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
   );
 }
 
+function AssetDeleteControl({ asset }: { asset: Asset }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const deleteAsset = useDeleteAsset();
+  const restoreAsset = useRestoreAsset();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !deleteAsset.isPending) {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, deleteAsset.isPending]);
+
+  if (asset.lifecycleState === "ARCHIVED") {
+    if (asset.supersededBy) {
+      return (
+        <div className="flex items-center gap-2">
+          <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
+            Archived (Superseded)
+          </span>
+          <Link
+            to={`/assets/${asset.supersededBy}`}
+            className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-700"
+          >
+            View Successor (Asset #{asset.supersededBy})
+          </Link>
+        </div>
+      );
+    }
+    return (
+      <div className="flex items-center gap-2">
+        <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
+          Archived
+        </span>
+        <button
+          type="button"
+          onClick={() => restoreAsset.mutate(asset.id)}
+          disabled={restoreAsset.isPending}
+          className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50"
+        >
+          {restoreAsset.isPending ? "Restoring…" : "Restore Asset"}
+        </button>
+        {restoreAsset.isError && (
+          <span className="text-xs text-red-400">
+            Failed to restore: {restoreAsset.error instanceof Error ? restoreAsset.error.message : String(restoreAsset.error)}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        disabled={deleteAsset.isPending}
+        className="rounded border border-red-800/80 bg-red-950/60 px-2.5 py-1 text-xs font-medium text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+      >
+        {deleteAsset.isPending ? "Archiving…" : "Archive Asset"}
+      </button>
+
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="archive-asset-title"
+        >
+          <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
+            <h3 id="archive-asset-title" className="text-base font-semibold text-neutral-100">Archive Asset</h3>
+            <p className="text-xs text-neutral-300 leading-relaxed">
+              Are you sure you want to soft-delete (archive) <strong className="text-white">{asset.fileName}</strong>?
+              The media node will be marked <code className="text-amber-400">ARCHIVED</code> and removed from active lineage.
+              Note: Extracted metadata (EXIF/ffprobe tags) for this node will be pruned on the next background scan.
+              The underlying file on disk is never deleted.
+            </p>
+            {deleteAsset.isError && (
+              <p className="text-xs text-red-400">Failed to archive: {String(deleteAsset.error)}</p>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                disabled={deleteAsset.isPending}
+                className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteAsset.mutate(asset.id, {
+                    onSuccess: () => setIsOpen(false),
+                  });
+                }}
+                disabled={deleteAsset.isPending}
+                className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {deleteAsset.isPending ? "Archiving…" : "Confirm Archive"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function AssetMetadataInspector({ assetId }: { assetId: number }) {
+  const { data, isLoading, isError } = useAssetMetadata(assetId);
+  const [filter, setFilter] = useState("");
+  const metadata = data?.metadata ?? [];
+
+  const filtered = filter.trim()
+    ? metadata.filter((m) =>
+        m.key.toLowerCase().includes(filter.toLowerCase()) ||
+        m.value.toLowerCase().includes(filter.toLowerCase()) ||
+        m.source.toLowerCase().includes(filter.toLowerCase())
+      )
+    : metadata;
+
+  return (
+    <section>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-medium text-neutral-400">
+          Extracted Tags & EXIF ({metadata.length})
+        </h2>
+        {metadata.length > 0 && (
+          <input
+            type="text"
+            placeholder="Filter tags..."
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-600"
+          />
+        )}
+      </div>
+
+      <div className="rounded border border-neutral-800 p-3 max-h-96 overflow-y-auto">
+        {isLoading ? (
+          <p className="text-xs text-neutral-500">Loading extracted metadata…</p>
+        ) : isError ? (
+          <p className="text-xs text-red-400">Failed to load metadata tags.</p>
+        ) : metadata.length === 0 ? (
+          <p className="text-xs text-neutral-500">No extracted metadata rows found for this asset.</p>
+        ) : filtered.length === 0 ? (
+          <p className="text-xs text-neutral-500">No tags match &quot;{filter}&quot;.</p>
+        ) : (
+          <table className="w-full text-left text-xs font-mono">
+            <thead className="border-b border-neutral-800 text-neutral-500">
+              <tr>
+                <th className="py-1 pr-3">Source</th>
+                <th className="py-1 pr-3">Key</th>
+                <th className="py-1">Value</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-900">
+              {filtered.map((m, idx) => (
+                <tr key={`${m.source}-${m.key}-${idx}`} className="hover:bg-neutral-900/50">
+                  <td className="py-1 pr-3 text-indigo-400">{m.source}</td>
+                  <td className="py-1 pr-3 text-neutral-300 font-semibold">{m.key}</td>
+                  <td className="py-1 text-neutral-200 break-all">{m.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const assetId = id ? Number(id) : undefined;
@@ -231,7 +410,10 @@ export default function AssetDetailPage() {
             <p className="text-sm text-neutral-500">{asset.filePath}</p>
           </div>
         </div>
-        <AssetPruneControl asset={asset} />
+        <div className="flex items-center gap-2">
+          <AssetPruneControl asset={asset} />
+          <AssetDeleteControl asset={asset} />
+        </div>
       </div>
 
       <section>
@@ -255,6 +437,8 @@ export default function AssetDetailPage() {
           <Field label="Full hash (BLAKE3-256)" value={asset.fullHash} />
         </dl>
       </section>
+
+      <AssetMetadataInspector assetId={asset.id} />
 
       <section>
         <h2 className="mb-2 text-sm font-medium text-neutral-400">Sync status</h2>

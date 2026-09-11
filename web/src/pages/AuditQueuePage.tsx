@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
 import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
@@ -204,7 +205,9 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
         previousFocusRef.current = document.activeElement as HTMLElement;
         wasOpenRef.current = true;
         const timer = setTimeout(() => {
-          dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+          if (!dialogRef.current?.contains(document.activeElement)) {
+            dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+          }
         }, 50);
         return () => clearTimeout(timer);
       }
@@ -395,7 +398,135 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   );
 }
 
+function BatchConfirmModal({
+  isOpen,
+  action,
+  edges,
+  onClose,
+  onComplete,
+}: {
+  isOpen: boolean;
+  action: "confirm" | "reject";
+  edges: EdgeAuditEntry[];
+  onClose: () => void;
+  onComplete: () => void;
+}) {
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [errorMsg, setErrorMsg] = useState("");
+  const confirmMutation = useConfirmEdge();
+  const rejectMutation = useRejectEdge();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !running) {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, running, onClose]);
+
+  if (!isOpen) return null;
+
+  const handleExecute = async () => {
+    setRunning(true);
+    setErrorMsg("");
+    let succeeded = 0;
+    let failed = 0;
+    try {
+      for (const edge of edges) {
+        try {
+          if (action === "confirm") {
+            await confirmMutation.mutateAsync(edge.id);
+          } else {
+            await rejectMutation.mutateAsync(edge.id);
+          }
+          succeeded++;
+        } catch {
+          failed++;
+        }
+        setProgress(succeeded + failed);
+      }
+    } finally {
+      setRunning(false);
+      if (failed > 0) {
+        setErrorMsg(`${failed} of ${edges.length} edges failed to ${action}.`);
+      } else {
+        onComplete();
+      }
+    }
+  };
+
+  const percent = edges.length > 0 ? Math.round((progress / edges.length) * 100) : 0;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="batch-confirm-modal-title"
+    >
+      <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
+        <h3 id="batch-confirm-modal-title" className="text-base font-semibold text-neutral-100">
+          Batch {action === "confirm" ? "Confirm" : "Reject"} Edges
+        </h3>
+        <p className="text-xs text-neutral-300">
+          Are you sure you want to <strong>{action}</strong> all{" "}
+          <strong className="text-white">{edges.length}</strong> currently filtered edge candidates on this page?
+        </p>
+
+        {running && (
+          <div className="space-y-1">
+            <div className="flex justify-between text-xs text-neutral-400">
+              <span>Progress</span>
+              <span>{progress} / {edges.length}</span>
+            </div>
+            <div className="h-1.5 w-full bg-neutral-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full ${action === "confirm" ? "bg-emerald-500" : "bg-red-500"}`}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {errorMsg && (
+          <p className="text-xs text-red-400">{errorMsg}</p>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            disabled={running}
+            onClick={onClose}
+            className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+          >
+            {errorMsg ? "Close" : "Cancel"}
+          </button>
+          {!errorMsg && (
+            <button
+              type="button"
+              disabled={running || edges.length === 0}
+              onClick={handleExecute}
+              className={`rounded px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 ${
+                action === "confirm"
+                  ? "bg-emerald-600 hover:bg-emerald-500"
+                  : "bg-red-600 hover:bg-red-500"
+              }`}
+            >
+              {running ? "Processing…" : action === "confirm" ? "Confirm All" : "Reject All"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AuditQueuePage() {
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   // beforeId=0 means "first page". We store it in the URL so a deep
   // link shares the right cursor; offset is intentionally not in the URL
@@ -404,12 +535,29 @@ export default function AuditQueuePage() {
   const beforeId = Number(searchParams.get("beforeId") || "0") || 0;
   const { data, isLoading, isError } = useAuditQueue({ limit: PAGE_SIZE, beforeId });
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [tierFilter, setTierFilter] = useState("");
+  const [resolverFilter, setResolverFilter] = useState("");
+  const [relFilter, setRelFilter] = useState("");
+  const [batchAction, setBatchAction] = useState<"confirm" | "reject" | null>(null);
 
-  const entries = data?.entries ?? [];
+  const entries = useMemo(() => data?.entries ?? [], [data?.entries]);
   const total = data?.total ?? 0;
   // hasMore: server returns total consistently with the page (single
   // query with COUNT(*) OVER()). If the page is full, there may be more.
   const hasMore = entries.length === PAGE_SIZE;
+
+  const resolvers = useMemo(() => {
+    return Array.from(new Set(entries.map((e) => e.resolver))).sort();
+  }, [entries]);
+
+  const filteredEntries = useMemo(() => {
+    return entries.filter((e) => {
+      if (tierFilter && String(e.tier) !== tierFilter) return false;
+      if (resolverFilter && e.resolver !== resolverFilter) return false;
+      if (relFilter && e.relationshipType !== relFilter) return false;
+      return true;
+    });
+  }, [entries, tierFilter, resolverFilter, relFilter]);
 
   const handleFirst = () => {
     const nextParams = new URLSearchParams(searchParams);
@@ -430,8 +578,8 @@ export default function AuditQueuePage() {
   if (isError) return <div className="p-6 text-red-400">Failed to load the audit queue.</div>;
 
   return (
-    <div className="p-6">
-      <div className="mb-6 flex items-center justify-between">
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-neutral-100">Audit Queue</h1>
           <p className="text-sm text-neutral-400">Review edge resolution candidates or manually link assets.</p>
@@ -445,12 +593,98 @@ export default function AuditQueuePage() {
         </button>
       </div>
 
+      {entries.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs">
+          <div className="flex flex-wrap items-center gap-3">
+            <div>
+              <label htmlFor="tier-filter" className="block text-neutral-400 mb-1">Tier</label>
+              <select
+                id="tier-filter"
+                value={tierFilter}
+                onChange={(e) => setTierFilter(e.target.value)}
+                className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
+              >
+                <option value="">All Tiers</option>
+                <option value="1">Tier 1 (Sidecars)</option>
+                <option value="2">Tier 2 (Stems / XMP)</option>
+                <option value="3">Tier 3 (Perceptual)</option>
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="resolver-filter" className="block text-neutral-400 mb-1">Resolver</label>
+              <select
+                id="resolver-filter"
+                value={resolverFilter}
+                onChange={(e) => setResolverFilter(e.target.value)}
+                className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
+              >
+                <option value="">All Resolvers</option>
+                {resolvers.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="relationship-filter" className="block text-neutral-400 mb-1">Relationship</label>
+              <select
+                id="relationship-filter"
+                value={relFilter}
+                onChange={(e) => setRelFilter(e.target.value)}
+                className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
+              >
+                <option value="">All Relationships</option>
+                <option value="DERIVED_FROM">Derived From</option>
+                <option value="FINAL_EXPORT">Final Export</option>
+                <option value="PROXY_OF">Proxy Of</option>
+                <option value="PROJECT_SIDECAR">Project Sidecar</option>
+                <option value="DUPLICATE_OF">Duplicate Of</option>
+              </select>
+            </div>
+
+            {(tierFilter || resolverFilter || relFilter) && (
+              <button
+                type="button"
+                onClick={() => { setTierFilter(""); setResolverFilter(""); setRelFilter(""); }}
+                className="self-end text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
+              >
+                Clear Filters
+              </button>
+            )}
+          </div>
+
+          {filteredEntries.length > 0 && (
+            <div className="flex items-center gap-2 self-end">
+              <button
+                type="button"
+                onClick={() => setBatchAction("confirm")}
+                className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 shadow"
+              >
+                Accept Filtered ({filteredEntries.length} on page)
+              </button>
+              <button
+                type="button"
+                onClick={() => setBatchAction("reject")}
+                className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-neutral-700 border border-red-900/60"
+              >
+                Decline Filtered ({filteredEntries.length} on page)
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {entries.length === 0 ? (
         <p className="text-neutral-500">Nothing needs review right now.</p>
+      ) : filteredEntries.length === 0 ? (
+        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
+          No edge candidates match the selected filters.
+        </div>
       ) : (
         <>
           <div className="space-y-4">
-            {entries.map((e) => (
+            {filteredEntries.map((e) => (
               <AuditRow key={e.id} entry={e} />
             ))}
           </div>
@@ -480,6 +714,22 @@ export default function AuditQueuePage() {
       )}
 
       <ManualLinkModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+
+      {batchAction && (
+        <BatchConfirmModal
+          isOpen={true}
+          action={batchAction}
+          edges={filteredEntries}
+          onClose={() => {
+            setBatchAction(null);
+            void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+          }}
+          onComplete={() => {
+            setBatchAction(null);
+            void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+          }}
+        />
+      )}
     </div>
   );
 }

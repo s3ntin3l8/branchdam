@@ -24,6 +24,21 @@ func (q *Queries) ArchiveMediaNode(ctx context.Context, id int64) error {
 	return err
 }
 
+const countMediaNodes = `-- name: CountMediaNodes :one
+SELECT COUNT(*)
+FROM media_nodes
+WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL
+`
+
+// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
+func (q *Queries) CountMediaNodes(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMediaNodes)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
 SELECT COUNT(*)
 FROM media_nodes
@@ -32,6 +47,7 @@ WHERE (lifecycle_state = ?1 OR ?1 IS NULL)
   AND (graph_status = ?3 OR ?3 IS NULL)
   AND (storage_location_id = ?4 OR ?4 IS NULL)
   AND (uploaded_by_user_id = ?5 OR ?5 IS NULL)
+  AND superseded_by IS NULL
 `
 
 type CountMediaNodesFilteredParams struct {
@@ -57,6 +73,61 @@ func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNod
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const getLatestNodeByPath = `-- name: GetLatestNodeByPath :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE file_path = ?1
+ORDER BY id DESC
+LIMIT 1
+`
+
+// Retrieves the most recent media node at a given path, including archived rows.
+func (q *Queries) GetLatestNodeByPath(ctx context.Context, filePath string) (MediaNode, error) {
+	row := q.db.QueryRowContext(ctx, getLatestNodeByPath, filePath)
+	var i MediaNode
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.StorageLocationID,
+		&i.FilePath,
+		&i.FileName,
+		&i.FileExt,
+		&i.SizeBytes,
+		&i.MtimeUnix,
+		&i.FastHash,
+		&i.FullHash,
+		&i.Phash,
+		&i.IndexingStatus,
+		&i.GraphStatus,
+		&i.LifecycleState,
+		&i.SupersededBy,
+		&i.OriginalDocumentID,
+		&i.DocumentID,
+		&i.DerivedFromID,
+		&i.CapturedAtUnix,
+		&i.CameraModel,
+		&i.FilenameStem,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
+		&i.ThumbState,
+		&i.ThumbAttempts,
+		&i.SourcePathHash,
+		&i.UploadedByUserID,
+	)
+	return i, err
 }
 
 const getLiveNodeByPath = `-- name: GetLiveNodeByPath :one
@@ -877,6 +948,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE lifecycle_state != 'ARCHIVED'
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2
 `
@@ -959,6 +1031,7 @@ WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
   AND (graph_status = ?5 OR ?5 IS NULL)
   AND (storage_location_id = ?6 OR ?6 IS NULL)
   AND (uploaded_by_user_id = ?7 OR ?7 IS NULL)
+  AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2
 `
@@ -1521,6 +1594,16 @@ type TouchMediaNodeParams struct {
 // in internal/pipeline for the regression test.
 func (q *Queries) TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) error {
 	_, err := q.db.ExecContext(ctx, touchMediaNode, arg.ID, arg.MtimeUnix)
+	return err
+}
+
+const unarchiveMediaNode = `-- name: UnarchiveMediaNode :exec
+UPDATE media_nodes SET lifecycle_state = 'ACTIVE', updated_at = unixepoch() WHERE id = ?1
+`
+
+// Restores an archived media node back to ACTIVE state.
+func (q *Queries) UnarchiveMediaNode(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, unarchiveMediaNode, id)
 	return err
 }
 

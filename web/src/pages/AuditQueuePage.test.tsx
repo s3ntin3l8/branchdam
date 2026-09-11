@@ -365,4 +365,184 @@ describe("AuditQueuePage", () => {
       })
     );
   });
+
+  it("handles batch confirmation of filtered edges sequentially with progress modal", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 101,
+          sourceNodeId: 10,
+          targetNodeId: 20,
+          relationshipType: "PROXY_OF",
+          confidence: 0.8,
+          tier: 1,
+          resolver: "sidecar",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: {
+            id: 10,
+            nodeUuid: "uuid-10",
+            fileName: "RAW_001.ARW",
+            filePath: "/storage/RAW_001.ARW",
+            thumbState: "READY",
+          },
+          targetNode: {
+            id: 20,
+            nodeUuid: "uuid-20",
+            fileName: "RAW_001.jpg",
+            filePath: "/storage/RAW_001.jpg",
+            thumbState: "READY",
+          },
+        },
+        {
+          id: 102,
+          sourceNodeId: 11,
+          targetNodeId: 21,
+          relationshipType: "PROXY_OF",
+          confidence: 0.9,
+          tier: 1,
+          resolver: "sidecar",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: {
+            id: 11,
+            nodeUuid: "uuid-11",
+            fileName: "RAW_002.ARW",
+            filePath: "/storage/RAW_002.ARW",
+            thumbState: "READY",
+          },
+          targetNode: {
+            id: 21,
+            nodeUuid: "uuid-21",
+            fileName: "RAW_002.jpg",
+            filePath: "/storage/RAW_002.jpg",
+            thumbState: "READY",
+          },
+        },
+      ],
+      total: 2,
+    });
+    vi.mocked(api.confirmEdge).mockResolvedValue({
+      ok: true,
+    });
+
+    renderWithClient(<AuditQueuePage />);
+
+    // Batch button is present and displays count on page
+    const batchBtn = await screen.findByRole("button", { name: /accept filtered \(2 on page\)/i });
+    await user.click(batchBtn);
+
+    // Modal dialog opens
+    expect(await screen.findByRole("dialog", { name: /batch confirm edges/i })).toBeInTheDocument();
+
+    // Click "Confirm All" inside modal
+    const confirmBtn = screen.getByRole("button", { name: "Confirm All" });
+    await user.click(confirmBtn);
+
+    // Verify sequential confirmEdge calls
+    await waitFor(() => {
+      expect(api.confirmEdge).toHaveBeenCalledWith(101);
+      expect(api.confirmEdge).toHaveBeenCalledWith(102);
+    });
+
+    // Verify modal closes upon successful completion
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: /batch confirm edges/i })).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps batch modal open and displays error feedback when an edge fails", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 201,
+          sourceNodeId: 10,
+          targetNodeId: 20,
+          relationshipType: "PROXY_OF",
+          confidence: 0.8,
+          tier: 1,
+          resolver: "sidecar",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: {
+            id: 10,
+            nodeUuid: "uuid-10",
+            fileName: "RAW_001.ARW",
+            filePath: "/storage/RAW_001.ARW",
+            thumbState: "READY",
+          },
+          targetNode: {
+            id: 20,
+            nodeUuid: "uuid-20",
+            fileName: "RAW_001.jpg",
+            filePath: "/storage/RAW_001.jpg",
+            thumbState: "READY",
+          },
+        },
+        {
+          id: 202,
+          sourceNodeId: 11,
+          targetNodeId: 21,
+          relationshipType: "PROXY_OF",
+          confidence: 0.9,
+          tier: 1,
+          resolver: "sidecar",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: {
+            id: 11,
+            nodeUuid: "uuid-11",
+            fileName: "RAW_002.ARW",
+            filePath: "/storage/RAW_002.ARW",
+            thumbState: "READY",
+          },
+          targetNode: {
+            id: 21,
+            nodeUuid: "uuid-21",
+            fileName: "RAW_002.jpg",
+            filePath: "/storage/RAW_002.jpg",
+            thumbState: "READY",
+          },
+        },
+      ],
+      total: 2,
+    });
+    vi.mocked(api.confirmEdge).mockImplementation(async (id: number) => {
+      if (id === 202) {
+        throw new Error("network error");
+      }
+      return { ok: true };
+    });
+
+    renderWithClient(<AuditQueuePage />);
+
+    const batchBtn = await screen.findByRole("button", { name: /accept filtered \(2 on page\)/i });
+    await user.click(batchBtn);
+
+    const dialog = await screen.findByRole("dialog", { name: /batch confirm edges/i });
+    expect(dialog).toBeInTheDocument();
+
+    const confirmBtn = screen.getByRole("button", { name: "Confirm All" });
+    await user.click(confirmBtn);
+
+    // Verify error message is rendered and modal remains open
+    expect(await screen.findByText(/1 of 2 edges failed to confirm/i)).toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
+
+    // Verify button text changes to "Close"
+    const closeBtn = screen.getByRole("button", { name: "Close" });
+    expect(closeBtn).toBeInTheDocument();
+
+    // Clicking Close closes the modal
+    await user.click(closeBtn);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: /batch confirm edges/i })).not.toBeInTheDocument();
+    });
+  });
 });
