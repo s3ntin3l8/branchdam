@@ -1255,6 +1255,85 @@ func TestDeleteAsset(t *testing.T) {
 	}
 }
 
+func TestRestoreAsset(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+	var node sqlcgen.MediaNode
+	var loc sqlcgen.StorageLocation
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "restore-test-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		hash := "aaaaaaaaaaaaaaaa"
+		node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-to-restore", StorageLocationID: loc.ID, FilePath: "/media/to_restore.jpg",
+			FileName: "to_restore.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// 1. Restore asset -> 200
+	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", node.ID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST restore status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Verify state is now ACTIVE
+	rrGet := doJSON(t, srv.Handler(), http.MethodGet, fmt.Sprintf("/api/v1/assets/%d", node.ID), nil)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("GET status = %d", rrGet.Code)
+	}
+	var after struct {
+		LifecycleState string `json:"lifecycleState"`
+	}
+	if err := json.Unmarshal(rrGet.Body.Bytes(), &after); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Fatalf("expected ACTIVE after restore, got %s", after.LifecycleState)
+	}
+
+	// 3. Restoring an already ACTIVE asset is an idempotent 200
+	rrAgain := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", node.ID), nil)
+	if rrAgain.Code != http.StatusOK {
+		t.Fatalf("POST restore idempotent status = %d", rrAgain.Code)
+	}
+
+	// 4. Restoring non-existent asset is 404
+	rr404 := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/999999/restore", nil)
+	if rr404.Code != http.StatusNotFound {
+		t.Fatalf("POST 999999 restore status = %d, want 404", rr404.Code)
+	}
+
+	// 5. Conflict: if another live asset occupies the same path, restore returns 409
+	var archivedNode sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		hash2 := "bbbbbbbbbbbbbbbb"
+		var err error
+		archivedNode, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-archived-dup", StorageLocationID: loc.ID, FilePath: "/media/to_restore.jpg",
+			FileName: "to_restore.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash2,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ARCHIVED",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert archivedNode: %v", err)
+	}
+	rr409 := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", archivedNode.ID), nil)
+	if rr409.Code != http.StatusConflict {
+		t.Fatalf("POST restore conflict status = %d, want 409, body = %s", rr409.Code, rr409.Body.String())
+	}
+}
+
 func TestGetAssetMetadata(t *testing.T) {
 	srv, database := fullTestServer(t)
 	ctx := context.Background()

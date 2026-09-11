@@ -137,9 +137,14 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 			return nil
 		}
 		// File content changed at this path: insert new successor and link superseded_by.
+		// Preserves archive delete intent on successor so file touch or tool metadata
+		// rewrites do not silently resurrect a user-deleted asset into active lineage.
 		newNode, err := insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
 		if err != nil {
 			return fmt.Errorf("insert successor node: %w", err)
+		}
+		if err := q.ArchiveMediaNode(ctx, newNode.ID); err != nil {
+			return fmt.Errorf("archive successor node: %w", err)
 		}
 		if err := q.SetSupersededBy(ctx, sqlcgen.SetSupersededByParams{
 			ID:           latest.ID,

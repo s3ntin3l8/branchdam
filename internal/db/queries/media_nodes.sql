@@ -228,6 +228,10 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 -- transaction -- archiving first, not after, is what keeps that true.
 UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?1;
 
+-- name: UnarchiveMediaNode :exec
+-- Restores an archived media node back to ACTIVE state.
+UPDATE media_nodes SET lifecycle_state = 'ACTIVE', updated_at = unixepoch() WHERE id = ?1;
+
 -- name: SetSupersededBy :exec
 -- Step 3 of a version collision: link the archived row to its successor,
 -- once the successor's id is known (i.e. after InsertMediaNode).

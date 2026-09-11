@@ -1489,7 +1489,8 @@ func TestCommitArchivedNodeSticksAndSupersedesOnChange(t *testing.T) {
 		t.Fatalf("GetLiveNodeByPath: want ErrNoRows (still archived), got %v", err)
 	}
 
-	// 5. File content at path changes -- successor should be inserted and linked via superseded_by.
+	// 5. File content at path changes -- successor should be inserted and linked via superseded_by,
+	// while preserving the ARCHIVED state (delete intent maintained).
 	stats, err = Commit(ctx, database, locationID, []Result{
 		{Path: "/exports/deleted.jpg", FileName: "deleted.jpg", FileExt: "jpg", Size: 200, ModTime: time.Now(), FastHash: "2222222222222222"},
 	}, 0)
@@ -1500,13 +1501,23 @@ func TestCommitArchivedNodeSticksAndSupersedesOnChange(t *testing.T) {
 		t.Errorf("stats.Inserted = %d, want 1 (new version of file at path)", stats.Inserted)
 	}
 
-	// Successor is live.
-	newNode := mustGetLiveNode(t, database, "/exports/deleted.jpg")
+	// Successor preserves archive delete intent (not live).
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, "/exports/deleted.jpg"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLiveNodeByPath: want ErrNoRows (successor preserves delete intent), got %v", err)
+	}
+
+	newNode, err := database.Reader.GetLatestNodeByPath(ctx, "/exports/deleted.jpg")
+	if err != nil {
+		t.Fatalf("GetLatestNodeByPath: %v", err)
+	}
 	if newNode.ID == node1.ID {
 		t.Fatalf("newNode.ID == node1.ID (%d)", node1.ID)
 	}
+	if newNode.LifecycleState != "ARCHIVED" {
+		t.Errorf("newNode.LifecycleState = %q, want ARCHIVED", newNode.LifecycleState)
+	}
 
-	// Archived node has superseded_by set to newNode.ID.
+	// Previous archived node has superseded_by set to newNode.ID.
 	archivedNode, err := database.Reader.GetMediaNodeByID(ctx, node1.ID)
 	if err != nil {
 		t.Fatalf("GetMediaNodeByID: %v", err)

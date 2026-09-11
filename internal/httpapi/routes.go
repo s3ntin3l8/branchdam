@@ -56,6 +56,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Delete(api, "/api/v1/assets/{id}", s.handleDeleteAsset)
+	huma.Post(api, "/api/v1/assets/{id}/restore", s.handleRestoreAsset)
 	huma.Get(api, "/api/v1/assets/{id}/metadata", s.handleGetAssetMetadata)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
 	huma.Get(api, "/api/v1/assets/{id}/lineage", s.handleAssetLineage)
@@ -518,6 +519,54 @@ func (s *Server) handleDeleteAsset(ctx context.Context, in *AssetPathInput) (*De
 	}
 
 	out := &DeleteAssetOutput{}
+	out.Body.OK = true
+	return out, nil
+}
+
+type RestoreAssetOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+// handleRestoreAsset transitions an ARCHIVED media node back to ACTIVE.
+// If another live node currently occupies the file path, returns 409 Conflict.
+func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*RestoreAssetOutput, error) {
+	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("asset not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get asset", err)
+	}
+
+	if node.LifecycleState == "ARCHIVED" {
+		live, err := s.db.Reader.GetLiveNodeByPath(ctx, node.FilePath)
+		if err == nil && live.ID != node.ID {
+			return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: another live asset (ID %d) already occupies %s", live.ID, node.FilePath))
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error500InternalServerError("check live node by path", err)
+		}
+
+		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.UnarchiveMediaNode(ctx, in.ID)
+		}); err != nil {
+			return nil, huma.Error500InternalServerError("restore asset", err)
+		}
+
+		if s.audit != nil {
+			details := map[string]any{
+				"assetId":  in.ID,
+				"filePath": node.FilePath,
+				"fileName": node.FileName,
+			}
+			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetRestored, "asset", strconv.FormatInt(in.ID, 10), details); err != nil {
+				s.log.Warn("failed to write actor audit for asset restore", "error", err)
+			}
+		}
+	}
+
+	out := &RestoreAssetOutput{}
 	out.Body.OK = true
 	return out, nil
 }

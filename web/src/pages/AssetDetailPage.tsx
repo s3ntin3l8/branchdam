@@ -8,6 +8,7 @@ import {
   useDeleteAsset,
   useInheritMetadata,
   usePruneCache,
+  useRestoreAsset,
   useRetrySync,
   useStorageLocations,
 } from "../hooks/queries";
@@ -196,6 +197,7 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
 function AssetDeleteControl({ asset }: { asset: Asset }) {
   const [isOpen, setIsOpen] = useState(false);
   const deleteAsset = useDeleteAsset();
+  const restoreAsset = useRestoreAsset();
 
   useEffect(() => {
     if (!isOpen) return;
@@ -210,9 +212,22 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
 
   if (asset.lifecycleState === "ARCHIVED") {
     return (
-      <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
-        Archived
-      </span>
+      <div className="flex items-center gap-2">
+        <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
+          Archived
+        </span>
+        <button
+          type="button"
+          onClick={() => restoreAsset.mutate(asset.id)}
+          disabled={restoreAsset.isPending}
+          className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50"
+        >
+          {restoreAsset.isPending ? "Restoring…" : "Restore Asset"}
+        </button>
+        {restoreAsset.isError && (
+          <span className="text-xs text-red-400">Failed to restore: {String(restoreAsset.error)}</span>
+        )}
+      </div>
     );
   }
 

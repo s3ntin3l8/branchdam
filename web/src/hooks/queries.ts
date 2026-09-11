@@ -169,6 +169,18 @@ export function useDeleteAsset() {
   });
 }
 
+export function useRestoreAsset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.restoreAsset(id),
+    onSuccess: (_data, id) => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+    },
+  });
+}
+
 export function useAuditEntries(params: import("../api/types").AuditQueryParams = {}) {
   return useQuery({
     queryKey: ["audit-entries", params],

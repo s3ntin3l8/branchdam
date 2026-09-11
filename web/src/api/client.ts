@@ -113,6 +113,7 @@ export const api = {
   getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
   deleteAsset: (id: number) => request<{ ok: boolean }>(`/api/v1/assets/${id}`, { method: "DELETE" }),
+  restoreAsset: (id: number) => request<{ ok: boolean }>(`/api/v1/assets/${id}/restore`, { method: "POST" }),
   getAssetMetadata: (id: number) => request<{ metadata: NodeMetadatum[] }>(`/api/v1/assets/${id}/metadata`),
   getAssetGraph: (id: number) => request<AssetGraph>(`/api/v1/assets/${id}/graph`),
   getAssetLineage: (id: number | string, depth = 2) => request<LineageResponse>(`/api/v1/assets/${id}/lineage?depth=${depth}`),

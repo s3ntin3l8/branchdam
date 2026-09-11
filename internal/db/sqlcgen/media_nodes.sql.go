@@ -1579,6 +1579,16 @@ func (q *Queries) TouchMediaNode(ctx context.Context, arg TouchMediaNodeParams) 
 	return err
 }
 
+const unarchiveMediaNode = `-- name: UnarchiveMediaNode :exec
+UPDATE media_nodes SET lifecycle_state = 'ACTIVE', updated_at = unixepoch() WHERE id = ?1
+`
+
+// Restores an archived media node back to ACTIVE state.
+func (q *Queries) UnarchiveMediaNode(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, unarchiveMediaNode, id)
+	return err
+}
+
 const updateMediaNodeFullHash = `-- name: UpdateMediaNodeFullHash :exec
 UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1
 `

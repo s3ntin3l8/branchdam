@@ -750,6 +750,8 @@ type Querier interface {
 	// request, but the WHERE matches the active-set partial index path
 	// already loaded above so the planner is happy.
 	TouchSession(ctx context.Context, arg TouchSessionParams) error
+	// Restores an archived media node back to ACTIVE state.
+	UnarchiveMediaNode(ctx context.Context, id int64) error
 	// Refresh the cached QR SVG after a key rotation. The SVG is computed
 	// outside the transaction (in pairing.Service) so this UPDATE is a
 	// pure byte-write with no rendering dependency.
