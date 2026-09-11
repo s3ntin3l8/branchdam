@@ -317,6 +317,8 @@ func (s *Server) Handler() http.Handler {
 	// reason -- Huma's response model expects a JSON body, not a raw
 	// image/jpeg byte stream.
 	mux.HandleFunc("GET /api/v1/assets/{id}/thumbnail", s.handleThumbnail)
+	// Asset media streaming with HTTP byte-range support for video and full-res preview
+	mux.HandleFunc("GET /api/v1/assets/{id}/stream", s.handleAssetStream)
 	// Companion pairing /qr.svg is registered directly on the mux, for
 	// the same reason -- Huma's response model is JSON-only and SVG
 	// needs raw image/svg+xml.

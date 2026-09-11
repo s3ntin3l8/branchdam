@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import SettingsPage from "./SettingsPage";
+import SettingsPage, { CATEGORIES, GROUP_TO_CATEGORY } from "./SettingsPage";
 import { ThemeProvider } from "../components/theme/ThemeProvider";
 import { api, ApiError } from "../api/client";
 import type { SettingsField, SettingsResponse } from "../api/types";
@@ -465,5 +465,39 @@ describe("SettingsPage", () => {
         unset: ["pathRewrites"],
       });
     });
+  });
+
+  it("maps every group in GROUP_TO_CATEGORY to an existing category", () => {
+    const validCategoryIds = new Set(CATEGORIES.map((c) => c.id));
+    for (const [group, catId] of Object.entries(GROUP_TO_CATEGORY)) {
+      expect(validCategoryIds.has(catId), `group "${group}" mapped to unknown category "${catId}"`).toBe(true);
+    }
+  });
+
+  it("renders fields in the Metadata group under Workers & Indexing category", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(
+      settingsResponse({
+        fields: [
+          field({
+            key: "metadata.autoInherit",
+            type: "bool",
+            label: "Auto-Inherit Metadata",
+            group: "Metadata",
+            value: true,
+            source: "config",
+            applyMode: "live",
+            editable: true,
+          }),
+        ],
+      })
+    );
+
+    renderWithClient(<SettingsPage />);
+
+    // Verify Metadata group and setting label are rendered
+    expect(await screen.findByRole("heading", { name: "Metadata" })).toBeInTheDocument();
+    expect(screen.getByText("Auto-Inherit Metadata")).toBeInTheDocument();
   });
 });

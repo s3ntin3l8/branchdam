@@ -17,6 +17,7 @@ vi.mock("../api/client", () => ({
     listStorageLocations: vi.fn(),
     inheritMetadata: vi.fn(),
     thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
+    streamUrl: vi.fn((id: number) => `/api/v1/assets/${id}/stream`),
   },
 }));
 
@@ -357,5 +358,87 @@ describe("AssetDetailPage sync status", () => {
     expect(screen.getByText("immich")).toBeInTheDocument();
     expect(screen.getByText("Exhausted (max retries reached)")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("AssetDetailPage media preview", () => {
+  it("renders image stream preview and handles lightbox open/close", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    const img = screen.getByTestId("asset-image-preview");
+    expect(img).toBeInTheDocument();
+    expect(img).toHaveAttribute("src", "/api/v1/assets/42/stream");
+
+    const enlargeBtn = screen.getByRole("button", { name: /enlarge/i });
+    await userEvent.click(enlargeBtn);
+
+    const closeBtn = screen.getByTestId("lightbox-close-button");
+    expect(closeBtn).toBeInTheDocument();
+
+    await userEvent.click(closeBtn);
+    expect(screen.queryByTestId("lightbox-close-button")).not.toBeInTheDocument();
+  });
+
+  it("renders video player when asset has video extension", async () => {
+    const videoAsset: Asset = { ...asset, fileName: "video.mp4", fileExt: "mp4" };
+    vi.mocked(api.getAsset).mockResolvedValue(videoAsset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [videoAsset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("video.mp4")).toBeInTheDocument());
+
+    const video = screen.getByTestId("asset-video-player");
+    expect(video).toBeInTheDocument();
+    expect(video.querySelector("source")).toHaveAttribute("src", "/api/v1/assets/42/stream");
+    expect(video.querySelector("source")).toHaveAttribute("type", "video/mp4");
+  });
+
+  it("switches stream source when proxy pair is available in lineage", async () => {
+    const originalAsset: Asset = { ...asset, id: 42, fileName: "clip.mov", fileExt: "mov" };
+    const proxyAsset: Asset = { ...asset, id: 43, fileName: "clip_proxy.mp4", fileExt: "mp4" };
+    vi.mocked(api.getAsset).mockResolvedValue(originalAsset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({
+      rootId: 42,
+      nodes: [originalAsset, proxyAsset],
+      edges: [
+        {
+          id: 101,
+          sourceNodeId: 42,
+          targetNodeId: 43,
+          relationshipType: "PROXY_OF",
+          confidence: 1.0,
+          reviewState: "CONFIRMED",
+          resolver: "test",
+        },
+      ],
+    });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "clip.mov" })).toBeInTheDocument());
+
+    const originalBtn = screen.getByRole("button", { name: /original \(mov\)/i });
+    const proxyBtn = screen.getByRole("button", { name: /proxy \(mp4\)/i });
+    expect(originalBtn).toBeInTheDocument();
+    expect(proxyBtn).toBeInTheDocument();
+
+    // Initially original is selected
+    expect(screen.getByTestId("asset-video-player").querySelector("source")).toHaveAttribute(
+      "src",
+      "/api/v1/assets/42/stream",
+    );
+
+    // Switch to proxy
+    await userEvent.click(proxyBtn);
+    expect(screen.getByTestId("asset-video-player").querySelector("source")).toHaveAttribute(
+      "src",
+      "/api/v1/assets/43/stream",
+    );
   });
 });

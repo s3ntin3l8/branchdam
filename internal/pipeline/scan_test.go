@@ -1770,8 +1770,8 @@ func (r testFixedParentResolver) Resolve(ctx context.Context, child graph.Node, 
 // one, so edges_created on the second scan must be 0, not another 1.
 func TestScanPersistsEdgesCreated(t *testing.T) {
 	root := t.TempDir()
-	parentPath := filepath.Join(root, "parent.jpg")
-	childPath := filepath.Join(root, "child.jpg")
+	parentPath := filepath.Join(root, "01_parent.jpg")
+	childPath := filepath.Join(root, "02_child.jpg")
 	writeFile(t, parentPath, "parent content")
 	writeFile(t, childPath, "child content")
 
@@ -1787,7 +1787,7 @@ func TestScanPersistsEdgesCreated(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 	locationID := seedPipelineLocation(t, database, resolvedRoot)
-	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps := scanTestDepsN(t, database, resolvedRoot, locationID, 1, 16)
 	deps.Engine = graph.NewEngine(database, nil, testFixedParentResolver{parentPath: resolvedParentPath})
 	location := storage.Location{ID: locationID, Name: "test-edges-created", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}
 

@@ -472,11 +472,12 @@ func base64URLStrip(b []byte) string {
 	return string(out)
 }
 
-// randomStrongPassword returns a 16-byte random password, base64url-
-// encoded without padding (22 characters). The "strength" here is the
-// 128 bits of entropy in 16 random bytes; operators are expected to
-// communicate the result out-of-band (the response body of the admin
-// reset endpoint), so the alphabet doesn't need to be human-pronounceable.
+// RandomStrongPassword returns an n-byte random password, base64url-
+// encoded without padding (e.g. 22 characters for 16 bytes).
+func RandomStrongPassword(n int) (string, error) {
+	return randomStrongPassword(n)
+}
+
 func randomStrongPassword(n int) (string, error) {
 	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {

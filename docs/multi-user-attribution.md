@@ -80,7 +80,7 @@ is preferred over a failed response with no audit trail.
 |---|---|
 | `GET /api/v1/me` | Adds `attributionUserId` (resolved via `ResolveOrCreate`). |
 | `POST /api/v1/scan` | Resolves `Principal` → user_id, sets `scan_jobs.started_by_user_id`, writes `actor_audit('scan.started')`. |
-| `POST /api/v1/settings` | Writes `actor_audit('settings.updated')` with the diff. |
+| `PUT /api/v1/settings` | Writes `actor_audit('settings.updated')` with the diff. |
 | `POST /api/v1/restart` | Writes `actor_audit('restart.executed')` before the restart goroutine. |
 | `PUT /api/v1/storage-locations/{id}` | Writes `actor_audit('storage_location.upserted')`. |
 | `POST /api/v1/prune` (execute) | Writes `actor_audit('prune.executed')`. |

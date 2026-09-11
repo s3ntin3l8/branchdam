@@ -159,16 +159,13 @@ worker. No restart of the branchDAM process itself is needed for an Immich chang
 
 ## `pathRewrites`
 
-**Missing from both `config.example.yaml` and `config.dev.yaml` entirely — a first deploy copying
-the example ships with Tier-1 project-file introspection silently inert unless this is added by
-hand.** Configures the operator-declared host-path → container-path prefix rewrites that Tier-1
+Configures the operator-declared host-path → container-path prefix rewrites that Tier-1
 project-file parsers (`.dam.json`, `.drp`, `.fcpxml`, `.edl`) need to resolve the paths those files
 reference (an editing workstation's `D:\Footage\...` or `/Volumes/Video/...`, not the container's
 `/storage/projects/...`). Full resolution strategy, ambiguity policy, and worked examples:
-[`project-paths.md`](project-paths.md). Without at least one matching rule, project-file references
-fall through to basename-only fallback matching (the size half of that fallback is aspirational --
-see [`project-paths.md`](project-paths.md#1-primary-path-resolution-strategy) -- no parser
-currently supplies a file size for it to filter on).
+[`integrations.md#2-nle-timelines--path-rewrites`](integrations.md#2-nle-timelines--path-rewrites).
+Without at least one matching rule, project-file references fall through to basename-only fallback matching.
+Commented out by default in `config.example.yaml` (and omitted entirely from `config.dev.yaml`) — uncomment and adapt for your workstations.
 
 ```yaml
 pathRewrites:
