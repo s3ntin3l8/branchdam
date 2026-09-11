@@ -76,7 +76,11 @@ func (s *Server) handleAssetStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = f.Close() }()
 
-	w.Header().Set("Content-Type", assetContentType(node.FileExt))
+	contentType := assetContentType(node.FileExt)
+	w.Header().Set("Content-Type", contentType)
+	if contentType == "image/svg+xml" {
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+node.FileName+"\"")
+	}
 	w.Header().Set("ETag", `"`+node.NodeUuid+"-"+strconv.FormatInt(node.UpdatedAt, 10)+`"`)
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("Accept-Ranges", "bytes")

@@ -224,4 +224,76 @@ func TestStreamAssetNotFoundOrArchived(t *testing.T) {
 			t.Errorf("archived asset status = %d, want 404", rr.Code)
 		}
 	})
+
+	t.Run("missing asset 404s", func(t *testing.T) {
+		var node sqlcgen.MediaNode
+		err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			var err error
+			node, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+				NodeUuid:          "0198abcd-0000-7000-8000-000000000078",
+				StorageLocationID: locID,
+				FilePath:          filepath.Join(dir, "missing.jpg"),
+				FileName:          "missing.jpg",
+				FileExt:           "jpg",
+				IndexingStatus:    "INDEXED_FULL",
+				GraphStatus:       "LINKED",
+				LifecycleState:    "MISSING",
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("InsertMediaNode: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/stream", node.ID), nil)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("missing asset status = %d, want 404", rr.Code)
+		}
+	})
+}
+
+func TestStreamAssetSVGContentDisposition(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "graphic.svg")
+	content := []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"5\" cy=\"5\" r=\"5\"/></svg>")
+	if err := os.WriteFile(filePath, content, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	srv, database, locID := streamTestServer(t, dir)
+	var node sqlcgen.MediaNode
+	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		var err error
+		node, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid:          "0198abcd-0000-7000-8000-000000000079",
+			StorageLocationID: locID,
+			FilePath:          filePath,
+			FileName:          "graphic.svg",
+			FileExt:           "svg",
+			IndexingStatus:    "INDEXED_FULL",
+			GraphStatus:       "LINKED",
+			LifecycleState:    "ACTIVE",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("InsertMediaNode: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/stream", node.ID), nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("Content-Type = %q, want image/svg+xml", ct)
+	}
+	wantCD := "attachment; filename=\"graphic.svg\""
+	if cd := rr.Header().Get("Content-Disposition"); cd != wantCD {
+		t.Errorf("Content-Disposition = %q, want %q", cd, wantCD)
+	}
 }
