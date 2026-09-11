@@ -343,3 +343,102 @@ an SSE nudge to connected web dashboard clients. Telemetry is queried via
 surfaced on the Storage Health dashboard with real-time capacity gauges, render cache/mirror
 breakdown, prune run metrics, and low space / critical space / stale status alerts, and can be
 dismissed via `DELETE /api/v1/storage-health/agents/{agentId}`.
+
+---
+
+## 8. Agent Discovery & Ping (`POST /api/v1/agent/hello`)
+
+A lightweight connectivity and version check endpoint for agent clients. Does not query the database, touch the event queue, or record state.
+
+**Authentication:** Requires an Agent Machine Principal (via Companion API key `Authorization: Bearer <key>`).
+
+**Request:** Empty JSON object (`{}`).
+
+**Response (Status 200 OK):**
+```json
+{
+  "ok": true,
+  "version": "v0.20.0"
+}
+```
+
+---
+
+## 9. Content Verification Pre-Flight (`GET /api/v1/agent/check-content`)
+
+Allows companion applications and workstation agents to perform a pre-flight content hash check before streaming multi-gigabyte uploads. If a file with the identical BLAKE3-256 hash already exists as an active or hidden node (excludes ARCHIVED and MISSING), the agent can skip the upload entirely.
+
+**Authentication:** Requires an Agent Machine Principal.
+
+**Query Parameters:**
+- `fullHash` (required): 64-character lowercase hex BLAKE3-256 digest of the candidate file content.
+- `fastHash` (optional): 16-character lowercase hex xxHash64 digest (accepted and format-validated for forward compatibility, but currently ignored; lookup is performed solely by `fullHash`).
+
+**Response When Found (Status 200 OK):**
+```json
+{
+  "found": true,
+  "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
+  "filePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
+  "lifecycleState": "ACTIVE",
+  "indexingStatus": "INDEXED"
+}
+```
+
+**Response When Not Found (Status 200 OK):**
+```json
+{
+  "found": false
+}
+```
+
+---
+
+## 10. Source Path Status Check (`GET /api/v1/agent/source-status`)
+
+Determines whether a local file path on a workstation or mobile device has already been ingested into the library. Relies on the client-supplied `X-Source-Path-Hash` recorded during streaming ingest.
+
+**Authentication:** Requires an Agent Machine Principal.
+
+**Query Parameters:**
+- `sourcePathHash` (required): 64-character hex SHA-256 hash of the normalized workstation/device file path.
+- `sourcePath`: Alias for `sourcePathHash` (supported for backwards compatibility; if both are specified, they must match).
+
+**Response When Tracked (Status 200 OK):**
+```json
+{
+  "tracked": true,
+  "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
+  "filePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
+  "indexingStatus": "INDEXED",
+  "lifecycleState": "ACTIVE"
+}
+```
+
+**Response When Not Tracked (Status 200 OK):**
+```json
+{
+  "tracked": false
+}
+```
+
+*Note:* Files ingested prior to migration `00015` or uploaded without the `X-Source-Path-Hash` header have a NULL `source_path_hash` column and will return `tracked: false`. Clients should fall back to `GET /api/v1/agent/check-content` (BLAKE3) when `tracked: false`.
+
+---
+
+## 11. Companion Device Pairing Management
+
+Companion pairing mints per-device API keys for `/api/v1/agent/*` access without sharing user passwords or forward-proxy credentials.
+
+All management endpoints require an authenticated administrator session (`auth.RequireAdmin`).
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/companion/pairings` | `POST` | Mint a new device pairing. Returns the plaintext API key (shown once) and QR pairing payload. Sets `owner_user_id` to the calling admin. |
+| `/api/v1/companion/pairings` | `GET` | List all registered companion device pairings, their enabled state, last seen timestamps, and client names. |
+| `/api/v1/companion/pairings/{id}` | `GET` | Retrieve details for a specific companion pairing. |
+| `/api/v1/companion/pairings/{id}/rotate` | `POST` | Rotate device API key. Invalidates previous key and returns a new plaintext token. |
+| `/api/v1/companion/pairings/{id}/revoke` | `POST` | Revoke device access immediately. Enforces a 401 Unauthorized response on subsequent agent calls. |
+| `/api/v1/companion/pairings/{id}` | `DELETE` | Delete device pairing record and its key history. Requires the pairing to be revoked first (`POST /revoke`), returning `409 Conflict` otherwise. |
+| `/api/v1/companion/pairings/{id}/audit` | `GET` | Retrieve audit events (creation, key rotation, revocation, IP changes) for a pairing. |
+| `/api/v1/companion/pairings/{id}/qr.svg` | `GET` | Raw `image/svg+xml` QR code for seamless optical onboarding from mobile companion cameras. |

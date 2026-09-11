@@ -22,7 +22,7 @@ ForwardAuth, on SQLite in WAL mode.
 - **Human-in-the-Loop Audit Queue**: Low-confidence candidate links (< 0.85/0.90 thresholds) route directly to an interactive Audit Queue where human confirmations/rejections permanently override automated algorithms.
 - **Storage Safety & Lifecycle Governance**: Ingested camera masters are stored safely in the Master Archive. Deletion events trigger soft-delete buffer isolation under `.trash/` with a 30-day safety retention window before automated pruning, preventing accidental loss while keeping active archives tidy.
 - **Storage Architecture & Ingest**:
-  - Direct streaming ingest (`POST /api/v1/agent/upload`) for mobile companion apps and workstation agents.
+  - Direct streaming ingest (`POST /api/v1/agent/upload`) for mobile companion apps and workstation agents, and web browser multipart upload (`POST /api/v1/upload`).
   - Server-evaluated folder and naming templates (e.g. `{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}`).
   - 30-day soft-delete trash buffer (`.trash/` isolation) on file deletion with automated retention pruning.
   - Zero-storage hardlink export into Immich for instant gallery browsing.
@@ -71,7 +71,7 @@ The standard branchDAM server deployment runs as a container behind Traefik v3 a
    docker compose up -d
    ```
 
-For detailed bring-up instructions and reverse proxy configurations, see [`docs/deploy.md`](docs/deploy.md) and [`docs/forward-auth.md`](docs/forward-auth.md). For the password-login surface (`auth.mode = local` or `both`), see [`docs/local-auth.md`](docs/local-auth.md).
+For detailed bring-up instructions and reverse proxy configurations, see [`docs/deploy.md`](docs/deploy.md) and [`docs/forward-auth.md`](docs/forward-auth.md). For the password-login surface (`auth.mode = local` or `both`), see [`docs/local-auth.md`](docs/local-auth.md). For multi-user setups and audit logging, see [`docs/multi-user-attribution.md`](docs/multi-user-attribution.md).
 
 ---
 
@@ -85,6 +85,7 @@ For detailed bring-up instructions and reverse proxy configurations, see [`docs/
 - [`docs/configuration.md`](docs/configuration.md) — Field-by-field reference for `config.yaml` and environment variables.
 - [`docs/forward-auth.md`](docs/forward-auth.md) — Traefik v3 and Authentik ForwardAuth configuration.
 - [`docs/local-auth.md`](docs/local-auth.md) — Password-login surface (setup, cookies, argon2id, rate limits, audit log).
+- [`docs/multi-user-attribution.md`](docs/multi-user-attribution.md) — Multi-user attribution, activity audit trail, and user management.
 
 ### Workflows & Lineage
 - [`docs/integrations.md`](docs/integrations.md) — DaVinci Resolve, NLE timelines, Luminar, Immich, workstation agent, Google Photos spike.
