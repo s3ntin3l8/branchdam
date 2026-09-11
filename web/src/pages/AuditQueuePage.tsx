@@ -517,7 +517,7 @@ function BatchConfirmModal({
                   : "bg-red-600 hover:bg-red-500"
               }`}
             >
-              {running ? "Processing…" : `Confirm ${action === "confirm" ? "Confirm All" : "Reject All"}`}
+              {running ? "Processing…" : action === "confirm" ? "Confirm All" : "Reject All"}
             </button>
           )}
         </div>

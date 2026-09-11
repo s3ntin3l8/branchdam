@@ -59,6 +59,61 @@ func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNod
 	return count, err
 }
 
+const getLatestNodeByPath = `-- name: GetLatestNodeByPath :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE file_path = ?1
+ORDER BY id DESC
+LIMIT 1
+`
+
+// Retrieves the most recent media node at a given path, including archived rows.
+func (q *Queries) GetLatestNodeByPath(ctx context.Context, filePath string) (MediaNode, error) {
+	row := q.db.QueryRowContext(ctx, getLatestNodeByPath, filePath)
+	var i MediaNode
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.StorageLocationID,
+		&i.FilePath,
+		&i.FileName,
+		&i.FileExt,
+		&i.SizeBytes,
+		&i.MtimeUnix,
+		&i.FastHash,
+		&i.FullHash,
+		&i.Phash,
+		&i.IndexingStatus,
+		&i.GraphStatus,
+		&i.LifecycleState,
+		&i.SupersededBy,
+		&i.OriginalDocumentID,
+		&i.DocumentID,
+		&i.DerivedFromID,
+		&i.CapturedAtUnix,
+		&i.CameraModel,
+		&i.FilenameStem,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
+		&i.ThumbState,
+		&i.ThumbAttempts,
+		&i.SourcePathHash,
+		&i.UploadedByUserID,
+	)
+	return i, err
+}
+
 const getLiveNodeByPath = `-- name: GetLiveNodeByPath :one
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,

@@ -530,3 +530,18 @@ SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
 FROM media_nodes n
 LEFT JOIN storage_locations s ON s.id = n.storage_location_id
 WHERE n.node_uuid IN (SELECT value FROM json_each(CAST(sqlc.arg(node_uuids) AS TEXT)));
+
+-- name: GetLatestNodeByPath :one
+-- Retrieves the most recent media node at a given path, including archived rows.
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE file_path = ?1
+ORDER BY id DESC
+LIMIT 1;

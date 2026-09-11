@@ -223,6 +223,8 @@ type Querier interface {
 	// Returns just the qr_svg column for the ActiveQRSVG hot path. Skips
 	// the row-wide scan if all the caller wants is the bytes.
 	GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error)
+	// Retrieves the most recent media node at a given path, including archived rows.
+	GetLatestNodeByPath(ctx context.Context, filePath string) (MediaNode, error)
 	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
 	// The live-path lookup a scan does for every file: is there already a
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path

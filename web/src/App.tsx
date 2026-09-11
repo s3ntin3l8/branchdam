@@ -64,7 +64,7 @@ export function Layout() {
           <NavItem to="/jobs">Ingest Jobs</NavItem>
           <NavItem to="/storage-health">Storage Health</NavItem>
           <NavItem to="/companion">Companion Pairing</NavItem>
-          <NavItem to="/audit-log">Audit Log</NavItem>
+          {me?.isAdmin && <NavItem to="/audit-log">Audit Log</NavItem>}
           <NavItem to="/settings">Settings</NavItem>
         </div>
         {disconnected && (

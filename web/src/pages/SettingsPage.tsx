@@ -42,7 +42,6 @@ export const GROUP_TO_CATEGORY: Record<string, string> = {
   HTTP: "server",
   Workers: "workers",
   Thumbnails: "workers",
-  Metadata: "workers",
   Immich: "integrations",
   "Path Resolution": "integrations",
   Agent: "security",

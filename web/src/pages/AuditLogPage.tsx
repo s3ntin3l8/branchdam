@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuditEntries } from "../hooks/queries";
 import type { AuditEntry } from "../api/types";
 
@@ -19,7 +19,7 @@ function DetailsCell({ detailsJson }: { detailsJson?: string }) {
   try {
     pretty = JSON.stringify(JSON.parse(detailsJson), null, 2);
   } catch {
-    // leave as raw string
+    // Keep raw string on JSON parse error
   }
 
   return (
@@ -27,12 +27,12 @@ function DetailsCell({ detailsJson }: { detailsJson?: string }) {
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="font-mono text-xs text-sky-400 hover:text-sky-300 underline"
+        className="text-xs text-indigo-400 hover:text-indigo-300 underline font-mono"
       >
         {expanded ? "Hide Details" : "View Details"}
       </button>
       {expanded && (
-        <pre className="mt-1 max-h-48 overflow-auto rounded bg-neutral-950 p-2 font-mono text-[11px] text-neutral-300 border border-neutral-800">
+        <pre className="mt-2 max-h-48 overflow-auto rounded bg-neutral-950 p-2 font-mono text-[11px] text-neutral-300 border border-neutral-800">
           {pretty}
         </pre>
       )}
@@ -45,6 +45,22 @@ export default function AuditLogPage() {
   const [page, setPage] = useState(1);
   const [eventFilter, setEventFilter] = useState("");
   const [resourceTypeFilter, setResourceTypeFilter] = useState("");
+  const [debouncedEventFilter, setDebouncedEventFilter] = useState("");
+  const [debouncedResourceTypeFilter, setDebouncedResourceTypeFilter] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedEventFilter(eventFilter);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [eventFilter]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedResourceTypeFilter(resourceTypeFilter);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [resourceTypeFilter]);
 
   const offset = (page - 1) * PAGE_SIZE;
 
@@ -52,8 +68,8 @@ export default function AuditLogPage() {
     type,
     limit: PAGE_SIZE,
     offset,
-    event: eventFilter.trim() || undefined,
-    resourceType: resourceTypeFilter.trim() || undefined,
+    event: debouncedEventFilter.trim() || undefined,
+    resourceType: debouncedResourceTypeFilter.trim() || undefined,
   });
 
   const entries = data?.entries ?? [];
@@ -127,7 +143,9 @@ export default function AuditLogPage() {
               type="button"
               onClick={() => {
                 setEventFilter("");
+                setDebouncedEventFilter("");
                 setResourceTypeFilter("");
+                setDebouncedResourceTypeFilter("");
                 setPage(1);
               }}
               className="self-end text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"

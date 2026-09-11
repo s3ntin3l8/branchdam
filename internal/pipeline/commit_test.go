@@ -3,7 +3,9 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -1442,4 +1444,74 @@ func seedAttributionUser(t *testing.T, database *db.DB, username, externalUID st
 	}
 	id, _ := res.LastInsertId()
 	return id
+}
+
+// TestCommitArchivedNodeSticksAndSupersedesOnChange verifies that an archived node
+// whose file on disk has not changed is NOT re-ingested as a duplicate node (soft-delete sticks).
+// When the file content DOES change, a successor is inserted and linked via superseded_by.
+func TestCommitArchivedNodeSticksAndSupersedesOnChange(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	// 1. Ingest initial file.
+	stats, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/deleted.jpg", FileName: "deleted.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "1111111111111111"},
+	}, 0)
+	if err != nil || stats.Inserted != 1 {
+		t.Fatalf("initial Commit: stats=%+v err=%v", stats, err)
+	}
+	node1 := mustGetLiveNode(t, database, "/exports/deleted.jpg")
+
+	// 2. Soft-delete (archive) the node.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.ArchiveMediaNode(ctx, node1.ID)
+	}); err != nil {
+		t.Fatalf("ArchiveMediaNode: %v", err)
+	}
+
+	// 3. Confirm node is no longer live.
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, "/exports/deleted.jpg"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLiveNodeByPath after archive: want ErrNoRows, got %v", err)
+	}
+
+	// 4. Re-scan with exact same file/hash -- soft-delete must stick, no new node inserted.
+	stats, err = Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/deleted.jpg", FileName: "deleted.jpg", FileExt: "jpg", Size: 100, ModTime: time.Now(), FastHash: "1111111111111111"},
+	}, 0)
+	if err != nil {
+		t.Fatalf("Commit on unchanged archived node: %v", err)
+	}
+	if stats.Inserted != 0 {
+		t.Errorf("stats.Inserted = %d, want 0 (soft-delete must stick on unchanged content)", stats.Inserted)
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, "/exports/deleted.jpg"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLiveNodeByPath: want ErrNoRows (still archived), got %v", err)
+	}
+
+	// 5. File content at path changes -- successor should be inserted and linked via superseded_by.
+	stats, err = Commit(ctx, database, locationID, []Result{
+		{Path: "/exports/deleted.jpg", FileName: "deleted.jpg", FileExt: "jpg", Size: 200, ModTime: time.Now(), FastHash: "2222222222222222"},
+	}, 0)
+	if err != nil {
+		t.Fatalf("Commit on changed archived node: %v", err)
+	}
+	if stats.Inserted != 1 {
+		t.Errorf("stats.Inserted = %d, want 1 (new version of file at path)", stats.Inserted)
+	}
+
+	// Successor is live.
+	newNode := mustGetLiveNode(t, database, "/exports/deleted.jpg")
+	if newNode.ID == node1.ID {
+		t.Fatalf("newNode.ID == node1.ID (%d)", node1.ID)
+	}
+
+	// Archived node has superseded_by set to newNode.ID.
+	archivedNode, err := database.Reader.GetMediaNodeByID(ctx, node1.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if !archivedNode.SupersededBy.Valid || archivedNode.SupersededBy.Int64 != newNode.ID {
+		t.Errorf("archivedNode.SupersededBy = %v, want %d", archivedNode.SupersededBy, newNode.ID)
+	}
 }
