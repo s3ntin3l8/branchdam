@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0](https://github.com/s3ntin3l8/branchdam/compare/v0.20.0...v0.21.0) (2026-09-11)
+
+
+### Features
+
+* **api:** add eventUuid transport idempotency to agent events endpoint ([#441](https://github.com/s3ntin3l8/branchdam/issues/441)) ([cf9c2f9](https://github.com/s3ntin3l8/branchdam/commit/cf9c2f9f6ca2b753daa6e633f87085de00d6efeb))
+* **httpapi,web:** high-res media streaming endpoint and asset detail preview player ([#442](https://github.com/s3ntin3l8/branchdam/issues/442)) ([d2be5e5](https://github.com/s3ntin3l8/branchdam/commit/d2be5e5ca18bfc0f2778ce87382a5584e14bf67d))
+* **metadata:** automated metadata inheritance on confirmed and auto-accepted edges ([#434](https://github.com/s3ntin3l8/branchdam/issues/434)) ([5435153](https://github.com/s3ntin3l8/branchdam/commit/5435153249c00b1e20d4ced9993876a735510031))
+* **pipeline:** harden graph engine with reverse lineage rescan, scan cancellation, and watcher telemetry ([#437](https://github.com/s3ntin3l8/branchdam/issues/437)) ([502abb1](https://github.com/s3ntin3l8/branchdam/commit/502abb1391de41b243b82ae9f69355f5cf822cda))
+* **users:** add admin user management page and provisioning endpoints ([#436](https://github.com/s3ntin3l8/branchdam/issues/436)) ([640565c](https://github.com/s3ntin3l8/branchdam/commit/640565c29f1eb0304c9e4228e04820bcbeed4e50))
+* **web:** audit queue batch actions, asset soft-delete, metadata inspector, and audit log page ([#435](https://github.com/s3ntin3l8/branchdam/issues/435)) ([4bf2cc9](https://github.com/s3ntin3l8/branchdam/commit/4bf2cc96b60b4eb97849fbce228ab6eff8b95e9a))
+
+
+### Bug Fixes
+
+* exclude bot-authored PRs by author, not actor; correct guard comment ([#431](https://github.com/s3ntin3l8/branchdam/issues/431)) ([dae0c3b](https://github.com/s3ntin3l8/branchdam/commit/dae0c3b24fb29a22aed2661eb3d4d235c464f6c5))
+
 ## [0.20.0](https://github.com/s3ntin3l8/branchdam/compare/v0.19.0...v0.20.0) (2026-09-09)
 
 
