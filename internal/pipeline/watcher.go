@@ -59,6 +59,52 @@ type WatcherSupervisor struct {
 	nudge     func() // guest-side SSE hub.Broadcast, wired from main.go; may be nil
 	wg        sync.WaitGroup
 	startOnce sync.Once
+
+	mu     sync.Mutex
+	active map[int64]*watchWork
+}
+
+func (w *WatcherSupervisor) registerActive(locID int64, work *watchWork) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.active == nil {
+		w.active = make(map[int64]*watchWork)
+	}
+	w.active[locID] = work
+}
+
+func (w *WatcherSupervisor) unregisterActive(locID int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.active, locID)
+}
+
+type WatcherLocationHealth struct {
+	LocationID    int64  `json:"locationId"`
+	RootPath      string `json:"rootPath"`
+	BacklogLen    int    `json:"backlogLen"`
+	DroppedEvents int64  `json:"droppedEvents"`
+	Running       bool   `json:"running"`
+}
+
+// Health reports current telemetry for every active watcher.
+func (w *WatcherSupervisor) Health() []WatcherLocationHealth {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]WatcherLocationHealth, 0, len(w.active))
+	for locID, work := range w.active {
+		out = append(out, WatcherLocationHealth{
+			LocationID:    locID,
+			RootPath:      work.location,
+			BacklogLen:    work.backlogLen(),
+			DroppedEvents: work.droppedCount(),
+			Running:       true,
+		})
+	}
+	return out
 }
 
 func NewWatcherSupervisor(deps ScanDeps, nudge func()) *WatcherSupervisor {
@@ -284,6 +330,8 @@ func (w *WatcherSupervisor) watchLocation(ctx context.Context, loc storage.Locat
 	}
 
 	work := newWatchWork(w.log, loc.RootPath)
+	w.registerActive(loc.ID, work)
+	defer w.unregisterActive(loc.ID)
 	var consumerWG sync.WaitGroup
 	consumerWG.Add(1)
 	go func() {

@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { useSearchParams } from "react-router";
-import { useJobs } from "../hooks/queries";
+import { useJobs, useCancelJob } from "../hooks/queries";
 import type { ScanJob } from "../api/types";
 
 const kindBadge: Record<ScanJob["kind"], string> = {
@@ -61,6 +62,9 @@ export default function IngestJobsPage() {
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
 
   const offset = (page - 1) * PAGE_SIZE;
+
+  const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const cancelMutation = useCancelJob();
 
   const { data, isLoading, isError, error } = useJobs({
     limit: PAGE_SIZE,
@@ -227,6 +231,7 @@ export default function IngestJobsPage() {
                   <th className="py-2.5 px-4 font-semibold text-right">Failed</th>
                   <th className="py-2.5 px-4 font-semibold text-right">Edges Created</th>
                   <th className="py-2.5 px-4 font-semibold">Error / Details</th>
+                  <th className="py-2.5 px-4 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-900">
@@ -254,6 +259,26 @@ export default function IngestJobsPage() {
                       <td className="py-2.5 px-4 text-right font-mono text-emerald-400">{j.edgesCreated.toLocaleString()}</td>
                       <td className="py-2.5 px-4 font-mono text-red-400 max-w-xs truncate">
                         {j.lastError || "—"}
+                      </td>
+                      <td className="py-2.5 px-4 text-right">
+                        {j.state === "RUNNING" ? (
+                          <button
+                            type="button"
+                            disabled={cancelMutation.isPending && cancellingId === j.id}
+                            onClick={() => {
+                              setCancellingId(j.id);
+                              cancelMutation.mutate(j.id, {
+                                onSettled: () => setCancellingId(null),
+                              });
+                            }}
+                            className="rounded bg-red-950/60 border border-red-800/80 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-900/80 hover:text-red-100 disabled:opacity-50 transition-colors"
+                            title="Cancel this running scan job"
+                          >
+                            {cancelMutation.isPending && cancellingId === j.id ? "Cancelling…" : "Cancel"}
+                          </button>
+                        ) : (
+                          <span className="text-neutral-600">—</span>
+                        )}
                       </td>
                     </tr>
                   );

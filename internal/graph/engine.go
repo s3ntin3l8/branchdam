@@ -170,30 +170,22 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 		}
 
 		if len(committed) > 0 {
-			// A REJECTED edge is a human decision that this specific
-			// candidate is wrong -- it says nothing about whether the node
-			// as a whole is linked, so it must not by itself push
-			// graph_status to NEEDS_REVIEW (the pre-fix code could never
-			// reach this branch with a REJECTED edge in committed at all,
-			// since the old UpsertMediaEdge treated a human-locked edge as
-			// a hard error and aborted before this point -- see H1). status
-			// stays "" (skip the write) only when every committed edge is
-			// REJECTED; any non-REJECTED edge sets it to at least
-			// NEEDS_REVIEW, and any AUTO_ACCEPTED/CONFIRMED edge wins
-			// outright regardless of order.
-			status := ""
+			// Update graph_status on each edge's actual target (child) node.
+			// Swapped candidate pairs (proxyExts, rawExts, SuffixRole) can emit
+			// edges where TargetNodeID != child.ID, so keying on TargetNodeID
+			// ensures the true child gets updated and a parent node with only
+			// outbound edges isn't incorrectly marked NEEDS_REVIEW.
+			statusByTarget := make(map[int64]string)
 			for _, edge := range committed {
 				if edge.ReviewState == "AUTO_ACCEPTED" || edge.ReviewState == "CONFIRMED" {
-					status = "LINKED"
-					break
-				}
-				if edge.ReviewState != "REJECTED" {
-					status = "NEEDS_REVIEW"
+					statusByTarget[edge.TargetNodeID] = "LINKED"
+				} else if edge.ReviewState != "REJECTED" && statusByTarget[edge.TargetNodeID] != "LINKED" {
+					statusByTarget[edge.TargetNodeID] = "NEEDS_REVIEW"
 				}
 			}
-			if status != "" {
+			for targetID, status := range statusByTarget {
 				if err := q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{
-					ID:          child.ID,
+					ID:          targetID,
 					GraphStatus: status,
 				}); err != nil {
 					return fmt.Errorf("update graph_status: %w", err)

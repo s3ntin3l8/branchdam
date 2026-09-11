@@ -129,6 +129,10 @@ type Deps struct {
 	// Audit is the actor_audit writer. The /api/v1/audit route reads
 	// from it. Nil in tests; the route 503s when nil.
 	Audit *audit.Service
+
+	// Watcher, if set, is the continuous filesystem watcher supervisor.
+	// Used by /api/v1/storage-health to report watcher daemon telemetry.
+	Watcher *pipeline.WatcherSupervisor
 }
 
 // LocalAuthDeps is the dependency bundle for local-auth endpoints.
@@ -172,6 +176,7 @@ type Server struct {
 	spa            fs.FS
 	version        string
 	tracker        *pipeline.ScanTracker
+	watcher        *pipeline.WatcherSupervisor
 	shutdown       <-chan struct{}
 	thumbs         *thumbs.Cache
 	requestRestart func()
@@ -240,6 +245,7 @@ func New(d Deps) *Server {
 		spa:            d.SPA,
 		version:        version,
 		tracker:        d.Tracker,
+		watcher:        d.Watcher,
 		shutdown:       d.Shutdown,
 		thumbs:         d.ThumbCache,
 		requestRestart: d.RequestRestart,

@@ -65,6 +65,12 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Post(api, "/api/v1/assets/{id}/inherit-metadata", s.handleInheritMetadata)
 
 	huma.Get(api, "/api/v1/jobs", s.handleListJobs)
+	huma.Register(api, huma.Operation{
+		Method:      http.MethodPost,
+		Path:        "/api/v1/jobs/{id}/cancel",
+		OperationID: "cancelJob",
+		Summary:     "Cancel an in-flight scan job",
+	}, s.handleCancelJob)
 
 	huma.Post(api, "/api/v1/edges", s.handleCreateEdge)
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
@@ -1674,6 +1680,49 @@ func (s *Server) handleListJobs(ctx context.Context, in *ListJobsInput) (*ListJo
 	return out, nil
 }
 
+// --- /api/v1/jobs/{id}/cancel ---
+
+type CancelJobInput struct {
+	ID int64 `path:"id" doc:"Scan job ID"`
+}
+
+type CancelJobOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+func (s *Server) handleCancelJob(ctx context.Context, in *CancelJobInput) (*CancelJobOutput, error) {
+	job, err := s.db.Reader.GetScanJob(ctx, in.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.Error404NotFound("scan job not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("get scan job", err)
+	}
+	if job.State != "RUNNING" {
+		return nil, huma.Error409Conflict(fmt.Sprintf("cannot cancel scan job in state %s", job.State))
+	}
+
+	if s.tracker == nil || !s.tracker.Cancel(in.ID) {
+		return nil, huma.Error409Conflict("scan job is not currently cancellable")
+	}
+
+	if s.hub != nil {
+		s.hub.Broadcast()
+	}
+
+	if s.audit != nil {
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventScanCancelled, "scan_job", strconv.FormatInt(in.ID, 10), map[string]any{"jobId": in.ID}); err != nil {
+			return nil, huma.Error500InternalServerError("write actor audit", err)
+		}
+	}
+
+	out := &CancelJobOutput{}
+	out.Body.OK = true
+	return out, nil
+}
+
 // --- /api/v1/agent/hello ---
 
 type AgentHelloOutput struct {
@@ -2599,21 +2648,24 @@ type storageLocationHealthDTO struct {
 	// row -- the UI's only way to know whether a "Reset to config" action on
 	// this location would do anything, since every other field above already
 	// reports the merged effective value with no per-field provenance.
-	OverriddenFields []string `json:"overriddenFields"`
-	NodeCount        int64    `json:"nodeCount"`
-	TotalBytes       uint64   `json:"totalBytes"`
-	UsedBytes        uint64   `json:"usedBytes"`
-	FreeBytes        uint64   `json:"freeBytes"`
-	IsDegraded       bool     `json:"isDegraded"`
-	DegradedMessage  *string  `json:"degradedMessage,omitempty"`
+	OverriddenFields     []string `json:"overriddenFields"`
+	NodeCount            int64    `json:"nodeCount"`
+	TotalBytes           uint64   `json:"totalBytes"`
+	UsedBytes            uint64   `json:"usedBytes"`
+	FreeBytes            uint64   `json:"freeBytes"`
+	IsDegraded           bool     `json:"isDegraded"`
+	DegradedMessage      *string  `json:"degradedMessage,omitempty"`
+	WatcherBacklog       int      `json:"watcherBacklog"`
+	WatcherDroppedEvents int64    `json:"watcherDroppedEvents"`
 }
 
 type storageQueueHealthDTO struct {
-	WorkerPoolInFlight int   `json:"workerPoolInFlight"`
-	WorkerPoolQueued   int   `json:"workerPoolQueued"`
-	WorkerPoolCapacity int   `json:"workerPoolCapacity"`
-	WorkerCount        int   `json:"workerCount"`
-	RunningScanJobs    int64 `json:"runningScanJobs"`
+	WorkerPoolInFlight  int   `json:"workerPoolInFlight"`
+	WorkerPoolQueued    int   `json:"workerPoolQueued"`
+	WorkerPoolCapacity  int   `json:"workerPoolCapacity"`
+	WorkerCount         int   `json:"workerCount"`
+	RunningScanJobs     int64 `json:"runningScanJobs"`
+	WatcherBacklogTotal int   `json:"watcherBacklogTotal"`
 }
 
 type storageHealthDTO struct {
@@ -2758,6 +2810,15 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 	if err != nil {
 		return nil, huma.Error500InternalServerError("load storage location overrides", err)
 	}
+
+	var watcherTotalBacklog int
+	watcherMap := make(map[int64]pipeline.WatcherLocationHealth)
+	if s.watcher != nil {
+		for _, wh := range s.watcher.Health() {
+			watcherMap[wh.LocationID] = wh
+			watcherTotalBacklog += wh.BacklogLen
+		}
+	}
 	// Watch/Sweep/SweepIntervalSecs are never persisted to storage_locations
 	// (see config.StorageLocation's doc comment) -- their config.yaml value
 	// only exists in the live resolved config, keyed here by rootPath so it
@@ -2823,22 +2884,30 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 				overriddenFields = append(overriddenFields, "enabled")
 			}
 		}
+		var watcherBacklog int
+		var watcherDropped int64
+		if wh, ok := watcherMap[loc.ID]; ok {
+			watcherBacklog = wh.BacklogLen
+			watcherDropped = wh.DroppedEvents
+		}
 		dtos[i] = storageLocationHealthDTO{
-			ID:                loc.ID,
-			Name:              name,
-			RootPath:          loc.RootPath,
-			Tier:              loc.Tier,
-			ReadOnly:          loc.ReadOnly == 1,
-			Prunable:          loc.Prunable == 1,
-			IsActive:          loc.IsActive == 1,
-			IsVirtual:         loc.IsVirtual == 1,
-			Watch:             watch,
-			Sweep:             sweep,
-			SweepIntervalSecs: sweepIntervalSecs,
-			CacheTtlHours:     cacheTTLHours,
-			Disabled:          disabled,
-			OverriddenFields:  overriddenFields,
-			NodeCount:         countMap[loc.ID],
+			ID:                   loc.ID,
+			Name:                 name,
+			RootPath:             loc.RootPath,
+			Tier:                 loc.Tier,
+			ReadOnly:             loc.ReadOnly == 1,
+			Prunable:             loc.Prunable == 1,
+			IsActive:             loc.IsActive == 1,
+			IsVirtual:            loc.IsVirtual == 1,
+			Watch:                watch,
+			Sweep:                sweep,
+			SweepIntervalSecs:    sweepIntervalSecs,
+			CacheTtlHours:        cacheTTLHours,
+			Disabled:             disabled,
+			OverriddenFields:     overriddenFields,
+			NodeCount:            countMap[loc.ID],
+			WatcherBacklog:       watcherBacklog,
+			WatcherDroppedEvents: watcherDropped,
 		}
 	}
 	// Probe every location's root path concurrently (see
@@ -2857,15 +2926,17 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 
 	if s.pool != nil {
 		out.Body.Queues = storageQueueHealthDTO{
-			WorkerPoolInFlight: s.pool.InFlight(),
-			WorkerPoolQueued:   s.pool.QueueDepth(),
-			WorkerPoolCapacity: s.pool.QueueCapacity(),
-			WorkerCount:        s.pool.WorkerCount(),
-			RunningScanJobs:    runningJobs,
+			WorkerPoolInFlight:  s.pool.InFlight(),
+			WorkerPoolQueued:    s.pool.QueueDepth(),
+			WorkerPoolCapacity:  s.pool.QueueCapacity(),
+			WorkerCount:         s.pool.WorkerCount(),
+			RunningScanJobs:     runningJobs,
+			WatcherBacklogTotal: watcherTotalBacklog,
 		}
 	} else {
 		out.Body.Queues = storageQueueHealthDTO{
-			RunningScanJobs: runningJobs,
+			RunningScanJobs:     runningJobs,
+			WatcherBacklogTotal: watcherTotalBacklog,
 		}
 	}
 

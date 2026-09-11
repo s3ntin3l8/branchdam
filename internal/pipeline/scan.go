@@ -130,11 +130,45 @@ func (d ScanDeps) InheritDeps() InheritDeps {
 // that outlives the request which started it also needs an explicit join
 // point during server shutdown, since nothing else waits for it.
 type ScanTracker struct {
-	wg sync.WaitGroup
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	cancels map[int64]context.CancelFunc
 }
 
 func (t *ScanTracker) add()  { t.wg.Add(1) }
 func (t *ScanTracker) done() { t.wg.Done() }
+
+func (t *ScanTracker) Register(jobID int64, cancel context.CancelFunc) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cancels == nil {
+		t.cancels = make(map[int64]context.CancelFunc)
+	}
+	t.cancels[jobID] = cancel
+}
+
+func (t *ScanTracker) register(jobID int64, cancel context.CancelFunc) {
+	t.Register(jobID, cancel)
+}
+
+func (t *ScanTracker) unregister(jobID int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.cancels, jobID)
+}
+
+// Cancel cancels the in-flight scan job with the given ID. Returns true if
+// the job was registered and cancelled, or false if not found / already completed.
+func (t *ScanTracker) Cancel(jobID int64) bool {
+	t.mu.Lock()
+	cancel, ok := t.cancels[jobID]
+	t.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	return true
+}
 
 // Wait blocks until every RunScan goroutine started against this tracker
 // has finished -- including its final DB writes. Call after the pool's
@@ -190,14 +224,18 @@ func startScanAsync(ctx context.Context, deps ScanDeps, location storage.Locatio
 	// closing the database -- add() happens synchronously here, before the
 	// goroutine starts, so a Wait() call racing immediately after this
 	// function returns can never miss it.
+	scanCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	if deps.Tracker != nil {
 		deps.Tracker.add()
+		deps.Tracker.register(job.ID, cancel)
 	}
 	go func() {
+		defer cancel()
 		if deps.Tracker != nil {
 			defer deps.Tracker.done()
+			defer deps.Tracker.unregister(job.ID)
 		}
-		runScan(context.WithoutCancel(ctx), deps, location, job.ID, job.StartedAt, differential)
+		runScan(scanCtx, deps, location, job.ID, job.StartedAt, differential)
 	}()
 	return job.ID, nil
 }
@@ -384,6 +422,10 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	go func() {
 		defer close(walkDone)
 		walkErr = walkFn(ctx, location.RootPath, func(rec indexer.Record) error {
+			if ctx.Err() != nil {
+				interrupted.Store(true)
+				return ctx.Err()
+			}
 			if rec.IsSymlink {
 				return nil // following a symlink is a storage.Guard-mediated decision elsewhere, not this pass's
 			}
@@ -475,6 +517,18 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 
 	finalErr := walkErr
 	if finalErr != nil {
+		if errors.Is(finalErr, context.Canceled) || interrupted.Load() {
+			log.Info("pipeline: scan cancelled", "location", location.RootPath, "jobID", jobID)
+			if err := deps.DB.InTx(context.WithoutCancel(ctx), func(q *sqlcgen.Queries) error {
+				return q.CancelScanJob(context.WithoutCancel(ctx), jobID)
+			}); err != nil {
+				log.Error("pipeline: cancel scan job", "jobID", jobID, "err", err)
+			}
+			if deps.Nudge != nil {
+				deps.Nudge()
+			}
+			return
+		}
 		log.Error("pipeline: walk failed", "location", location.RootPath, "err", finalErr)
 		// A walk that failed partway means the sweep cannot know which nodes
 		// were genuinely unseen vs. just not reached -- sweep never runs. The
@@ -482,8 +536,8 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 		// barring a failure of the terminalizing write itself -- which only
 		// happens when the DB is failing, and there is nothing else the scan
 		// can do about it.
-		if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
-			return q.FailScanJob(ctx, sqlcgen.FailScanJobParams{ID: jobID, LastError: sql.NullString{String: finalErr.Error(), Valid: true}})
+		if err := deps.DB.InTx(context.WithoutCancel(ctx), func(q *sqlcgen.Queries) error {
+			return q.FailScanJob(context.WithoutCancel(ctx), sqlcgen.FailScanJobParams{ID: jobID, LastError: sql.NullString{String: finalErr.Error(), Valid: true}})
 		}); err != nil {
 			log.Error("pipeline: fail scan job", "jobID", jobID, "err", err)
 		}
@@ -653,9 +707,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	//                 before terminalizing at all and reconcileOrphanedScanJobs
 	//                 (cmd/branchdam, #88) flipped the orphaned RUNNING row
 	//                 at the next boot.
-	//   COMPLETED  -- ran to completion, whether or not individual files failed,
-	//                 and whether or not shutdown began after completion.
-	interruptedByShutdown := interrupted.Load()
+	interruptedByShutdown := interrupted.Load() || errors.Is(ctx.Err(), context.Canceled)
 
 	// CompleteScanJob/CancelScanJob runs in its own transaction, after the
 	// sweep: the two are deliberately not atomic. A crash between them
@@ -664,10 +716,10 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	// re-sweeps harmlessly. Gating the sweep and the terminal write behind
 	// one transaction would instead widen the "RUNNING forever" failure
 	// window on a mid-write crash.
-	if err := deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+	if err := deps.DB.InTx(context.WithoutCancel(ctx), func(q *sqlcgen.Queries) error {
 		switch {
 		case interruptedByShutdown:
-			return q.CancelScanJob(ctx, jobID)
+			return q.CancelScanJob(context.WithoutCancel(ctx), jobID)
 		case sweepWarningNeeded:
 			// #225: distinguishable, on the job row itself, from a walkErr
 			// abort -- this scan reaches COMPLETED (it did complete, cleanly),
@@ -676,7 +728,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			// there were prior ACTIVE nodes this pass would otherwise have
 			// swept -- a genuinely empty, never-before-seen location gets a
 			// plain COMPLETED with no warning (the default case below).
-			return q.CompleteScanJobWithWarning(ctx, sqlcgen.CompleteScanJobWithWarningParams{
+			return q.CompleteScanJobWithWarning(context.WithoutCancel(ctx), sqlcgen.CompleteScanJobWithWarningParams{
 				ID: jobID,
 				LastError: sql.NullString{
 					String: fmt.Sprintf("MISSING sweep skipped: scan saw zero files under %s (possible unmounted or misconfigured storage location) -- no nodes were marked MISSING this pass", location.RootPath),
@@ -684,7 +736,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				},
 			})
 		default:
-			return q.CompleteScanJob(ctx, jobID)
+			return q.CompleteScanJob(context.WithoutCancel(ctx), jobID)
 		}
 	}); err != nil {
 		log.Error("pipeline: terminalize scan job", "jobID", jobID, "cancelled", interruptedByShutdown, "sweepSkippedZeroFiles", sweepSkippedZeroFiles, "sweepWarningNeeded", sweepWarningNeeded, "err", err)
@@ -858,7 +910,37 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 			}
 		}
 	}
-	return n
+
+	created := n
+
+	// Reverse lineage resolution: when a potential parent node (e.g. master camera RAW)
+	// is ingested, previously ingested children/exports that share its filename stem
+	// were unlinked because the parent did not yet exist. Re-evaluate unlinked siblings.
+	if node.FilenameStem.Valid && node.FilenameStem.String != "" {
+		siblings, err := deps.DB.Reader.ListLiveNodesByFilenameStem(ctx, sqlcgen.ListLiveNodesByFilenameStemParams{
+			FilenameStem: node.FilenameStem,
+			Limit:        graph.FilenameStemCandidateCap,
+		})
+		if err != nil {
+			deps.Log.Warn("pipeline.scan: reverse lineage stem lookup failed", "node_id", node.ID, "stem", node.FilenameStem.String, "err", err)
+		} else {
+			for _, sib := range siblings {
+				if sib.ID == node.ID || sib.StorageLocationID != node.StorageLocationID {
+					continue
+				}
+				if sib.GraphStatus == "UNLINKED" {
+					_, sibCreated, sibErr := deps.Engine.ResolveAndCommit(ctx, toGraphNode(sib))
+					if sibErr != nil {
+						deps.Log.Warn("pipeline.scan: reverse lineage resolve failed", "sibling_id", sib.ID, "parent_id", node.ID, "err", sibErr)
+					} else {
+						created += sibCreated
+					}
+				}
+			}
+		}
+	}
+
+	return created
 }
 
 func hasEligibleInheritanceParent(edges []sqlcgen.MediaEdge) bool {

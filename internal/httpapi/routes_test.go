@@ -24,6 +24,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -2593,12 +2594,97 @@ func TestScanJobOutlivesRequestContext(t *testing.T) {
 	}
 }
 
+func TestCancelScanJobEndpoint(t *testing.T) {
+	srv, database := fullTestServer(t)
+	ctx := context.Background()
+
+	// 1. Not Found
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/jobs/999999/cancel", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("POST /api/v1/jobs/999999/cancel: status = %d, want 404", rr.Code)
+	}
+
+	var locID int64
+	var jobCompletedID int64
+	var jobRunningID int64
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "test-cancel-loc", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS", ReadOnly: 0, Prunable: 0,
+		})
+		if err != nil {
+			return err
+		}
+		locID = loc.ID
+		jobCompleted, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: locID, Valid: true},
+			Kind:              "FULL_SCAN",
+		})
+		if err != nil {
+			return err
+		}
+		jobCompletedID = jobCompleted.ID
+		if err := q.CompleteScanJob(ctx, jobCompleted.ID); err != nil {
+			return err
+		}
+		jobRunning, err := q.CreateScanJob(ctx, sqlcgen.CreateScanJobParams{
+			StorageLocationID: sql.NullInt64{Int64: locID, Valid: true},
+			Kind:              "FULL_SCAN",
+		})
+		if err != nil {
+			return err
+		}
+		jobRunningID = jobRunning.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("seed scan jobs: %v", err)
+	}
+
+	// 2. Conflict on completed job
+	rr = doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/jobs/%d/cancel", jobCompletedID), nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("POST /api/v1/jobs/%d/cancel: status = %d, want 409", jobCompletedID, rr.Code)
+	}
+
+	// 3. Conflict on untracked RUNNING job
+	rr = doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/jobs/%d/cancel", jobRunningID), nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("POST /api/v1/jobs/%d/cancel (untracked): status = %d, want 409", jobRunningID, rr.Code)
+	}
+
+	// 4. Cancel succeeds when registered in ScanTracker
+	tracker := &pipeline.ScanTracker{}
+	srv.tracker = tracker
+	cancelledCalled := false
+	tracker.Register(jobRunningID, func() {
+		cancelledCalled = true
+	})
+
+	rr = doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/jobs/%d/cancel", jobRunningID), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/jobs/%d/cancel: status = %d, want 200, body = %s", jobRunningID, rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal cancel response: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("resp.OK = false, want true")
+	}
+	if !cancelledCalled {
+		t.Fatalf("tracker cancel func was not called")
+	}
+}
+
 func TestMutatingRoutesAuthorization(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	srv.cfg().Authz.Groups = []string{"dam-admins"}
 
 	mutatingPaths := []string{
 		"/api/v1/scan",
+		"/api/v1/jobs/1/cancel",
 		"/api/v1/edges/1/confirm",
 		"/api/v1/edges/1/reject",
 		"/api/v1/prune",

@@ -224,6 +224,10 @@ export const api = {
     if (params.state) qs.set("state", params.state);
     return request<{ jobs: ScanJob[]; total: number }>(`/api/v1/jobs?${qs.toString()}`);
   },
+  cancelJob: (id: number) =>
+    request<{ ok: boolean }>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }),
 
   getStorageHealth: () => request<StorageHealth>("/api/v1/storage-health"),
   deleteAgentTelemetry: (agentId: string) =>

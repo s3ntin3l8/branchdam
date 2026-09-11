@@ -2203,3 +2203,106 @@ func TestRunScanResolvesXMPSidecar(t *testing.T) {
 		t.Fatalf("unexpected edge: %+v", edges[0])
 	}
 }
+
+func TestScanJobCancellation(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "alpha")
+	writeFile(t, filepath.Join(root, "b.txt"), "bravo")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	tracker := &ScanTracker{}
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.Tracker = tracker
+
+	started := make(chan struct{})
+	deps.WalkFn = func(walkCtx context.Context, _ string, _ func(indexer.Record) error) error {
+		close(started)
+		<-walkCtx.Done()
+		return walkCtx.Err()
+	}
+
+	loc := storage.Location{ID: locationID, Name: "cancel-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS"}
+	jobID, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan: %v", err)
+	}
+
+	<-started
+	if !tracker.Cancel(jobID) {
+		t.Fatalf("tracker.Cancel(%d) returned false, want true", jobID)
+	}
+
+	job := waitJobDone(t, database, jobID)
+	if job.State != "CANCELLED" {
+		t.Fatalf("scan job state = %q, want CANCELLED", job.State)
+	}
+}
+
+func TestReverseLineageRescanOnMasterIngest(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.Engine = graph.NewEngine(database, nil, graph.FilenameStemResolver{})
+	loc := storage.Location{ID: locationID, Name: "reverse-lineage-test", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS"}
+
+	// Step 1: Ingest export child file first: DSC_1000.jpg
+	childPath := filepath.Join(resolvedRoot, "DSC_1000.jpg")
+	writeFile(t, childPath, "fake jpeg export content")
+
+	jobID1, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan child: %v", err)
+	}
+	waitJobDone(t, database, jobID1)
+
+	childNode, err := database.Reader.GetLiveNodeByPath(ctx, childPath)
+	if err != nil {
+		t.Fatalf("child node not found: %v", err)
+	}
+	if childNode.GraphStatus != "UNLINKED" {
+		t.Fatalf("childNode graph_status = %q, want UNLINKED", childNode.GraphStatus)
+	}
+
+	// Step 2: Now ingest master camera raw parent: DSC_1000.nef
+	parentPath := filepath.Join(resolvedRoot, "DSC_1000.nef")
+	writeFile(t, parentPath, "fake raw master content")
+
+	jobID2, err := RunScan(ctx, deps, loc)
+	if err != nil {
+		t.Fatalf("RunScan parent: %v", err)
+	}
+	waitJobDone(t, database, jobID2)
+
+	parentNode, err := database.Reader.GetLiveNodeByPath(ctx, parentPath)
+	if err != nil {
+		t.Fatalf("parent node not found: %v", err)
+	}
+
+	// Step 3: Verify the lineage edge was created pointing to childNode with parentNode as source!
+	edges, err := database.Reader.ListEdgesByTarget(ctx, childNode.ID)
+	if err != nil {
+		t.Fatalf("ListEdgesByTarget: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("edges count = %d, want 1 edge pointing to child", len(edges))
+	}
+	if edges[0].SourceNodeID != parentNode.ID {
+		t.Errorf("edge source = %d, want parent node ID %d", edges[0].SourceNodeID, parentNode.ID)
+	}
+	if edges[0].RelationshipType != "FINAL_EXPORT" {
+		t.Errorf("relationship = %q, want FINAL_EXPORT", edges[0].RelationshipType)
+	}
+}
