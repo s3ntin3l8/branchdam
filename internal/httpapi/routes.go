@@ -540,9 +540,23 @@ func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*R
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
 
+	if node.LifecycleState != "ARCHIVED" && node.LifecycleState != "ACTIVE" {
+		return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset lifecycle state is %s (expected ARCHIVED)", node.LifecycleState))
+	}
+
 	if node.LifecycleState == "ARCHIVED" {
 		if node.SupersededBy.Valid && node.SupersededBy.Int64 != 0 {
 			return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset has been superseded by asset ID %d", node.SupersededBy.Int64))
+		}
+
+		if s.guard != nil {
+			exists, err := s.guard.Exists(node.FilePath)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("check file on disk", err)
+			}
+			if !exists {
+				return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: file %s does not exist on disk", node.FilePath))
+			}
 		}
 
 		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -557,6 +571,9 @@ func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*R
 			var hErr huma.StatusError
 			if errors.As(err, &hErr) {
 				return nil, hErr
+			}
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: another live asset already occupies %s", node.FilePath))
 			}
 			return nil, huma.Error500InternalServerError("restore asset", err)
 		}

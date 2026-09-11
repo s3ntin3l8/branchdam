@@ -1358,6 +1358,26 @@ func TestRestoreAsset(t *testing.T) {
 	if rrSuperseded.Code != http.StatusConflict {
 		t.Fatalf("POST restore superseded asset status = %d, want 409, body = %s", rrSuperseded.Code, rrSuperseded.Body.String())
 	}
+
+	// 7. Conflict: attempting to restore an asset with MISSING state returns 409
+	var missingNode sqlcgen.MediaNode
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		hash4 := "dddddddddddddddd"
+		var err error
+		missingNode, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "uuid-missing", StorageLocationID: loc.ID, FilePath: "/media/missing_node.jpg",
+			FileName: "missing_node.jpg", FileExt: ".jpg", SizeBytes: 100, MtimeUnix: 1000, FastHash: &hash4,
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "MISSING",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert missingNode: %v", err)
+	}
+	rrMissing := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/restore", missingNode.ID), nil)
+	if rrMissing.Code != http.StatusConflict {
+		t.Fatalf("POST restore missing asset status = %d, want 409, body = %s", rrMissing.Code, rrMissing.Body.String())
+	}
 }
 
 func TestGetAssetMetadata(t *testing.T) {

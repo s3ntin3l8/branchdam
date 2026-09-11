@@ -225,7 +225,9 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
           {restoreAsset.isPending ? "Restoring…" : "Restore Asset"}
         </button>
         {restoreAsset.isError && (
-          <span className="text-xs text-red-400">Failed to restore: {String(restoreAsset.error)}</span>
+          <span className="text-xs text-red-400">
+            Failed to restore: {restoreAsset.error instanceof Error ? restoreAsset.error.message : String(restoreAsset.error)}
+          </span>
         )}
       </div>
     );
