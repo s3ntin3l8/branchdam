@@ -386,6 +386,8 @@ func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen
 		return 0, d.applyNodeDeleted(ctx, q, ev)
 	case EventPathRebased:
 		return d.applyPathRebased(ctx, q, ev)
+	case EventVirtualNodeCreated:
+		return d.applyVirtualNodeCreated(ctx, q, ev)
 	default:
 		return 0, fmt.Errorf("%w: %s", ErrUnknownEventType, ev.EventType)
 	}
@@ -1092,6 +1094,66 @@ func resolveRebaseTarget(guard *storage.Guard, path string) (storage.Location, e
 		return storage.Location{}, fmt.Errorf("%w: rebase target %q resolves to read-only tier %s and no file exists there yet -- the bytes must already be copied into the archive before the server can rebase the record", ErrArchiveFileNotYetPresent, path, loc.Tier)
 	}
 	return loc, nil
+}
+
+// applyVirtualNodeCreated handles EVENT_VIRTUAL_NODE_CREATED: creates a
+// node in media_nodes that represents an integration project (Resolve
+// timeline, Premiere sequence, FCPXML bundle) rather than a physical file.
+// The node uses a virtual storage location (is_virtual=1) and a scheme-based
+// FilePath that the Guard resolves lexically without filesystem I/O.
+func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) (int64, error) {
+	var p VirtualNodeCreated
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return 0, fmt.Errorf("%w: unmarshal virtual node created: %v", ErrMalformedPayload, err)
+	}
+	if p.NodeUUID == "" {
+		return 0, fmt.Errorf("%w: missing nodeUuid in virtual node created payload", ErrInvalidNodeUUID)
+	}
+	if p.FilePath == "" {
+		return 0, fmt.Errorf("%w: missing filePath in virtual node created payload", ErrMalformedPayload)
+	}
+
+	// Idempotency: if node already exists with this node_uuid, it's a no-op success.
+	if _, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID); err == nil {
+		return 0, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("lookup node by uuid: %w", err)
+	}
+
+	// Resolve storage location from the virtual path. The path uses a
+	// conventional absolute prefix (e.g. "/virtual/resolve/My%20Documentary")
+	// that the Guard resolves lexically via an is_virtual storage location
+	// -- no stat call.
+	if d.guard == nil {
+		return 0, fmt.Errorf("agent: storage guard not configured, deferring virtual node create for %q", p.FilePath)
+	}
+	loc, err := d.guard.Resolve(p.FilePath)
+	if err != nil {
+		return 0, fmt.Errorf("%w: virtual path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
+	}
+
+	displayName := p.DisplayName
+	if displayName == "" {
+		displayName = filepath.Base(p.FilePath)
+	}
+
+	inserted, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+		NodeUuid:          p.NodeUUID,
+		StorageLocationID: loc.ID,
+		FilePath:          p.FilePath,
+		FileName:          displayName,
+		FileExt:           "",
+		SizeBytes:         0,
+		MtimeUnix:         0,
+		IndexingStatus:    "INDEXED_SHALLOW",
+		GraphStatus:       "UNLINKED",
+		LifecycleState:    "ACTIVE",
+	})
+	if err != nil {
+		return 0, fmt.Errorf("insert virtual node: %w", err)
+	}
+
+	return inserted.ID, nil
 }
 
 func isDuplicateEdgeError(err error) bool {

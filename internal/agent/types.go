@@ -10,11 +10,12 @@ import (
 
 // Event type constants matching the event_queue.event_type CHECK constraint.
 const (
-	EventNodeCreated  = "EVENT_NODE_CREATED"
-	EventEdgeAttached = "EVENT_EDGE_ATTACHED"
-	EventNodeMoved    = "EVENT_NODE_MOVED"
-	EventNodeDeleted  = "EVENT_NODE_DELETED"
-	EventPathRebased  = "EVENT_PATH_REBASED"
+	EventNodeCreated        = "EVENT_NODE_CREATED"
+	EventEdgeAttached       = "EVENT_EDGE_ATTACHED"
+	EventNodeMoved          = "EVENT_NODE_MOVED"
+	EventNodeDeleted        = "EVENT_NODE_DELETED"
+	EventPathRebased        = "EVENT_PATH_REBASED"
+	EventVirtualNodeCreated = "EVENT_VIRTUAL_NODE_CREATED"
 )
 
 // Common errors.
@@ -102,6 +103,19 @@ type EdgeAttachedPayload struct {
 	// review decision (CONFIRMED/REJECTED) is never the agent's to make.
 	// The field is kept so an existing agent payload still parses.
 	ReviewState string `json:"reviewState,omitempty"`
+}
+
+// VirtualNodeCreated represents the payload for EVENT_VIRTUAL_NODE_CREATED.
+// Unlike NodeCreatedPayload, it carries no file metadata — the node
+// represents an integration project (Resolve timeline, Premiere sequence,
+// FCPXML bundle), not a physical file on disk. The FilePath uses a
+// conventional absolute prefix (e.g. "/virtual/resolve/My%20Documentary")
+// that the Guard resolves lexically via an is_virtual storage location.
+type VirtualNodeCreated struct {
+	NodeUUID    string `json:"nodeUuid"`
+	FilePath    string `json:"filePath"`
+	DisplayName string `json:"displayName"`
+	ProjectType string `json:"projectType"`
 }
 
 // NodeMovedPayload represents the payload for EVENT_NODE_MOVED.

@@ -21,14 +21,16 @@ import (
 )
 
 type testEnv struct {
-	db      *db.DB
-	guard   *storage.Guard
-	staging string
-	exports string
-	archive string
-	locID1  int64
-	locID2  int64
-	locID3  int64
+	db           *db.DB
+	guard        *storage.Guard
+	staging      string
+	exports      string
+	archive      string
+	locID1       int64
+	locID2       int64
+	locID3       int64
+	locIDVirtual int64
+	virtualRoot  string
 }
 
 func setupTestDB(t *testing.T) *testEnv {
@@ -62,7 +64,7 @@ func setupTestDB(t *testing.T) *testEnv {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	var loc1, loc2, loc3 sqlcgen.StorageLocation
+	var loc1, loc2, loc3, locVirtual sqlcgen.StorageLocation
 	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		loc1, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
@@ -92,6 +94,20 @@ func setupTestDB(t *testing.T) *testEnv {
 			ReadOnly: 1,
 			Prunable: 0,
 		})
+		if err != nil {
+			return err
+		}
+		// Virtual storage location for integration project nodes (Resolve,
+		// Premiere, etc.). Root path is a conventional absolute path;
+		// Guard resolves it lexically without filesystem I/O.
+		locVirtual, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name:      "resolve-virtual",
+			RootPath:  "/virtual/resolve",
+			Tier:      "TIER0_LOCAL_STAGING",
+			ReadOnly:  1,
+			Prunable:  0,
+			IsVirtual: 1,
+		})
 		return err
 	})
 	require.NoError(t, err)
@@ -100,17 +116,20 @@ func setupTestDB(t *testing.T) *testEnv {
 		{ID: loc1.ID, Name: "local_staging", RootPath: resStaging, Tier: "TIER0_LOCAL_STAGING", ReadOnly: false},
 		{ID: loc2.ID, Name: "exports", RootPath: resExports, Tier: "TIER2_EXPORTS", ReadOnly: false},
 		{ID: loc3.ID, Name: "archive", RootPath: resArchive, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
+		{ID: locVirtual.ID, Name: "resolve-virtual", RootPath: "/virtual/resolve", Tier: "TIER0_LOCAL_STAGING", ReadOnly: true, IsVirtual: true},
 	})
 
 	return &testEnv{
-		db:      database,
-		guard:   guard,
-		staging: resStaging,
-		exports: resExports,
-		archive: resArchive,
-		locID1:  loc1.ID,
-		locID2:  loc2.ID,
-		locID3:  loc3.ID,
+		db:           database,
+		guard:        guard,
+		staging:      resStaging,
+		exports:      resExports,
+		archive:      resArchive,
+		locID1:       loc1.ID,
+		locID2:       loc2.ID,
+		locID3:       loc3.ID,
+		locIDVirtual: locVirtual.ID,
+		virtualRoot:  "/virtual/resolve",
 	}
 }
 
@@ -1814,4 +1833,153 @@ func TestDrainer_PathRebased_KnownAndUnknown_SetsIndexedFullWhenFullHashKnown(t 
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+// --- Virtual Node Created tests ---
+
+func TestDrainer_VirtualNodeCreated_BasicFlow(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	virtualUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    virtualUUID,
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+		ProjectType: "resolve_project",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.GetMediaNodeByUUID(ctx, virtualUUID)
+		require.NoError(t, err)
+		require.Equal(t, "/virtual/resolve/My%20Documentary", node.FilePath)
+		require.Equal(t, "Resolve: My Documentary", node.FileName)
+		require.Equal(t, env.locIDVirtual, node.StorageLocationID)
+		require.Equal(t, "INDEXED_SHALLOW", node.IndexingStatus)
+		require.Equal(t, "UNLINKED", node.GraphStatus)
+		require.Equal(t, "ACTIVE", node.LifecycleState)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_VirtualNodeCreated_Idempotent(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	virtualUUID := uuid.New().String()
+	payload := agent.VirtualNodeCreated{
+		NodeUUID:    virtualUUID,
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+		ProjectType: "resolve_project",
+	}
+
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, payload)
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	// Enqueue same event again - should be a no-op.
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, payload)
+	stats, err = drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_EdgeAttached(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	// Create a real media node.
+	mediaUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: mediaUUID,
+		FilePath: filepath.Join(env.staging, "scene1.mov"),
+	})
+
+	// Create the virtual project node.
+	virtualUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    virtualUUID,
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+		ProjectType: "resolve_project",
+	})
+
+	// Attach an edge from the media node to the virtual project node.
+	enqueueEvent(t, env.db, agent.EventEdgeAttached, agent.EdgeAttachedPayload{
+		SourceNodeUUID:   mediaUUID,
+		TargetNodeUUID:   virtualUUID,
+		RelationshipType: "PROJECT_SIDECAR",
+		Confidence:       1.00,
+		Tier:             1,
+		Resolver:         "resolve_project_db",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 3, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		mediaNode, err := q.GetMediaNodeByUUID(ctx, mediaUUID)
+		require.NoError(t, err)
+		virtualNode, err := q.GetMediaNodeByUUID(ctx, virtualUUID)
+		require.NoError(t, err)
+
+		edges, err := q.ListEdgesByTarget(ctx, virtualNode.ID)
+		require.NoError(t, err)
+		require.Len(t, edges, 1)
+		require.Equal(t, mediaNode.ID, edges[0].SourceNodeID)
+		require.Equal(t, virtualNode.ID, edges[0].TargetNodeID)
+		require.Equal(t, "PROJECT_SIDECAR", edges[0].RelationshipType)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestDrainer_VirtualNodeCreated_MissingFilePath(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	virtualUUID := uuid.New().String()
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    virtualUUID,
+		FilePath:    "",
+		DisplayName: "Resolve: My Documentary",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_MissingNodeUUID(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    "",
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
 }
