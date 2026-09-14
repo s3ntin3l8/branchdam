@@ -1954,6 +1954,33 @@ func TestAgentEventEnqueues(t *testing.T) {
 	}
 }
 
+func TestAgentEventVirtualNodeCreatedEnqueues(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	body := map[string]string{
+		"agentId":   "workstation-1",
+		"eventType": "EVENT_VIRTUAL_NODE_CREATED",
+		"payload":   `{"nodeUuid":"018f3a9b-8d76-7890-a123-456789abcdef","filePath":"/virtual/resolve/workstation-1/test","displayName":"Test","projectType":"resolve_project"}`,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytesOfJSON(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		EventID string `json:"eventId"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.EventID == "" {
+		t.Error("eventId is empty")
+	}
+}
+
 func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
 	srv, database := fullTestServer(t)
 	eventUUID := "018f3a9b-8d76-7890-a123-456789abcdef"

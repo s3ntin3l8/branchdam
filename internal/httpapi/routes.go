@@ -1745,7 +1745,7 @@ type AgentEventInput struct {
 	Body struct {
 		EventUUID string `json:"eventUuid,omitempty"` // Client-minted UUID for idempotent transport retry
 		AgentID   string `json:"agentId" required:"true"`
-		EventType string `json:"eventType" required:"true" enum:"EVENT_NODE_CREATED,EVENT_EDGE_ATTACHED,EVENT_NODE_MOVED,EVENT_NODE_DELETED,EVENT_PATH_REBASED"`
+		EventType string `json:"eventType" required:"true" enum:"EVENT_NODE_CREATED,EVENT_EDGE_ATTACHED,EVENT_NODE_MOVED,EVENT_NODE_DELETED,EVENT_PATH_REBASED,EVENT_VIRTUAL_NODE_CREATED"`
 		Payload   string `json:"payload" required:"true"` // opaque JSON, applied asynchronously by internal/agent.Drainer (#166)
 	}
 }

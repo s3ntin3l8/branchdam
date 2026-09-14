@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -261,6 +262,8 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			errors.Is(processErr, ErrReadOnlyRebase) ||
 			errors.Is(processErr, ErrArchivedNode) ||
 			errors.Is(processErr, ErrWouldCreateCycle) ||
+			errors.Is(processErr, ErrVirtualPathNotVirtual) ||
+			errors.Is(processErr, ErrCrossAgentCollision) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
 		attempts := int(ev.RetryCount) + 1
@@ -386,6 +389,8 @@ func (d *Drainer) applyEvent(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen
 		return 0, d.applyNodeDeleted(ctx, q, ev)
 	case EventPathRebased:
 		return d.applyPathRebased(ctx, q, ev)
+	case EventVirtualNodeCreated:
+		return d.applyVirtualNodeCreated(ctx, q, ev)
 	default:
 		return 0, fmt.Errorf("%w: %s", ErrUnknownEventType, ev.EventType)
 	}
@@ -1092,6 +1097,170 @@ func resolveRebaseTarget(guard *storage.Guard, path string) (storage.Location, e
 		return storage.Location{}, fmt.Errorf("%w: rebase target %q resolves to read-only tier %s and no file exists there yet -- the bytes must already be copied into the archive before the server can rebase the record", ErrArchiveFileNotYetPresent, path, loc.Tier)
 	}
 	return loc, nil
+}
+
+// extractPathAgentSegment returns the <agentID> segment of a virtual path
+// if it follows the convention "/<rootPath>/<agentID>/...". The second
+// return value reports whether a segment was found at all — false means
+// the path is in the legacy unscoped form (no agentID segment), which the
+// collision handler treats as same-agent reuse.
+func extractPathAgentSegment(filePath, rootPath string) (string, bool) {
+	prefix := rootPath + "/"
+	if !strings.HasPrefix(filePath, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(filePath, prefix)
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return "", false
+	}
+	segment := rest[:slash]
+	if segment == "" {
+		return "", false
+	}
+	return segment, true
+}
+
+// applyVirtualNodeCreated handles EVENT_VIRTUAL_NODE_CREATED: creates a
+// node in media_nodes that represents an integration project (Resolve
+// timeline, Premiere sequence, FCPXML bundle) rather than a physical file.
+// The node uses a virtual storage location (is_virtual=1) and a scheme-based
+// FilePath that the Guard resolves lexically without filesystem I/O.
+func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) (int64, error) {
+	var p VirtualNodeCreated
+	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
+		return 0, fmt.Errorf("%w: unmarshal virtual node created: %v", ErrMalformedPayload, err)
+	}
+	if p.NodeUUID == "" {
+		return 0, fmt.Errorf("%w: missing nodeUuid in virtual node created payload", ErrInvalidNodeUUID)
+	}
+	if p.FilePath == "" {
+		return 0, fmt.Errorf("%w: missing filePath in virtual node created payload", ErrMalformedPayload)
+	}
+
+	// Idempotency: if node already exists with this node_uuid, it's a no-op success.
+	if _, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID); err == nil {
+		return 0, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("lookup node by uuid: %w", err)
+	}
+
+	// Resolve storage location from the virtual path. The path uses a
+	// conventional absolute prefix (e.g. "/virtual/resolve/<agentID>/My%20Documentary")
+	// that the Guard resolves lexically via an is_virtual storage location
+	// -- no stat call.
+	if d.guard == nil {
+		return 0, fmt.Errorf("agent: storage guard not configured, deferring virtual node create for %q", p.FilePath)
+	}
+	loc, err := d.guard.Resolve(p.FilePath)
+	if err != nil {
+		return 0, fmt.Errorf("%w: virtual path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
+	}
+	if !loc.IsVirtual {
+		return 0, fmt.Errorf("%w: %q resolves to non-virtual location %q (tier %s)", ErrVirtualPathNotVirtual, p.FilePath, loc.Name, loc.Tier)
+	}
+
+	// Log unknown projectType as a warning rather than failing fatally.
+	// The value is metadata-only — failing here forces agent/server
+	// version lockstep for no data-safety benefit. A future project type
+	// (e.g. "avid_bin") or a typo won't kill the event.
+	if p.ProjectType != "" {
+		validProjectTypes := map[string]bool{
+			"resolve_project":  true,
+			"premiere_project": true,
+			"fcpxml_bundle":    true,
+		}
+		if !validProjectTypes[p.ProjectType] {
+			d.log.Warn("agent: unrecognized projectType in virtual node, persisting anyway",
+				"projectType", p.ProjectType, "nodeUUID", p.NodeUUID)
+		}
+	}
+
+	displayName := p.DisplayName
+	if displayName == "" {
+		displayName = filepath.Base(p.FilePath)
+		if unescaped, err := url.PathUnescape(displayName); err == nil {
+			displayName = unescaped
+		}
+	}
+
+	inserted, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+		NodeUuid:          p.NodeUUID,
+		StorageLocationID: loc.ID,
+		FilePath:          p.FilePath,
+		FileName:          displayName,
+		FileExt:           "",
+		SizeBytes:         0,
+		MtimeUnix:         0,
+		IndexingStatus:    "INDEXED_SHALLOW",
+		GraphStatus:       "UNLINKED",
+		LifecycleState:    "ACTIVE",
+	})
+	if err != nil {
+		// Handle unique constraint violation on file_path: another
+		// agent may have already created a virtual node at this path.
+		// Validate agent ownership before reusing:
+		//   - Path has an <agentID> segment matching ev.AgentID    -> reuse
+		//   - Path has no agent segment (legacy unscoped)         -> reuse
+		//     (the agent is replaying an unscoped event with a
+		//     deterministic nodeUUID; "different agent" would be
+		//     misleading on an intra-agent event)
+		//   - Path has a different <agentID> segment              -> ErrCrossAgentCollision
+		if strings.Contains(err.Error(), "constraint failed") {
+			existing, lookupErr := q.GetMediaNodeByFilePath(ctx, p.FilePath)
+			if lookupErr == nil {
+				pathAgent, hasSegment := extractPathAgentSegment(p.FilePath, loc.RootPath)
+				sameAgent := hasSegment && pathAgent == ev.AgentID
+				legacyUnscoped := !hasSegment
+				if sameAgent || legacyUnscoped {
+					d.log.Info("agent: virtual node file_path already exists for this agent, reusing",
+						"filePath", p.FilePath, "nodeUUID", p.NodeUUID, "existingID", existing.ID)
+					// Upsert evidenceJson on reuse — the agent may
+					// have richer metadata on this sync pass.
+					if len(p.EvidenceJSON) > 0 {
+						source := "virtual_evidence"
+						if p.ProjectType != "" {
+							source = p.ProjectType + "_evidence"
+						}
+						if mdErr := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+							NodeID: existing.ID,
+							Source: source,
+							Key:    "evidence_json",
+							Value:  string(p.EvidenceJSON),
+						}); mdErr != nil {
+							d.log.Warn("agent: failed to upsert evidence on reuse",
+								"nodeID", existing.ID, "err", mdErr)
+						}
+					}
+					return existing.ID, nil
+				}
+				return 0, fmt.Errorf("%w: virtual path %q already exists for a different agent (existing node_id=%d, event agent=%s)",
+					ErrCrossAgentCollision, p.FilePath, existing.ID, ev.AgentID)
+			}
+		}
+		return 0, fmt.Errorf("insert virtual node: %w", err)
+	}
+
+	// Persist EvidenceJSON as node_metadata overflow if provided.
+	// This data (timeline names, clip metadata) is queryable via
+	// node_metadata without schema changes to media_nodes.
+	if len(p.EvidenceJSON) > 0 {
+		source := "virtual_evidence"
+		if p.ProjectType != "" {
+			source = p.ProjectType + "_evidence"
+		}
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: inserted.ID,
+			Source: source,
+			Key:    "evidence_json",
+			Value:  string(p.EvidenceJSON),
+		}); err != nil {
+			d.log.Warn("agent: failed to persist virtual node evidence, continuing",
+				"nodeUUID", p.NodeUUID, "err", err)
+		}
+	}
+
+	return inserted.ID, nil
 }
 
 func isDuplicateEdgeError(err error) bool {

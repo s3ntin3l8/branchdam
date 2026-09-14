@@ -178,6 +178,35 @@ Processing `EVENT_NODE_DELETED` triggers a safe, multi-step soft delete:
 }
 ```
 
+### 3.6. `EVENT_VIRTUAL_NODE_CREATED`
+
+Creates a virtual media node representing an integration project timeline (Resolve, Premiere, FCPXML). The node's `file_path` uses a conventional absolute prefix under the `resolve-virtual` storage location; Guard resolves it lexically without filesystem I/O.
+
+**Payload fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `nodeUuid` | string | yes | Deterministic UUID (SHA256 of agentId + timelineName + databaseURL) |
+| `filePath` | string | yes | Must resolve to a `virtual` storage location. Agent convention: `/virtual/resolve/<agentID>/<sanitized-name>-<8-hex hash>` (e.g. `/virtual/resolve/workstation-01/My%20Documentary-a2bb3478`) |
+| `displayName` | string | yes | Human-readable label shown in the asset graph (uses raw timeline name) |
+| `projectType` | string | no | One of `resolve_project`, `premiere_project`, `fcpxml_bundle`. Empty accepted for backward compat |
+| `evidenceJson` | string | no | Optional evidence JSON (timeline-level metadata) |
+
+```json
+{
+  "nodeUuid": "018f...",
+  "filePath": "/virtual/resolve/workstation-01/My%20Documentary-a2bb3478",
+  "displayName": "Resolve: My Documentary",
+  "projectType": "resolve_project",
+  "evidenceJson": "{\"schemaMapping\":\"resolve-projectdb-1\",\"databaseUrl\":\"postgresql://...\",\"timelineName\":\"My Documentary\"}"
+}
+```
+
+**Fatal errors (no retry):**
+- `ErrVirtualPathNotVirtual`: `filePath` resolves to a non-virtual storage location
+- `ErrCrossAgentCollision`: `filePath` already exists for a different agent
+- `ErrMalformedPayload`: missing `nodeUuid` or `filePath`
+
 ---
 
 ## 4. Direct Streaming Upload (`POST /api/v1/agent/upload`)

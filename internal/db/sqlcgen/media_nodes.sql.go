@@ -200,6 +200,58 @@ func (q *Queries) GetMediaNodeByFastHash(ctx context.Context, fastHash *string) 
 	return id, err
 }
 
+const getMediaNodeByFilePath = `-- name: GetMediaNodeByFilePath :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED'
+`
+
+func (q *Queries) GetMediaNodeByFilePath(ctx context.Context, filePath string) (MediaNode, error) {
+	row := q.db.QueryRowContext(ctx, getMediaNodeByFilePath, filePath)
+	var i MediaNode
+	err := row.Scan(
+		&i.ID,
+		&i.NodeUuid,
+		&i.StorageLocationID,
+		&i.FilePath,
+		&i.FileName,
+		&i.FileExt,
+		&i.SizeBytes,
+		&i.MtimeUnix,
+		&i.FastHash,
+		&i.FullHash,
+		&i.Phash,
+		&i.IndexingStatus,
+		&i.GraphStatus,
+		&i.LifecycleState,
+		&i.SupersededBy,
+		&i.OriginalDocumentID,
+		&i.DocumentID,
+		&i.DerivedFromID,
+		&i.CapturedAtUnix,
+		&i.CameraModel,
+		&i.FilenameStem,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CameraSerial,
+		&i.LensModel,
+		&i.ThumbState,
+		&i.ThumbAttempts,
+		&i.SourcePathHash,
+		&i.UploadedByUserID,
+	)
+	return i, err
+}
+
 const getMediaNodeByFullHash = `-- name: GetMediaNodeByFullHash :one
 SELECT id, node_uuid, file_path, lifecycle_state, indexing_status, size_bytes
 FROM media_nodes

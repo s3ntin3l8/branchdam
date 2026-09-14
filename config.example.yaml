@@ -126,8 +126,18 @@ storageLocations:
     virtual: true                 # Virtual namespace for branchdam-agent's offline ingest queue drain
                                   # (EVENT_NODE_CREATED before files rebase to Tier-3 archive). Needs no
                                   # host directory or mount on disk — Guard resolves it virtually without filesystem stat.
-                                  # Per-machine subtree convention: /storage/staging/<agentId>/... to avoid
-                                  # path collisions across multiple workstations.
+  # Per-machine subtree convention: /storage/staging/<agentId>/... to avoid
+  # path collisions across multiple workstations.
+
+  # Virtual storage location for agent integration events (Resolve timelines,
+  # Premiere sequences, FCPXML bundles). Agent code emits EVENT_VIRTUAL_NODE_CREATED
+  # under this root; Guard resolves paths lexically without filesystem stat.
+  # Required when using the Resolve/Premiere integration. If using multiple agents,
+  # append agentId to filePath (e.g. /virtual/resolve/<agentId>/Timeline).
+  - name: resolve-virtual
+    rootPath: /virtual/resolve
+    tier: TIER0_LOCAL_STAGING
+    virtual: true
 
   - name: exports
     rootPath: /storage/exports
