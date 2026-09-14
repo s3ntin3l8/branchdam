@@ -1188,6 +1188,23 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 				if strings.HasPrefix(p.FilePath, expectedPrefix) {
 					d.log.Info("agent: virtual node file_path already exists for this agent, reusing",
 						"filePath", p.FilePath, "nodeUUID", p.NodeUUID, "existingID", existing.ID)
+					// Upsert evidenceJson on reuse — the agent may
+					// have richer metadata on this sync pass.
+					if len(p.EvidenceJSON) > 0 {
+						source := "virtual_evidence"
+						if p.ProjectType != "" {
+							source = p.ProjectType + "_evidence"
+						}
+						if mdErr := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+							NodeID: existing.ID,
+							Source: source,
+							Key:    "evidence_json",
+							Value:  string(p.EvidenceJSON),
+						}); mdErr != nil {
+							d.log.Warn("agent: failed to upsert evidence on reuse",
+								"nodeID", existing.ID, "err", mdErr)
+						}
+					}
 					return existing.ID, nil
 				}
 				return 0, fmt.Errorf("%w: virtual path %q already exists for a different agent (existing node_id=%d, event agent=%s)",

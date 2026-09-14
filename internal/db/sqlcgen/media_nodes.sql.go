@@ -210,7 +210,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE file_path = ?1
+WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED'
 `
 
 func (q *Queries) GetMediaNodeByFilePath(ctx context.Context, filePath string) (MediaNode, error) {
