@@ -2,10 +2,13 @@
 
 -- Expand node_metadata.source CHECK to allow integration evidence sources.
 -- Previous constraint only allowed ('exiftool','ffprobe','internal').
--- Virtual node evidence uses projectType-derived sources like
--- 'resolve_evidence', 'premiere_evidence', 'fcpxml_evidence',
--- 'virtual_evidence' (when projectType is empty). Use a LIKE pattern
--- for extensibility rather than enumerating each integration.
+-- Virtual node evidence uses projectType-derived sources
+-- (see internal/agent/drainer.go:applyVirtualNodeCreated):
+--   projectType='resolve_project'  -> source='resolve_project_evidence'
+--   projectType='premiere_project' -> source='premiere_project_evidence'
+--   projectType='fcpxml_bundle'    -> source='fcpxml_bundle_evidence'
+--   projectType=''                 -> source='virtual_evidence'
+-- Use a LIKE pattern for extensibility rather than enumerating each integration.
 CREATE TABLE node_metadata_new (
     node_id INTEGER NOT NULL REFERENCES media_nodes(id) ON DELETE RESTRICT,
     source  TEXT    NOT NULL CHECK (source IN ('exiftool','ffprobe','internal')

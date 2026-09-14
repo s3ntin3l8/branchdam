@@ -2,6 +2,12 @@
 
 -- Expand event_type CHECK to include EVENT_VIRTUAL_NODE_CREATED.
 -- SQLite cannot ALTER CHECK constraints; recreate the table.
+--
+-- The recreated index name (ix_event_queue_status) intentionally matches
+-- the original from 00001_init.sql so dropping the old index here would
+-- be a no-op if it existed. The column list stays (status, created_at) to
+-- match ListPendingAgentEvents' "WHERE status='PENDING' ORDER BY created_at ASC"
+-- covering index — see internal/db/queries/event_queue.sql:10.
 CREATE TABLE event_queue_new (
     id           INTEGER PRIMARY KEY,
     event_uuid   TEXT NOT NULL UNIQUE,
@@ -28,7 +34,7 @@ SELECT
 FROM event_queue;
 DROP TABLE event_queue;
 ALTER TABLE event_queue_new RENAME TO event_queue;
-CREATE INDEX ix_event_queue_status ON event_queue(status, id);
+CREATE INDEX ix_event_queue_status ON event_queue(status, created_at);
 
 -- +goose Down
 
@@ -62,4 +68,4 @@ FROM event_queue
 WHERE event_type <> 'EVENT_VIRTUAL_NODE_CREATED';
 DROP TABLE event_queue;
 ALTER TABLE event_queue_old RENAME TO event_queue;
-CREATE INDEX ix_event_queue_status ON event_queue(status, id);
+CREATE INDEX ix_event_queue_status ON event_queue(status, created_at);

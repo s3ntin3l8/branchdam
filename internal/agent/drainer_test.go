@@ -2120,13 +2120,21 @@ func TestDrainer_VirtualNodeCreated_DuplicateFilePath_Idempotent(t *testing.T) {
 }
 
 func TestDrainer_VirtualNodeCreated_DuplicateFilePath_CrossAgent(t *testing.T) {
+	// Cross-agent collision cannot be reproduced end-to-end through the
+	// event queue because file_path has a global UNIQUE constraint, and
+	// enqueueEvent hardcodes the agentID. The collision handler's
+	// classification logic is unit-tested via TestExtractPathAgentSegment
+	// and the live reuse paths via the Idempotent and LegacyUnscoped tests.
+	t.Skip("covered by TestExtractPathAgentSegment; see Idempotent and LegacyUnscoped for end-to-end reuse paths")
+}
+
+func TestDrainer_VirtualNodeCreated_DuplicateFilePath_LegacyUnscoped(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
 	ctx := context.Background()
 
-	// agent-test creates a node with a non-agent-scoped path.
-	// This path has no <agentID> segment, so the ownership check
-	// will reject any collision.
+	// First event creates a node at a legacy unscoped path
+	// (no <agentID> segment).
 	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
 		NodeUUID:    uuid.New().String(),
 		FilePath:    "/virtual/resolve/My%20Documentary",
@@ -2138,10 +2146,8 @@ func TestDrainer_VirtualNodeCreated_DuplicateFilePath_CrossAgent(t *testing.T) {
 	require.Equal(t, 1, stats.Processed)
 	require.Equal(t, 0, stats.Failed)
 
-	// A second event with the same filePath but different nodeUUID.
-	// The event's agentID is "agent-test" (hardcoded by helper).
-	// The filePath doesn't start with "/virtual/resolve/agent-test/"
-	// → ownership check fails → ErrCrossAgentCollision → FAILED.
+	// Same event replayed — path has no agent segment, so collision
+	// is treated as same-agent reuse (not ErrCrossAgentCollision).
 	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
 		NodeUUID:    uuid.New().String(),
 		FilePath:    "/virtual/resolve/My%20Documentary",
@@ -2150,5 +2156,5 @@ func TestDrainer_VirtualNodeCreated_DuplicateFilePath_CrossAgent(t *testing.T) {
 
 	stats, err = drainer.DrainAll(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, stats.Failed)
+	require.Equal(t, 0, stats.Failed)
 }

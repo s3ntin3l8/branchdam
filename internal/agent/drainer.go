@@ -1099,6 +1099,28 @@ func resolveRebaseTarget(guard *storage.Guard, path string) (storage.Location, e
 	return loc, nil
 }
 
+// extractPathAgentSegment returns the <agentID> segment of a virtual path
+// if it follows the convention "/<rootPath>/<agentID>/...". The second
+// return value reports whether a segment was found at all — false means
+// the path is in the legacy unscoped form (no agentID segment), which the
+// collision handler treats as same-agent reuse.
+func extractPathAgentSegment(filePath, rootPath string) (string, bool) {
+	prefix := rootPath + "/"
+	if !strings.HasPrefix(filePath, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(filePath, prefix)
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return "", false
+	}
+	segment := rest[:slash]
+	if segment == "" {
+		return "", false
+	}
+	return segment, true
+}
+
 // applyVirtualNodeCreated handles EVENT_VIRTUAL_NODE_CREATED: creates a
 // node in media_nodes that represents an integration project (Resolve
 // timeline, Premiere sequence, FCPXML bundle) rather than a physical file.
@@ -1177,15 +1199,20 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 	if err != nil {
 		// Handle unique constraint violation on file_path: another
 		// agent may have already created a virtual node at this path.
-		// Validate agent ownership before reusing — the filePath
-		// convention is /virtual/resolve/<agentID>/..., so the agent
-		// segment must match the authenticated agent. Cross-agent
-		// collisions are fatal to prevent data attribution errors.
+		// Validate agent ownership before reusing:
+		//   - Path has an <agentID> segment matching ev.AgentID -> reuse
+		//   - Path has no agent segment (legacy unscoped)       -> reuse
+		//     (the agent is replaying an unscoped event with a
+		//     deterministic nodeUUID; "different agent" would be
+		//     misleading on an intra-agent event)
+		//   - Path has a different <agentID> segment             -> ErrCrossAgentCollision
 		if strings.Contains(err.Error(), "constraint failed") {
 			existing, lookupErr := q.GetMediaNodeByFilePath(ctx, p.FilePath)
 			if lookupErr == nil {
-				expectedPrefix := loc.RootPath + "/" + ev.AgentID + "/"
-				if strings.HasPrefix(p.FilePath, expectedPrefix) {
+				pathAgent, hasSegment := extractPathAgentSegment(p.FilePath, loc.RootPath)
+				sameAgent := hasSegment && pathAgent == ev.AgentID
+				legacyUnscoped := !hasSegment
+				if sameAgent || legacyUnscoped {
 					d.log.Info("agent: virtual node file_path already exists for this agent, reusing",
 						"filePath", p.FilePath, "nodeUUID", p.NodeUUID, "existingID", existing.ID)
 					// Upsert evidenceJson on reuse — the agent may
