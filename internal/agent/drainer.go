@@ -261,6 +261,8 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			errors.Is(processErr, ErrReadOnlyRebase) ||
 			errors.Is(processErr, ErrArchivedNode) ||
 			errors.Is(processErr, ErrWouldCreateCycle) ||
+			errors.Is(processErr, ErrVirtualPathNotVirtual) ||
+			errors.Is(processErr, ErrInvalidProjectType) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
 		attempts := int(ev.RetryCount) + 1
@@ -1130,6 +1132,21 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 	loc, err := d.guard.Resolve(p.FilePath)
 	if err != nil {
 		return 0, fmt.Errorf("%w: virtual path %q does not resolve to any known storage location: %v", ErrMalformedPayload, p.FilePath, err)
+	}
+	if !loc.IsVirtual {
+		return 0, fmt.Errorf("%w: %q resolves to non-virtual location %q (tier %s)", ErrVirtualPathNotVirtual, p.FilePath, loc.Name, loc.Tier)
+	}
+
+	// Validate ProjectType against known values. An unrecognized type is
+	// fatal — the agent is sending data the server can't meaningfully
+	// persist, and retrying won't change that.
+	validProjectTypes := map[string]bool{
+		"resolve_project":  true,
+		"premiere_project": true,
+		"fcpxml_bundle":    true,
+	}
+	if p.ProjectType != "" && !validProjectTypes[p.ProjectType] {
+		return 0, fmt.Errorf("%w: %q", ErrInvalidProjectType, p.ProjectType)
 	}
 
 	displayName := p.DisplayName

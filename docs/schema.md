@@ -172,6 +172,8 @@ Every migration after `00001_init.sql`, in order:
 | `00020_users_and_audit.sql` | `actor_audit` table; attribution FKs on nodes (`uploaded_by_user_id`), scan jobs (`started_by_user_id`), and pairings (`user_id`) | First-class multi-user attribution and administrative audit trail |
 | `00021_login_audit_password_reset_source.sql` | Extends `login_audit.source` CHECK constraint | Integrates password-reset events into the unified login audit log |
 | `00022_storage_locations_is_virtual.sql` | `storage_locations.is_virtual` column | Virtual storage namespaces for agent offline staging locations |
+| `00023_media_nodes_file_path_idx.sql` | `ix_media_nodes_file_path` index | Efficient file path lookups for `Guard.Resolve` and `RebaseNodePathByUUID` |
+| `00024_virtual_node_and_event.sql` | `event_queue` CHECK expansion (+`EVENT_VIRTUAL_NODE_CREATED`) | Agent integration events for virtual project nodes (Resolve timelines, Premiere sequences). Virtual storage location is config-driven (`resolve-virtual`), not migration-seeded |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.

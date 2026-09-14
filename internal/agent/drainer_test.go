@@ -1983,3 +1983,59 @@ func TestDrainer_VirtualNodeCreated_MissingNodeUUID(t *testing.T) {
 	require.Equal(t, 0, stats.Processed)
 	require.Equal(t, 1, stats.Failed)
 }
+
+func TestDrainer_VirtualNodeCreated_NonVirtualPath(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	// A path that resolves to a physical storage location, not a virtual one.
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    filepath.Join(env.staging, "fake.mov"),
+		DisplayName: "Fake",
+		ProjectType: "resolve_project",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_InvalidProjectType(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+		ProjectType: "unknown_project_type",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Processed)
+	require.Equal(t, 1, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_EmptyProjectType(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	// Empty ProjectType is allowed (backward compat).
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+		ProjectType: "",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+}

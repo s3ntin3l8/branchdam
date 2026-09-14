@@ -134,10 +134,10 @@ func TestLoadExampleConfig(t *testing.T) {
 	}
 	var foundStaging bool
 	for _, loc := range cfg.StorageLocations {
-		if loc.Tier == "TIER0_LOCAL_STAGING" {
+		if loc.Name == "staging" {
 			foundStaging = true
-			if loc.Name != "staging" {
-				t.Errorf("staging location name = %q, want %q", loc.Name, "staging")
+			if loc.Tier != "TIER0_LOCAL_STAGING" {
+				t.Errorf("staging location tier = %q, want %q", loc.Tier, "TIER0_LOCAL_STAGING")
 			}
 			if loc.RootPath != "/storage/staging" {
 				t.Errorf("staging location rootPath = %q, want %q", loc.RootPath, "/storage/staging")
@@ -145,7 +145,7 @@ func TestLoadExampleConfig(t *testing.T) {
 		}
 	}
 	if !foundStaging {
-		t.Error("config.example.yaml missing TIER0_LOCAL_STAGING storage location")
+		t.Error("config.example.yaml missing 'staging' storage location")
 	}
 }
 

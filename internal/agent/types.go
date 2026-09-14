@@ -46,6 +46,17 @@ var (
 	// attempt; only marked FAILED once retries are exhausted with the
 	// bytes still absent. Flagged by an independent review pass on #178.
 	ErrArchiveFileNotYetPresent = errors.New("agent: rebase target resolves to Tier 3 but the file does not exist there yet")
+
+	// ErrVirtualPathNotVirtual is fatal: the agent sent a filePath that
+	// resolves to a physical storage location, not an is_virtual one.
+	// Virtual nodes must live under a virtual storage namespace to avoid
+	// colliding with real-file ingest paths.
+	ErrVirtualPathNotVirtual = errors.New("agent: virtual node filePath resolves to a non-virtual storage location")
+
+	// ErrInvalidProjectType is fatal: the agent sent an unrecognized
+	// projectType value. Valid values are "resolve_project",
+	// "premiere_project", "fcpxml_bundle".
+	ErrInvalidProjectType = errors.New("agent: unrecognized projectType in virtual node created payload")
 )
 
 // NodeCreatedPayload represents the payload for EVENT_NODE_CREATED.
@@ -112,10 +123,11 @@ type EdgeAttachedPayload struct {
 // conventional absolute prefix (e.g. "/virtual/resolve/My%20Documentary")
 // that the Guard resolves lexically via an is_virtual storage location.
 type VirtualNodeCreated struct {
-	NodeUUID    string `json:"nodeUuid"`
-	FilePath    string `json:"filePath"`
-	DisplayName string `json:"displayName"`
-	ProjectType string `json:"projectType"`
+	NodeUUID     string          `json:"nodeUuid"`
+	FilePath     string          `json:"filePath"`
+	DisplayName  string          `json:"displayName"`
+	ProjectType  string          `json:"projectType"`
+	EvidenceJSON json.RawMessage `json:"evidenceJson,omitempty"`
 }
 
 // NodeMovedPayload represents the payload for EVENT_NODE_MOVED.
