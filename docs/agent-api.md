@@ -204,7 +204,6 @@ Creates a virtual media node representing an integration project timeline (Resol
 
 **Fatal errors (no retry):**
 - `ErrVirtualPathNotVirtual`: `filePath` resolves to a non-virtual storage location
-- `ErrInvalidProjectType`: unrecognized `projectType` value
 - `ErrMalformedPayload`: missing `nodeUuid` or `filePath`
 
 ---

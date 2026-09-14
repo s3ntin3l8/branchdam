@@ -53,11 +53,6 @@ var (
 	// colliding with real-file ingest paths.
 	ErrVirtualPathNotVirtual = errors.New("agent: virtual node filePath resolves to a non-virtual storage location")
 
-	// ErrInvalidProjectType is fatal: the agent sent an unrecognized
-	// projectType value. Valid values are "resolve_project",
-	// "premiere_project", "fcpxml_bundle".
-	ErrInvalidProjectType = errors.New("agent: unrecognized projectType in virtual node created payload")
-
 	// ErrCrossAgentCollision is fatal: a virtual node with a different
 	// agentID already exists at the requested filePath. This means two
 	// agents are trying to create the same virtual path — a cross-agent
