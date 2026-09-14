@@ -2067,7 +2067,39 @@ func TestDrainer_VirtualNodeCreated_DuplicateFilePath_Idempotent(t *testing.T) {
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
 	ctx := context.Background()
 
-	// First event creates the node.
+	// First event creates the node — agent-test sends its own scoped path.
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    "/virtual/resolve/agent-test/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	// Second event with same filePath but different nodeUUID —
+	// same agent, so it should be an idempotent reuse.
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    "/virtual/resolve/agent-test/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+	})
+
+	stats, err = drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_DuplicateFilePath_CrossAgent(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	// agent-test creates a node with a non-agent-scoped path.
+	// This path has no <agentID> segment, so the ownership check
+	// will reject any collision.
 	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
 		NodeUUID:    uuid.New().String(),
 		FilePath:    "/virtual/resolve/My%20Documentary",
@@ -2079,8 +2111,10 @@ func TestDrainer_VirtualNodeCreated_DuplicateFilePath_Idempotent(t *testing.T) {
 	require.Equal(t, 1, stats.Processed)
 	require.Equal(t, 0, stats.Failed)
 
-	// Second event with same filePath but different nodeUUID —
-	// should hit unique constraint on file_path but handle it gracefully.
+	// A second event with the same filePath but different nodeUUID.
+	// The event's agentID is "agent-test" (hardcoded by helper).
+	// The filePath doesn't start with "/virtual/resolve/agent-test/"
+	// → ownership check fails → ErrCrossAgentCollision → FAILED.
 	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
 		NodeUUID:    uuid.New().String(),
 		FilePath:    "/virtual/resolve/My%20Documentary",
@@ -2089,5 +2123,5 @@ func TestDrainer_VirtualNodeCreated_DuplicateFilePath_Idempotent(t *testing.T) {
 
 	stats, err = drainer.DrainAll(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 0, stats.Failed)
+	require.Equal(t, 1, stats.Failed)
 }
