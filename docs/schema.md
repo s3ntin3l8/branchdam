@@ -174,6 +174,7 @@ Every migration after `00001_init.sql`, in order:
 | `00022_storage_locations_is_virtual.sql` | `storage_locations.is_virtual` column | Virtual storage namespaces for agent offline staging locations |
 | `00023_media_nodes_file_path_idx.sql` | `ix_media_nodes_file_path` index | Efficient file path lookups for `Guard.Resolve` and `RebaseNodePathByUUID` |
 | `00024_virtual_node_and_event.sql` | `event_queue` CHECK expansion (+`EVENT_VIRTUAL_NODE_CREATED`) | Agent integration events for virtual project nodes (Resolve timelines, Premiere sequences). Virtual storage location is config-driven (`resolve-virtual`), not migration-seeded |
+| `00025_expand_node_metadata_source.sql` | `node_metadata.source` CHECK expansion (allows `LIKE '%_evidence'`) | Persist per-integration virtual-node evidence (e.g. `resolve_project_evidence`, `premiere_project_evidence`) without enumerating each |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.
