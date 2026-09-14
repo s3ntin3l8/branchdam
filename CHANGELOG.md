@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.22.0](https://github.com/s3ntin3l8/branchdam/compare/v0.21.0...v0.22.0) (2026-09-14)
+
+
+### Features
+
+* **agent:** EVENT_VIRTUAL_NODE_CREATED handler for integration project nodes ([854f008](https://github.com/s3ntin3l8/branchdam/commit/854f008c4f7fee7518aeaade773ec2bfce3222a0))
+* **agent:** EVENT_VIRTUAL_NODE_CREATED handler for integration project nodes ([22aa8de](https://github.com/s3ntin3l8/branchdam/commit/22aa8de35a032b91823b6d4adfefb34154d90440))
+
+
+### Bug Fixes
+
+* **agent:** address Hermes review: IsVirtual guard, ProjectType validation, EvidenceJSON, docs ([fdeaaf6](https://github.com/s3ntin3l8/branchdam/commit/fdeaaf6c47a286cb37d567bcb4a226dc1cb9c0e6))
+* **agent:** address Hermes round-2 review: evidence persistence, projectType relax, down migration fix ([2c9cf1f](https://github.com/s3ntin3l8/branchdam/commit/2c9cf1f29e3c9e45c168836acb0e8d3b60041b1d))
+* **agent:** address Hermes round-3: rootPath coupling, dead isFatal, evidence source ([0f4606f](https://github.com/s3ntin3l8/branchdam/commit/0f4606f6fca6bd72cfb2e36f0ab24e5ce98dac5e))
+* **agent:** address Hermes round-4: route enum, evidence on reuse, ARCHIVED filter ([9833a51](https://github.com/s3ntin3l8/branchdam/commit/9833a5143f366a9411d145315f902b30c929b2f9))
+* **agent:** address Hermes round-5: index columns, source comment, legacy-unscoped reuse ([9a86af2](https://github.com/s3ntin3l8/branchdam/commit/9a86af2bcbe5625a4281dcb95b7a504cc6e634a9))
+* **agent:** enforce per-agent path scoping on file_path collision ([b377c10](https://github.com/s3ntin3l8/branchdam/commit/b377c103cc924464b424b0bacda9734d7d51e595))
+* **agent:** remove dead ErrInvalidProjectType sentinel and doc entry ([5fc3bca](https://github.com/s3ntin3l8/branchdam/commit/5fc3bcaf92a5c86b6c5811e38ed09592fee9fb5a))
+
 ## [0.21.0](https://github.com/s3ntin3l8/branchdam/compare/v0.20.0...v0.21.0) (2026-09-11)
 
 
