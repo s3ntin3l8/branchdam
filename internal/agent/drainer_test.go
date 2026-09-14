@@ -2048,8 +2048,9 @@ func TestDrainer_VirtualNodeCreated_PersistsEvidenceJSON(t *testing.T) {
 	ctx := context.Background()
 
 	evidence := json.RawMessage(`{"timelineNames":"Master, YouTube","clipCount":5}`)
+	nodeUUID := uuid.New().String()
 	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
-		NodeUUID:     uuid.New().String(),
+		NodeUUID:     nodeUUID,
 		FilePath:     "/virtual/resolve/My%20Documentary",
 		DisplayName:  "Resolve: My Documentary",
 		ProjectType:  "resolve_project",
@@ -2060,6 +2061,32 @@ func TestDrainer_VirtualNodeCreated_PersistsEvidenceJSON(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Processed)
 	require.Equal(t, 0, stats.Failed)
+
+	// Verify evidence was persisted with source derived from projectType.
+	// Use InTx with sqlcgen queries to read through the writer pool.
+	var source, key, value string
+	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		if err != nil {
+			return err
+		}
+		metas, err := q.ListNodeMetadata(ctx, node.ID)
+		if err != nil {
+			return err
+		}
+		if len(metas) == 0 {
+			t.Errorf("no metadata found for node %d (uuid=%s)", node.ID, nodeUUID)
+			return nil
+		}
+		source = metas[0].Source
+		key = metas[0].Key
+		value = metas[0].Value
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "resolve_project_evidence", source)
+	require.Equal(t, "evidence_json", key)
+	require.Contains(t, value, "timelineNames")
 }
 
 func TestDrainer_VirtualNodeCreated_DuplicateFilePath_Idempotent(t *testing.T) {

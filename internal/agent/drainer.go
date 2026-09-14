@@ -264,7 +264,6 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			errors.Is(processErr, ErrWouldCreateCycle) ||
 			errors.Is(processErr, ErrVirtualPathNotVirtual) ||
 			errors.Is(processErr, ErrCrossAgentCollision) ||
-			errors.Is(processErr, ErrInvalidProjectType) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
 		attempts := int(ev.RetryCount) + 1
@@ -1185,7 +1184,7 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 		if strings.Contains(err.Error(), "constraint failed") {
 			existing, lookupErr := q.GetMediaNodeByFilePath(ctx, p.FilePath)
 			if lookupErr == nil {
-				expectedPrefix := "/virtual/resolve/" + ev.AgentID + "/"
+				expectedPrefix := loc.RootPath + "/" + ev.AgentID + "/"
 				if strings.HasPrefix(p.FilePath, expectedPrefix) {
 					d.log.Info("agent: virtual node file_path already exists for this agent, reusing",
 						"filePath", p.FilePath, "nodeUUID", p.NodeUUID, "existingID", existing.ID)
@@ -1202,9 +1201,13 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 	// This data (timeline names, clip metadata) is queryable via
 	// node_metadata without schema changes to media_nodes.
 	if len(p.EvidenceJSON) > 0 {
+		source := "virtual_evidence"
+		if p.ProjectType != "" {
+			source = p.ProjectType + "_evidence"
+		}
 		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
 			NodeID: inserted.ID,
-			Source: "resolve_evidence",
+			Source: source,
 			Key:    "evidence_json",
 			Value:  string(p.EvidenceJSON),
 		}); err != nil {
