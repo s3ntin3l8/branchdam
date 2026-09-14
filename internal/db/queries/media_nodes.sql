@@ -390,6 +390,18 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 FROM media_nodes
 WHERE node_uuid = ?1;
 
+-- name: GetMediaNodeByFilePath :one
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE file_path = ?1;
+
 -- name: RebaseNodePathByUUID :exec
 UPDATE media_nodes
 SET file_path = ?2, file_name = ?3, storage_location_id = ?4,

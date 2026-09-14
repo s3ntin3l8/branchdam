@@ -240,6 +240,7 @@ type Querier interface {
 	// here rather than treating the no-row RETURNING as an error.
 	GetMediaEdgeBySourceTargetRel(ctx context.Context, arg GetMediaEdgeBySourceTargetRelParams) (MediaEdge, error)
 	GetMediaNodeByFastHash(ctx context.Context, fastHash *string) (int64, error)
+	GetMediaNodeByFilePath(ctx context.Context, filePath string) (MediaNode, error)
 	// Strict dedup: find an active or hidden node with the given BLAKE3 full_hash.
 	// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
 	GetMediaNodeByFullHash(ctx context.Context, fullHash *string) (GetMediaNodeByFullHashRow, error)

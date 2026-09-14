@@ -2008,6 +2008,8 @@ func TestDrainer_VirtualNodeCreated_InvalidProjectType(t *testing.T) {
 	drainer := agent.NewDrainer(env.db, env.guard, nil)
 	ctx := context.Background()
 
+	// Unknown projectType is logged as a warning but the node is still
+	// created — the value is metadata-only and shouldn't force version lockstep.
 	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
 		NodeUUID:    uuid.New().String(),
 		FilePath:    "/virtual/resolve/My%20Documentary",
@@ -2017,8 +2019,8 @@ func TestDrainer_VirtualNodeCreated_InvalidProjectType(t *testing.T) {
 
 	stats, err := drainer.DrainAll(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 0, stats.Processed)
-	require.Equal(t, 1, stats.Failed)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
 }
 
 func TestDrainer_VirtualNodeCreated_EmptyProjectType(t *testing.T) {
@@ -2037,5 +2039,55 @@ func TestDrainer_VirtualNodeCreated_EmptyProjectType(t *testing.T) {
 	stats, err := drainer.DrainAll(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_PersistsEvidenceJSON(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	evidence := json.RawMessage(`{"timelineNames":"Master, YouTube","clipCount":5}`)
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:     uuid.New().String(),
+		FilePath:     "/virtual/resolve/My%20Documentary",
+		DisplayName:  "Resolve: My Documentary",
+		ProjectType:  "resolve_project",
+		EvidenceJSON: evidence,
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+}
+
+func TestDrainer_VirtualNodeCreated_DuplicateFilePath_Idempotent(t *testing.T) {
+	env := setupTestDB(t)
+	drainer := agent.NewDrainer(env.db, env.guard, nil)
+	ctx := context.Background()
+
+	// First event creates the node.
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+	})
+
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+
+	// Second event with same filePath but different nodeUUID —
+	// should hit unique constraint on file_path but handle it gracefully.
+	enqueueEvent(t, env.db, agent.EventVirtualNodeCreated, agent.VirtualNodeCreated{
+		NodeUUID:    uuid.New().String(),
+		FilePath:    "/virtual/resolve/My%20Documentary",
+		DisplayName: "Resolve: My Documentary",
+	})
+
+	stats, err = drainer.DrainAll(ctx)
+	require.NoError(t, err)
 	require.Equal(t, 0, stats.Failed)
 }

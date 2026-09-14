@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -262,7 +263,6 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			errors.Is(processErr, ErrArchivedNode) ||
 			errors.Is(processErr, ErrWouldCreateCycle) ||
 			errors.Is(processErr, ErrVirtualPathNotVirtual) ||
-			errors.Is(processErr, ErrInvalidProjectType) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
 		attempts := int(ev.RetryCount) + 1
@@ -1123,7 +1123,7 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 	}
 
 	// Resolve storage location from the virtual path. The path uses a
-	// conventional absolute prefix (e.g. "/virtual/resolve/My%20Documentary")
+	// conventional absolute prefix (e.g. "/virtual/resolve/<agentID>/My%20Documentary")
 	// that the Guard resolves lexically via an is_virtual storage location
 	// -- no stat call.
 	if d.guard == nil {
@@ -1137,21 +1137,28 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 		return 0, fmt.Errorf("%w: %q resolves to non-virtual location %q (tier %s)", ErrVirtualPathNotVirtual, p.FilePath, loc.Name, loc.Tier)
 	}
 
-	// Validate ProjectType against known values. An unrecognized type is
-	// fatal — the agent is sending data the server can't meaningfully
-	// persist, and retrying won't change that.
-	validProjectTypes := map[string]bool{
-		"resolve_project":  true,
-		"premiere_project": true,
-		"fcpxml_bundle":    true,
-	}
-	if p.ProjectType != "" && !validProjectTypes[p.ProjectType] {
-		return 0, fmt.Errorf("%w: %q", ErrInvalidProjectType, p.ProjectType)
+	// Log unknown projectType as a warning rather than failing fatally.
+	// The value is metadata-only — failing here forces agent/server
+	// version lockstep for no data-safety benefit. A future project type
+	// (e.g. "avid_bin") or a typo won't kill the event.
+	if p.ProjectType != "" {
+		validProjectTypes := map[string]bool{
+			"resolve_project":  true,
+			"premiere_project": true,
+			"fcpxml_bundle":    true,
+		}
+		if !validProjectTypes[p.ProjectType] {
+			d.log.Warn("agent: unrecognized projectType in virtual node, persisting anyway",
+				"projectType", p.ProjectType, "nodeUUID", p.NodeUUID)
+		}
 	}
 
 	displayName := p.DisplayName
 	if displayName == "" {
 		displayName = filepath.Base(p.FilePath)
+		if unescaped, err := url.PathUnescape(displayName); err == nil {
+			displayName = unescaped
+		}
 	}
 
 	inserted, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
@@ -1167,7 +1174,34 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 		LifecycleState:    "ACTIVE",
 	})
 	if err != nil {
+		// Handle unique constraint violation on file_path gracefully:
+		// another agent already created a virtual node at this path.
+		// Look up the existing node by filePath and return its ID
+		// (idempotent — different UUID, same path = reuse).
+		if strings.Contains(err.Error(), "constraint failed") {
+			d.log.Warn("agent: virtual node file_path already exists, reusing",
+				"filePath", p.FilePath, "nodeUUID", p.NodeUUID)
+			existing, lookupErr := q.GetMediaNodeByFilePath(ctx, p.FilePath)
+			if lookupErr == nil {
+				return existing.ID, nil
+			}
+		}
 		return 0, fmt.Errorf("insert virtual node: %w", err)
+	}
+
+	// Persist EvidenceJSON as node_metadata overflow if provided.
+	// This data (timeline names, clip metadata) is queryable via
+	// node_metadata without schema changes to media_nodes.
+	if len(p.EvidenceJSON) > 0 {
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{
+			NodeID: inserted.ID,
+			Source: "resolve_evidence",
+			Key:    "evidence_json",
+			Value:  string(p.EvidenceJSON),
+		}); err != nil {
+			d.log.Warn("agent: failed to persist virtual node evidence, continuing",
+				"nodeUUID", p.NodeUUID, "err", err)
+		}
 	}
 
 	return inserted.ID, nil

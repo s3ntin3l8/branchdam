@@ -33,6 +33,9 @@ CREATE INDEX ix_event_queue_status ON event_queue(status, id);
 -- +goose Down
 
 -- Restore event_queue without EVENT_VIRTUAL_NODE_CREATED in the CHECK.
+-- Virtual events are silently dropped on downgrade (one-way migration,
+-- same precedent as 00021). Rows with the new type cannot be inserted
+-- into event_queue_old's narrower CHECK, so filter them out.
 CREATE TABLE event_queue_old (
     id           INTEGER PRIMARY KEY,
     event_uuid   TEXT NOT NULL UNIQUE,
@@ -55,7 +58,8 @@ SELECT
     id, event_uuid, agent_id, event_type, payload_json,
     status, error_log, created_at, processed_at,
     COALESCE(retry_count, 0)
-FROM event_queue;
+FROM event_queue
+WHERE event_type <> 'EVENT_VIRTUAL_NODE_CREATED';
 DROP TABLE event_queue;
 ALTER TABLE event_queue_old RENAME TO event_queue;
 CREATE INDEX ix_event_queue_status ON event_queue(status, id);
