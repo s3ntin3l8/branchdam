@@ -1200,12 +1200,12 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 		// Handle unique constraint violation on file_path: another
 		// agent may have already created a virtual node at this path.
 		// Validate agent ownership before reusing:
-		//   - Path has an <agentID> segment matching ev.AgentID -> reuse
-		//   - Path has no agent segment (legacy unscoped)       -> reuse
+		//   - Path has an <agentID> segment matching ev.AgentID    -> reuse
+		//   - Path has no agent segment (legacy unscoped)         -> reuse
 		//     (the agent is replaying an unscoped event with a
 		//     deterministic nodeUUID; "different agent" would be
 		//     misleading on an intra-agent event)
-		//   - Path has a different <agentID> segment             -> ErrCrossAgentCollision
+		//   - Path has a different <agentID> segment              -> ErrCrossAgentCollision
 		if strings.Contains(err.Error(), "constraint failed") {
 			existing, lookupErr := q.GetMediaNodeByFilePath(ctx, p.FilePath)
 			if lookupErr == nil {
