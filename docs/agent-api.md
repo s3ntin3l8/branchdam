@@ -110,6 +110,9 @@ source memberships are rejected before the transaction begins.
 The server creates/updates Resolve timeline nodes, creates or refreshes
 `PROJECT_SIDECAR` edges owned by `resolve_project_db`, and makes absent
 unreviewed edges inactive (`is_active=0`) while retaining rows for audit.
+Timeline evidence uses the `resolve_snapshot_evidence` metadata source, kept
+separate from legacy queued-event metadata so a draining old event cannot
+overwrite the synchronous snapshot slot.
 Human-reviewed `CONFIRMED`/`REJECTED` edges are never changed; the response's
 `reviewedConflicts` count prompts manual resolution. `legacyTimelineNodeUuids`
 claims processed virtual-node events from the same agent during migration.

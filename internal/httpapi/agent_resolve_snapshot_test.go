@@ -99,6 +99,10 @@ func TestResolveSnapshotCreateRefreshAndSoftDetach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metadata, err := database.Reader.ListNodeMetadata(ctx, target.ID)
+	if err != nil || len(metadata) != 1 || metadata[0].Source != "resolve_snapshot_evidence" {
+		t.Fatalf("snapshot metadata slot = %+v, %v", metadata, err)
+	}
 	edges, err := database.Reader.ListEdgesByTarget(ctx, target.ID)
 	if err != nil || len(edges) != 1 {
 		t.Fatalf("initial edges = %d, %v", len(edges), err)

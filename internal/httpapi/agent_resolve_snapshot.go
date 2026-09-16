@@ -204,7 +204,10 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 			if err := q.UpdateResolveTimelineDisplayName(ctx, sqlcgen.UpdateResolveTimelineDisplayNameParams{ID: node.ID, FileName: tl.DisplayName}); err != nil {
 				return err
 			}
-			if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{NodeID: node.ID, Source: "resolve_project_evidence", Key: "evidence_json", Value: string(tl.EvidenceJSON)}); err != nil {
+			// Keep synchronous snapshot evidence in a distinct slot from the
+			// legacy async drainer so an already-queued virtual-node event cannot
+			// race and overwrite the authoritative snapshot metadata.
+			if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{NodeID: node.ID, Source: "resolve_snapshot_evidence", Key: "evidence_json", Value: string(tl.EvidenceJSON)}); err != nil {
 				return err
 			}
 			targets[node.ID] = tl.TimelineID
