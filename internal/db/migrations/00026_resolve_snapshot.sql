@@ -32,6 +32,16 @@ WHERE e.is_active = 1;
 
 -- +goose Down
 
+-- An older binary cannot represent inactive audit-retained edges. Refuse a
+-- downgrade instead of silently reviving them as live lineage. Operators can
+-- restore a pre-migration backup if a rollback is required after removals.
+CREATE TEMP TABLE resolve_snapshot_downgrade_guard (
+    ok INTEGER NOT NULL CHECK (ok = 1)
+);
+INSERT INTO resolve_snapshot_downgrade_guard (ok)
+SELECT 0 WHERE EXISTS (SELECT 1 FROM media_edges WHERE is_active = 0);
+DROP TABLE resolve_snapshot_downgrade_guard;
+
 DROP TABLE resolve_timeline_scopes;
 DROP VIEW v_media_edges_resolved;
 

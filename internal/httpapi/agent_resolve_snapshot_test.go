@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -193,6 +194,22 @@ func TestResolveSnapshotRollbackAndAgentIsolation(t *testing.T) {
 	var parsed map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &parsed); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResolveSnapshotRejectsDuplicateResolvedSourceAliases(t *testing.T) {
+	srv, database, targetUUID, sourceUUID := resolveSnapshotServer(t)
+	body := resolveSnapshotBody(targetUUID, sourceUUID, "D:\\A.mov", "upper")
+	body["memberships"] = append(body["memberships"].([]map[string]any), map[string]any{
+		"timelineId": "tl1", "mediaFilePath": "D:\\a.mov", "sourceNodeUuid": sourceUUID,
+		"evidenceJson": map[string]any{"mediaFilePath": "D:\\a.mov", "timelineId": "tl1", "clipName": "lower"},
+	})
+	rr := postResolveSnapshot(t, srv, body)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "duplicate Resolve source membership") {
+		t.Fatalf("duplicate source aliases = %d %s", rr.Code, rr.Body.String())
+	}
+	if _, err := database.Reader.GetMediaNodeByUUID(context.Background(), targetUUID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("rejected alias snapshot committed timeline node: %v", err)
 	}
 }
 

@@ -108,6 +108,7 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 	}
 	protected := make(map[string]map[string]bool, len(timelines))
 	desired := make(map[string]map[string]ResolveSnapshotMembership, len(timelines))
+	resolvedSources := make(map[string]map[string]bool, len(timelines))
 	seen := make(map[string]bool, len(b.Memberships))
 	for _, m := range b.Memberships {
 		if _, exists := timelines[m.TimelineID]; !exists || m.MediaFilePath == "" {
@@ -125,9 +126,18 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 			protected[m.TimelineID][m.MediaFilePath] = true
 			continue
 		}
-		if _, err := uuid.Parse(m.SourceNodeUUID); err != nil || !json.Valid(m.EvidenceJSON) {
+		sourceUUID, err := uuid.Parse(m.SourceNodeUUID)
+		if err != nil || !json.Valid(m.EvidenceJSON) {
 			return nil, huma.Error400BadRequest("resolved membership needs UUID and JSON evidence", err)
 		}
+		m.SourceNodeUUID = sourceUUID.String()
+		if resolvedSources[m.TimelineID] == nil {
+			resolvedSources[m.TimelineID] = make(map[string]bool)
+		}
+		if resolvedSources[m.TimelineID][m.SourceNodeUUID] {
+			return nil, huma.Error400BadRequest("duplicate Resolve source membership for timeline", nil)
+		}
+		resolvedSources[m.TimelineID][m.SourceNodeUUID] = true
 		var ev struct {
 			MediaFilePath string `json:"mediaFilePath"`
 			TimelineID    string `json:"timelineId"`

@@ -104,6 +104,9 @@ ordinary JSON (not the double-encoded `/events` envelope):
 
 An unresolved membership omits `sourceNodeUuid` and `evidenceJson`; it remains
 present in the database snapshot and protects its existing edge from removal.
+Resolved memberships must be unique by `(timelineId, sourceNodeUuid)`; agents
+merge path aliases and repeated placements into one membership. Duplicate
+source memberships are rejected before the transaction begins.
 The server creates/updates Resolve timeline nodes, creates or refreshes
 `PROJECT_SIDECAR` edges owned by `resolve_project_db`, and makes absent
 unreviewed edges inactive (`is_active=0`) while retaining rows for audit.
@@ -119,6 +122,10 @@ The response fields are `created`, `refreshed`, `removed`, `unchanged`,
 `unresolved`, and `reviewedConflicts`. The request's `agentId` must match the
 machine principal (except the existing env-bootstrap machine-key path), and
 timeline paths must resolve through a virtual `storage.Guard` location.
+
+Migration 26 retains inactive edges for audit. Its down migration refuses to
+run while any inactive edge exists because the older schema cannot represent
+that state; restoring a pre-migration backup is the safe rollback in that case.
 
 
 ---
