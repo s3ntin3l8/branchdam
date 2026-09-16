@@ -1250,7 +1250,7 @@ WITH RECURSIVE lineage(root, id) AS (
     FROM media_edges e
     JOIN lineage l ON e.target_node_id = l.id
     JOIN media_nodes a ON a.id = e.source_node_id
-    WHERE e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
       AND a.lifecycle_state <> 'ARCHIVED'
 )
 SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,

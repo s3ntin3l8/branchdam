@@ -116,6 +116,7 @@ type MediaEdge struct {
 	ReviewedBy       sql.NullString
 	CreatedAt        int64
 	UpdatedAt        int64
+	IsActive         int64
 }
 
 type MediaNode struct {
@@ -179,6 +180,12 @@ type RemoteSyncState struct {
 	CreatedAt     int64
 	UpdatedAt     int64
 	RetryCount    int64
+}
+
+type ResolveTimelineScope struct {
+	AgentID        string
+	ScopeID        string
+	TimelineNodeID int64
 }
 
 type ScanJob struct {
