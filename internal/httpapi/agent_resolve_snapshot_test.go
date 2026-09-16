@@ -213,6 +213,23 @@ func TestResolveSnapshotRejectsDuplicateResolvedSourceAliases(t *testing.T) {
 	}
 }
 
+func TestResolveSnapshotRejectsDuplicateTimelineNodeUUIDs(t *testing.T) {
+	srv, database, targetUUID, sourceUUID := resolveSnapshotServer(t)
+	body := resolveSnapshotBody(targetUUID, sourceUUID, "D:\\a.mov", "original")
+	body["timelines"] = append(body["timelines"].([]map[string]any), map[string]any{
+		"timelineId": "tl2", "nodeUuid": targetUUID,
+		"filePath": "/virtual/resolve/" + targetUUID, "displayName": "Resolve: Duplicate",
+		"evidenceJson": map[string]any{"timelineName": "Duplicate"},
+	})
+	rr := postResolveSnapshot(t, srv, body)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "duplicate Resolve timeline nodeUuid") {
+		t.Fatalf("duplicate timeline node UUID = %d %s", rr.Code, rr.Body.String())
+	}
+	if _, err := database.Reader.GetMediaNodeByUUID(context.Background(), targetUUID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("rejected duplicate timeline committed node: %v", err)
+	}
+}
+
 func TestResolveSnapshotEmptyDatabaseRetiresPriorTimelineEdges(t *testing.T) {
 	srv, database, targetUUID, sourceUUID := resolveSnapshotServer(t)
 	body := resolveSnapshotBody(targetUUID, sourceUUID, "D:\\a.mov", "original")

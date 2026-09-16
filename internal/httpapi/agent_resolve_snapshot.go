@@ -90,16 +90,23 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 	}
 
 	timelines := make(map[string]ResolveSnapshotTimeline, len(b.Timelines))
+	timelineNodes := make(map[string]bool, len(b.Timelines))
 	for _, tl := range b.Timelines {
 		if tl.TimelineID == "" || tl.DisplayName == "" || tl.FilePath == "" || !json.Valid(tl.EvidenceJSON) {
 			return nil, huma.Error400BadRequest("invalid Resolve timeline", nil)
 		}
-		if _, err := uuid.Parse(tl.NodeUUID); err != nil {
+		timelineUUID, err := uuid.Parse(tl.NodeUUID)
+		if err != nil {
 			return nil, huma.Error400BadRequest("invalid Resolve timeline nodeUuid", err)
 		}
+		tl.NodeUUID = timelineUUID.String()
 		if _, exists := timelines[tl.TimelineID]; exists {
 			return nil, huma.Error400BadRequest("duplicate Resolve timelineId", nil)
 		}
+		if timelineNodes[tl.NodeUUID] {
+			return nil, huma.Error400BadRequest("duplicate Resolve timeline nodeUuid", nil)
+		}
+		timelineNodes[tl.NodeUUID] = true
 		loc, err := s.guard.Resolve(tl.FilePath)
 		if err != nil || !loc.IsVirtual {
 			return nil, huma.Error409Conflict("Resolve timeline path must resolve to virtual storage", err)

@@ -113,6 +113,9 @@ unreviewed edges inactive (`is_active=0`) while retaining rows for audit.
 Human-reviewed `CONFIRMED`/`REJECTED` edges are never changed; the response's
 `reviewedConflicts` count prompts manual resolution. `legacyTimelineNodeUuids`
 claims processed virtual-node events from the same agent during migration.
+They are deliberately reconciled with an empty desired set: current timelines
+are already present in `timelines`, while obsolete or old-identity nodes are
+retired atomically after their replacement edges are established.
 `retireScopeId` deactivates unreviewed edges from a previously synced database
 scope after a database switch. At most 10,000 memberships/timelines/legacy IDs
 are accepted; oversized snapshots fail closed rather than truncating and
