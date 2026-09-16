@@ -106,6 +106,13 @@ func (s *Server) registerRoutes(api huma.API) {
 	}, s.handleAgentEvent)
 	huma.Register(api, huma.Operation{
 		Method:        http.MethodPost,
+		Path:          "/api/v1/agent/resolve-snapshot",
+		OperationID:   "reconcileResolveSnapshot",
+		Summary:       "Synchronously reconcile one agent-owned Resolve database snapshot",
+		DefaultStatus: http.StatusOK,
+	}, s.handleResolveSnapshot)
+	huma.Register(api, huma.Operation{
+		Method:        http.MethodPost,
 		Path:          "/api/v1/agent/rebase",
 		OperationID:   "agentRebasePath",
 		Summary:       "Rebase staged media node path",

@@ -13,7 +13,7 @@ INSERT INTO media_edges (
 )
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at;
+          created_at, updated_at, is_active;
 
 -- name: CreateManualMediaEdge :one
 INSERT INTO media_edges (
@@ -29,28 +29,29 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     review_state = 'CONFIRMED',
     reviewed_by = ?4,
     reviewed_at = unixepoch(),
+    is_active = 1,
     updated_at = unixepoch()
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at;
+          created_at, updated_at, is_active;
 
 -- name: GetMediaEdge :one
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
 WHERE id = ?1;
 
 -- name: ListEdgesBySource :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
-WHERE source_node_id = ?1;
+WHERE source_node_id = ?1 AND is_active = 1;
 
 -- name: ListEdgesByTarget :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
-WHERE target_node_id = ?1;
+WHERE target_node_id = ?1 AND is_active = 1;

@@ -69,6 +69,70 @@ When `eventUuid` is provided, `POST /api/v1/agent/events` performs duplicate det
 the endpoint returns `202 Accepted` with the existing `eventId` without enqueuing a duplicate row.
 If `eventUuid` is omitted (legacy callers), the server mints a new UUIDv7.
 
+### 2.1. Resolve snapshot (`POST /api/v1/agent/resolve-snapshot`)
+
+This is a synchronous, authenticated machine-agent operation, unlike the
+asynchronous event queue. A `200 OK` confirms that all graph changes committed
+in one transaction; a failed/incomplete request changes no edges. The body is
+ordinary JSON (not the double-encoded `/events` envelope):
+
+```json
+{
+  "agentId": "workstation-01",
+  "scopeId": "<lowercase SHA-256 hex of credential-free database identity>",
+  "timelines": [{
+    "timelineId": "<Resolve timeline ID>",
+    "nodeUuid": "<deterministic virtual UUID>",
+    "filePath": "/virtual/resolve/<uuid>",
+    "displayName": "Resolve: Master",
+    "evidenceJson": {"timelineName": "Master"}
+  }],
+  "memberships": [{
+    "timelineId": "<Resolve timeline ID>",
+    "mediaFilePath": "D:\\Videos\\clip.mov",
+    "sourceNodeUuid": "<indexed media UUID>",
+    "evidenceJson": {
+      "timelineId": "<Resolve timeline ID>",
+      "mediaFilePath": "D:\\Videos\\clip.mov",
+      "placements": [{"itemId": "<Resolve item ID>", "clipName": "clip.mov"}]
+    }
+  }],
+  "legacyTimelineNodeUuids": [],
+  "retireScopeId": ""
+}
+```
+
+An unresolved membership omits `sourceNodeUuid` and `evidenceJson`; it remains
+present in the database snapshot and protects its existing edge from removal.
+Resolved memberships must be unique by `(timelineId, sourceNodeUuid)`; agents
+merge path aliases and repeated placements into one membership. Duplicate
+source memberships are rejected before the transaction begins.
+The server creates/updates Resolve timeline nodes, creates or refreshes
+`PROJECT_SIDECAR` edges owned by `resolve_project_db`, and makes absent
+unreviewed edges inactive (`is_active=0`) while retaining rows for audit.
+Timeline evidence uses the `resolve_snapshot_evidence` metadata source, kept
+separate from legacy queued-event metadata so a draining old event cannot
+overwrite the synchronous snapshot slot.
+Human-reviewed `CONFIRMED`/`REJECTED` edges are never changed; the response's
+`reviewedConflicts` count prompts manual resolution. `legacyTimelineNodeUuids`
+claims processed virtual-node events from the same agent during migration.
+They are deliberately reconciled with an empty desired set: current timelines
+are already present in `timelines`, while obsolete or old-identity nodes are
+retired atomically after their replacement edges are established.
+`retireScopeId` deactivates unreviewed edges from a previously synced database
+scope after a database switch. At most 10,000 memberships/timelines/legacy IDs
+are accepted; oversized snapshots fail closed rather than truncating and
+removing edges.
+
+The response fields are `created`, `refreshed`, `removed`, `unchanged`,
+`unresolved`, and `reviewedConflicts`. The request's `agentId` must match the
+machine principal (except the existing env-bootstrap machine-key path), and
+timeline paths must resolve through a virtual `storage.Guard` location.
+
+Migration 26 retains inactive edges for audit. Its down migration refuses to
+run while any inactive edge exists because the older schema cannot represent
+that state; restoring a pre-migration backup is the safe rollback in that case.
+
 
 ---
 

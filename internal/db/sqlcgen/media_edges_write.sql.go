@@ -24,10 +24,11 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     review_state = 'CONFIRMED',
     reviewed_by = ?4,
     reviewed_at = unixepoch(),
+    is_active = 1,
     updated_at = unixepoch()
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at
+          created_at, updated_at, is_active
 `
 
 type CreateManualMediaEdgeParams struct {
@@ -59,6 +60,7 @@ func (q *Queries) CreateManualMediaEdge(ctx context.Context, arg CreateManualMed
 		&i.ReviewedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.IsActive,
 	)
 	return i, err
 }
@@ -72,7 +74,7 @@ INSERT INTO media_edges (
 )
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at
+          created_at, updated_at, is_active
 `
 
 type CreateMediaEdgeParams struct {
@@ -118,6 +120,7 @@ func (q *Queries) CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams
 		&i.ReviewedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.IsActive,
 	)
 	return i, err
 }
@@ -125,7 +128,7 @@ func (q *Queries) CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams
 const getMediaEdge = `-- name: GetMediaEdge :one
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
 WHERE id = ?1
 `
@@ -147,6 +150,7 @@ func (q *Queries) GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
 		&i.ReviewedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.IsActive,
 	)
 	return i, err
 }
@@ -154,9 +158,9 @@ func (q *Queries) GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
 const listEdgesBySource = `-- name: ListEdgesBySource :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
-WHERE source_node_id = ?1
+WHERE source_node_id = ?1 AND is_active = 1
 `
 
 func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]MediaEdge, error) {
@@ -182,6 +186,7 @@ func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]
 			&i.ReviewedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.IsActive,
 		); err != nil {
 			return nil, err
 		}
@@ -199,9 +204,9 @@ func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]
 const listEdgesByTarget = `-- name: ListEdgesByTarget :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
-WHERE target_node_id = ?1
+WHERE target_node_id = ?1 AND is_active = 1
 `
 
 func (q *Queries) ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error) {
@@ -227,6 +232,7 @@ func (q *Queries) ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]
 			&i.ReviewedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.IsActive,
 		); err != nil {
 			return nil, err
 		}

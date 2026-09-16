@@ -129,6 +129,62 @@ func TestMigrateUpDownUp(t *testing.T) {
 	assertTablesExist(t, writerDB)
 }
 
+func TestResolveSnapshotMigrationSingleStepRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolve-roundtrip.db")
+	writerDB := openRawWriter(t, path)
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 26); err != nil {
+		t.Fatalf("up to resolve snapshot: %v", err)
+	}
+	if err := goose.Down(writerDB, migrationsDir); err != nil {
+		t.Fatalf("down resolve snapshot: %v", err)
+	}
+	if _, err := writerDB.Exec("SELECT is_active FROM media_edges LIMIT 0"); err == nil {
+		t.Fatal("down migration retained is_active")
+	}
+	if err := goose.Up(writerDB, migrationsDir); err != nil {
+		t.Fatalf("re-up resolve snapshot: %v", err)
+	}
+	if _, err := writerDB.Exec("SELECT is_active FROM media_edges LIMIT 0"); err != nil {
+		t.Fatalf("re-up missing is_active: %v", err)
+	}
+}
+
+func TestResolveSnapshotMigrationRefusesDowngradeWithInactiveEdges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolve-no-resurrection.db")
+	writerDB := openRawWriter(t, path)
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 26); err != nil {
+		t.Fatalf("up to resolve snapshot: %v", err)
+	}
+	statements := []string{
+		`INSERT INTO storage_locations (id, name, root_path, tier) VALUES (1, 'media', '/media', 'TIER2_EXPORTS')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (1, '018f0000-0000-7000-8000-000000000101', 1, '/media/a.mov', 'a.mov')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (2, '018f0000-0000-7000-8000-000000000102', 1, '/media/timeline', 'timeline')`,
+		`INSERT INTO media_edges (source_node_id, target_node_id, relationship_type, confidence, tier, resolver, is_active) VALUES (1, 2, 'PROJECT_SIDECAR', 1, 1, 'resolve_project_db', 0)`,
+	}
+	for _, statement := range statements {
+		if _, err := writerDB.Exec(statement); err != nil {
+			t.Fatalf("seed inactive edge: %v", err)
+		}
+	}
+	if err := goose.Down(writerDB, migrationsDir); err == nil {
+		t.Fatal("downgrade with inactive edge unexpectedly succeeded")
+	}
+	var inactive int
+	if err := writerDB.QueryRow(`SELECT count(*) FROM media_edges WHERE is_active = 0`).Scan(&inactive); err != nil || inactive != 1 {
+		t.Fatalf("failed downgrade changed inactive audit row: count=%d err=%v", inactive, err)
+	}
+}
+
 // TestOpenIsIdempotent proves Open (which runs migrations at startup) can be
 // called against an already-migrated database without error -- the normal
 // case of restarting the server against an existing data volume.
@@ -249,6 +305,13 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	}
 
 	// An index-suffix pair, mimicking a pre-#132 AUTO_ACCEPTED mesh edge:
+	// The current generated edge DTO includes is_active (migration 26),
+	// while this historical fixture intentionally stops at version 5.
+	// Add only that later column so generated edge queries can still seed
+	// and inspect the fixture without changing migration 6's behavior.
+	if _, err := writerDB.Exec("ALTER TABLE media_edges ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1));"); err != nil {
+		t.Fatalf("alter table add is_active: %v", err)
+	}
 	// "photo.jpg" (anchor) -> "photo-2.jpg" (index-suffixed).
 	anchor := insertNode("0001", "/photo.jpg", "photo.jpg", "photo")
 	indexChild := insertNode("0002", "/photo-2.jpg", "photo-2.jpg", "photo")

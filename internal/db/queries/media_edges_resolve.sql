@@ -77,11 +77,12 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
                                      AND media_edges.review_state = 'AUTO_ACCEPTED'
                                      AND excluded.review_state = 'NEEDS_REVIEW')
                           THEN excluded.review_state ELSE media_edges.review_state END,
-    updated_at    = unixepoch()
+    updated_at    = unixepoch(),
+    is_active     = 1
 WHERE media_edges.review_state NOT IN ('CONFIRMED', 'REJECTED')
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at;
+          created_at, updated_at, is_active;
 
 -- name: GetMediaEdgeBySourceTargetRel :one
 -- Used by internal/graph.Engine.ResolveAndCommit when UpsertMediaEdge
@@ -90,7 +91,7 @@ RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
 -- here rather than treating the no-row RETURNING as an error.
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
 WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3;
 
@@ -101,7 +102,7 @@ WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3;
 -- Backs scan_jobs.edges_created (fix(pipeline): #90).
 SELECT EXISTS(
     SELECT 1 FROM media_edges
-    WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3
+    WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3 AND is_active = 1
 ) AS edge_exists;
 
 -- name: ConfirmMediaEdge :one

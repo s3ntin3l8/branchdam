@@ -13,6 +13,7 @@ WITH RECURSIVE descendants(id) AS (
     SELECT e.target_node_id
     FROM media_edges e
     JOIN descendants d ON e.source_node_id = d.id
+    WHERE e.is_active = 1
 )
 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = sqlc.arg(parent_node_id)) AS would_cycle;
 
@@ -101,7 +102,7 @@ WITH RECURSIVE ancestors(id) AS (
     FROM media_edges e
     JOIN ancestors a ON e.target_node_id = a.id
     JOIN media_nodes n ON e.source_node_id = n.id
-    WHERE e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
 SELECT ancestors.id FROM ancestors;
@@ -119,7 +120,7 @@ WITH RECURSIVE ancestors(ancestor_id) AS (
     FROM media_edges e
     JOIN ancestors a ON e.target_node_id = a.ancestor_id
     JOIN media_nodes n ON e.source_node_id = n.id
-    WHERE e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
 SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id,
@@ -145,7 +146,7 @@ WITH RECURSIVE descendants(id) AS (
     FROM media_edges e
     JOIN descendants d ON e.source_node_id = d.id
     JOIN media_nodes n ON e.target_node_id = n.id
-    WHERE e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
       AND n.lifecycle_state <> 'ARCHIVED'
 )
 SELECT descendants.id FROM descendants;
@@ -178,7 +179,7 @@ SELECT id, source_node_id, target_node_id, relationship_type, confidence,
 FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
-  AND review_state <> 'REJECTED';
+  AND review_state <> 'REJECTED' AND is_active = 1;
 
 -- name: ListEdgesByMultipleTargets :many
 -- Batch lookup of edges by a JSON-encoded array of target_node_ids, used by
@@ -188,17 +189,17 @@ WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
 -- the traversal via a later level.
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
 WHERE target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
-  AND review_state <> 'REJECTED';
+  AND review_state <> 'REJECTED' AND is_active = 1;
 
 -- name: ListEdgesByMultipleSources :many
 -- See ListEdgesByMultipleTargets above; this is the symmetric query for
 -- children edges at depth d+1.
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at
+       created_at, updated_at, is_active
 FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
-  AND review_state <> 'REJECTED';
+  AND review_state <> 'REJECTED' AND is_active = 1;

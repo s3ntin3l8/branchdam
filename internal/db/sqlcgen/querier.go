@@ -10,6 +10,7 @@ import (
 )
 
 type Querier interface {
+	AgentCreatedVirtualNode(ctx context.Context, arg AgentCreatedVirtualNodeParams) (bool, error)
 	// Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
 	// row FIRST, before inserting the new one. The partial unique index
 	// (WHERE lifecycle_state != 'ARCHIVED') means a live row and a new live
@@ -294,6 +295,7 @@ type Querier interface {
 	// The lookup is username-only; password verification happens in Go against
 	// password_hash. Index: users.username UNIQUE already covers this.
 	GetUserByUsername(ctx context.Context, username string) (User, error)
+	InactivateResolveEdge(ctx context.Context, id int64) error
 	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
 	// actor_audit: append-only event log for admin actions that aren't
 	// otherwise audited (scan start, restart, settings PUT, storage location
@@ -544,6 +546,8 @@ type Querier interface {
 	// both IMMICH and GOOGLE_PHOTOS rows under the (node_id, remote) PK, so
 	// ProcessPending(remote) must never list (or re-flip) another remote's rows.
 	ListRemoteSyncStateByStatus(ctx context.Context, arg ListRemoteSyncStateByStatusParams) ([]RemoteSyncState, error)
+	ListResolveEdgesForTimeline(ctx context.Context, targetNodeID int64) ([]ListResolveEdgesForTimelineRow, error)
+	ListResolveTimelineScopes(ctx context.Context, arg ListResolveTimelineScopesParams) ([]int64, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
@@ -678,6 +682,8 @@ type Querier interface {
 	// so a stale full_hash would otherwise persist forever, masquerading as a
 	// verified integrity fingerprint it no longer is (docs/schema.md fix #8).
 	RefreshMediaNodeAfterInPlaceWrite(ctx context.Context, arg RefreshMediaNodeAfterInPlaceWriteParams) error
+	RefreshResolveEdge(ctx context.Context, arg RefreshResolveEdgeParams) error
+	RegisterResolveTimelineScope(ctx context.Context, arg RegisterResolveTimelineScopeParams) error
 	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
@@ -697,6 +703,7 @@ type Querier interface {
 	// to PENDING_CLOUD_PUSH so the next worker pass re-claims them. Scoped to a
 	// single remote so an IMMICH recovery can never touch GOOGLE_PHOTOS rows.
 	ResetRemoteSyncStateStale(ctx context.Context, arg ResetRemoteSyncStateStaleParams) (int64, error)
+	ResolveTimelineScopeOwner(ctx context.Context, arg ResolveTimelineScopeOwnerParams) (bool, error)
 	// Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
@@ -794,6 +801,7 @@ type Querier interface {
 	// empty or unchanged is passed through as the node's current value, so this
 	// query is only ever reached with at least one genuine change.
 	UpdateMediaNodePromotedColumns(ctx context.Context, arg UpdateMediaNodePromotedColumnsParams) error
+	UpdateResolveTimelineDisplayName(ctx context.Context, arg UpdateResolveTimelineDisplayNameParams) error
 	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
 	// Rotates the password hash. Used by /api/v1/password-reset/confirm
 	// (self-service) and /api/v1/admin/users/{id}/reset-password (admin).
