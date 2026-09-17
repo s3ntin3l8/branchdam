@@ -84,8 +84,13 @@ export default function AssetListPage() {
   // previous row's restore -- leaks into the next row's dialog or button
   // before that row has been touched. openArchiveDialog/closeArchiveDialog
   // and handleRestore below reset the relevant mutation and scope its
-  // pending/error display to the specific row via archiveTarget /
-  // restoreTargetId, so each row only ever shows its own outcome.
+  // pending/error label/message display to the specific row via
+  // archiveTarget / restoreTargetId. The Restore button's disabled state is
+  // deliberately NOT scoped the same way: since there is only one shared
+  // mutation, disabling only the clicked row would let a second row's click
+  // reset() and re-target that same mutation mid-flight, silently dropping
+  // the first row's in-flight result. Disabling every Restore button while
+  // any restore is pending keeps the single mutation single-owner.
   const [archiveTarget, setArchiveTarget] = useState<Asset | null>(null);
   const [restoreTargetId, setRestoreTargetId] = useState<number | null>(null);
 
@@ -111,6 +116,7 @@ export default function AssetListPage() {
     setPrevFilterKey(filterKey);
     setSelectedIds(new Set());
     setBatchError(null);
+    setRestoreTargetId(null);
   }
 
   const selectableIds = assets.filter((a) => a.lifecycleState !== "ARCHIVED").map((a) => a.id);
@@ -484,7 +490,7 @@ export default function AssetListPage() {
                         <button
                           type="button"
                           onClick={() => handleRestore(a.id)}
-                          disabled={restoreAsset.isPending && restoreTargetId === a.id}
+                          disabled={restoreAsset.isPending}
                           className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2 py-1 font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50"
                         >
                           {restoreAsset.isPending && restoreTargetId === a.id ? "Restoring…" : "Restore"}
@@ -499,7 +505,7 @@ export default function AssetListPage() {
                       <button
                         type="button"
                         onClick={() => openArchiveDialog(a)}
-                        className="rounded border border-red-800/80 bg-red-950/60 px-2 py-1 font-medium text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+                        className="rounded border border-red-800/80 bg-red-950/60 px-2 py-1 font-medium text-red-300 hover:bg-red-900/60"
                       >
                         Archive
                       </button>

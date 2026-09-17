@@ -179,6 +179,40 @@ describe("AssetListPage restore", () => {
     // The error is scoped to row A -- row B's Restore button shows no error.
     expect(screen.getAllByText(/failed to restore/i)).toHaveLength(1);
   });
+
+  it("disables every row's Restore button while one restore is in flight", async () => {
+    vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+    vi.mocked(api.listAssets).mockResolvedValue({
+      assets: [
+        baseAsset({ id: 5, filePath: "/scratch/a.jpg", fileName: "a.jpg", lifecycleState: "ARCHIVED" }),
+        baseAsset({ id: 6, filePath: "/scratch/b.jpg", fileName: "b.jpg", lifecycleState: "ARCHIVED" }),
+      ],
+      total: 2,
+    });
+    // Row A's restore never settles during this test -- it stands in for a
+    // slow request so we can assert row B's button is inert while it's in
+    // flight, which is what stops a second click from clobbering row A's
+    // pending/error state on the single shared mutation.
+    let resolveA: (() => void) | undefined;
+    vi.mocked(api.restoreAsset).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveA = () => resolve({ ok: true }); })
+    );
+
+    renderWithClient(<AssetListPage />);
+    await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
+
+    const restoreButtons = screen.getAllByRole("button", { name: /restor/i });
+    await userEvent.click(restoreButtons[0]);
+
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /restor/i })[0]).toHaveTextContent(/restoring/i));
+    const [rowA, rowB] = screen.getAllByRole("button", { name: /restor/i });
+    expect(rowA).toBeDisabled();
+    expect(rowB).toBeDisabled();
+
+    resolveA?.();
+    await waitFor(() => expect(api.restoreAsset).toHaveBeenCalledWith(5));
+  });
 });
 
 describe("AssetListPage batch archive", () => {
