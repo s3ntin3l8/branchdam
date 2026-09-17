@@ -24,6 +24,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/mfa"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
@@ -411,6 +412,7 @@ func main() {
 			SessionMw:    sessionMw,
 			Reset:        passwordResetService,
 			Email:        emailNotifier,
+			MFA:          mfa.NewService(database, secretBox, log),
 			AuthMode:     authMode,
 		}
 		// Pre-build the JIT provisioner closure so httpapi/Handler()

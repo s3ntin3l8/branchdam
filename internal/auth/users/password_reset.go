@@ -141,7 +141,7 @@ func (p *PasswordResetService) RequestPasswordReset(ctx context.Context, email, 
 // ConfirmResult is the outcome of ConfirmPasswordReset. NewPassword
 // is set on the new-password flow; User is the rotated user.
 type ConfirmResult struct {
-	User sqlcgen.User
+	User sqlcgen.UpdateUserPasswordHashRow
 }
 
 // ConfirmPasswordReset validates a plaintext token, rotates the
@@ -171,7 +171,7 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		tokenID  int64
 	}
 	var (
-		rotated         sqlcgen.User
+		rotated         sqlcgen.UpdateUserPasswordHashRow
 		failureAuditRow *failureAudit
 	)
 	err := p.svc.withTx(ctx, func(q *sqlcgen.Queries) error {
@@ -305,7 +305,7 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 // is the freshly-minted plaintext password -- the caller returns it
 // in the response body exactly once.
 type AdminResetResult struct {
-	User        sqlcgen.User
+	User        sqlcgen.GetUserByIDRow
 	NewPassword string
 }
 
@@ -332,7 +332,20 @@ func (p *PasswordResetService) AdminResetPassword(ctx context.Context, targetUse
 		if err != nil {
 			return err
 		}
-		user = rotated
+		user = sqlcgen.GetUserByIDRow{
+			ID:           rotated.ID,
+			Username:     rotated.Username,
+			Email:        rotated.Email,
+			PasswordHash: rotated.PasswordHash,
+			IsAdmin:      rotated.IsAdmin,
+			Source:       rotated.Source,
+			CreatedAt:    rotated.CreatedAt,
+			CreatedBy:    rotated.CreatedBy,
+			DisabledAt:   rotated.DisabledAt,
+			AuthProvider: rotated.AuthProvider,
+			ExternalUid:  rotated.ExternalUid,
+			LastSeenAt:   rotated.LastSeenAt,
+		}
 		// Revoke every active session for the target user. The reset
 		// is the operator's signal that the existing credential is
 		// compromised; a session the legitimate user had on a phone,
@@ -394,7 +407,7 @@ func (p *PasswordResetService) RevokeToken(ctx context.Context, tokenID int64) e
 // future-proof: when #410 (MFA) needs to record password_changed_at
 // for its re-auth grace window, the rotation logic here is the only
 // place to add it.
-func updateUserPasswordHash(ctx context.Context, q *sqlcgen.Queries, userID int64, hash string, _ int64) (sqlcgen.User, error) {
+func updateUserPasswordHash(ctx context.Context, q *sqlcgen.Queries, userID int64, hash string, _ int64) (sqlcgen.UpdateUserPasswordHashRow, error) {
 	return q.UpdateUserPasswordHash(ctx, sqlcgen.UpdateUserPasswordHashParams{
 		ID:           userID,
 		PasswordHash: sql.NullString{String: hash, Valid: true},

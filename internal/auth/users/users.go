@@ -201,22 +201,22 @@ func (s *Service) CountUsers(ctx context.Context) (int64, error) {
 }
 
 // CreateLocalUser inserts a source='local' user with the given password.
-func (s *Service) CreateLocalUser(ctx context.Context, username, email, password string, isAdmin bool, createdAt int64, createdBy string) (sqlcgen.User, error) {
+func (s *Service) CreateLocalUser(ctx context.Context, username, email, password string, isAdmin bool, createdAt int64, createdBy string) (sqlcgen.CreateLocalUserRow, error) {
 	if username == "" {
-		return sqlcgen.User{}, errors.New("users: username is required")
+		return sqlcgen.CreateLocalUserRow{}, errors.New("users: username is required")
 	}
 	if password == "" {
-		return sqlcgen.User{}, errors.New("users: password is required")
+		return sqlcgen.CreateLocalUserRow{}, errors.New("users: password is required")
 	}
 	hash, err := s.HashPassword(password)
 	if err != nil {
-		return sqlcgen.User{}, fmt.Errorf("hash password: %w", err)
+		return sqlcgen.CreateLocalUserRow{}, fmt.Errorf("hash password: %w", err)
 	}
 	var emailNS sql.NullString
 	if email != "" {
 		emailNS = sql.NullString{String: email, Valid: true}
 	}
-	var row sqlcgen.User
+	var row sqlcgen.CreateLocalUserRow
 	err = s.withTx(ctx, func(q *sqlcgen.Queries) error {
 		var txErr error
 		row, txErr = q.CreateLocalUser(ctx, sqlcgen.CreateLocalUserParams{
@@ -230,7 +230,7 @@ func (s *Service) CreateLocalUser(ctx context.Context, username, email, password
 		return txErr
 	})
 	if err != nil {
-		return sqlcgen.User{}, err
+		return sqlcgen.CreateLocalUserRow{}, err
 	}
 	return row, nil
 }
@@ -240,9 +240,9 @@ func (s *Service) CreateLocalUser(ctx context.Context, username, email, password
 // then keyed by username. The callers (JITProvisioner in jit.go)
 // enforce the require-email gate; this function just persists what
 // the caller gave it.
-func (s *Service) CreateForwardJITUser(ctx context.Context, username, email string, isAdmin bool, createdAt int64, createdBy string) (sqlcgen.User, error) {
+func (s *Service) CreateForwardJITUser(ctx context.Context, username, email string, isAdmin bool, createdAt int64, createdBy string) (sqlcgen.CreateForwardJITUserRow, error) {
 	if email == "" && username == "" {
-		return sqlcgen.User{}, errors.New("users: forward-jit requires either email or username")
+		return sqlcgen.CreateForwardJITUserRow{}, errors.New("users: forward-jit requires either email or username")
 	}
 	if username == "" {
 		at := strings.IndexByte(email, '@')
@@ -256,7 +256,7 @@ func (s *Service) CreateForwardJITUser(ctx context.Context, username, email stri
 	if email != "" {
 		emailNS = sql.NullString{String: email, Valid: true}
 	}
-	var row sqlcgen.User
+	var row sqlcgen.CreateForwardJITUserRow
 	err := s.withTx(ctx, func(q *sqlcgen.Queries) error {
 		var txErr error
 		row, txErr = q.CreateForwardJITUser(ctx, sqlcgen.CreateForwardJITUserParams{
@@ -269,46 +269,46 @@ func (s *Service) CreateForwardJITUser(ctx context.Context, username, email stri
 		return txErr
 	})
 	if err != nil {
-		return sqlcgen.User{}, err
+		return sqlcgen.CreateForwardJITUserRow{}, err
 	}
 	return row, nil
 }
 
 // GetUserByID returns ErrUserNotFound on sql.ErrNoRows.
-func (s *Service) GetUserByID(ctx context.Context, id int64) (sqlcgen.User, error) {
+func (s *Service) GetUserByID(ctx context.Context, id int64) (sqlcgen.GetUserByIDRow, error) {
 	row, err := s.db.Reader.GetUserByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return sqlcgen.User{}, ErrUserNotFound
+			return sqlcgen.GetUserByIDRow{}, ErrUserNotFound
 		}
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByIDRow{}, err
 	}
 	return row, nil
 }
 
 // GetUserByUsername wraps the sqlc query.
-func (s *Service) GetUserByUsername(ctx context.Context, username string) (sqlcgen.User, error) {
+func (s *Service) GetUserByUsername(ctx context.Context, username string) (sqlcgen.GetUserByUsernameRow, error) {
 	row, err := s.db.Reader.GetUserByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return sqlcgen.User{}, ErrUserNotFound
+			return sqlcgen.GetUserByUsernameRow{}, ErrUserNotFound
 		}
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByUsernameRow{}, err
 	}
 	return row, nil
 }
 
 // GetUserByEmailSource wraps the sqlc query.
-func (s *Service) GetUserByEmailSource(ctx context.Context, email, source string) (sqlcgen.User, error) {
+func (s *Service) GetUserByEmailSource(ctx context.Context, email, source string) (sqlcgen.GetUserByEmailSourceRow, error) {
 	row, err := s.db.Reader.GetUserByEmailSource(ctx, sqlcgen.GetUserByEmailSourceParams{
 		Email:  sql.NullString{String: email, Valid: true},
 		Source: source,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return sqlcgen.User{}, ErrUserNotFound
+			return sqlcgen.GetUserByEmailSourceRow{}, ErrUserNotFound
 		}
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByEmailSourceRow{}, err
 	}
 	return row, nil
 }
@@ -324,7 +324,7 @@ func (s *Service) DisableUser(ctx context.Context, id int64, when time.Time) err
 }
 
 // ListUsers is a paginated admin listing.
-func (s *Service) ListUsers(ctx context.Context, limit, offset int64) ([]sqlcgen.User, error) {
+func (s *Service) ListUsers(ctx context.Context, limit, offset int64) ([]sqlcgen.ListUsersRow, error) {
 	return s.db.Reader.ListUsers(ctx, sqlcgen.ListUsersParams{Limit: limit, Offset: offset})
 }
 
@@ -482,6 +482,16 @@ func (s *Service) TouchSession(ctx context.Context, sessionID int64, lastSeen, i
 			ID:            sessionID,
 			LastSeenAt:    lastSeen.Unix(),
 			IdleExpiresAt: idleExpiry.Unix(),
+		})
+	})
+}
+
+// SetSessionMFAVerified marks a session as MFA-verified.
+func (s *Service) SetSessionMFAVerified(ctx context.Context, sessionID int64) error {
+	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.SetSessionMFAVerified(ctx, sqlcgen.SetSessionMFAVerifiedParams{
+			ID:            sessionID,
+			MfaVerifiedAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
 		})
 	})
 }

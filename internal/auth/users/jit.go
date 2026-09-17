@@ -51,29 +51,30 @@ func JITProvisioner(svc *Service, adminGroups []string, requireEmail bool, log *
 			return auth.LocalUserView{}, nil
 		}
 		email := merged.Email
-		var user sqlcgen.User
-		var err error
 		if email != "" {
-			user, err = getOrCreateForwardJIT(ctx, svc, merged.Name, email, true, log)
-		} else {
-			user, err = getOrCreateForwardJITByUsername(ctx, svc, merged.Name, log)
+			existing, err := getOrCreateForwardJIT(ctx, svc, merged.Name, email, true, log)
+			if err != nil {
+				return auth.LocalUserView{}, err
+			}
+			return auth.LocalUserView{UserID: existing.ID, IsAdmin: existing.IsAdmin != 0}, nil
 		}
+		existing, err := getOrCreateForwardJITByUsername(ctx, svc, merged.Name, log)
 		if err != nil {
 			return auth.LocalUserView{}, err
 		}
-		return auth.LocalUserView{UserID: user.ID, IsAdmin: user.IsAdmin != 0}, nil
+		return auth.LocalUserView{UserID: existing.ID, IsAdmin: existing.IsAdmin != 0}, nil
 	}
 }
 
 // getOrCreateForwardJIT returns the local source='forward-jit' user
 // for email, creating one if it doesn't exist.
-func getOrCreateForwardJIT(ctx context.Context, svc *Service, name, email string, isAdmin bool, log *slog.Logger) (sqlcgen.User, error) {
+func getOrCreateForwardJIT(ctx context.Context, svc *Service, name, email string, isAdmin bool, log *slog.Logger) (sqlcgen.GetUserByEmailSourceRow, error) {
 	existing, err := svc.GetUserByEmailSource(ctx, email, "forward-jit")
 	if err == nil {
 		return existing, nil
 	}
 	if !errors.Is(err, ErrUserNotFound) {
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByEmailSourceRow{}, err
 	}
 	created, err := svc.CreateForwardJITUser(ctx, name, email, isAdmin, time.Now().Unix(), "forward:"+name)
 	if err != nil {
@@ -83,26 +84,40 @@ func getOrCreateForwardJIT(ctx context.Context, svc *Service, name, email string
 		if lookupErr == nil {
 			return existing2, nil
 		}
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByEmailSourceRow{}, err
 	}
+	// Convert CreateForwardJITUserRow to GetUserByEmailSourceRow for return type compatibility
 	log.Info("auth: forward-JIT provisioned local admin", "email", email, "isAdmin", isAdmin)
-	return created, nil
+	return sqlcgen.GetUserByEmailSourceRow{
+		ID:           created.ID,
+		Username:     created.Username,
+		Email:        created.Email,
+		PasswordHash: created.PasswordHash,
+		IsAdmin:      created.IsAdmin,
+		Source:       created.Source,
+		CreatedAt:    created.CreatedAt,
+		CreatedBy:    created.CreatedBy,
+		DisabledAt:   created.DisabledAt,
+		AuthProvider: created.AuthProvider,
+		ExternalUid:  created.ExternalUid,
+		LastSeenAt:   created.LastSeenAt,
+	}, nil
 }
 
 // getOrCreateForwardJITByUsername is the email-less fallback path.
 // Refuses to create a JIT row when a LOCAL user with the same username
 // already exists -- that would silently let the forward-auth user take
 // over a manually-created account.
-func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username string, log *slog.Logger) (sqlcgen.User, error) {
+func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username string, log *slog.Logger) (sqlcgen.GetUserByUsernameRow, error) {
 	if username == "" {
-		return sqlcgen.User{}, errors.New("auth: forward-JIT username path: empty username")
+		return sqlcgen.GetUserByUsernameRow{}, errors.New("auth: forward-JIT username path: empty username")
 	}
 	existing, err := svc.GetUserByUsername(ctx, username)
 	if err == nil {
 		return existing, nil
 	}
 	if !errors.Is(err, ErrUserNotFound) {
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByUsernameRow{}, err
 	}
 	created, err := svc.CreateForwardJITUser(ctx, username, "", true, time.Now().Unix(), "forward:"+username)
 	if err != nil {
@@ -110,10 +125,23 @@ func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username
 		if lookupErr == nil {
 			return existing2, nil
 		}
-		return sqlcgen.User{}, err
+		return sqlcgen.GetUserByUsernameRow{}, err
 	}
 	log.Info("auth: forward-JIT provisioned local admin (username-keyed, no email)", "username", username)
-	return created, nil
+	return sqlcgen.GetUserByUsernameRow{
+		ID:           created.ID,
+		Username:     created.Username,
+		Email:        created.Email,
+		PasswordHash: created.PasswordHash,
+		IsAdmin:      created.IsAdmin,
+		Source:       created.Source,
+		CreatedAt:    created.CreatedAt,
+		CreatedBy:    created.CreatedBy,
+		DisabledAt:   created.DisabledAt,
+		AuthProvider: created.AuthProvider,
+		ExternalUid:  created.ExternalUid,
+		LastSeenAt:   created.LastSeenAt,
+	}, nil
 }
 
 // slicesContainsAny returns true if any element of a is in b. Cheap

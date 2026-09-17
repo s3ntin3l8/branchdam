@@ -17,6 +17,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/mfa"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
@@ -40,6 +41,7 @@ type localAuthHandlers struct {
 	sessionMw    *session.Middleware
 	reset        *users.PasswordResetService
 	email        email.Notifier
+	mfa          *mfa.Service
 	log          *slog.Logger
 	authMode     auth.AuthMode
 	jit          auth.JITProvisioner
@@ -84,6 +86,7 @@ func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/enable", s.handleAdminEnableUser)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{id}", s.handleAdminUpdateUser)
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/revoke-sessions", s.handleAdminRevokeSessions)
+	s.registerMFARoutes(mux)
 }
 
 // --- /api/v1/setup/status ---
@@ -251,6 +254,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if MFA is enabled.
+	mfaEnabled := s.localAuth.mfa != nil && s.localAuth.mfa.HasMFA(r.Context(), user.ID)
+
 	now := time.Now()
 	_, cookieValue, err := s.localAuth.users.MintCookieValue()
 	if err != nil {
@@ -268,11 +274,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.localAuth.loginLimiter.RecordSuccess(ip)
-	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: user.ID, Valid: true}, username, "local", "ok", ip, r.UserAgent(), "{}")
 
 	maxAge := int(s.localAuth.sessionMw.AbsoluteTimeout().Seconds())
 	s.localAuth.sessionMw.SetSessionCookie(w, r, cookieValue, maxAge, s.cfg().HTTP.TrustedProxies)
 
+	if mfaEnabled {
+		s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: user.ID, Valid: true}, username, "local", "mfa-required", ip, r.UserAgent(), "{}")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mfaRequired": true})
+		return
+	}
+
+	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: user.ID, Valid: true}, username, "local", "ok", ip, r.UserAgent(), "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

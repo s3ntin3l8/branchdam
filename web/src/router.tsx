@@ -13,6 +13,7 @@ const CompanionPairingsPage = lazy(() => import("./pages/CompanionPairingsPage")
 const AuditLogPage = lazy(() => import("./pages/AuditLogPage"));
 const UsersPage = lazy(() => import("./pages/UsersPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
+const MfaSetupPage = lazy(() => import("./pages/MfaSetupPage"));
 const PasswordResetPage = lazy(() => import("./pages/PasswordResetPage"));
 
 // Minimal error element for the data router's errorElement. The full
@@ -63,6 +64,7 @@ export const routeConfig: RouteObject[] = [
       { path: "audit-log", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit log…</div>}><AuditLogPage /></Suspense> },
       { path: "users", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading users…</div>}><UsersPage /></Suspense> },
       { path: "login", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><LoginPage /></Suspense> },
+      { path: "mfa/setup", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><MfaSetupPage /></Suspense> },
       { path: "password-reset", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><PasswordResetPage /></Suspense> },
     ],
   },

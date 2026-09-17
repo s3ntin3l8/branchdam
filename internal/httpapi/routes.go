@@ -3303,6 +3303,7 @@ type attributionUserDTO struct {
 	IsAdmin      bool   `json:"isAdmin"`
 	Source       string `json:"source"`
 	DisabledAt   *int64 `json:"disabledAt,omitempty"`
+	MfaEnabled   bool   `json:"mfaEnabled"`
 }
 
 type ListUsersOutput struct {
@@ -3350,6 +3351,7 @@ func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*List
 			LastSeenAt:   r.LastSeenAt,
 			IsAdmin:      r.IsAdmin == 1,
 			Source:       r.Source,
+			MfaEnabled:   r.MfaEnabled == 1,
 		}
 		if r.Email.Valid {
 			u.Email = r.Email.String

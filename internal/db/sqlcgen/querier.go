@@ -28,6 +28,7 @@ type Querier interface {
 	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
+	ClearMFAPendingSecret(ctx context.Context, id int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
 	// #225: used when the MISSING sweep is skipped because the walk saw zero
 	// files. The scan itself still completed cleanly -- state stays COMPLETED,
@@ -134,12 +135,12 @@ type Querier interface {
 	// schema CHECK constraint enforces this. email is required (callers
 	// refuse the JIT when the forward-auth email header is empty). created_by is
 	// 'forward:<forward-auth username>'.
-	CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error)
+	CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (CreateForwardJITUserRow, error)
 	// Inserts a source='local' user. password_hash is the argon2id encoded
 	// string. created_by is 'setup' for the first admin, 'self' for self-
 	// registration flows (none in v1), or 'user:<principal name>' for admin-
 	// created users. Returns the inserted row.
-	CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error)
+	CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (CreateLocalUserRow, error)
 	CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error)
 	// Minimal edge insert, landed here because PR 6's own version-collision test
 	// (T5, spec 9.5) needs to prove an existing edge survives archiving its
@@ -186,8 +187,10 @@ type Querier interface {
 	// recoverable rather than merely resettable to some other stored value.
 	DeleteAppSetting(ctx context.Context, key string) error
 	DeleteDevicePairing(ctx context.Context, id int64) error
+	DeleteMFACredentials(ctx context.Context, userID int64) error
 	DeletePairingAuditForPairing(ctx context.Context, pairingID int64) error
 	DeletePairingKeysForPairing(ctx context.Context, pairingID int64) error
+	DeleteRecoveryCodes(ctx context.Context, userID int64) error
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// Same recursive walk as WouldCreateCycle, but returns the whole descendant
@@ -222,6 +225,7 @@ type Querier interface {
 	// (see CreateAttributionUser) keeps RETURNING returning a row on conflict.
 	EnsureSystemUser(ctx context.Context) (int64, error)
 	FailScanJob(ctx context.Context, arg FailScanJobParams) error
+	FindUnusedRecoveryCode(ctx context.Context, arg FindUnusedRecoveryCodeParams) (FindUnusedRecoveryCodeRow, error)
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
 	GetAgentEventByUUIDAndAgent(ctx context.Context, arg GetAgentEventByUUIDAndAgentParams) (GetAgentEventByUUIDAndAgentRow, error)
 	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
@@ -254,6 +258,10 @@ type Querier interface {
 	// non-archived node at this exact path? Backed by ux_media_nodes_live_path
 	// (docs/schema.md fix #3).
 	GetLiveNodeByPath(ctx context.Context, filePath string) (MediaNode, error)
+	// MFA queries. All positional params use bare ?1/?2 per AGENTS.md's
+	// "SQL Syntax Traps" note.
+	GetMFACredentials(ctx context.Context, userID int64) (MfaCredential, error)
+	GetMFAPendingSecret(ctx context.Context, id int64) (GetMFAPendingSecretRow, error)
 	GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
 	// Used by internal/graph.Engine.ResolveAndCommit when UpsertMediaEdge
 	// returns sql.ErrNoRows -- the edge is CONFIRMED/REJECTED and was
@@ -293,11 +301,13 @@ type Querier interface {
 	GetRemoteSyncState(ctx context.Context, arg GetRemoteSyncStateParams) (RemoteSyncState, error)
 	GetScanJob(ctx context.Context, id int64) (ScanJob, error)
 	// Hot path: called by SessionMiddleware on every authenticated browser
-	// request. Returns the full row including revoked_at so the middleware
-	// can reject post-revoke cookies in one query. The partial index
-	// sessions_user_active_idx covers the active-set variant but the
-	// revoke check needs the full row, so we don't use it here.
+	// request. Returns the full row including revoked_at and mfa_verified_at
+	// so the middleware can reject post-revoke cookies and enforce MFA in
+	// one query. The partial index sessions_user_active_idx covers the
+	// active-set variant but the revoke check needs the full row, so we
+	// don't use it here.
 	GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error)
+	GetSessionWithMFA(ctx context.Context, cookieID string) (Session, error)
 	// handlePrune (#61, #238) reads cache_ttl_hours directly off this row --
 	// it no longer re-joins config by root_path to recover the TTL.
 	GetStorageLocationByID(ctx context.Context, id int64) (StorageLocation, error)
@@ -316,12 +326,12 @@ type Querier interface {
 	// and source 'forward-jit' either matches an existing admin or triggers
 	// a fresh INSERT in CreateForwardJITUser. Partial unique index
 	// users_email_source_uniq covers this.
-	GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error)
-	GetUserByID(ctx context.Context, id int64) (User, error)
+	GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (GetUserByEmailSourceRow, error)
+	GetUserByID(ctx context.Context, id int64) (GetUserByIDRow, error)
 	// Used by /api/v1/login to resolve the presented username to a user row.
 	// The lookup is username-only; password verification happens in Go against
 	// password_hash. Index: users.username UNIQUE already covers this.
-	GetUserByUsername(ctx context.Context, username string) (User, error)
+	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
 	InactivateResolveEdge(ctx context.Context, id int64) error
 	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
 	// actor_audit: append-only event log for admin actions that aren't
@@ -345,6 +355,7 @@ type Querier interface {
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
 	InsertPairingAudit(ctx context.Context, arg InsertPairingAuditParams) error
+	InsertRecoveryCodes(ctx context.Context, arg InsertRecoveryCodesParams) error
 	// Resets a node's thumbnail generation state to PENDING with attempts
 	// zeroed, so internal/thumbs.Worker regenerates it on its next pass. The
 	// Cache.Write path is os.CreateTemp + os.Rename to the same node_uuid path,
@@ -583,7 +594,7 @@ type Querier interface {
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
 	// Paginated user list for the admin UI. Order by id ASC so paging is
 	// stable across inserts (new users go to the END, not the middle).
-	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
+	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
 	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
 	// ARCHIVED nodes excluded) and returns every live ancestor on a
 	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
@@ -611,6 +622,7 @@ type Querier interface {
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
 	MarkNodeMissing(ctx context.Context, id int64) error
+	MarkRecoveryCodeUsed(ctx context.Context, arg MarkRecoveryCodeUsedParams) error
 	// Terminal failure: records the error, the attempt time, and increments
 	// retry_count -- what ResetRemoteSyncStateFailed's bound is measured against.
 	MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error
@@ -772,6 +784,8 @@ type Querier interface {
 	SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyExpirationsParams) error
 	// Toggles the is_admin flag.
 	SetAdmin(ctx context.Context, arg SetAdminParams) error
+	SetMFAPendingSecret(ctx context.Context, arg SetMFAPendingSecretParams) error
+	SetSessionMFAVerified(ctx context.Context, arg SetSessionMFAVerifiedParams) error
 	// Backs M6: storage.LoadGuard calls this to deactivate a location whose
 	// root_path can't be resolved at startup (mount vanished) rather than
 	// treating that as a fatal error that prevents the whole server from
@@ -815,6 +829,7 @@ type Querier interface {
 	// outside the transaction (in pairing.Service) so this UPDATE is a
 	// pure byte-write with no rendering dependency.
 	UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error
+	UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStepParams) error
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
 	// location (docs/schema.md fix #8's full_hash policy).
@@ -853,7 +868,7 @@ type Querier interface {
 	UpdateScanJobProgress(ctx context.Context, arg UpdateScanJobProgressParams) error
 	// Rotates the password hash. Used by /api/v1/password-reset/confirm
 	// (self-service) and /api/v1/admin/users/{id}/reset-password (admin).
-	UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (User, error)
+	UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (UpdateUserPasswordHashRow, error)
 	UpsertAgentScratchTelemetry(ctx context.Context, arg UpsertAgentScratchTelemetryParams) (AgentScratchTelemetry, error)
 	// The row's mere existence is the override -- callers pass "" for value
 	// exactly when the operator wants "explicitly empty", never as a signal to
@@ -862,6 +877,7 @@ type Querier interface {
 	// set via unixepoch() here, not passed from Go, matching every other
 	// UPDATE/upsert in this package (docs/schema.md fix #5).
 	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
+	UpsertMFACredentials(ctx context.Context, arg UpsertMFACredentialsParams) error
 	// A human decision outranks any resolver, permanently: the UPDATE branch is
 	// gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely.
 	// IMPORTANT: when that WHERE evaluates false, SQLite's RETURNING emits NO

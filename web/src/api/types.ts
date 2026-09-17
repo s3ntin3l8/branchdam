@@ -615,6 +615,7 @@ export interface AttributionUser {
   isAdmin?: boolean;
   source?: string;
   disabledAt?: number;
+  mfaEnabled?: boolean;
 }
 
 export interface ListUsersResponse {
@@ -677,4 +678,39 @@ export interface AuditQueryParams {
   untilUnix?: number;
   limit?: number;
   offset?: number;
+}
+
+// MFA (PR #410)
+
+export interface MfaSetupResponse {
+  otpauthURI: string;
+  asciiQR: string;
+}
+
+export interface MfaEnableInput {
+  code: string;
+}
+
+export interface MfaEnableResponse {
+  ok: boolean;
+  recoveryCodes: string[];
+  notice: string;
+}
+
+export interface MfaChallengeInput {
+  code: string;
+}
+
+export interface MfaChallengeResponse {
+  ok: boolean;
+}
+
+export interface MfaDisableInput {
+  password: string;
+  code: string;
+}
+
+export interface LoginResponse {
+  ok: boolean;
+  mfaRequired?: boolean;
 }

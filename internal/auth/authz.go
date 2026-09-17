@@ -36,8 +36,9 @@ func writeForbidden(w http.ResponseWriter, detail string) {
 // cookie). UserID is exposed so handlers can audit-log "admin alice
 // did X" without a second DB hit.
 type LocalUserView struct {
-	UserID  int64
-	IsAdmin bool
+	UserID      int64
+	IsAdmin     bool
+	MFAVerified bool
 }
 
 // IsLocalAdmin satisfies a tiny inline contract (so future refactors

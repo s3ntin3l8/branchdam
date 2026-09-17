@@ -22,6 +22,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/mfa"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
@@ -153,6 +154,7 @@ type LocalAuthDeps struct {
 	// only in tests that don't construct a Deps.LocalAuth. The HTTP
 	// handlers short-circuit to 503 when Reset is nil.
 	Reset    *users.PasswordResetService
+	MFA      *mfa.Service
 	AuthMode auth.AuthMode
 	// Email, when non-nil, sends password-reset links via SMTP or
 	// logs them (logSender). nil means no email delivery; the handler
@@ -266,6 +268,7 @@ func New(d Deps) *Server {
 			sessionMw:    d.LocalAuth.SessionMw,
 			reset:        d.LocalAuth.Reset,
 			email:        d.LocalAuth.Email,
+			mfa:          d.LocalAuth.MFA,
 			log:          log,
 			authMode:     d.LocalAuth.AuthMode,
 			jit:          d.LocalAuth.JIT,
