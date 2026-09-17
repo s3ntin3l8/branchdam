@@ -171,6 +171,30 @@ func (s *Server) resolveTargetStorageLocation(ctx context.Context, locationID in
 	return targetLoc, exportLoc, nil
 }
 
+// backfillDedupUploaderIfMissing sets uploaded_by_user_id on a node a dedup
+// hit returned unchanged, when the request carries a live, resolved
+// uploader identity the pre-existing row didn't have. This is a deliberate
+// exception to pipeline.Commit's write-once rescan behavior (commit.go's
+// doc comment on uploadedByUserID): a rescan has no uploader identity to
+// offer, whereas a dedup'd upload arrives on a request that does. The
+// query's IS NULL guard preserves "first real attribution wins" and makes
+// this safe to call unconditionally on every dedup hit. Best-effort: a
+// failure here must not turn a successful dedup response into a 5xx.
+func (s *Server) backfillDedupUploaderIfMissing(ctx context.Context, nodeID int64, userID int64) {
+	if s.db == nil || userID == 0 {
+		return
+	}
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.BackfillMediaNodeUploader(ctx, sqlcgen.BackfillMediaNodeUploaderParams{
+			ID:               nodeID,
+			UploadedByUserID: sql.NullInt64{Int64: userID, Valid: true},
+		})
+	})
+	if err != nil && s.log != nil {
+		s.log.Warn("upload: dedup uploader backfill failed", "nodeID", nodeID, "err", err.Error())
+	}
+}
+
 // dedupUploadResult constructs a unified UploadResult and assetDTO for deduplicated upload responses.
 // bytesWritten represents the bytes transferred to disk during this specific request (0 for pre-write hits,
 // whereas Asset.SizeBytes always reflects the existing media node's stored size).
@@ -210,6 +234,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	if params.ExpectedBlake3 != "" && s.db != nil {
 		cleanHash := strings.ToLower(strings.TrimSpace(params.ExpectedBlake3))
 		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &cleanHash); err == nil {
+			s.backfillDedupUploaderIfMissing(ctx, existing.ID, params.UserID)
 			return dedupUploadResult(existing, cleanHash, 0), nil
 		}
 	}
@@ -371,6 +396,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	if s.db != nil {
 		if existing, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); err == nil {
 			_ = s.removeFile(targetPath)
+			s.backfillDedupUploaderIfMissing(ctx, existing.ID, params.UserID)
 			return dedupUploadResult(existing, computedBlake3, bytesWritten), nil
 		}
 	}
@@ -585,6 +611,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		}
 		if s.db != nil && computedBlake3 != "" {
 			if existing, lookupErr := s.db.Reader.GetMediaNodeByFullHash(ctx, &computedBlake3); lookupErr == nil {
+				s.backfillDedupUploaderIfMissing(ctx, existing.ID, params.UserID)
 				return dedupUploadResult(existing, computedBlake3, bytesWritten), nil
 			}
 		}

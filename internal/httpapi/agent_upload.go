@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -22,6 +23,42 @@ func (s *Server) writeJSONError(w http.ResponseWriter, statusCode int, message s
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
+// resolveAgentUploadUserID resolves the uploaded_by_user_id attribution for
+// an agent upload from agentID's device_pairings row. Returns 0 (NULL
+// attribution) for every case other than "an active pairing with a set
+// owner" -- no pairing row, a revoked pairing, or a pairing with no owner --
+// logging a Warn for anything other than the documented env-bootstrap-has-
+// no-pairing case.
+//
+// The RevokedAt.Valid case is normally unreachable through the HTTP auth
+// path: GetDevicePairingKeyByHash (the query behind AgentConfig.LookupKey)
+// already filters out keys belonging to a revoked pairing, so a revoked
+// pairing's key fails authentication before this ever runs. It exists to
+// cover the narrow TOCTOU window where a pairing is revoked between that
+// auth check and this lookup, for an already-in-flight request.
+func (s *Server) resolveAgentUploadUserID(ctx context.Context, agentID string) int64 {
+	pairing, err := s.db.Reader.GetDevicePairingByAgentID(ctx, agentID)
+	switch {
+	case err != nil:
+		// "env-bootstrap" (the shared BRANCHDAM_AGENT_API_KEY) has no
+		// pairing row by design -- that's the documented "agent without
+		// pairing = NULL" case, not worth a warning. Anything else here
+		// (a paired agent_id the lookup can't find) is worth knowing about.
+		if agentID != "env-bootstrap" {
+			s.log.Warn("agent upload: device pairing lookup failed, attribution NULL", "agentId", agentID, "err", err.Error())
+		}
+		return 0
+	case pairing.RevokedAt.Valid:
+		s.log.Warn("agent upload: pairing revoked, attribution NULL", "agentId", agentID)
+		return 0
+	case !pairing.UserID.Valid:
+		s.log.Warn("agent upload: pairing has no owner, attribution NULL", "agentId", agentID)
+		return 0
+	default:
+		return pairing.UserID.Int64
+	}
+}
+
 func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	p, ok := auth.From(r.Context())
 	if !ok || (p.Kind != auth.KindMachine && !p.Authenticated) {
@@ -34,9 +71,7 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	// user_id comes from the device_pairings row keyed on agent_id.
 	var agentUserID int64
 	if p.Kind == auth.KindMachine {
-		if pairing, err := s.db.Reader.GetDevicePairingByAgentID(r.Context(), p.Name); err == nil && pairing.UserID.Valid {
-			agentUserID = pairing.UserID.Int64
-		}
+		agentUserID = s.resolveAgentUploadUserID(r.Context(), p.Name)
 	}
 
 	filename := r.Header.Get("X-Filename")
