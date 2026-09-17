@@ -19,7 +19,7 @@ const backfillDevicePairingUserIDSQL = `
 UPDATE device_pairings
 SET user_id = (
     SELECT u.id FROM users u
-    WHERE u.username = (
+    WHERE 'user:' || u.username = (
         SELECT a.actor FROM companion_pairing_audit a
         WHERE a.pairing_id = device_pairings.id
           AND a.event = 'PAIR_CREATED'
@@ -29,7 +29,7 @@ SET user_id = (
 WHERE user_id IS NULL
   AND EXISTS (
     SELECT 1 FROM users u
-    WHERE u.username = (
+    WHERE 'user:' || u.username = (
         SELECT a.actor FROM companion_pairing_audit a
         WHERE a.pairing_id = device_pairings.id
           AND a.event = 'PAIR_CREATED'
@@ -42,18 +42,27 @@ WHERE user_id IS NULL
 // follow-up promised at lines 20-24 and finally shipped in migration 00027:
 // pairings created before multi-user attribution existed have user_id NULL,
 // and the intended recovery path is resolving companion_pairing_audit's
-// PAIR_CREATED actor against users.username. This test covers the three
-// cases the migration's WHERE/EXISTS guards exist for.
+// PAIR_CREATED actor against users.username.
+//
+// Actor values below use the real production shape written by actorFromCtx
+// (internal/httpapi/companion_pairings.go): "user:" + p.Name for a KindUser
+// principal, bare agent_id for a KindMachine principal. An earlier version
+// of this test seeded bare usernames as the actor, which happened to match
+// the (buggy) migration under test and masked the mismatch -- Hermes review
+// caught that the migration's join would never match in production. Case 4
+// below exists specifically to keep that regression caught: a bare-agent_id
+// actor must never match a users.username of the same string.
 func TestBackfillDevicePairingUserID(t *testing.T) {
 	database := openTestDB(t)
 	ctx := context.Background()
 
 	var (
-		matchedUserID     int64
-		alreadySetUserID  int64
-		pairingWithMatch  int64
-		pairingNoMatch    int64
-		pairingAlreadySet int64
+		matchedUserID       int64
+		alreadySetUserID    int64
+		pairingWithMatch    int64
+		pairingNoMatch      int64
+		pairingAlreadySet   int64
+		pairingMachineActor int64
 	)
 
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -77,13 +86,14 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 			return err
 		}
 
-		// Case 1: pairing has NULL user_id; audit actor "alice" matches an
-		// existing users.username -> expect backfill to matchedUserID.
+		// Case 1: pairing has NULL user_id; audit actor "user:alice" (the
+		// real actorFromCtx shape for a KindUser principal) matches an
+		// existing users.username="alice" -> expect backfill to matchedUserID.
 		pairing1, err := q.CreateDevicePairing(ctx, sqlcgen.CreateDevicePairingParams{
 			AgentID:       "agent-match",
 			FriendlyLabel: "Match Phone",
 			CreatedAt:     1000,
-			CreatedBy:     "alice",
+			CreatedBy:     "user:alice",
 			QrSvg:         []byte("<svg/>"),
 			UserID:        sql.NullInt64{},
 		})
@@ -93,7 +103,7 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 		pairingWithMatch = pairing1.ID
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingWithMatch,
-			Actor:     "alice",
+			Actor:     "user:alice",
 			Event:     "PAIR_CREATED",
 			Details:   "{}",
 			CreatedAt: 1000,
@@ -101,13 +111,13 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 			return err
 		}
 
-		// Case 2: pairing has NULL user_id; audit actor "ghost" matches no
-		// users.username -> expect the row to stay NULL, not be clobbered.
+		// Case 2: pairing has NULL user_id; audit actor "user:ghost" matches
+		// no users.username -> expect the row to stay NULL, not be clobbered.
 		pairing2, err := q.CreateDevicePairing(ctx, sqlcgen.CreateDevicePairingParams{
 			AgentID:       "agent-no-match",
 			FriendlyLabel: "Orphan Phone",
 			CreatedAt:     2000,
-			CreatedBy:     "ghost",
+			CreatedBy:     "user:ghost",
 			QrSvg:         []byte("<svg/>"),
 			UserID:        sql.NullInt64{},
 		})
@@ -117,7 +127,7 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 		pairingNoMatch = pairing2.ID
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingNoMatch,
-			Actor:     "ghost",
+			Actor:     "user:ghost",
 			Event:     "PAIR_CREATED",
 			Details:   "{}",
 			CreatedAt: 2000,
@@ -132,7 +142,7 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 			AgentID:       "agent-already-set",
 			FriendlyLabel: "Already Attributed Phone",
 			CreatedAt:     3000,
-			CreatedBy:     "bob",
+			CreatedBy:     "user:bob",
 			QrSvg:         []byte("<svg/>"),
 			UserID:        sql.NullInt64{Int64: alreadySetUserID, Valid: true},
 		})
@@ -142,10 +152,39 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 		pairingAlreadySet = pairing3.ID
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingAlreadySet,
-			Actor:     "alice",
+			Actor:     "user:alice",
 			Event:     "PAIR_CREATED",
 			Details:   "{}",
 			CreatedAt: 3000,
+		}); err != nil {
+			return err
+		}
+
+		// Case 4: pairing has NULL user_id; audit actor is a bare agent_id
+		// ("alice", no "user:" prefix) -- the shape actorFromCtx writes for a
+		// KindMachine principal. Even though a users row with username
+		// "alice" exists (from case 1), this must NOT match: a machine
+		// principal creating a pairing is not the same thing as the human
+		// user "alice", and the whole point of the "user:" prefix check is
+		// to not conflate the two string spaces.
+		pairing4, err := q.CreateDevicePairing(ctx, sqlcgen.CreateDevicePairingParams{
+			AgentID:       "agent-machine-actor",
+			FriendlyLabel: "Machine-Paired Phone",
+			CreatedAt:     4000,
+			CreatedBy:     "alice",
+			QrSvg:         []byte("<svg/>"),
+			UserID:        sql.NullInt64{},
+		})
+		if err != nil {
+			return err
+		}
+		pairingMachineActor = pairing4.ID
+		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
+			PairingID: pairingMachineActor,
+			Actor:     "alice",
+			Event:     "PAIR_CREATED",
+			Details:   "{}",
+			CreatedAt: 4000,
 		}); err != nil {
 			return err
 		}
@@ -169,6 +208,7 @@ func TestBackfillDevicePairingUserID(t *testing.T) {
 		{"matched actor backfills owner", pairingWithMatch, true, matchedUserID},
 		{"unmatched actor stays NULL", pairingNoMatch, false, 0},
 		{"already-set owner is untouched", pairingAlreadySet, true, alreadySetUserID},
+		{"bare-agent_id actor never matches a same-named user", pairingMachineActor, false, 0},
 	}
 
 	for _, tc := range cases {

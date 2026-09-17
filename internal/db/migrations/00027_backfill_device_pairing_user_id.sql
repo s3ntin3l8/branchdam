@@ -6,6 +6,13 @@
 -- (the creating Principal's Name, written at PAIR_CREATED time) resolved
 -- against users.username.
 --
+-- actorFromCtx (internal/httpapi/companion_pairings.go) writes a KindUser
+-- principal's actor as "user:" + p.Name, not bare p.Name -- so the join
+-- below must strip that prefix before comparing to users.username.
+-- KindMachine actors (bare agent_id, e.g. "env-bootstrap") and the
+-- unauthenticated "system"/"user:anonymous" sentinels never match the
+-- "user:" || username shape and correctly stay unresolved.
+--
 -- This is best-effort, not deterministic: users rows for Authentik
 -- principals are created lazily by ResolveOrCreate on first authenticated
 -- request, while this migration runs at boot. If the pairing's creator
@@ -23,7 +30,7 @@
 UPDATE device_pairings
 SET user_id = (
     SELECT u.id FROM users u
-    WHERE u.username = (
+    WHERE 'user:' || u.username = (
         SELECT a.actor FROM companion_pairing_audit a
         WHERE a.pairing_id = device_pairings.id
           AND a.event = 'PAIR_CREATED'
@@ -33,7 +40,7 @@ SET user_id = (
 WHERE user_id IS NULL
   AND EXISTS (
     SELECT 1 FROM users u
-    WHERE u.username = (
+    WHERE 'user:' || u.username = (
         SELECT a.actor FROM companion_pairing_audit a
         WHERE a.pairing_id = device_pairings.id
           AND a.event = 'PAIR_CREATED'
