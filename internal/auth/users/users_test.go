@@ -184,14 +184,18 @@ func TestRevokeAllUserSessions(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, svc.RevokeAllUserSessions(ctx, user.ID))
+	count, err := svc.RevokeAllUserSessions(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
 
 	cid, _, err := svc.MintCookieValue()
 	require.NoError(t, err)
 	created, err := svc.CreateSession(ctx, user.ID, cid, "127.0.0.1", "test", now.Add(time.Hour), now.Add(time.Minute))
 	require.NoError(t, err)
 	assert.False(t, created.RevokedAt.Valid)
-	require.NoError(t, svc.RevokeAllUserSessions(ctx, user.ID))
+	count, err = svc.RevokeAllUserSessions(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
 	got, err := svc.GetSessionByCookieID(ctx, cid)
 	require.NoError(t, err)
 	assert.True(t, got.RevokedAt.Valid)

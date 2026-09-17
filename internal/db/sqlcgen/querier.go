@@ -684,6 +684,8 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
+	// Clears disabled_at, re-enabling the account. Idempotent.
+	ReenableUser(ctx context.Context, id int64) error
 	// Updates the denormalized username/email (a user may have renamed since
 	// their last request) and bumps last_seen_at. Called by
 	// ResolveOrCreate after a cache miss, in the same transaction as the
@@ -737,8 +739,10 @@ type Querier interface {
 	ResolvedEdgeParentMissing(ctx context.Context, id int64) (bool, error)
 	RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeysForPairingParams) error
 	// Used by admin "log out everywhere" action and by DisableUser's
-	// companion flow (future admin endpoint). Idempotent.
-	RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error
+	// companion flow (future admin endpoint). Idempotent. Returns the
+	// number of sessions actually revoked (0 when user has no active
+	// sessions, >=1 otherwise).
+	RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) (int64, error)
 	// Sets revoked_at on the pairing (does NOT touch keys -- the HTTP layer
 	// also revokes every key for the pairing in the same tx).
 	RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairingParams) error
@@ -751,6 +755,8 @@ type Querier interface {
 	// that doesn't already have one. Idempotent -- re-running after the same
 	// clock has no effect.
 	SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyExpirationsParams) error
+	// Toggles the is_admin flag.
+	SetAdmin(ctx context.Context, arg SetAdminParams) error
 	// Backs M6: storage.LoadGuard calls this to deactivate a location whose
 	// root_path can't be resolved at startup (mount vanished) rather than
 	// treating that as a fatal error that prevents the whole server from

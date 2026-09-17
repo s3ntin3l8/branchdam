@@ -408,10 +408,11 @@ func updateUserPasswordHash(ctx context.Context, q *sqlcgen.Queries, userID int6
 // Both reset paths use it inside their own withTx scope so the
 // password rotation and the session revocation commit together.
 func revokeAllUserSessionsTx(ctx context.Context, q *sqlcgen.Queries, userID, revokedAt int64) error {
-	return q.RevokeAllUserSessions(ctx, sqlcgen.RevokeAllUserSessionsParams{
+	_, err := q.RevokeAllUserSessions(ctx, sqlcgen.RevokeAllUserSessionsParams{
 		UserID:    userID,
 		RevokedAt: sql.NullInt64{Int64: revokedAt, Valid: true},
 	})
+	return err
 }
 
 // mintResetToken returns (plaintext-base64url, sha256-hex). The

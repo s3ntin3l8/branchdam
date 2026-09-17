@@ -497,11 +497,37 @@ func (s *Service) RevokeSession(ctx context.Context, sessionID int64) error {
 }
 
 // RevokeAllUserSessions terminates every active session for a user.
-func (s *Service) RevokeAllUserSessions(ctx context.Context, userID int64) error {
-	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.RevokeAllUserSessions(ctx, sqlcgen.RevokeAllUserSessionsParams{
+// Returns the number of sessions actually revoked.
+func (s *Service) RevokeAllUserSessions(ctx context.Context, userID int64) (int64, error) {
+	var count int64
+	err := s.withTx(ctx, func(q *sqlcgen.Queries) error {
+		var txErr error
+		count, txErr = q.RevokeAllUserSessions(ctx, sqlcgen.RevokeAllUserSessionsParams{
 			UserID:    userID,
 			RevokedAt: sql.NullInt64{Int64: s.nowFn().Unix(), Valid: true},
+		})
+		return txErr
+	})
+	return count, err
+}
+
+// ReenableUser clears disabled_at, re-enabling the account.
+func (s *Service) ReenableUser(ctx context.Context, id int64) error {
+	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.ReenableUser(ctx, id)
+	})
+}
+
+// SetAdmin toggles the is_admin flag.
+func (s *Service) SetAdmin(ctx context.Context, id int64, isAdmin bool) error {
+	val := 0
+	if isAdmin {
+		val = 1
+	}
+	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.SetAdmin(ctx, sqlcgen.SetAdminParams{
+			ID:      id,
+			IsAdmin: int64(val),
 		})
 	})
 }

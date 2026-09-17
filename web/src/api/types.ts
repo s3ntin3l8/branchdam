@@ -635,6 +635,22 @@ export interface CreateUserResponse {
   shownOnceNotice?: string;
 }
 
+export interface UpdateUserInput {
+  isAdmin?: boolean | null;
+  disabledAt?: number | null;
+}
+
+export interface UpdateUserResponse {
+  ok: boolean;
+  user: AttributionUser;
+}
+
+export interface RevokeUserSessionsResponse {
+  ok: boolean;
+  id: number;
+  revokedCount: number;
+}
+
 // AuditEntry is the merged row shape returned by /api/v1/audit. Source
 // discriminates actor_audit (cross-cutting admin event log) from
 // login_audit (PR #407's local-auth login/reset log); the route merges
