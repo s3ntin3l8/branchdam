@@ -1,3 +1,7 @@
+// Package httpapi is branchDAM's HTTP surface: middleware chain, the
+// Huma-generated REST API, the SSE progress stream, and the embedded SPA
+// fallback.
+//
 // codeql[go/log-injection]
 //
 // Password-reset HTTP handlers (PR #409). Three endpoints:
@@ -23,6 +27,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -31,6 +36,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
+	emailpkg "github.com/s3ntin3l8/branchdam/internal/email"
 )
 
 // handlePasswordResetRequest: POST /api/v1/password-reset/request
@@ -98,6 +104,37 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		"plaintext_token", issue.PlaintextToken,
 		"ip", ip,
 	)
+
+	// Email delivery: when the notifier is configured, send the reset
+	// link to the user's email address. The notifier is nil when
+	// auth.email.provider is unset (default "log"), which silently
+	// skips delivery. Enumeration defense: email is only sent when a
+	// token was minted (user found), and the 200 response is identical.
+	if s.localAuth.email != nil {
+		user, lookupErr := s.localAuth.users.GetUserByID(r.Context(), issue.Token.UserID)
+		if lookupErr == nil && user.Email.Valid && user.Email.String != "" {
+			baseURL := requestBaseURL(r)
+			resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
+			subject := "Reset your branchDAM password"
+			htmlBody := emailpkg.PasswordResetHTML(emailpkg.ResetEmailData{
+				Username:  user.Username,
+				ResetLink: resetLink,
+				ExpiresAt: issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2"),
+			})
+			textBody := emailpkg.PasswordResetText(emailpkg.ResetEmailData{
+				Username:  user.Username,
+				ResetLink: resetLink,
+				ExpiresAt: issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2"),
+			})
+			if sendErr := s.localAuth.email.Send(r.Context(), user.Email.String, subject, htmlBody, textBody); sendErr != nil {
+				s.localAuth.log.Warn("password-reset: email delivery failed",
+					"user_id", issue.Token.UserID,
+					"error", sendErr.Error(),
+				)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

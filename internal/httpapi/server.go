@@ -27,6 +27,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/email"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/pairing"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
@@ -153,6 +154,10 @@ type LocalAuthDeps struct {
 	// handlers short-circuit to 503 when Reset is nil.
 	Reset    *users.PasswordResetService
 	AuthMode auth.AuthMode
+	// Email, when non-nil, sends password-reset links via SMTP or
+	// logs them (logSender). nil means no email delivery; the handler
+	// falls back to slog-only.
+	Email email.Notifier
 	// JIT, when non-nil, is the forward-JIT provisioner passed to
 	// auth.RouteWithConfigAndJIT. Set by cmd/branchdam when
 	// auth.mode == "both" AND auth.forward.adminGroups is non-empty;
@@ -260,6 +265,7 @@ func New(d Deps) *Server {
 			resetLimiter: d.LocalAuth.ResetLimiter,
 			sessionMw:    d.LocalAuth.SessionMw,
 			reset:        d.LocalAuth.Reset,
+			email:        d.LocalAuth.Email,
 			log:          log,
 			authMode:     d.LocalAuth.AuthMode,
 			jit:          d.LocalAuth.JIT,

@@ -21,6 +21,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/email"
 )
 
 // errSetupComplete is the sentinel the setup handler returns when
@@ -38,6 +39,7 @@ type localAuthHandlers struct {
 	resetLimiter *ratelimit.Limiter
 	sessionMw    *session.Middleware
 	reset        *users.PasswordResetService
+	email        email.Notifier
 	log          *slog.Logger
 	authMode     auth.AuthMode
 	jit          auth.JITProvisioner
@@ -510,6 +512,28 @@ func clientIP(s *Server, r *http.Request) string {
 		return strings.TrimSpace(fwd)
 	}
 	return remoteIP.String()
+}
+
+// requestBaseURL derives the public-facing base URL from the incoming
+// request. It checks X-Forwarded-Proto (for reverse-proxy deployments)
+// before falling back to the request's own scheme. The Host header
+// provides the hostname; when empty, the request URL is used as a
+// last resort.
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" {
+		scheme = "https"
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = r.URL.Host
+	}
+	if host == "" {
+		return scheme + "://localhost"
+	}
+	return scheme + "://" + host
 }
 
 // currentTrustedProxies reads s.cfg().HTTP.TrustedProxies through a

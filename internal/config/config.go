@@ -152,6 +152,27 @@ type Auth struct {
 
 	Local   AuthLocal   `yaml:"local"`
 	Forward AuthForward `yaml:"forward"`
+	Email   AuthEmail   `yaml:"email"`
+}
+
+// AuthEmail configures outbound email delivery for password-reset
+// links and other transactional email. Provider selects the backend:
+// "smtp" for real delivery, "log" (default) for slog-only dev mode.
+type AuthEmail struct {
+	// Provider is "smtp" or "log". Default "log".
+	Provider string `yaml:"provider"`
+	// Host is the SMTP server hostname.
+	Host string `yaml:"host"`
+	// Port is the SMTP server port. Default 587.
+	Port int `yaml:"port"`
+	// Username for SMTP AUTH. Empty = no authentication.
+	Username string `yaml:"username"`
+	// Password for SMTP AUTH. Supports ${VAR} expansion.
+	Password string `yaml:"password"`
+	// From is the sender address, e.g. "branchDAM <noreply@example.com>".
+	From string `yaml:"from"`
+	// TLS selects the TLS mode: "starttls" (default), "implicit", or "none".
+	TLS string `yaml:"tls"`
 }
 
 // AuthLocal configures the local-auth chain (only meaningful when
