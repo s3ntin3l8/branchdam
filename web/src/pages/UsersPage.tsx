@@ -3,6 +3,7 @@ import {
   useAdminResetPassword,
   useCreateUser,
   useDisableUser,
+  useEnableUser,
   useMe,
   useRevokeUserSessions,
   useUpdateUser,
@@ -66,6 +67,7 @@ export default function UsersPage() {
   const createUserMutation = useCreateUser();
   const resetPasswordMutation = useAdminResetPassword();
   const disableUserMutation = useDisableUser();
+  const enableUserMutation = useEnableUser();
   const updateUserMutation = useUpdateUser();
   const revokeUserSessionsMutation = useRevokeUserSessions();
 
@@ -167,7 +169,7 @@ export default function UsersPage() {
 
   const handleReEnable = async (user: AttributionUser) => {
     try {
-      await updateUserMutation.mutateAsync({ userId: user.id, input: { disabledAt: null } });
+      await enableUserMutation.mutateAsync(user.id);
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to re-enable user.");
     }

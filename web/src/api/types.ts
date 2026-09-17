@@ -636,8 +636,7 @@ export interface CreateUserResponse {
 }
 
 export interface UpdateUserInput {
-  isAdmin?: boolean | null;
-  disabledAt?: number | null;
+  isAdmin?: boolean;
 }
 
 export interface UpdateUserResponse {

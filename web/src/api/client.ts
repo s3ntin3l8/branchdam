@@ -116,6 +116,10 @@ export const api = {
     request<{ ok: boolean; id: number; disabledAt: number }>(`/api/v1/admin/users/${userId}/disable`, {
       method: "POST",
     }),
+  enableUser: (userId: number) =>
+    request<{ ok: boolean; id: number }>(`/api/v1/admin/users/${userId}/enable`, {
+      method: "POST",
+    }),
   updateUser: (userId: number, input: UpdateUserInput) =>
     request<UpdateUserResponse>(`/api/v1/admin/users/${userId}`, {
       method: "PATCH",

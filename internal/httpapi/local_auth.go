@@ -65,6 +65,7 @@ func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/admin/users/{id}/reset-password", s.handleAdminResetPasswordNoLocal)
 		mux.HandleFunc("POST /api/v1/admin/users", s.handleAdminCreateUserNoLocal)
 		mux.HandleFunc("POST /api/v1/admin/users/{id}/disable", s.handleAdminDisableUserNoLocal)
+		mux.HandleFunc("POST /api/v1/admin/users/{id}/enable", s.handleAdminEnableUserNoLocal)
 		mux.HandleFunc("PATCH /api/v1/admin/users/{id}", s.handleAdminUpdateUserNoLocal)
 		mux.HandleFunc("POST /api/v1/admin/users/{id}/revoke-sessions", s.handleAdminRevokeSessionsNoLocal)
 		return
@@ -78,6 +79,7 @@ func (s *Server) registerLocalAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/reset-password", s.handleAdminResetPassword)
 	mux.HandleFunc("POST /api/v1/admin/users", s.handleAdminCreateUser)
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/disable", s.handleAdminDisableUser)
+	mux.HandleFunc("POST /api/v1/admin/users/{id}/enable", s.handleAdminEnableUser)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{id}", s.handleAdminUpdateUser)
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/revoke-sessions", s.handleAdminRevokeSessions)
 }
@@ -317,6 +319,9 @@ func (s *Server) handleAdminCreateUserNoLocal(w http.ResponseWriter, _ *http.Req
 func (s *Server) handleAdminDisableUserNoLocal(w http.ResponseWriter, _ *http.Request) {
 	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 }
+func (s *Server) handleAdminEnableUserNoLocal(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+}
 func (s *Server) handleAdminUpdateUserNoLocal(w http.ResponseWriter, _ *http.Request) {
 	writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
 }
@@ -514,8 +519,7 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		IsAdmin    *bool `json:"isAdmin"`
-		DisabledAt *int  `json:"disabledAt"`
+		IsAdmin *bool `json:"isAdmin"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
@@ -535,19 +539,6 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if body.DisabledAt != nil {
-		if user.DisabledAt.Valid {
-			// Re-enable: set disabled_at to NULL
-			if err := s.localAuth.users.ReenableUser(r.Context(), id); err != nil {
-				writeJSONError(w, http.StatusInternalServerError, "re-enable user: "+err.Error())
-				return
-			}
-			changed = true
-		}
-		// If already enabled and disabledAt is non-null, nothing to do
-		// (disable is handled by POST /disable)
-	}
-
 	if !changed {
 		writeJSONError(w, http.StatusBadRequest, "no changes requested")
 		return
@@ -564,9 +555,6 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		details := map[string]any{"id": id}
 		if body.IsAdmin != nil {
 			details["isAdmin"] = *body.IsAdmin
-		}
-		if body.DisabledAt != nil {
-			details["reEnabled"] = true
 		}
 		if err := s.audit.WriteActorAudit(r.Context(), principalFromCtx(r.Context()), audit.EventUserUpdated, "user", strconv.FormatInt(id, 10), details); err != nil {
 			s.log.Warn("failed to write actor audit for user update", "error", err)
@@ -589,6 +577,53 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		respUser["disabledAt"] = user.DisabledAt.Int64
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": respUser})
+}
+
+// handleAdminEnableUser: POST /api/v1/admin/users/{id}/enable
+// (admin-only, gated by requireSettingsAdmin). Clears disabled_at.
+func (s *Server) handleAdminEnableUser(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireSettingsAdmin(r.Context()); err != nil {
+		var statusErr huma.StatusError
+		if errors.As(err, &statusErr) {
+			writeJSONError(w, statusErr.GetStatus(), statusErr.Error())
+		} else {
+			writeJSONError(w, http.StatusForbidden, err.Error())
+		}
+		return
+	}
+	if s.localAuth == nil || s.localAuth.users == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
+		return
+	}
+	id, ok := pathInt64Param(r, "id")
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "missing or invalid user id")
+		return
+	}
+	user, err := s.localAuth.users.GetUserByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, users.ErrUserNotFound) {
+			writeJSONError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "get user: "+err.Error())
+		return
+	}
+	if !user.DisabledAt.Valid {
+		writeJSONError(w, http.StatusBadRequest, "user is not disabled")
+		return
+	}
+	if err := s.localAuth.users.ReenableUser(r.Context(), id); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "re-enable user: "+err.Error())
+		return
+	}
+	if s.audit != nil {
+		details := map[string]any{"id": id}
+		if err := s.audit.WriteActorAudit(r.Context(), principalFromCtx(r.Context()), audit.EventUserUpdated, "user", strconv.FormatInt(id, 10), details); err != nil {
+			s.log.Warn("failed to write actor audit for user enable", "error", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
 // handleAdminRevokeSessions: POST /api/v1/admin/users/{id}/revoke-sessions
