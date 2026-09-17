@@ -61,6 +61,15 @@ type ResolveSnapshotResult struct {
 
 const maxResolveSnapshotMemberships = 10_000
 
+// MaxResolveSnapshotBodyBytes overrides huma's default 1 MiB per-operation
+// body cap (huma.Operation.ensureMaxBodyBytes), which a legitimate snapshot
+// at the documented maxResolveSnapshotMemberships cap already exceeds -- the
+// 1k/10k benchmarks this limit was raised for (issue #448) hit a 413 before
+// this endpoint's own validation ever ran. Sized for 10,000 timelines plus
+// 10,000 memberships with several KB of client evidence JSON each, well
+// under the request still being rejected outright by something unbounded.
+const MaxResolveSnapshotBodyBytes = 64 * 1024 * 1024
+
 type resolveSnapshotConflict struct{ message string }
 
 func (e resolveSnapshotConflict) Error() string { return e.message }
@@ -161,6 +170,10 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 	out := &ResolveSnapshotOutput{}
 	out.Body.Unresolved = len(b.Memberships) - len(seenResolved(desired))
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		sourcesByUUID, err := batchResolveSourceNodes(ctx, q, desired)
+		if err != nil {
+			return err
+		}
 		targets := make(map[int64]string, len(timelines))
 		for _, tl := range b.Timelines {
 			node, err := q.GetMediaNodeByUUID(ctx, tl.NodeUUID)
@@ -239,7 +252,7 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 			return err
 		}
 		for _, id := range ids {
-			if err := reconcileResolveTimeline(ctx, q, id, targets[id], desired[targets[id]], protected[targets[id]], &out.Body); err != nil {
+			if err := reconcileResolveTimeline(ctx, q, id, targets[id], desired[targets[id]], protected[targets[id]], sourcesByUUID, &out.Body); err != nil {
 				return err
 			}
 		}
@@ -252,7 +265,7 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 				if _, current := targets[id]; current {
 					continue
 				}
-				if err := reconcileResolveTimeline(ctx, q, id, "", nil, nil, &out.Body); err != nil {
+				if err := reconcileResolveTimeline(ctx, q, id, "", nil, nil, sourcesByUUID, &out.Body); err != nil {
 					return err
 				}
 			}
@@ -279,7 +292,42 @@ func seenResolved(desired map[string]map[string]ResolveSnapshotMembership) map[s
 	return out
 }
 
-func reconcileResolveTimeline(ctx context.Context, q *sqlcgen.Queries, targetID int64, timelineID string, desired map[string]ResolveSnapshotMembership, protected map[string]bool, stats *ResolveSnapshotResult) error {
+// batchResolveSourceNodes resolves every distinct SourceNodeUUID referenced
+// anywhere in desired in a single query, instead of the one-row-per-membership
+// round trip reconcileResolveTimeline used before (issue #448). Resolution is
+// still exclusively by node_uuid: a membership's SourceNodeUUID is client
+// input, so it is only ever used as an IN-list lookup key here, never as (or
+// to derive) a trusted internal media_nodes.id.
+func batchResolveSourceNodes(ctx context.Context, q *sqlcgen.Queries, desired map[string]map[string]ResolveSnapshotMembership) (map[string]sqlcgen.GetMediaNodesByUUIDsRow, error) {
+	uuidSet := make(map[string]bool)
+	for _, members := range desired {
+		for _, m := range members {
+			uuidSet[m.SourceNodeUUID] = true
+		}
+	}
+	if len(uuidSet) == 0 {
+		return nil, nil
+	}
+	uuids := make([]string, 0, len(uuidSet))
+	for id := range uuidSet {
+		uuids = append(uuids, id)
+	}
+	encoded, err := json.Marshal(uuids)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.GetMediaNodesByUUIDs(ctx, string(encoded))
+	if err != nil {
+		return nil, err
+	}
+	byUUID := make(map[string]sqlcgen.GetMediaNodesByUUIDsRow, len(rows))
+	for _, row := range rows {
+		byUUID[row.NodeUuid] = row
+	}
+	return byUUID, nil
+}
+
+func reconcileResolveTimeline(ctx context.Context, q *sqlcgen.Queries, targetID int64, timelineID string, desired map[string]ResolveSnapshotMembership, protected map[string]bool, sources map[string]sqlcgen.GetMediaNodesByUUIDsRow, stats *ResolveSnapshotResult) error {
 	existing, err := q.ListResolveEdgesForTimeline(ctx, targetID)
 	if err != nil {
 		return err
@@ -289,13 +337,16 @@ func reconcileResolveTimeline(ctx context.Context, q *sqlcgen.Queries, targetID 
 		bySource[edge.SourceNodeID] = edge
 	}
 	keep := make(map[int64]bool, len(desired))
+	// Lazily populated on the first new edge this timeline needs: the target
+	// is fixed for this whole call, and a new edge only adds an INCOMING edge
+	// to it, which cannot change what is reachable FORWARD from it -- so one
+	// descendant walk covers every candidate parent checked below instead of
+	// re-running the cycle CTE per candidate.
+	var descendantsOfTarget map[int64]bool
 	for _, m := range desired {
-		src, lookupErr := q.GetMediaNodeByUUID(ctx, m.SourceNodeUUID)
-		if errors.Is(lookupErr, sql.ErrNoRows) {
+		src, ok := sources[m.SourceNodeUUID]
+		if !ok {
 			return resolveSnapshotConflict{message: "Resolve source node missing on server; no edges changed"}
-		}
-		if lookupErr != nil {
-			return lookupErr
 		}
 		if src.LifecycleState != "ACTIVE" && src.LifecycleState != "HIDDEN" {
 			return resolveSnapshotConflict{message: "Resolve source node is not live; no edges changed"}
@@ -322,11 +373,17 @@ func reconcileResolveTimeline(ctx context.Context, q *sqlcgen.Queries, targetID 
 			stats.Refreshed++
 			continue
 		}
-		wouldCycle, cycleErr := q.WouldCreateCycle(ctx, sqlcgen.WouldCreateCycleParams{ParentNodeID: src.ID, ChildNodeID: targetID})
-		if cycleErr != nil {
-			return cycleErr
+		if descendantsOfTarget == nil {
+			descendantIDs, cycleErr := q.DescendantNodeIDs(ctx, targetID)
+			if cycleErr != nil {
+				return cycleErr
+			}
+			descendantsOfTarget = make(map[int64]bool, len(descendantIDs))
+			for _, id := range descendantIDs {
+				descendantsOfTarget[id] = true
+			}
 		}
-		if wouldCycle {
+		if descendantsOfTarget[src.ID] {
 			return resolveSnapshotConflict{message: "Resolve edge would create a lineage cycle"}
 		}
 		if _, err := q.CreateMediaEdge(ctx, sqlcgen.CreateMediaEdgeParams{

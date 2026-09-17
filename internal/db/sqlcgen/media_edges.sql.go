@@ -10,6 +10,52 @@ import (
 	"database/sql"
 )
 
+const descendantNodeIDs = `-- name: DescendantNodeIDs :many
+WITH RECURSIVE descendants(id) AS (
+    SELECT CAST(?1 AS INTEGER) AS id
+    UNION
+    SELECT e.target_node_id
+    FROM media_edges e
+    JOIN descendants d ON e.source_node_id = d.id
+    WHERE e.is_active = 1
+)
+SELECT descendants.id FROM descendants
+`
+
+// Same recursive walk as WouldCreateCycle, but returns the whole descendant
+// set of root_node_id in one query instead of one CTE per candidate parent.
+// Reconciling a Resolve timeline snapshot (issue #448) tests many candidate
+// source nodes against the SAME target in one transaction; the target never
+// changes mid-reconciliation (new edges only add incoming edges to it, which
+// cannot add to what is reachable FORWARD from it), so callers can run this
+// once per timeline and hold the result in memory for every candidate's
+// cycle check instead of re-running WouldCreateCycle per candidate.
+// The CAST is not a runtime coercion -- root_node_id is always an int64 id
+// -- it exists so sqlc infers the anchor column (and so the whole CTE) as
+// INTEGER instead of falling back to interface{}.
+func (q *Queries) DescendantNodeIDs(ctx context.Context, rootNodeID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, descendantNodeIDs, rootNodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAncestors = `-- name: ListAncestors :many
 WITH RECURSIVE ancestors(id) AS (
     SELECT CAST(?1 AS INTEGER) AS id

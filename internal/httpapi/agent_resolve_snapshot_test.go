@@ -61,7 +61,7 @@ func resolveSnapshotServer(t *testing.T) (*Server, *db.DB, string, string) {
 	return srv, database, "018f0000-0000-7000-8000-000000000102", "018f0000-0000-7000-8000-000000000101"
 }
 
-func postResolveSnapshot(t *testing.T, srv *Server, body any) *httptest.ResponseRecorder {
+func postResolveSnapshot(t testing.TB, srv *Server, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/resolve-snapshot", bytesOfJSON(t, body))
 	req.Header.Set("Content-Type", "application/json")

@@ -182,6 +182,18 @@ type Querier interface {
 	DeletePairingKeysForPairing(ctx context.Context, pairingID int64) error
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
+	// Same recursive walk as WouldCreateCycle, but returns the whole descendant
+	// set of root_node_id in one query instead of one CTE per candidate parent.
+	// Reconciling a Resolve timeline snapshot (issue #448) tests many candidate
+	// source nodes against the SAME target in one transaction; the target never
+	// changes mid-reconciliation (new edges only add incoming edges to it, which
+	// cannot add to what is reachable FORWARD from it), so callers can run this
+	// once per timeline and hold the result in memory for every candidate's
+	// cycle check instead of re-running WouldCreateCycle per candidate.
+	// The CAST is not a runtime coercion -- root_node_id is always an int64 id
+	// -- it exists so sqlc infers the anchor column (and so the whole CTE) as
+	// INTEGER instead of falling back to interface{}.
+	DescendantNodeIDs(ctx context.Context, rootNodeID int64) ([]int64, error)
 	// Sets disabled_at. Idempotent. Does NOT revoke existing sessions --
 	// that's a separate admin action (RevokeAllUserSessions) so an admin can
 	// disable future logins without immediately logging the user out.
@@ -252,6 +264,13 @@ type Querier interface {
 	// Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.
 	GetMediaNodeBySourcePathHash(ctx context.Context, sourcePathHash *string) (GetMediaNodeBySourcePathHashRow, error)
 	GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (MediaNode, error)
+	// Batches the per-membership source-node lookup that reconcileResolveTimeline
+	// previously issued one row at a time (issue #448). node_uuid is still the
+	// only key -- the client's sourceNodeUuid is never trusted as an internal id,
+	// it is just the IN-list value looked up here in one round trip instead of
+	// many. See docs/schema.md's sqlc risk note for the json_each(CAST(...))
+	// spelling this needs to stay within SQLite's bound-parameter limit.
+	GetMediaNodesByUUIDs(ctx context.Context, nodeUuids string) ([]GetMediaNodesByUUIDsRow, error)
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)

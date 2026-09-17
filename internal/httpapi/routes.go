@@ -110,6 +110,7 @@ func (s *Server) registerRoutes(api huma.API) {
 		OperationID:   "reconcileResolveSnapshot",
 		Summary:       "Synchronously reconcile one agent-owned Resolve database snapshot",
 		DefaultStatus: http.StatusOK,
+		MaxBodyBytes:  MaxResolveSnapshotBodyBytes,
 	}, s.handleResolveSnapshot)
 	huma.Register(api, huma.Operation{
 		Method:        http.MethodPost,

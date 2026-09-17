@@ -30,6 +30,47 @@ func (q *Queries) AgentCreatedVirtualNode(ctx context.Context, arg AgentCreatedV
 	return created_by_agent, err
 }
 
+const getMediaNodesByUUIDs = `-- name: GetMediaNodesByUUIDs :many
+SELECT id, node_uuid, lifecycle_state
+FROM media_nodes
+WHERE node_uuid IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
+`
+
+type GetMediaNodesByUUIDsRow struct {
+	ID             int64
+	NodeUuid       string
+	LifecycleState string
+}
+
+// Batches the per-membership source-node lookup that reconcileResolveTimeline
+// previously issued one row at a time (issue #448). node_uuid is still the
+// only key -- the client's sourceNodeUuid is never trusted as an internal id,
+// it is just the IN-list value looked up here in one round trip instead of
+// many. See docs/schema.md's sqlc risk note for the json_each(CAST(...))
+// spelling this needs to stay within SQLite's bound-parameter limit.
+func (q *Queries) GetMediaNodesByUUIDs(ctx context.Context, nodeUuids string) ([]GetMediaNodesByUUIDsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getMediaNodesByUUIDs, nodeUuids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetMediaNodesByUUIDsRow{}
+	for rows.Next() {
+		var i GetMediaNodesByUUIDsRow
+		if err := rows.Scan(&i.ID, &i.NodeUuid, &i.LifecycleState); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const inactivateResolveEdge = `-- name: InactivateResolveEdge :exec
 UPDATE media_edges
 SET is_active = 0, updated_at = unixepoch()
