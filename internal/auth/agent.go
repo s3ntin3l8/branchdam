@@ -16,10 +16,12 @@ import (
 	"time"
 )
 
-// minAgentKeyLength matches config.example.yaml's documented requirement.
+// MinAgentKeyLength matches config.example.yaml's documented requirement.
 // A shorter (or unset) key fails every agent request closed rather than
-// accepting a weak or empty secret.
-const minAgentKeyLength = 32
+// accepting a weak or empty secret. Exported so internal/settings can
+// validate agent.apiKey at save time instead of letting a too-short value
+// brick every agent route (including paired devices) at the next restart.
+const MinAgentKeyLength = 32
 
 // defaultSignedMaxBodyBytes caps the request body the signature validator is
 // willing to buffer in memory. Every signed agent endpoint other than the
@@ -87,9 +89,9 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	keyConfigured := len(cfg.APIKey) >= minAgentKeyLength
+	keyConfigured := len(cfg.APIKey) >= MinAgentKeyLength
 	if !keyConfigured {
-		log.Warn("auth: BRANCHDAM_AGENT_API_KEY is unset or shorter than the minimum length -- agent routes will fail closed with 503 until it is fixed", "minLength", minAgentKeyLength)
+		log.Warn("auth: BRANCHDAM_AGENT_API_KEY is unset or shorter than the minimum length -- agent routes will fail closed with 503 until it is fixed", "minLength", MinAgentKeyLength)
 	}
 
 	window := cfg.ReplayWindow

@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 )
 
@@ -87,7 +88,12 @@ type Field struct {
 	// "Immich".
 	Group  string
 	Secret bool
-	Apply  ApplyMode
+	// Generatable marks a Secret field the UI may offer to fill with a
+	// fresh cryptographically random value in place of requiring the
+	// operator to paste one in. Only meaningful alongside Secret; ignored
+	// otherwise.
+	Generatable bool
+	Apply       ApplyMode
 	// Editable is false for fields this package refuses to ever write --
 	// authz.groups (lockout risk), listenAddr/database.path (a running
 	// process cannot change them). ReadOnlyReason explains why.
@@ -425,19 +431,26 @@ var httpFields = []Field{
 
 var agentFields = []Field{
 	{
-		Key:    "agent.apiKey",
-		Type:   KindString,
-		Label:  "Agent API Key",
-		Group:  "Agent",
-		Secret: true,
-		Apply:  ApplyRestart,
-		Get:    func(cfg *config.Config) any { return cfg.Agent.APIKey },
+		Key:         "agent.apiKey",
+		Type:        KindString,
+		Label:       "Shared Agent Secret",
+		Group:       "Agent",
+		Secret:      true,
+		Generatable: true,
+		Apply:       ApplyRestart,
+		Get:         func(cfg *config.Config) any { return cfg.Agent.APIKey },
 		Set: func(cfg *config.Config, v any) error {
 			cfg.Agent.APIKey = v.(string)
 			return nil
 		},
+		Validate: minLenString(auth.MinAgentKeyLength),
 		Editable: true,
-		Doc:      "Machine-principal key for /api/v1/agent/* routes. Changing this breaks every workstation agent until re-keyed with the new value.",
+		Doc: "Single secret shared by every agent that is not individually paired. " +
+			"Two roles: (1) accepted as X-API-Key, granting a machine principal that " +
+			"can act for any device; (2) the HMAC key for signed requests -- rotating " +
+			"it re-keys signing for ALL agents, paired ones included. Required: agent " +
+			"routes return 503 while it is unset or under 32 characters, even for " +
+			"paired devices. Prefer Companion Pairing for new devices.",
 	},
 	{
 		Key:   "agent.signedRequests",

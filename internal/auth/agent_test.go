@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const testKey = "01234567890123456789012345678901" // 33 chars, >= minAgentKeyLength
+const testKey = "01234567890123456789012345678901" // 33 chars, >= MinAgentKeyLength
 
 func principalCapturingHandler(t *testing.T, got *Principal, gotAuthentikHeader *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +101,7 @@ func TestAgentChainFailsClosedOnMisconfiguredKey(t *testing.T) {
 	cases := map[string]string{
 		"unset":    "",
 		"7 chars":  "short12",
-		"31 chars": "0123456789012345678901234567890", // one short of minAgentKeyLength
+		"31 chars": "0123456789012345678901234567890", // one short of MinAgentKeyLength
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {

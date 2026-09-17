@@ -558,6 +558,9 @@ export interface SettingsField {
   source: SettingsFieldSource;
   applyMode: SettingsApplyMode;
   secret: boolean;
+  // True iff the UI should offer to fill this secret field with a fresh
+  // random value instead of requiring the operator to paste one in.
+  generatable?: boolean;
   hasValue?: boolean;
   editable: boolean;
   readOnlyReason?: string;

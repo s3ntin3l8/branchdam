@@ -45,6 +45,26 @@ func positiveInt(v any) error {
 	return nil
 }
 
+// minLenString rejects a string shorter than n. Used for agent.apiKey, whose
+// underlying auth.MinAgentKeyLength requirement was previously enforced only
+// at request time (internal/auth.AgentChainWithConfig's keyConfigured gate) --
+// a too-short value saved through the settings UI would 503 every agent
+// route, paired devices included, only after the next restart. Validate
+// runs before Store.Apply's own value.(string) assertion for secret fields
+// (see store.go), so this also owns the "not a string" case.
+func minLenString(n int) func(any) error {
+	return func(v any) error {
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("must be a string")
+		}
+		if len(s) < n {
+			return fmt.Errorf("must be at least %d characters", n)
+		}
+		return nil
+	}
+}
+
 // absolutePath mirrors the constraint internal/config's doc comments state
 // for database.path/thumbnails.cacheDir but config.Load never enforces.
 func absolutePath(v any) error {
