@@ -17,6 +17,28 @@ WITH RECURSIVE descendants(id) AS (
 )
 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = sqlc.arg(parent_node_id)) AS would_cycle;
 
+-- name: DescendantNodeIDs :many
+-- Same recursive walk as WouldCreateCycle, but returns the whole descendant
+-- set of root_node_id in one query instead of one CTE per candidate parent.
+-- Reconciling a Resolve timeline snapshot (issue #448) tests many candidate
+-- source nodes against the SAME target in one transaction; the target never
+-- changes mid-reconciliation (new edges only add incoming edges to it, which
+-- cannot add to what is reachable FORWARD from it), so callers can run this
+-- once per timeline and hold the result in memory for every candidate's
+-- cycle check instead of re-running WouldCreateCycle per candidate.
+-- The CAST is not a runtime coercion -- root_node_id is always an int64 id
+-- -- it exists so sqlc infers the anchor column (and so the whole CTE) as
+-- INTEGER instead of falling back to interface{}.
+WITH RECURSIVE descendants(id) AS (
+    SELECT CAST(sqlc.arg(root_node_id) AS INTEGER) AS id
+    UNION
+    SELECT e.target_node_id
+    FROM media_edges e
+    JOIN descendants d ON e.source_node_id = d.id
+    WHERE e.is_active = 1
+)
+SELECT descendants.id FROM descendants;
+
 -- name: ListAuditQueue :many
 -- The audit queue (spec sec. 7) is this query over review_state, not a second
 -- table. v_media_edges_resolved's parent_missing works for every

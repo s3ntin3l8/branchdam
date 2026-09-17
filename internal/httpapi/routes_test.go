@@ -2082,7 +2082,7 @@ func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
 	}
 }
 
-func bytesOfJSON(t *testing.T, v any) *bytes.Reader {
+func bytesOfJSON(t testing.TB, v any) *bytes.Reader {
 	t.Helper()
 	b, err := json.Marshal(v)
 	if err != nil {

@@ -28,6 +28,17 @@ WHERE id = ?1 AND resolver = 'resolve_project_db'
 UPDATE media_nodes SET file_name = ?2, updated_at = unixepoch()
 WHERE id = ?1;
 
+-- name: GetMediaNodesByUUIDs :many
+-- Batches the per-membership source-node lookup that reconcileResolveTimeline
+-- previously issued one row at a time (issue #448). node_uuid is still the
+-- only key -- the client's sourceNodeUuid is never trusted as an internal id,
+-- it is just the IN-list value looked up here in one round trip instead of
+-- many. See docs/schema.md's sqlc risk note for the json_each(CAST(...))
+-- spelling this needs to stay within SQLite's bound-parameter limit.
+SELECT id, node_uuid, lifecycle_state
+FROM media_nodes
+WHERE node_uuid IN (SELECT value FROM json_each(CAST(sqlc.arg(node_uuids) AS TEXT)));
+
 -- name: AgentCreatedVirtualNode :one
 SELECT EXISTS(
     SELECT 1 FROM event_queue
