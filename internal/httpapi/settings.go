@@ -75,9 +75,13 @@ type SettingsFieldDTO struct {
 	// explicitly -- internal/config.Load tracks no finer provenance than
 	// that, see internal/settings' doc comment on the boundary this stops
 	// short of).
-	Source         string `json:"source"`
-	ApplyMode      string `json:"applyMode"`
-	Secret         bool   `json:"secret"`
+	Source    string `json:"source"`
+	ApplyMode string `json:"applyMode"`
+	Secret    bool   `json:"secret"`
+	// Generatable mirrors settings.Field.Generatable -- true iff the UI
+	// should offer to fill this secret field with a fresh random value
+	// instead of requiring the operator to paste one in.
+	Generatable    bool   `json:"generatable,omitempty"`
 	HasValue       bool   `json:"hasValue,omitempty"`
 	Editable       bool   `json:"editable"`
 	ReadOnlyReason string `json:"readOnlyReason,omitempty"`
@@ -119,6 +123,7 @@ func (s *Server) buildSettingsOutput(ctx context.Context) (*GetSettingsOutput, e
 			Group:          f.Group,
 			ApplyMode:      f.Apply.String(),
 			Secret:         f.Secret,
+			Generatable:    f.Generatable,
 			Editable:       f.Editable,
 			ReadOnlyReason: f.ReadOnlyReason,
 			PendingRestart: pendingSet[f.Key],

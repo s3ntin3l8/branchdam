@@ -78,7 +78,15 @@ function renderInput(field: SettingsField, draft: unknown, onChange: (value: unk
     return <ReadOnlyValue field={field} />;
   }
   if (field.secret) {
-    return <SecretField hasValue={!!field.hasValue} value={draft as string} onChange={onChange} disabled={!secretsAvailable} />;
+    return (
+      <SecretField
+        hasValue={!!field.hasValue}
+        value={draft as string}
+        onChange={onChange}
+        disabled={!secretsAvailable}
+        generatable={field.generatable}
+      />
+    );
   }
   const options = SELECT_OPTIONS[field.key];
   if (options) {

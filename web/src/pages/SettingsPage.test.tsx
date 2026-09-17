@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
@@ -295,6 +295,52 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(secretInput).toHaveValue("");
     });
+  });
+
+  it("fills a generatable secret field's draft with a fresh value and enables Save", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(
+      settingsResponse({
+        fields: [
+          ...settingsResponse().fields,
+          field({
+            key: "agent.apiKey",
+            label: "Shared Agent Secret",
+            group: "Agent",
+            value: undefined,
+            source: "config",
+            secret: true,
+            generatable: true,
+            hasValue: true,
+          }),
+        ],
+      })
+    );
+
+    renderWithClient(<SettingsPage />);
+
+    const row = (await screen.findByText("Shared Agent Secret")).closest("div")!.parentElement!;
+    const generateButton = within(row).getByRole("button", { name: "Generate" });
+    await user.click(generateButton);
+
+    const secretInput = within(row).getByPlaceholderText("Set -- enter a new value to replace");
+    // 32 random bytes as base64url with padding stripped is always 43
+    // chars -- see SecretField.tsx's generateSecret doc comment.
+    expect((secretInput as HTMLInputElement).value).toHaveLength(43);
+    expect(within(row).getByRole("button", { name: "Save" })).toBeInTheDocument();
+  });
+
+  it("does not show a Generate button for a non-generatable secret field", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    const row = (await screen.findByText("Immich API Key")).closest("div")!.parentElement!;
+    expect(within(row).queryByRole("button", { name: "Generate" })).not.toBeInTheDocument();
   });
 
   it("disables secret editing when secrets storage is unavailable", async () => {

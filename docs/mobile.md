@@ -87,9 +87,18 @@ Per-device pairing keys (`device_pairings` / `device_pairing_keys`) replaced the
 single shared `BRANCHDAM_AGENT_API_KEY` as of #companion-pairing. The
 env-var key remains valid indefinitely as a bootstrap path so legacy
 workstation agents and previously-paired mobile apps continue to work
-without re-pairing. Operators can migrate at their own pace; once no
-device or workstation agent depends on the env-var key, it can be unset
-in `.env` (no in-server flag — operator-driven).
+without re-pairing. Operators can migrate at their own pace -- but the key
+itself cannot be unset. `internal/auth.AgentChainWithConfig`'s
+`keyConfigured` check runs before the per-device pairing lookup, so an
+unset or too-short (<32 char) value 503s **every** `/api/v1/agent/*`
+request, paired devices included, not just the legacy bootstrap path. Once
+no device or workstation agent depends on the env-var key's value, the
+value itself can be rotated to a fresh, undistributed one via Settings ->
+Security & Access ("Shared Agent Secret") or `BRANCHDAM_AGENT_API_KEY`,
+which neutralizes the bootstrap path without disabling agent auth
+entirely. Actually letting the field be unset, when pairing alone is
+sufficient, is tracked separately in
+[#453](https://github.com/s3ntin3l8/branchdam/issues/453).
 
 Authentication as a paired device attaches `Principal{Name: <agent_id>, Kind: KindMachine}`.
 The env-var bootstrap path attaches `Principal{Name: "env-bootstrap", Kind: KindMachine}`.
@@ -122,11 +131,16 @@ This means rotation is non-disruptive: a rotating phone never sees an outage as 
 The mobile app's next request returns 401; the keychain entry is
 cleared on the device, the operator re-pairs via QR.
 
-The env-var key can be rotated (or unset) separately from any paired
-device. Rotating the env-var key forces every device or workstation
-agent that authenticates with it to update simultaneously — useful
-when a workstation is decommissioned but the operator hasn't yet
-deployed paired devices.
+The env-var key can be rotated separately from any paired device.
+Rotating it forces every device or workstation agent that authenticates
+with it to update simultaneously — useful when a workstation is
+decommissioned but the operator hasn't yet deployed paired devices.
+Rotating it also re-keys HMAC signing for every agent, paired devices
+included, because `agent.signedRequests` verifies against this same
+shared secret. With `signedRequests: false` (the default) only agents
+still presenting the old key as `X-API-Key` are affected; with it
+enabled, every agent must pick up the new value before its next signed
+request.
 
 ### 4.5. QR payload format
 
