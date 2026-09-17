@@ -129,6 +129,14 @@ func RouteWithConfigAndJIT(cfg AgentConfig, mode AuthMode, localBuilder ChainBui
 				localView = view
 			}
 		}
+		// When the session middleware ran inside the local capture
+		// chain, its LocalUserView was captured but not yet propagated.
+		// Use it when JIT didn't fire (i.e. the user has a local
+		// session, so JIT is skipped by the localCap.principal != nil
+		// guard above).
+		if localCap.localView != nil && localView.UserID == 0 {
+			localView = *localCap.localView
+		}
 
 		if merged != nil {
 			r = r.WithContext(WithPrincipal(r.Context(), *merged))
@@ -141,15 +149,20 @@ func RouteWithConfigAndJIT(cfg AgentConfig, mode AuthMode, localBuilder ChainBui
 }
 
 // principalCapture is the slot both chains write their would-be-set
-// Principal into. Captured from the per-chain capture-only next.
+// Principal and (when present) LocalUserView into. Captured from the
+// per-chain capture-only next.
 type principalCapture struct {
 	principal *Principal
+	localView *LocalUserView
 }
 
 func captureHandler(cap *principalCapture) http.Handler {
 	return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		if p, ok := From(r.Context()); ok {
 			cap.principal = &p
+		}
+		if v, ok := FromUser(r.Context()); ok {
+			cap.localView = &v
 		}
 	})
 }
