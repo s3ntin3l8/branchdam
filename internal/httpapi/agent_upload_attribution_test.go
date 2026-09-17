@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -230,4 +231,45 @@ func TestAgentUpload_DedupBackfillsMissingAttribution(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, nodeAfter.UploadedByUserID.Valid, "dedup must backfill uploaded_by_user_id when it was NULL")
 	assert.Equal(t, ownerID, nodeAfter.UploadedByUserID.Int64)
+}
+
+// TestResolveAgentUploadUserID_RevokedPairingStaysNull backs the
+// pairing.RevokedAt.Valid branch in resolveAgentUploadUserID. That branch
+// is unreachable through the normal HTTP path in this test server --
+// GetDevicePairingKeyByHash (behind AgentConfig.LookupKey) already filters
+// out a revoked pairing's keys, so a request authenticated against one
+// never reaches the handler. It exists for the narrow TOCTOU window where a
+// pairing is revoked between that auth check and this lookup, for a request
+// already in flight. Revoking the pairing directly via SQL (rather than
+// pairSvc.RevokePairing, which also revokes the pairing's keys) reproduces
+// that state without going through the auth layer, so the branch is
+// exercised deterministically instead of relying on a real race.
+func TestResolveAgentUploadUserID_RevokedPairingStaysNull(t *testing.T) {
+	srv, database, pairSvc, _ := newPairingUploadTestServer(t)
+	ctx := context.Background()
+
+	var ownerID int64
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		id, err := q.CreateAttributionUser(ctx, sqlcgen.CreateAttributionUserParams{
+			AuthProvider: "authentik", ExternalUid: "revoked-owner-uid", Username: "revoked-owner",
+		})
+		ownerID = id
+		return err
+	})
+	require.NoError(t, err)
+
+	p, _, err := pairSvc.CreatePairing(ctx, "Revoked Phone", "test-admin", ownerID, stubQRPayloadForAttrTest)
+	require.NoError(t, err)
+	require.True(t, p.UserID.Valid)
+
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.RevokeDevicePairing(ctx, sqlcgen.RevokeDevicePairingParams{
+			ID:        p.ID,
+			RevokedAt: sql.NullInt64{Int64: p.CreatedAt + 1, Valid: true},
+		})
+	})
+	require.NoError(t, err)
+
+	userID := srv.resolveAgentUploadUserID(ctx, p.AgentID)
+	assert.Equal(t, int64(0), userID, "a revoked pairing must never attribute an upload to its former owner")
 }

@@ -16,26 +16,20 @@ import (
 // logic means replaying the same statement against seeded rows after the
 // schema exists. If the migration's UPDATE changes, update it here too.
 const backfillDevicePairingUserIDSQL = `
-UPDATE device_pairings
-SET user_id = (
-    SELECT u.id FROM users u
-    WHERE 'user:' || u.username = (
+WITH creator AS (
+    SELECT dp.id AS pairing_id, u.id AS user_id
+    FROM device_pairings dp
+    JOIN users u ON 'user:' || u.username = (
         SELECT a.actor FROM companion_pairing_audit a
-        WHERE a.pairing_id = device_pairings.id
+        WHERE a.pairing_id = dp.id
           AND a.event = 'PAIR_CREATED'
         ORDER BY a.created_at ASC LIMIT 1
     )
 )
+UPDATE device_pairings
+SET user_id = (SELECT creator.user_id FROM creator WHERE creator.pairing_id = device_pairings.id)
 WHERE user_id IS NULL
-  AND EXISTS (
-    SELECT 1 FROM users u
-    WHERE 'user:' || u.username = (
-        SELECT a.actor FROM companion_pairing_audit a
-        WHERE a.pairing_id = device_pairings.id
-          AND a.event = 'PAIR_CREATED'
-        ORDER BY a.created_at ASC LIMIT 1
-    )
-  )
+  AND id IN (SELECT pairing_id FROM creator)
 `
 
 // TestBackfillDevicePairingUserID backs the 00020_users_and_audit.sql

@@ -22,31 +22,26 @@
 -- goose will not re-run this once applied. Re-pairing the device remains
 -- the reliable fix for any pairing this migration cannot backfill.
 --
--- The EXISTS guard is load-bearing: without it the correlated subquery
--- would write NULL over NULL when no user match is found, and the
+-- The "id IN (SELECT pairing_id FROM creator)" guard is load-bearing:
+-- without it the correlated subquery in SET would write NULL over NULL
+-- for every pairing with no resolved creator, and the
 -- `WHERE user_id IS NULL` filter would stop meaning anything.
 --
 -- No triggers (AGENTS.md invariant #1); plain UPDATE, no CASCADE.
-UPDATE device_pairings
-SET user_id = (
-    SELECT u.id FROM users u
-    WHERE 'user:' || u.username = (
+WITH creator AS (
+    SELECT dp.id AS pairing_id, u.id AS user_id
+    FROM device_pairings dp
+    JOIN users u ON 'user:' || u.username = (
         SELECT a.actor FROM companion_pairing_audit a
-        WHERE a.pairing_id = device_pairings.id
+        WHERE a.pairing_id = dp.id
           AND a.event = 'PAIR_CREATED'
         ORDER BY a.created_at ASC LIMIT 1
     )
 )
+UPDATE device_pairings
+SET user_id = (SELECT creator.user_id FROM creator WHERE creator.pairing_id = device_pairings.id)
 WHERE user_id IS NULL
-  AND EXISTS (
-    SELECT 1 FROM users u
-    WHERE 'user:' || u.username = (
-        SELECT a.actor FROM companion_pairing_audit a
-        WHERE a.pairing_id = device_pairings.id
-          AND a.event = 'PAIR_CREATED'
-        ORDER BY a.created_at ASC LIMIT 1
-    )
-  );
+  AND id IN (SELECT pairing_id FROM creator);
 
 -- +goose Down
 -- No-op: the pre-backfill NULL/non-NULL split is not recoverable.
