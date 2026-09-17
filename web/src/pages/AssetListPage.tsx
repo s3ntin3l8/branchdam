@@ -76,7 +76,18 @@ export default function AssetListPage() {
 
   // Per-row archive confirmation. Restore has no confirm step, matching
   // AssetDetailPage's AssetDeleteControl.
+  //
+  // deleteAsset/restoreAsset are each a single shared mutation instance
+  // across every row (there is only one row's dialog/action in flight at a
+  // time). Without an explicit .reset() at the open/close boundary, a
+  // failed archive's error state -- or a stale isPending/isError from a
+  // previous row's restore -- leaks into the next row's dialog or button
+  // before that row has been touched. openArchiveDialog/closeArchiveDialog
+  // and handleRestore below reset the relevant mutation and scope its
+  // pending/error display to the specific row via archiveTarget /
+  // restoreTargetId, so each row only ever shows its own outcome.
   const [archiveTarget, setArchiveTarget] = useState<Asset | null>(null);
+  const [restoreTargetId, setRestoreTargetId] = useState<number | null>(null);
 
   // Batch archive selection. Scoped to the CURRENT PAGE only -- there is no
   // "select all matching this filter" endpoint to back a broader claim, so
@@ -126,6 +137,24 @@ export default function AssetListPage() {
     setSelectedIds(allSelectableSelected ? new Set() : new Set(selectableIds));
   };
 
+  const openArchiveDialog = (a: Asset) => {
+    deleteAsset.reset();
+    setArchiveTarget(a);
+  };
+
+  const closeArchiveDialog = () => {
+    deleteAsset.reset();
+    setArchiveTarget(null);
+  };
+
+  const handleRestore = (id: number) => {
+    restoreAsset.reset();
+    setRestoreTargetId(id);
+    restoreAsset.mutate(id, {
+      onSuccess: () => setRestoreTargetId(null),
+    });
+  };
+
   // Sequential loop over the existing single-asset DELETE endpoint rather
   // than a new batch route: the writer pool is single-connection
   // (SetMaxOpenConns(1)), so a batch route buys no concurrency, and this
@@ -142,11 +171,13 @@ export default function AssetListPage() {
     setBatchProgress({ done: 0, total: ids.length });
 
     const failed: number[] = [];
+    const succeeded: number[] = [];
     let firstErrorMessage: string | undefined;
     let completed = 0;
     for (const id of ids) {
       try {
         await api.deleteAsset(id);
+        succeeded.push(id);
       } catch (err) {
         failed.push(id);
         if (firstErrorMessage === undefined) {
@@ -157,7 +188,17 @@ export default function AssetListPage() {
       setBatchProgress({ done: completed, total: ids.length });
     }
 
+    // Mirror useDeleteAsset's per-id invalidation (["asset", id],
+    // ["asset-metadata", id]) for every archived id, in addition to the
+    // single ["assets"] list invalidation -- otherwise a detail page
+    // cached earlier in the session for one of these ids would stay stale
+    // after a batch archive. Only for succeeded ids: a failed archive
+    // didn't change that asset's state.
     void queryClient.invalidateQueries({ queryKey: ["assets"] });
+    for (const id of succeeded) {
+      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+    }
     setBatchPending(false);
     setBatchDialogOpen(false);
     setBatchProgress(null);
@@ -439,19 +480,25 @@ export default function AssetListPage() {
                   <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{a.fastHash ?? "—"}</td>
                   <td className="py-2 pr-4 text-xs">
                     {a.lifecycleState === "ARCHIVED" ? (
-                      <button
-                        type="button"
-                        onClick={() => restoreAsset.mutate(a.id)}
-                        disabled={restoreAsset.isPending}
-                        className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2 py-1 font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50"
-                      >
-                        {restoreAsset.isPending ? "Restoring…" : "Restore"}
-                      </button>
+                      <div className="flex flex-col items-start gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleRestore(a.id)}
+                          disabled={restoreAsset.isPending && restoreTargetId === a.id}
+                          className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2 py-1 font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50"
+                        >
+                          {restoreAsset.isPending && restoreTargetId === a.id ? "Restoring…" : "Restore"}
+                        </button>
+                        {restoreAsset.isError && restoreTargetId === a.id && (
+                          <span className="text-[10px] text-red-400">
+                            Failed to restore: {String(restoreAsset.error)}
+                          </span>
+                        )}
+                      </div>
                     ) : (
                       <button
                         type="button"
-                        onClick={() => setArchiveTarget(a)}
-                        disabled={deleteAsset.isPending}
+                        onClick={() => openArchiveDialog(a)}
                         className="rounded border border-red-800/80 bg-red-950/60 px-2 py-1 font-medium text-red-300 hover:bg-red-900/60 disabled:opacity-50"
                       >
                         Archive
@@ -515,7 +562,7 @@ export default function AssetListPage() {
               onSuccess: () => setArchiveTarget(null),
             });
           }}
-          onCancel={() => setArchiveTarget(null)}
+          onCancel={closeArchiveDialog}
         />
       )}
 
