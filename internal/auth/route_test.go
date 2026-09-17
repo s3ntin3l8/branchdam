@@ -60,11 +60,19 @@ func TestMergePrincipals_Both_OnlyForward(t *testing.T) {
 
 func TestMergePrincipals_Both_Both_UnionGroupsAndPreferLocal(t *testing.T) {
 	local := &Principal{
-		Kind: KindUser, Name: "alice", Email: "alice@example.com",
+		Kind:          KindUser,
+		Name:          "alice",
+		Email:         "alice@example.com",
+		ExternalUID:   "alice",
+		AuthProvider:  AuthProviderLocal,
 		Authenticated: true,
 	}
 	fwd := &Principal{
-		Kind: KindUser, Name: "alice", Email: "alice@authentik",
+		Kind:          KindUser,
+		Name:          "alice",
+		Email:         "alice@authentik",
+		ExternalUID:   "abc123-uuid",
+		AuthProvider:  "authentik",
 		Groups:        []string{"dam-admins", "users"},
 		Authenticated: true,
 	}
@@ -73,6 +81,9 @@ func TestMergePrincipals_Both_Both_UnionGroupsAndPreferLocal(t *testing.T) {
 	assert.Equal(t, "alice", got.Name)
 	// Local email wins on collision (it's the interactive login's source of truth).
 	assert.Equal(t, "alice@example.com", got.Email)
+	// Local ExternalUID/AuthProvider win (interactive login).
+	assert.Equal(t, "alice", got.ExternalUID)
+	assert.Equal(t, AuthProviderLocal, got.AuthProvider)
 	// Groups union even though local has none.
 	assert.Equal(t, []string{"dam-admins", "users"}, got.Groups)
 	assert.True(t, got.Authenticated)

@@ -30,6 +30,14 @@ const (
 	KindSystem Kind = "system"
 )
 
+// AuthProviderLocal identifies the auth_provider value used for users who
+// authenticate via the local session-cookie chain (source='local' rows in
+// the users table). The attribution layer (internal/users) uses this to
+// resolve local-session Principals to stable users.id values without
+// going through the Authentik-style INSERT path (which would violate the
+// CHECK constraint on source/password_hash).
+const AuthProviderLocal = "local"
+
 // Principal is what a request is authenticated as. A machine Principal
 // after #companion-pairing carries Name = agent_id (the device that owns
 // the API key) for device-paired sessions, OR Name = "env-bootstrap"
@@ -42,9 +50,18 @@ const (
 // ExternalUID is the stable identity key the multi-user attribution layer
 // (internal/users) uses to lazy-provision a row in `users` keyed on
 // (auth_provider, external_uid). For KindUser it comes from Authentik's
-// X-Authentik-Uid header (stable across username renames). For KindMachine
-// it is empty -- machine sessions never own user-attributed rows. Name
-// is the display label (X-Authentik-Username); ExternalUID is the key.
+// X-Authentik-Uid header (stable across username renames) for forward-auth
+// sessions, or the local username for local sessions. For KindMachine it
+// is empty -- machine sessions never own user-attributed rows. Name is
+// the display label (X-Authentik-Username or local username); ExternalUID
+// is the key.
+//
+// AuthProvider identifies which auth backend authenticated this Principal.
+// It maps to the `auth_provider` column in the `users` table and
+// determines which UPSERT path ResolveOrCreate takes. Empty string
+// defaults to "authentik" for backward compatibility with forward-auth
+// Principals that predate this field. AuthProviderLocal ("local") is set
+// by the session middleware for local-cookie sessions.
 //
 // Authenticated is true iff BrowserChain saw a non-empty
 // X-Authentik-Username (#164). BrowserChain always attaches a Principal --
@@ -61,6 +78,7 @@ type Principal struct {
 	Email         string
 	Groups        []string
 	ExternalUID   string
+	AuthProvider  string
 	Authenticated bool
 }
 

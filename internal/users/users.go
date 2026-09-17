@@ -29,12 +29,19 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
-// AuthProviderAuthentik is the only auth_provider this server understands
-// in this PR. Authentik-ForwardAuth sets the stable per-user id header,
-// which the Principal's ExternalUID carries (or the username fallback, see
-// auth.BrowserChain.pickExternalUID), and we lazily insert a row at first
-// sight.
+// AuthProviderAuthentik is the auth_provider value for users who
+// authenticate via Authentik ForwardAuth. The stable per-user id header
+// (set by the identity proxy) is carried in the Principal's ExternalUID
+// (or the username fallback, see auth.BrowserChain.pickExternalUID).
 const AuthProviderAuthentik = "authentik"
+
+// AuthProviderLocal is the auth_provider value for users who authenticate
+// via the local session-cookie chain (source='local' rows in the users
+// table). These rows already exist when ResolveOrCreate is called, so
+// the local branch does a lookup+refresh instead of an INSERT (the
+// INSERT path uses source='forward-link' which would violate the CHECK
+// constraint on source/password_hash for local rows).
+const AuthProviderLocal = "local"
 
 // PrincipalKindUser is the only Principal kind that resolves to a real
 // users row via ResolveOrCreate. KindMachine (agent) sessions do not own
@@ -162,6 +169,12 @@ func (s *Service) SystemUserSafe() (Attribution, error) {
 //     a username rename or email change shows up on the next request
 //     without a separate background refresh job.
 //
+// For local-session Principals (AuthProvider == "local"), the user row
+// already exists (source='local', password_hash set) so this skips the
+// INSERT and does a lookup+refresh instead -- the INSERT path uses
+// source='forward-link' with NULL password_hash, which would violate the
+// CHECK constraint on local rows.
+//
 // The two writes happen in the same write transaction (single-connection
 // writer pool, AGENTS.md invariant #2), so a slow scan/insert doesn't
 // observe a half-updated attribution row. The principal lookup and the
@@ -181,6 +194,18 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 	}
 	if p.ExternalUID == "" {
 		return Attribution{}, ErrInvalidPrincipal
+	}
+
+	// Local-session branch: the row already exists (source='local'),
+	// so do a lookup+refresh instead of INSERT. The INSERT path
+	// hardcodes source='forward-link' + password_hash=NULL, which
+	// violates the CHECK constraint for source='local' rows.
+	provider := p.AuthProvider
+	if provider == "" {
+		provider = AuthProviderAuthentik
+	}
+	if provider == AuthProviderLocal {
+		return s.resolveLocal(ctx, p)
 	}
 
 	var out Attribution
@@ -211,6 +236,45 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 			ExternalUID:  row.ExternalUid,
 			Username:     row.Username,
 			Email:        row.Email,
+		}
+		return nil
+	})
+	if err != nil {
+		return Attribution{}, err
+	}
+	return out, nil
+}
+
+// resolveLocal handles the auth_provider="local" case of ResolveOrCreate.
+// Local users already exist in the users table (source='local',
+// password_hash set) so we only need a lookup+refresh -- no INSERT.
+func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attribution, error) {
+	var out Attribution
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		row, err := q.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+			AuthProvider: AuthProviderLocal,
+			ExternalUid:  p.ExternalUID,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve local user: %w", err)
+		}
+		if err := q.RefreshAttributionUserSeen(ctx, sqlcgen.RefreshAttributionUserSeenParams{
+			ID:       row.ID,
+			Username: p.Name,
+			Email:    sql.NullString{String: p.Email, Valid: p.Email != ""},
+		}); err != nil {
+			return fmt.Errorf("refresh local attribution user: %w", err)
+		}
+		refreshed, err := q.GetAttributionUserByID(ctx, row.ID)
+		if err != nil {
+			return fmt.Errorf("load local attribution user: %w", err)
+		}
+		out = Attribution{
+			ID:           refreshed.ID,
+			AuthProvider: refreshed.AuthProvider,
+			ExternalUID:  refreshed.ExternalUid,
+			Username:     refreshed.Username,
+			Email:        refreshed.Email,
 		}
 		return nil
 	})

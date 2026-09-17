@@ -174,6 +174,8 @@ func (m *Middleware) Middleware(next http.Handler) http.Handler {
 			Kind:          auth.KindUser,
 			Name:          user.Username,
 			Email:         user.Email.String,
+			ExternalUID:   user.Username,
+			AuthProvider:  auth.AuthProviderLocal,
 			Authenticated: true,
 		}
 		ctx = auth.WithPrincipal(ctx, principal)

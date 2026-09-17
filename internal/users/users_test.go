@@ -8,6 +8,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
 func newService(t *testing.T) *Service {
@@ -293,4 +294,90 @@ func TestResolveOrCreate_RefreshesLastSeenAt(t *testing.T) {
 		t.Logf("first.ID=%d row.LastSeenAt=%d", first.ID, row.LastSeenAt)
 	}
 	_ = first // first.ID is the row id; last_seen_at lives in row
+}
+
+// TestResolveOrCreate_LocalUser: local-session Principals (auth_provider="local")
+// should resolve to the existing local user row via lookup, not INSERT.
+// The INSERT path uses source='forward-link' which would violate the CHECK
+// constraint on source/password_hash for source='local' rows.
+func TestResolveOrCreate_LocalUser(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+
+	// Insert a local user row directly (simulating CreateLocalUser).
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('testlocal', 'testlocal@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'local', 'testlocal')`,
+	)
+	if err != nil {
+		t.Fatalf("insert local user: %v", err)
+	}
+
+	// ResolveOrCreate with a local-session Principal.
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "testlocal",
+		Email:         "testlocal@example.com",
+		ExternalUID:   "testlocal",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatal("ResolveOrCreate returned ID=0")
+	}
+	if got.AuthProvider != "local" {
+		t.Errorf("AuthProvider = %q, want %q", got.AuthProvider, "local")
+	}
+	if got.ExternalUID != "testlocal" {
+		t.Errorf("ExternalUID = %q, want %q", got.ExternalUID, "testlocal")
+	}
+
+	// Verify no duplicate row was created (unique index check).
+	row, err := svc.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+		AuthProvider: "local",
+		ExternalUid:  "testlocal",
+	})
+	if err != nil {
+		t.Fatalf("lookup local user: %v", err)
+	}
+	_ = row // existence is the assertion; GetAttributionUserByExternalUID returns one row or errors
+}
+
+// TestResolveOrCreate_LocalUser_RefreshesFields: the local-user branch
+// of ResolveOrCreate should refresh denormalized username/email like
+// the forward-auth branch does.
+func TestResolveOrCreate_LocalUser_RefreshesFields(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('bob', 'bob@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'local', 'bob')`,
+	)
+	if err != nil {
+		t.Fatalf("insert local user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "bob-renamed",
+		Email:         "bob2@example.com",
+		ExternalUID:   "bob",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.Username != "bob-renamed" {
+		t.Errorf("Username = %q, want %q", got.Username, "bob-renamed")
+	}
+	if !got.Email.Valid || got.Email.String != "bob2@example.com" {
+		t.Errorf("Email = %+v, want bob2@example.com", got.Email)
+	}
 }

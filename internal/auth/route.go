@@ -209,6 +209,8 @@ func mergePrincipals(fwd, local *Principal, mode AuthMode) *Principal {
 			Kind:          KindUser,
 			Name:          pickName(local.Name, fwd.Name),
 			Email:         pickName(local.Email, fwd.Email),
+			ExternalUID:   pickName(local.ExternalUID, fwd.ExternalUID),
+			AuthProvider:  pickAuthProvider(local.AuthProvider, fwd.AuthProvider),
 			Groups:        unionGroups(local.Groups, fwd.Groups),
 			Authenticated: local.Authenticated || fwd.Authenticated,
 		}
@@ -221,6 +223,16 @@ func mergePrincipals(fwd, local *Principal, mode AuthMode) *Principal {
 // interactive login's name/email over a forward-auth assertion when
 // both are present.
 func pickName(local, forward string) string {
+	if local != "" {
+		return local
+	}
+	return forward
+}
+
+// pickAuthProvider returns the first non-empty auth provider. Local
+// sessions take precedence over forward-auth when both are present,
+// consistent with pickName's preference for the interactive login.
+func pickAuthProvider(local, forward string) string {
 	if local != "" {
 		return local
 	}
