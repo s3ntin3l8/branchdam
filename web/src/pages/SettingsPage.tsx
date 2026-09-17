@@ -143,6 +143,7 @@ function SettingsFieldEditor({
 
   return (
     <FieldRow
+      fieldKey={field.key}
       label={field.label}
       doc={field.doc}
       source={field.source}

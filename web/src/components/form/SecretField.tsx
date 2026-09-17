@@ -42,7 +42,7 @@ export function SecretField({ hasValue, value, onChange, disabled, generatable }
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         placeholder={hasValue ? "Set -- enter a new value to replace" : "Not set"}
-        className={INPUT_CLASS}
+        className={`${INPUT_CLASS} min-w-0 flex-1`}
       />
       {generatable && (
         <button

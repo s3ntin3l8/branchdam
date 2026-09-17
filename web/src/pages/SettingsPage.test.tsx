@@ -321,7 +321,7 @@ describe("SettingsPage", () => {
 
     renderWithClient(<SettingsPage />);
 
-    const row = (await screen.findByText("Shared Agent Secret")).closest("div")!.parentElement!;
+    const row = await screen.findByTestId("field-row-agent.apiKey");
     const generateButton = within(row).getByRole("button", { name: "Generate" });
     await user.click(generateButton);
 
@@ -339,7 +339,7 @@ describe("SettingsPage", () => {
 
     renderWithClient(<SettingsPage />);
 
-    const row = (await screen.findByText("Immich API Key")).closest("div")!.parentElement!;
+    const row = await screen.findByTestId("field-row-immich.apiKey");
     expect(within(row).queryByRole("button", { name: "Generate" })).not.toBeInTheDocument();
   });
 

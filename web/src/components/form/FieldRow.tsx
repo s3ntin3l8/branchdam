@@ -16,6 +16,14 @@ function ProvenanceChip({ source }: { source: SettingsFieldSource }) {
 }
 
 interface FieldRowProps {
+  // Present for a settings.Field-backed row (SettingsPage), whose registry
+  // key is stable and unique; omitted for a StorageHealthPage row, which
+  // has no such key and identifies itself by label alone. When present,
+  // it becomes a `field-row-<fieldKey>` data-testid so tests can scope a
+  // query to one row instead of relying on DOM-structure traversal (e.g.
+  // `.closest("div")`) that breaks the moment this component's markup
+  // shape changes.
+  fieldKey?: string;
   label: string;
   doc?: string;
   source: SettingsFieldSource;
@@ -24,9 +32,12 @@ interface FieldRowProps {
   children: React.ReactNode;
 }
 
-export function FieldRow({ label, doc, source, pendingRestart, readOnlyReason, children }: FieldRowProps) {
+export function FieldRow({ fieldKey, label, doc, source, pendingRestart, readOnlyReason, children }: FieldRowProps) {
   return (
-    <div className="border-b border-neutral-800/60 py-3 last:border-b-0">
+    <div
+      data-testid={fieldKey ? `field-row-${fieldKey}` : undefined}
+      className="border-b border-neutral-800/60 py-3 last:border-b-0"
+    >
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-neutral-200">{label}</span>
         <ProvenanceChip source={source} />
