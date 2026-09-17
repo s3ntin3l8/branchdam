@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams, useSearchParams, Link } from "react-router";
 import {
   useAsset,
@@ -14,6 +14,7 @@ import {
 } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
 import AssetMediaPreview from "../components/AssetMediaPreview";
+import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
@@ -200,17 +201,6 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
   const deleteAsset = useDeleteAsset();
   const restoreAsset = useRestoreAsset();
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !deleteAsset.isPending) {
-        setIsOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isOpen, deleteAsset.isPending]);
-
   if (asset.lifecycleState === "ARCHIVED") {
     if (asset.supersededBy) {
       return (
@@ -261,47 +251,29 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
       </button>
 
       {isOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="archive-asset-title"
-        >
-          <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
-            <h3 id="archive-asset-title" className="text-base font-semibold text-neutral-100">Archive Asset</h3>
-            <p className="text-xs text-neutral-300 leading-relaxed">
+        <ConfirmDialog
+          titleId="archive-asset-title"
+          title="Archive Asset"
+          body={
+            <>
               Are you sure you want to soft-delete (archive) <strong className="text-white">{asset.fileName}</strong>?
               The media node will be marked <code className="text-amber-400">ARCHIVED</code> and removed from active lineage.
               Note: Extracted metadata (EXIF/ffprobe tags) for this node will be pruned on the next background scan.
               The underlying file on disk is never deleted.
-            </p>
-            {deleteAsset.isError && (
-              <p className="text-xs text-red-400">Failed to archive: {String(deleteAsset.error)}</p>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setIsOpen(false)}
-                disabled={deleteAsset.isPending}
-                className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  deleteAsset.mutate(asset.id, {
-                    onSuccess: () => setIsOpen(false),
-                  });
-                }}
-                disabled={deleteAsset.isPending}
-                className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
-              >
-                {deleteAsset.isPending ? "Archiving…" : "Confirm Archive"}
-              </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+          confirmLabel="Confirm Archive"
+          pendingLabel="Archiving…"
+          isPending={deleteAsset.isPending}
+          error={deleteAsset.isError ? deleteAsset.error : undefined}
+          errorLabel="Failed to archive"
+          onConfirm={() => {
+            deleteAsset.mutate(asset.id, {
+              onSuccess: () => setIsOpen(false),
+            });
+          }}
+          onCancel={() => setIsOpen(false)}
+        />
       )}
     </>
   );

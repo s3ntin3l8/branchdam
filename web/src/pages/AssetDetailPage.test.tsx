@@ -16,6 +16,8 @@ vi.mock("../api/client", () => ({
     pruneCache: vi.fn(),
     listStorageLocations: vi.fn(),
     inheritMetadata: vi.fn(),
+    deleteAsset: vi.fn(),
+    restoreAsset: vi.fn(),
     thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
     streamUrl: vi.fn((id: number) => `/api/v1/assets/${id}/stream`),
   },
@@ -136,6 +138,57 @@ describe("AssetDetailPage purge control", () => {
 
     await waitFor(() => expect(screen.getByText(/purge failed/i)).toBeInTheDocument());
     expect(screen.queryByText("Cache purged.")).not.toBeInTheDocument();
+  });
+});
+
+describe("AssetDetailPage archive control", () => {
+  it("does not mutate until the dialog is confirmed, and Cancel dismisses it", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /archive asset/i }));
+    expect(await screen.findByRole("dialog", { name: /archive asset/i })).toBeInTheDocument();
+    expect(api.deleteAsset).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.deleteAsset).not.toHaveBeenCalled();
+  });
+
+  it("archives on confirm and closes the dialog", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+    vi.mocked(api.deleteAsset).mockResolvedValueOnce({ ok: true });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /archive asset/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /confirm archive/i }));
+
+    await waitFor(() => expect(api.deleteAsset).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("Escape dismisses the dialog without mutating", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /archive asset/i }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.deleteAsset).not.toHaveBeenCalled();
   });
 });
 

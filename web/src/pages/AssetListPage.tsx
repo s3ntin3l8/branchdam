@@ -1,5 +1,9 @@
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams, Link } from "react-router";
-import { useAssetFacets, useAssets, useMe, useStorageLocations, useUsers } from "../hooks/queries";
+import { useQueryClient } from "@tanstack/react-query";
+import { api } from "../api/client";
+import { useAssetFacets, useAssets, useDeleteAsset, useMe, useRestoreAsset, useStorageLocations, useUsers } from "../hooks/queries";
+import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset } from "../api/types";
 
@@ -65,6 +69,105 @@ export default function AssetListPage() {
   const assets = data?.assets ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const queryClient = useQueryClient();
+  const deleteAsset = useDeleteAsset();
+  const restoreAsset = useRestoreAsset();
+
+  // Per-row archive confirmation. Restore has no confirm step, matching
+  // AssetDetailPage's AssetDeleteControl.
+  const [archiveTarget, setArchiveTarget] = useState<Asset | null>(null);
+
+  // Batch archive selection. Scoped to the CURRENT PAGE only -- there is no
+  // "select all matching this filter" endpoint to back a broader claim, so
+  // the selection is cleared whenever the page or any filter changes rather
+  // than silently carrying stale ids across a refetch.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [batchDialogOpen, setBatchDialogOpen] = useState(false);
+  const [batchPending, setBatchPending] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  const [batchError, setBatchError] = useState<{ count: number; message: string } | null>(null);
+
+  // Reset selection synchronously during render when the page or any
+  // filter changes, rather than in a useEffect -- this is React's
+  // documented "adjusting state when a prop changes" pattern
+  // (react.dev/learn/you-might-not-need-an-effect#adjusting-state-when-a-prop-changes),
+  // which avoids the extra render-then-effect-then-render cascade a
+  // useEffect version would cause here.
+  const filterKey = searchParams.toString();
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (filterKey !== prevFilterKey) {
+    setPrevFilterKey(filterKey);
+    setSelectedIds(new Set());
+    setBatchError(null);
+  }
+
+  const selectableIds = assets.filter((a) => a.lifecycleState !== "ARCHIVED").map((a) => a.id);
+  const allSelectableSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
+  const someSelected = selectedIds.size > 0;
+
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someSelected && !allSelectableSelected;
+    }
+  }, [someSelected, allSelectableSelected]);
+
+  const toggleRow = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds(allSelectableSelected ? new Set() : new Set(selectableIds));
+  };
+
+  // Sequential loop over the existing single-asset DELETE endpoint rather
+  // than a new batch route: the writer pool is single-connection
+  // (SetMaxOpenConns(1)), so a batch route buys no concurrency, and this
+  // way every archive still gets its own actor_audit row for free.
+  // Deliberately calls api.deleteAsset directly instead of the
+  // useDeleteAsset hook -- that hook invalidates ["assets"] in its own
+  // onSuccess, which would refetch (and re-render the rows this loop is
+  // iterating over) after every single archive in the batch. Invalidate
+  // once, after the whole batch settles, instead.
+  const runBatchArchive = async () => {
+    const ids = Array.from(selectedIds);
+    setBatchPending(true);
+    setBatchError(null);
+    setBatchProgress({ done: 0, total: ids.length });
+
+    const failed: number[] = [];
+    let firstErrorMessage: string | undefined;
+    let completed = 0;
+    for (const id of ids) {
+      try {
+        await api.deleteAsset(id);
+      } catch (err) {
+        failed.push(id);
+        if (firstErrorMessage === undefined) {
+          firstErrorMessage = err instanceof Error ? err.message : String(err);
+        }
+      }
+      completed += 1;
+      setBatchProgress({ done: completed, total: ids.length });
+    }
+
+    void queryClient.invalidateQueries({ queryKey: ["assets"] });
+    setBatchPending(false);
+    setBatchDialogOpen(false);
+    setBatchProgress(null);
+    if (failed.length > 0) {
+      setSelectedIds(new Set(failed));
+      setBatchError({ count: failed.length, message: firstErrorMessage ?? "unknown error" });
+    } else {
+      setSelectedIds(new Set());
+    }
+  };
 
   const updateFilters = (updates: Record<string, string | null>) => {
     const nextParams = new URLSearchParams(searchParams);
@@ -234,6 +337,35 @@ export default function AssetListPage() {
         </div>
       </div>
 
+      {someSelected && (
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-4 rounded-lg border border-indigo-800/60 bg-indigo-950/60 px-4 py-2 text-xs">
+          <span className="text-indigo-200">
+            {selectedIds.size} selected
+          </span>
+          <div className="flex items-center gap-3">
+            {batchError && (
+              <span className="text-red-400">
+                {batchError.count} failed to archive: {batchError.message}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1 text-neutral-300 hover:bg-neutral-700"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={() => setBatchDialogOpen(true)}
+              className="rounded border border-red-800/80 bg-red-950/60 px-2.5 py-1 font-medium text-red-300 hover:bg-red-900/60"
+            >
+              Archive selected
+            </button>
+          </div>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="p-6 text-neutral-400">Loading assets…</div>
       ) : isError ? (
@@ -247,6 +379,17 @@ export default function AssetListPage() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-neutral-800 text-neutral-400">
               <tr>
+                <th className="py-2 pr-4">
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    aria-label="Select all on this page"
+                    checked={allSelectableSelected}
+                    disabled={selectableIds.length === 0}
+                    onChange={toggleSelectAll}
+                    className="rounded border-neutral-700 bg-neutral-800 text-indigo-500 focus:ring-0 disabled:opacity-40"
+                  />
+                </th>
                 <th className="py-2 pr-4"></th>
                 <th className="py-2 pr-4">Path</th>
                 <th className="py-2 pr-4">Lifecycle</th>
@@ -255,11 +398,22 @@ export default function AssetListPage() {
                 <th className="py-2 pr-4">Graph status</th>
                 <th className="py-2 pr-4">Uploaded by</th>
                 <th className="py-2 pr-4">Fast Hash</th>
+                <th className="py-2 pr-4">Actions</th>
               </tr>
             </thead>
             <tbody>
               {assets.map((a) => (
                 <tr key={a.id} className="border-b border-neutral-900 hover:bg-neutral-900">
+                  <td className="py-2 pr-4">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${a.fileName}`}
+                      checked={selectedIds.has(a.id)}
+                      disabled={a.lifecycleState === "ARCHIVED"}
+                      onChange={() => toggleRow(a.id)}
+                      className="rounded border-neutral-700 bg-neutral-800 text-indigo-500 focus:ring-0 disabled:opacity-40"
+                    />
+                  </td>
                   <td className="py-2 pr-4">
                     <Thumbnail assetId={a.id} thumbState={a.thumbState} alt={a.fileName} />
                   </td>
@@ -283,6 +437,27 @@ export default function AssetListPage() {
                   <td className={`py-2 pr-4 text-xs ${statusColor[a.graphStatus] ?? ""}`}>{a.graphStatus}</td>
                   <td className="py-2 pr-4 text-neutral-500 text-xs">{formatUploadedBy(a.uploadedByUserId)}</td>
                   <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{a.fastHash ?? "—"}</td>
+                  <td className="py-2 pr-4 text-xs">
+                    {a.lifecycleState === "ARCHIVED" ? (
+                      <button
+                        type="button"
+                        onClick={() => restoreAsset.mutate(a.id)}
+                        disabled={restoreAsset.isPending}
+                        className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2 py-1 font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50"
+                      >
+                        {restoreAsset.isPending ? "Restoring…" : "Restore"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setArchiveTarget(a)}
+                        disabled={deleteAsset.isPending}
+                        className="rounded border border-red-800/80 bg-red-950/60 px-2 py-1 font-medium text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+                      >
+                        Archive
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -316,6 +491,51 @@ export default function AssetListPage() {
             </div>
           </div>
         </>
+      )}
+
+      {archiveTarget && (
+        <ConfirmDialog
+          titleId="archive-asset-title"
+          title="Archive Asset"
+          body={
+            <>
+              Are you sure you want to soft-delete (archive){" "}
+              <strong className="text-white">{archiveTarget.fileName}</strong>? The media node will be marked{" "}
+              <code className="text-amber-400">ARCHIVED</code> and removed from active lineage. The underlying file
+              on disk is never deleted.
+            </>
+          }
+          confirmLabel="Confirm Archive"
+          pendingLabel="Archiving…"
+          isPending={deleteAsset.isPending}
+          error={deleteAsset.isError ? deleteAsset.error : undefined}
+          errorLabel="Failed to archive"
+          onConfirm={() => {
+            deleteAsset.mutate(archiveTarget.id, {
+              onSuccess: () => setArchiveTarget(null),
+            });
+          }}
+          onCancel={() => setArchiveTarget(null)}
+        />
+      )}
+
+      {batchDialogOpen && (
+        <ConfirmDialog
+          titleId="batch-archive-title"
+          title="Archive Selected Assets"
+          body={
+            batchPending && batchProgress
+              ? `Archiving ${batchProgress.done}/${batchProgress.total}…`
+              : `Are you sure you want to archive ${selectedIds.size} asset${selectedIds.size === 1 ? "" : "s"}? Each will be marked ARCHIVED and removed from active lineage. The underlying files on disk are never deleted.`
+          }
+          confirmLabel="Confirm Archive"
+          pendingLabel="Archiving…"
+          isPending={batchPending}
+          onConfirm={() => {
+            void runBatchArchive();
+          }}
+          onCancel={() => setBatchDialogOpen(false)}
+        />
       )}
     </div>
   );
