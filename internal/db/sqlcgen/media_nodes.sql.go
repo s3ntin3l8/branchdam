@@ -24,6 +24,30 @@ func (q *Queries) ArchiveMediaNode(ctx context.Context, id int64) error {
 	return err
 }
 
+const backfillMediaNodeUploader = `-- name: BackfillMediaNodeUploader :exec
+UPDATE media_nodes
+SET uploaded_by_user_id = ?2
+WHERE id = ?1
+  AND uploaded_by_user_id IS NULL
+`
+
+type BackfillMediaNodeUploaderParams struct {
+	ID               int64
+	UploadedByUserID sql.NullInt64
+}
+
+// Sets uploaded_by_user_id on a node that dedup returned unchanged, so a
+// dedup'd upload from an authenticated/paired identity still gets
+// attribution even though the row itself predates it. The IS NULL guard
+// makes this idempotent and means it can never clobber an existing
+// attribution -- first real uploader identity wins, matching the
+// write-once intent documented at pipeline.Commit's rescan path (which
+// never has an uploader identity to offer in the first place).
+func (q *Queries) BackfillMediaNodeUploader(ctx context.Context, arg BackfillMediaNodeUploaderParams) error {
+	_, err := q.db.ExecContext(ctx, backfillMediaNodeUploader, arg.ID, arg.UploadedByUserID)
+	return err
+}
+
 const countMediaNodes = `-- name: CountMediaNodes :one
 SELECT COUNT(*)
 FROM media_nodes

@@ -17,6 +17,14 @@ type Querier interface {
 	// row can never share file_path even for an instant within the
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
+	// Sets uploaded_by_user_id on a node that dedup returned unchanged, so a
+	// dedup'd upload from an authenticated/paired identity still gets
+	// attribution even though the row itself predates it. The IS NULL guard
+	// makes this idempotent and means it can never clobber an existing
+	// attribution -- first real uploader identity wins, matching the
+	// write-once intent documented at pipeline.Commit's rescan path (which
+	// never has an uploader identity to offer in the first place).
+	BackfillMediaNodeUploader(ctx context.Context, arg BackfillMediaNodeUploaderParams) error
 	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error

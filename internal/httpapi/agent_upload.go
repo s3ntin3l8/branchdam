@@ -34,7 +34,21 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	// user_id comes from the device_pairings row keyed on agent_id.
 	var agentUserID int64
 	if p.Kind == auth.KindMachine {
-		if pairing, err := s.db.Reader.GetDevicePairingByAgentID(r.Context(), p.Name); err == nil && pairing.UserID.Valid {
+		pairing, err := s.db.Reader.GetDevicePairingByAgentID(r.Context(), p.Name)
+		switch {
+		case err != nil:
+			// "env-bootstrap" (the shared BRANCHDAM_AGENT_API_KEY) has no
+			// pairing row by design -- that's the documented "agent without
+			// pairing = NULL" case, not worth a warning. Anything else here
+			// (a paired agent_id the lookup can't find) is worth knowing about.
+			if p.Name != "env-bootstrap" {
+				s.log.Warn("agent upload: device pairing lookup failed, attribution NULL", "agentId", p.Name, "err", err.Error())
+			}
+		case pairing.RevokedAt.Valid:
+			s.log.Warn("agent upload: pairing revoked, attribution NULL", "agentId", p.Name)
+		case !pairing.UserID.Valid:
+			s.log.Warn("agent upload: pairing has no owner, attribution NULL", "agentId", p.Name)
+		default:
 			agentUserID = pairing.UserID.Int64
 		}
 	}

@@ -532,6 +532,19 @@ WHERE full_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 LIMIT 1;
 
+-- name: BackfillMediaNodeUploader :exec
+-- Sets uploaded_by_user_id on a node that dedup returned unchanged, so a
+-- dedup'd upload from an authenticated/paired identity still gets
+-- attribution even though the row itself predates it. The IS NULL guard
+-- makes this idempotent and means it can never clobber an existing
+-- attribution -- first real uploader identity wins, matching the
+-- write-once intent documented at pipeline.Commit's rescan path (which
+-- never has an uploader identity to offer in the first place).
+UPDATE media_nodes
+SET uploaded_by_user_id = ?2
+WHERE id = ?1
+  AND uploaded_by_user_id IS NULL;
+
 -- name: GetMediaNodeByFastHash :one
 SELECT id
 FROM media_nodes
