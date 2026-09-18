@@ -27,8 +27,6 @@ import {
   useRevokeUserSessions,
 } from "../hooks/queries";
 
-const mocked = (fn: ReturnType<typeof vi.fn>) => fn as unknown as (...args: unknown[]) => unknown;
-
 function makeUser(overrides: Record<string, unknown> = {}) {
   return {
     id: 1,
