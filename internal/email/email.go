@@ -76,7 +76,7 @@ type logSender struct {
 // sent. `to` is a stored user email and is format-validated in the
 // smtpSender.Send path (mail.ParseAddress); here we just log it.
 func (s *logSender) Send(_ context.Context, to, subject, htmlBody, textBody string) error {
-	s.log.Warn("email: not sent (log-only mode)",
+	s.log.Info("email: not sent (log-only mode)",
 		"to", to,
 		"subject", subject,
 		"body_preview", truncate(textBody, 200),
@@ -283,8 +283,12 @@ func buildMessage(from, to, subject, htmlBody, textBody string) []byte {
 }
 
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:max]) + "…"
 }
