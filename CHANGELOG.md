@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.22.0](https://github.com/s3ntin3l8/branchdam/compare/v0.21.0...v0.22.0) (2026-09-18)
+
+
+### Features
+
+* **agent:** add transactional Resolve snapshot API ([#447](https://github.com/s3ntin3l8/branchdam/issues/447)) ([11906bb](https://github.com/s3ntin3l8/branchdam/commit/11906bbc3b20984efd41d1dc64252c6df0e4fc92))
+* **agent:** EVENT_VIRTUAL_NODE_CREATED handler for integration project nodes ([854f008](https://github.com/s3ntin3l8/branchdam/commit/854f008c4f7fee7518aeaade773ec2bfce3222a0))
+* **agent:** EVENT_VIRTUAL_NODE_CREATED handler for integration project nodes ([22aa8de](https://github.com/s3ntin3l8/branchdam/commit/22aa8de35a032b91823b6d4adfefb34154d90440))
+* **auth:** admin user-management endpoints and UI ([#458](https://github.com/s3ntin3l8/branchdam/issues/458)) ([c01ceaa](https://github.com/s3ntin3l8/branchdam/commit/c01ceaa142b654ef306f73647c1daf25c09fedee))
+* **auth:** email-based password reset link delivery ([#414](https://github.com/s3ntin3l8/branchdam/issues/414)) ([#460](https://github.com/s3ntin3l8/branchdam/issues/460)) ([599b4b2](https://github.com/s3ntin3l8/branchdam/commit/599b4b203f7abad98a4e9cffe9834bda646789f1))
+* **auth:** TOTP-based MFA for local users ([#410](https://github.com/s3ntin3l8/branchdam/issues/410)) ([#459](https://github.com/s3ntin3l8/branchdam/issues/459)) ([4746734](https://github.com/s3ntin3l8/branchdam/commit/4746734933223723e5b5388481d87322cafe4d55))
+* **settings:** clarify and harden the shared agent secret ([#454](https://github.com/s3ntin3l8/branchdam/issues/454)) ([19f7d3d](https://github.com/s3ntin3l8/branchdam/commit/19f7d3d8e7c4d94df5869c1ba073230cc4c6b01c))
+* **web:** archive assets from the asset list, per-row and batch ([#456](https://github.com/s3ntin3l8/branchdam/issues/456)) ([1e2c2ca](https://github.com/s3ntin3l8/branchdam/commit/1e2c2ca3c108b149a4ceadd0f3c1cb92f831322f))
+
+
+### Bug Fixes
+
+* **agent:** address Hermes review: IsVirtual guard, ProjectType validation, EvidenceJSON, docs ([fdeaaf6](https://github.com/s3ntin3l8/branchdam/commit/fdeaaf6c47a286cb37d567bcb4a226dc1cb9c0e6))
+* **agent:** address Hermes round-2 review: evidence persistence, projectType relax, down migration fix ([2c9cf1f](https://github.com/s3ntin3l8/branchdam/commit/2c9cf1f29e3c9e45c168836acb0e8d3b60041b1d))
+* **agent:** address Hermes round-3: rootPath coupling, dead isFatal, evidence source ([0f4606f](https://github.com/s3ntin3l8/branchdam/commit/0f4606f6fca6bd72cfb2e36f0ab24e5ce98dac5e))
+* **agent:** address Hermes round-4: route enum, evidence on reuse, ARCHIVED filter ([9833a51](https://github.com/s3ntin3l8/branchdam/commit/9833a5143f366a9411d145315f902b30c929b2f9))
+* **agent:** address Hermes round-5: index columns, source comment, legacy-unscoped reuse ([9a86af2](https://github.com/s3ntin3l8/branchdam/commit/9a86af2bcbe5625a4281dcb95b7a504cc6e634a9))
+* **agent:** enforce per-agent path scoping on file_path collision ([b377c10](https://github.com/s3ntin3l8/branchdam/commit/b377c103cc924464b424b0bacda9734d7d51e595))
+* **agent:** remove dead ErrInvalidProjectType sentinel and doc entry ([5fc3bca](https://github.com/s3ntin3l8/branchdam/commit/5fc3bcaf92a5c86b6c5811e38ed09592fee9fb5a))
+* **attribution:** populate uploaded_by_user_id for paired-agent uploads ([#455](https://github.com/s3ntin3l8/branchdam/issues/455)) ([071ebbe](https://github.com/s3ntin3l8/branchdam/commit/071ebbe30e3dd0a42dcc8268fd19154d4da3310f))
+* **auth:** resolve attribution and is_admin for local-auth sessions ([#461](https://github.com/s3ntin3l8/branchdam/issues/461)) ([974adb2](https://github.com/s3ntin3l8/branchdam/commit/974adb21510038699c805b3c0cd4e6f1e444254e))
+
+
+### Performance Improvements
+
+* **agent:** batch Resolve snapshot reconciliation lookups ([c1701af](https://github.com/s3ntin3l8/branchdam/commit/c1701af5f93919b6a4c95f5ae842ed84af747c63))
+
 ## [0.21.0](https://github.com/s3ntin3l8/branchdam/compare/v0.20.0...v0.21.0) (2026-09-11)
 
 
