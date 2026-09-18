@@ -823,8 +823,18 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	// disappearance). Use the *Tx variant because we're already inside
 	// ProcessPending's InTx; the public pipeline.TrashAsset would deadlock
 	// the writer pool (single connection per Invariant 2).
-	if _, trashErr := pipeline.TrashAssetTx(ctx, q, d.guard, d.log, node.ID, false); trashErr != nil {
-		return fmt.Errorf("trash asset (agent EVENT_NODE_DELETED): %w", trashErr)
+	//
+	// Preserve ARCHIVED semantics: if the node was already ARCHIVED (from
+	// a prior version-collision supersede), don't try to re-trash it --
+	// the row is already in a terminal-retired state. This matches the
+	// pre-trash-asset behavior where MarkNodeMissing was guarded by
+	// `node.LifecycleState != "ARCHIVED"`. ErrAssetNotTrashed is added
+	// to the fatal-error set in processEvent for this specific path so
+	// ARCHIVED events don't burn retries.
+	if node.LifecycleState != "ARCHIVED" {
+		if _, trashErr := pipeline.TrashAssetTx(ctx, q, d.guard, d.log, node.ID, false); trashErr != nil {
+			return fmt.Errorf("trash asset (agent EVENT_NODE_DELETED): %w", trashErr)
+		}
 	}
 
 	// If Immich client is wired, trigger external library rescan

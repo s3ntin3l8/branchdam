@@ -39,7 +39,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -139,7 +138,7 @@ func TrashAssetTx(
 			log.Warn("trash: skipping physical move for read-only/tier3 master; row marked TRASHED logically only",
 				"nodeID", loaded.ID, "tier", loc.Tier, "path", loaded.FilePath)
 		default:
-			if err := moveToTrash(guard, loc.RootPath, loaded.FilePath, log); err != nil {
+			if err := moveToTrash(guard, loc.RootPath, loaded.FilePath, loaded.NodeUuid, log); err != nil {
 				return sqlcgen.MediaNode{}, fmt.Errorf("move to trash: %w", err)
 			}
 		}
@@ -224,7 +223,7 @@ func RestoreTrashedAssetTx(
 	}
 
 	if guard != nil && loaded.FilePath != "" {
-		if err := restoreFromTrash(guard, loaded.FilePath, log); err != nil {
+		if err := restoreFromTrash(guard, loaded.FilePath, loaded.NodeUuid, log); err != nil {
 			return sqlcgen.MediaNode{}, err
 		}
 	}
@@ -244,21 +243,35 @@ func RestoreTrashedAssetTx(
 	return updated, nil
 }
 
-// moveToTrash moves filePath to <rootPath>/.trash/<rel_path>, creating the
-// .trash/ directory tree as needed. If a prior trashed copy of the same rel
-// path already lives in .trash/, a numeric suffix (_1, _2, ...) is appended
-// to avoid clobbering.
+// moveToTrash moves filePath to <rootPath>/.trash/<rel_path>.<nodeUUID>.<ext>,
+// creating the .trash/ directory tree as needed. The nodeUUID is embedded in
+// the filename so each trashed node's bytes are uniquely identifiable on disk
+// without consulting the DB -- critical for the collision case where the same
+// rel_path has been trashed twice for two different node_uuids (Hermes
+// review, trash.go:333 in the original implementation).
 //
 // If the source file is missing on disk, this logs a warning and returns nil --
 // the DB row's TRASHED state is still the durable record of intent; the user
 // (or an upstream sync) may have already moved the file. Refusing the trash
 // in that case would leave the row in an ACTIVE/MISSING limbo forever.
-func moveToTrash(guard *storage.Guard, rootPath, filePath string, log *slog.Logger) error {
+func moveToTrash(guard *storage.Guard, rootPath, filePath, nodeUUID string, log *slog.Logger) error {
 	relPath, err := filepath.Rel(rootPath, filePath)
 	if err != nil || strings.HasPrefix(relPath, "..") {
 		return fmt.Errorf("compute rel path for %s under %s: %w", filePath, rootPath, err)
 	}
-	trashPath := filepath.Join(rootPath, ".trash", relPath)
+	if nodeUUID == "" {
+		return fmt.Errorf("moveToTrash requires a non-empty nodeUUID for filename-uniqueness")
+	}
+	// Embed the node_uuid in the trash filename so the same rel_path can
+	// be trashed by N nodes with N distinct, recoverable copies.
+	ext := filepath.Ext(relPath)
+	stem := strings.TrimSuffix(relPath, ext)
+	uuidShort := nodeUUID
+	if len(uuidShort) > 8 {
+		uuidShort = uuidShort[:8]
+	}
+	trashRel := stem + "." + uuidShort + ext
+	trashPath := filepath.Join(rootPath, ".trash", trashRel)
 	if err := guard.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir .trash parent: %w", err)
 	}
@@ -269,7 +282,6 @@ func moveToTrash(guard *storage.Guard, rootPath, filePath string, log *slog.Logg
 		}
 		return fmt.Errorf("stat source %s: %w", filePath, statErr)
 	}
-	trashPath = uniqueTrashPath(trashPath)
 	if err := os.Rename(filePath, trashPath); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", filePath, trashPath, err)
 	}
@@ -280,11 +292,12 @@ func moveToTrash(guard *storage.Guard, rootPath, filePath string, log *slog.Logg
 	return nil
 }
 
-// restoreFromTrash moves a trashed file back to its original path. Computes
-// the .trash/<rel_path> location, finds the unique-suffixed file if one
-// exists, and renames it back. Returns ErrAssetTrashFileMissing if no .trash
-// copy can be found (TTL expired and the pruner already removed it).
-func restoreFromTrash(guard *storage.Guard, filePath string, log *slog.Logger) error {
+// restoreFromTrash moves a trashed file back to its original path. The trash
+// filename is deterministic given (rel_path, node_uuid) (see moveToTrash), so
+// we can compute the exact .trash path without scanning. Returns
+// ErrAssetTrashFileMissing if no .trash copy can be found (TTL expired and
+// the pruner already removed it).
+func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog.Logger) error {
 	loc, err := guard.Resolve(filePath)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", filePath, err)
@@ -292,19 +305,31 @@ func restoreFromTrash(guard *storage.Guard, filePath string, log *slog.Logger) e
 	if loc.IsVirtual {
 		return nil
 	}
+	if nodeUUID == "" {
+		return fmt.Errorf("restoreFromTrash requires a non-empty nodeUUID")
+	}
 	relPath, err := filepath.Rel(loc.RootPath, filePath)
 	if err != nil || strings.HasPrefix(relPath, "..") {
 		return fmt.Errorf("compute rel path for %s under %s: %w", filePath, loc.RootPath, err)
 	}
-	canonicalTrash := filepath.Join(loc.RootPath, ".trash", relPath)
+
+	ext := filepath.Ext(relPath)
+	stem := strings.TrimSuffix(relPath, ext)
+	uuidShort := nodeUUID
+	if len(uuidShort) > 8 {
+		uuidShort = uuidShort[:8]
+	}
+	trashPath := filepath.Join(loc.RootPath, ".trash", stem+"."+uuidShort+ext)
 
 	if _, statErr := os.Stat(filePath); statErr == nil {
 		return nil
 	}
 
-	trashPath, err := findTrashPath(canonicalTrash)
-	if err != nil {
-		return err
+	if _, err := os.Stat(trashPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: %s", ErrAssetTrashFileMissing, trashPath)
+		}
+		return fmt.Errorf("stat %s: %w", trashPath, err)
 	}
 	if err := guard.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		return fmt.Errorf("mkdir restore parent: %w", err)
@@ -314,41 +339,6 @@ func restoreFromTrash(guard *storage.Guard, filePath string, log *slog.Logger) e
 	}
 	log.Info("restored from trash", "from", trashPath, "to", filePath)
 	return nil
-}
-
-func uniqueTrashPath(canonical string) string {
-	if _, err := os.Stat(canonical); os.IsNotExist(err) {
-		return canonical
-	}
-	ext := filepath.Ext(canonical)
-	stem := strings.TrimSuffix(canonical, ext)
-	for i := 1; ; i++ {
-		candidate := stem + "_" + strconv.Itoa(i) + ext
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
-		}
-	}
-}
-
-func findTrashPath(canonical string) (string, error) {
-	if _, err := os.Stat(canonical); err == nil {
-		return canonical, nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("stat %s: %w", canonical, err)
-	}
-	ext := filepath.Ext(canonical)
-	stem := strings.TrimSuffix(canonical, ext)
-	for i := 1; ; i++ {
-		candidate := stem + "_" + strconv.Itoa(i) + ext
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		} else if !os.IsNotExist(err) {
-			return "", fmt.Errorf("stat %s: %w", candidate, err)
-		}
-		if i > 9999 {
-			return "", fmt.Errorf("%w: too many suffixed candidates for %s", ErrAssetTrashFileMissing, canonical)
-		}
-	}
 }
 
 // purgeLinkedExports deletes the files for every Tier-2 export node linked to
@@ -378,6 +368,12 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 		if exp.LifecycleState == "TRASHED" || exp.LifecycleState == "MISSING" {
 			continue
 		}
+		// Exports share the .trash/ buffer with the master so a restore
+		// of the master also restores its exports atomically (the master's
+		// restoreLinkedExports pass looks up .trash/<export rel> just like
+		// the master's own move). For read-only or virtual tiers there is
+		// no bytes to move -- mirror the master's read-only/tier3
+		// logical-only trash path and leave the export ACTIVE on disk.
 		if guard != nil && exp.FilePath != "" {
 			expLoc, resolveErr := guard.Resolve(exp.FilePath)
 			if resolveErr != nil {
@@ -385,22 +381,12 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 				continue
 			}
 			if expLoc.ReadOnly || expLoc.IsVirtual {
-				// Cannot physically remove from a read-only or virtual tier.
-				// Leave the export node ACTIVE on disk; the master's
-				// TRASHED state is the user-visible "this asset is gone"
-				// signal -- the read-only export simply stays as a stale
-				// mirror. Matches the original PR #315 behavior: read-only
-				// exports were never touched by EVENT_NODE_DELETED.
 				log.Warn("trash: skipping read-only/virtual export; leaving ACTIVE on disk",
 					"exportID", exp.ID, "tier", expLoc.Tier, "path", exp.FilePath)
 				continue
 			}
-			if rmErr := guard.Remove(exp.FilePath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-				return fmt.Errorf("remove export %s: %w", exp.FilePath, rmErr)
-			}
-		} else if exp.FilePath != "" {
-			if rmErr := os.Remove(exp.FilePath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-				return fmt.Errorf("remove export %s: %w", exp.FilePath, rmErr)
+			if err := moveToTrash(guard, expLoc.RootPath, exp.FilePath, exp.NodeUuid, log); err != nil {
+				return fmt.Errorf("move export to trash: %w", err)
 			}
 		}
 		if err := q.MarkNodeTrashed(ctx, exp.ID); err != nil {
@@ -431,7 +417,12 @@ func purgeRemoteSyncStateForLinkedExports(ctx context.Context, q *sqlcgen.Querie
 
 // restoreLinkedExports restores any TRASHED export nodes linked to this master,
 // moving their files back from .trash/<rel> to the export's original path.
-// No-op if no linked exports are TRASHED (the keepExports=true case).
+//
+// Tolerates missing .trash/ copies (TTL pruner may have already purged them,
+// or the export was on a read-only/virtual tier at trash time and was never
+// moved into .trash/ in the first place): in those cases the export's
+// lifecycle_state still flips back to ACTIVE so the master's restore succeeds
+// as a whole, and a warning is logged. The user can re-export if needed.
 func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.Guard, log *slog.Logger, parentID int64) error {
 	edges, err := q.ListEdgesBySource(ctx, parentID)
 	if err != nil {
@@ -450,8 +441,13 @@ func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storag
 			continue
 		}
 		if guard != nil && exp.FilePath != "" {
-			if err := restoreFromTrash(guard, exp.FilePath, log); err != nil {
-				return fmt.Errorf("restore export %s: %w", exp.FilePath, err)
+			if err := restoreFromTrash(guard, exp.FilePath, exp.NodeUuid, log); err != nil {
+				if errors.Is(err, ErrAssetTrashFileMissing) {
+					log.Warn("trash copy for export is missing (TTL expired or never moved); export restored logically only -- re-export may be needed",
+						"exportID", exp.ID, "filePath", exp.FilePath)
+				} else {
+					return fmt.Errorf("restore export %s: %w", exp.FilePath, err)
+				}
 			}
 		}
 		if err := q.UntrashNode(ctx, exp.ID); err != nil {

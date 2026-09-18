@@ -563,6 +563,10 @@ func (s *Server) handleTrashAsset(ctx context.Context, in *TrashAssetInput) (*Tr
 }
 
 func (s *Server) doTrashAsset(ctx context.Context, assetID int64, keepExports bool) (*DeleteAssetOutput, error) {
+	// Pre-flight load: needed only to (a) translate ErrNoRows into 404 before
+	// opening a tx, and (b) populate the audit-event details with file
+	// metadata. Idempotency for already-TRASHED nodes is handled inside
+	// pipeline.TrashAsset (the tx returns the existing row unchanged).
 	prior, err := s.db.Reader.GetMediaNodeByID(ctx, assetID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, huma.Error404NotFound("asset not found")
@@ -571,24 +575,25 @@ func (s *Server) doTrashAsset(ctx context.Context, assetID int64, keepExports bo
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
 
-	if prior.LifecycleState != "TRASHED" {
-		if _, trashErr := pipeline.TrashAsset(ctx, s.db, s.guard, s.log, assetID, keepExports); trashErr != nil {
-			if errors.Is(trashErr, pipeline.ErrAssetNotTrashed) {
-				return nil, huma.Error409Conflict(trashErr.Error())
-			}
-			return nil, huma.Error500InternalServerError("trash asset", trashErr)
+	trashed, trashErr := pipeline.TrashAsset(ctx, s.db, s.guard, s.log, assetID, keepExports)
+	if trashErr != nil {
+		if errors.Is(trashErr, pipeline.ErrAssetNotTrashed) {
+			return nil, huma.Error409Conflict(trashErr.Error())
 		}
+		return nil, huma.Error500InternalServerError("trash asset", trashErr)
+	}
 
-		if s.audit != nil {
-			details := map[string]any{
-				"assetId":     assetID,
-				"filePath":    prior.FilePath,
-				"fileName":    prior.FileName,
-				"keepExports": keepExports,
-			}
-			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetTrashed, "asset", strconv.FormatInt(assetID, 10), details); err != nil {
-				s.log.Warn("failed to write actor audit for asset trash", "error", err)
-			}
+	// Skip the audit on a no-op idempotent re-trash so we don't flood the
+	// actor_audit log with one row per repeat click.
+	if trashed.LifecycleState == "TRASHED" && prior.LifecycleState != "TRASHED" && s.audit != nil {
+		details := map[string]any{
+			"assetId":     assetID,
+			"filePath":    prior.FilePath,
+			"fileName":    prior.FileName,
+			"keepExports": keepExports,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetTrashed, "asset", strconv.FormatInt(assetID, 10), details); err != nil {
+			s.log.Warn("failed to write actor audit for asset trash", "error", err)
 		}
 	}
 
