@@ -130,23 +130,33 @@ func (s *Service) Setup(ctx context.Context, userID int64, username string) (*Se
 // exactly once.
 //
 // Refuses a pending secret older than PendingSecretTTL (Issue 7): the
-// user must call /mfa/setup again. Refuses if MFA is already enabled --
-// the handler layer (handleMFAEnable + handleMFASetup) enforces this
-// earlier; the redundant check here is belt-and-braces against the
-// credentials row appearing between handler check and store, and
-// against any future direct callsite that skips the handler.
+// user must call /mfa/setup again. Refuses if MFA is already enabled:
+// the current HTTP handler (handleMFAEnable) does not pre-check
+// HasMFA, so this guard is the primary gate against overwriting a
+// live credentials row and orphaning its recovery codes. It also
+// defends future direct callsites (e.g. an admin "reset MFA" helper)
+// from skipping the same check.
+//
+// last_used_step is persisted as 0 on Enable, not the enrollment
+// step. Otherwise a user who enrolls and immediately logs out + back
+// in within the same 30s window would be rejected by Issue 6's
+// replay guard (acceptTOTP requires candidateStep > lastUsedStep),
+// even though their code was never observed by anyone but themselves
+// at enroll time. Replay protection still kicks in from the second
+// accepted use onward (the first accepted use advances last_used_step
+// to the accepted step).
 //
 // All RecoveryCodeCount inserts happen inside ONE write transaction
 // (Issue 11): a failure mid-loop used to commit a partial set while
 // Enable returned an error, leaving the user with no plaintext codes
 // but a partial DB set. Now the whole set either commits or rolls back.
 func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]string, error) {
-	// Belt-and-braces guard against a stale mfa_credentials row
-	// (handler must reject earlier, but Enable is reachable from
-	// other callsites in the future -- e.g. an admin "reset MFA"
-	// helper). Refusing here keeps the secret envelope + pending
-	// rows consistent instead of overwriting a live credentials row
-	// and orphaning the existing recovery codes.
+	// Primary guard against overwriting a live mfa_credentials row.
+	// handleMFAEnable doesn't pre-check, so refusing here is the
+	// only thing that keeps the secret envelope + pending rows
+	// consistent and stops existing recovery codes from being
+	// orphaned. Also covers future direct callsites (e.g. an admin
+	// "reset MFA" helper) that bypass the HTTP handler.
 	if s.HasMFA(ctx, userID) {
 		return nil, fmt.Errorf("MFA is already enabled; disable it first")
 	}
@@ -197,7 +207,7 @@ func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]stri
 			Algo:             DefaultTOTPAlgo,
 			Digits:           int64(DefaultTOTPDigits),
 			Period:           int64(DefaultTOTPPeriod),
-			LastUsedStep:     step,
+			LastUsedStep:     0,
 			RecoveryCodeSalt: salt,
 		}); err != nil {
 			return fmt.Errorf("upsert mfa credentials: %w", err)

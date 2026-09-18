@@ -106,9 +106,9 @@ func TestValidateTOTPCode(t *testing.T) {
 	_, err = svc.Enable(context.Background(), userID, code)
 	require.NoError(t, err)
 
-	// Re-generate for a strictly-future step: Enable consumed the
-	// current step (last_used_step), so re-using the same step's
-	// code is rejected by Issue 6's replay protection.
+	// Use a strictly-future step: re-using the same step's code
+	// would be rejected by Issue 6's replay protection, which kicks
+	// in from the second accepted use onward.
 	step = time.Now().Unix() / int64(DefaultTOTPPeriod)
 	futureStep := step + 1
 	validCode := computeTOTP(secret, futureStep)
