@@ -346,7 +346,10 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 func (s *Service) reconcileLocalDrift(ctx context.Context, q *sqlcgen.Queries, p auth.Principal) (int64, error) {
 	byName, err := q.GetUserByUsername(ctx, p.Name)
 	if err != nil {
-		return 0, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("get user by username for drift reconciliation: %w", err)
 	}
 	if byName.Source != AuthProviderLocal {
 		return 0, nil
