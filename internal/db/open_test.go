@@ -801,3 +801,66 @@ func TestSourcePathHashIndexAndQueryPlan(t *testing.T) {
 		t.Errorf("query plan requires a temporary sort: %s", gotPlan)
 	}
 }
+
+// TestMigration00028UpDownRoundTrip verifies that migration 00028 is
+// reversible and that the Down state matches the forward-link convention
+// (auth_provider='forward-link', external_uid=username), and that Up
+// repairs it back to auth_provider='local'.
+func TestMigration00028UpDownRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m00028-roundtrip.db")
+	writerDB := openRawWriter(t, path)
+
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("SetDialect: %v", err)
+	}
+
+	// Up to 00028 (inclusive) to get the schema + backfill.
+	if err := goose.UpTo(writerDB, migrationsDir, 28); err != nil {
+		t.Fatalf("goose UpTo 28: %v", err)
+	}
+
+	// Insert a local user that already has auth_provider='local'
+	// (simulates a row created after 00020).
+	if _, err := writerDB.Exec(
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('alice', 'alice@example.com', 'hash', 0, 'local', unixepoch(), 'test', 'local', 'alice')`,
+	); err != nil {
+		t.Fatalf("insert local user: %v", err)
+	}
+
+	// Down 00028: should set auth_provider='forward-link'.
+	if err := goose.Down(writerDB, migrationsDir); err != nil {
+		t.Fatalf("goose Down 00028: %v", err)
+	}
+
+	var provider string
+	if err := writerDB.QueryRow(`SELECT auth_provider FROM users WHERE username = 'alice'`).Scan(&provider); err != nil {
+		t.Fatalf("scan auth_provider after Down: %v", err)
+	}
+	if provider != "forward-link" {
+		t.Errorf("auth_provider after Down = %q, want %q", provider, "forward-link")
+	}
+
+	// Re-Up 00028: should repair auth_provider='local'.
+	if err := goose.Up(writerDB, migrationsDir); err != nil {
+		t.Fatalf("goose Up 00028 (re-up): %v", err)
+	}
+
+	if err := writerDB.QueryRow(`SELECT auth_provider FROM users WHERE username = 'alice'`).Scan(&provider); err != nil {
+		t.Fatalf("scan auth_provider after re-Up: %v", err)
+	}
+	if provider != "local" {
+		t.Errorf("auth_provider after re-Up = %q, want %q", provider, "local")
+	}
+
+	// Verify external_uid round-tripped correctly.
+	var extUID string
+	if err := writerDB.QueryRow(`SELECT external_uid FROM users WHERE username = 'alice'`).Scan(&extUID); err != nil {
+		t.Fatalf("scan external_uid: %v", err)
+	}
+	if extUID != "alice" {
+		t.Errorf("external_uid = %q, want %q", extUID, "alice")
+	}
+}

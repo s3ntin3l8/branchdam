@@ -336,13 +336,14 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 // reconcileLocalDrift is the self-heal path for a (local, external_uid)
 // miss in resolveLocal: look up the user by username (p.Name ==
 // p.ExternalUID for local-session Principals), confirm the row is
-// source='local' with a mismatched external_uid, and UPDATE the column
-// inside the caller's transaction. Returns the row's id on success,
-// 0 when no row qualifies (caller falls back to the original
-// sql.ErrNoRows), or a non-nil error. The mismatch-already-correct
-// case returns 0 so the caller doesn't mask the original ErrNoRows
-// with a logged "reconciliation succeeded" entry that the next
-// request would re-trigger.
+// source='local' with a mismatched external_uid OR auth_provider
+// (the 00028-Down case sets auth_provider='forward-link'), and
+// UPDATE both columns inside the caller's transaction. Returns the
+// row's id on success, 0 when no row qualifies (caller falls back
+// to the original sql.ErrNoRows), or a non-nil error. The
+// already-correct case returns 0 so the caller doesn't mask the
+// original ErrNoRows with a logged "reconciliation succeeded" entry
+// that the next request would re-trigger.
 func (s *Service) reconcileLocalDrift(ctx context.Context, q *sqlcgen.Queries, p auth.Principal) (int64, error) {
 	byName, err := q.GetUserByUsername(ctx, p.Name)
 	if err != nil {
@@ -354,7 +355,8 @@ func (s *Service) reconcileLocalDrift(ctx context.Context, q *sqlcgen.Queries, p
 	if byName.Source != AuthProviderLocal {
 		return 0, nil
 	}
-	if byName.ExternalUid == p.ExternalUID {
+	needsReconcile := byName.ExternalUid != p.ExternalUID || byName.AuthProvider != AuthProviderLocal
+	if !needsReconcile {
 		return 0, nil
 	}
 	if err := q.ReconcileLocalExternalUID(ctx, sqlcgen.ReconcileLocalExternalUIDParams{
@@ -368,6 +370,7 @@ func (s *Service) reconcileLocalDrift(ctx context.Context, q *sqlcgen.Queries, p
 		"username", p.Name,
 		"old_external_uid", byName.ExternalUid,
 		"new_external_uid", p.ExternalUID,
+		"old_auth_provider", byName.AuthProvider,
 	)
 	return byName.ID, nil
 }

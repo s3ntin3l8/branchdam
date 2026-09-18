@@ -237,7 +237,8 @@ func (q *Queries) ListAttributionUsers(ctx context.Context, arg ListAttributionU
 
 const reconcileLocalExternalUID = `-- name: ReconcileLocalExternalUID :exec
 UPDATE users
-SET external_uid = ?2
+SET external_uid = ?2,
+    auth_provider = 'local'
 WHERE id = ?1
 `
 
@@ -246,17 +247,20 @@ type ReconcileLocalExternalUIDParams struct {
 	ExternalUid string
 }
 
-// Realigns external_uid on an existing user row. Used by the local
-// reconciliation path in internal/users.Service.resolveLocal when a
-// username-based lookup finds a source='local' row whose stored
-// external_uid no longer matches the current username -- typically
-// because an admin renamed the local user without an accompany-side
-// sync to external_uid. session/middleware sets ExternalUID=username
-// for local principals, so a renamed user lands here on their next
+// Realigns external_uid AND auth_provider on an existing user row.
+// Used by the local reconciliation path in
+// internal/users.Service.resolveLocal when a username-based lookup
+// finds a source='local' row whose stored external_uid no longer
+// matches the current username -- typically because an admin renamed
+// the local user without an accompany-side sync to external_uid, or
+// because migration 00028 Down rewrote auth_provider to
+// 'forward-link' and external_uid to the raw username. The
+// session/middleware sets ExternalUID=username for local principals,
+// so a renamed or Down-affected user lands here on their next
 // request and attribution silently NULLs until this UPDATE runs.
 // Caller (resolveLocal) verifies source='local' and the pre-update
-// external_uid mismatch before invoking, so this query is a targeted
-// single-row UPDATE with no further filtering.
+// external_uid mismatch before invoking, so this query is a
+// targeted single-row UPDATE with no further filtering.
 func (q *Queries) ReconcileLocalExternalUID(ctx context.Context, arg ReconcileLocalExternalUIDParams) error {
 	_, err := q.db.ExecContext(ctx, reconcileLocalExternalUID, arg.ID, arg.ExternalUid)
 	return err

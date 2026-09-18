@@ -453,6 +453,56 @@ func TestResolveOrCreate_LocalUser_ReconcilesDriftedExternalUID(t *testing.T) {
 	}
 }
 
+// TestResolveOrCreate_LocalUser_RepairAuthProvider: when 00028 Down
+// rewrote auth_provider to 'forward-link', the self-heal path must
+// also repair auth_provider back to 'local' -- not just external_uid.
+// Without this, a post-Down row would keep auth_provider='forward-link'
+// and attribution would keep missing even after external_uid is
+// realigned.
+func TestResolveOrCreate_LocalUser_RepairAuthProvider(t *testing.T) {
+	var buf bytes.Buffer
+	svc := newService(t).WithLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+
+	// Simulate 00028-Down state: auth_provider='forward-link',
+	// external_uid=raw username.
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('alice', 'alice@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'forward-link', 'alice')`,
+	)
+	if err != nil {
+		t.Fatalf("insert forward-link user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "alice",
+		Email:         "alice@example.com",
+		ExternalUID:   "alice",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatal("ResolveOrCreate returned ID=0 after reconciliation")
+	}
+
+	// Verify auth_provider was repaired to 'local'.
+	row, err := svc.db.Reader.GetUserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername post-reconcile: %v", err)
+	}
+	if row.AuthProvider != "local" {
+		t.Errorf("auth_provider = %q, want %q (should have been repaired from forward-link)", row.AuthProvider, "local")
+	}
+	if row.ExternalUid != "alice" {
+		t.Errorf("external_uid = %q, want %q", row.ExternalUid, "alice")
+	}
+}
+
 // TestResolveOrCreate_LocalUser_MissReturnsOriginalErr: when neither
 // (local, ExternalUID) nor (username) finds a usable source='local' row,
 // resolveLocal falls back to the original sql.ErrNoRows so callers
