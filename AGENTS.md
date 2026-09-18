@@ -41,7 +41,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/probe` | `exiftool`/`ffprobe`/`ffmpeg` subprocess wrappers; graceful `ErrToolUnavailable` fallback |
 | `internal/indexer` | `Walk` (directory scan) and `Watch` (fsnotify), both `Lstat`-only |
 | `internal/workers` | Bounded worker pool, per-path dedup, non-blocking `Submit` |
-| `internal/pipeline` | Ingestion, collision handling, move detection (`MISSING`/rebase), `Commit` tx |
+| `internal/pipeline` | Ingestion, collision handling, move detection (`MISSING`/rebase), `TrashAsset`/`Commit` tx |
 | `internal/graph` | Edge resolvers (Tier 1 sidecars, Tier 2 stems/XMP, Tier 3 heuristics), cycle checks |
 | `internal/auth` | `Principal` + `BrowserChain`/`AgentChain` (sole reader of `X-Authentik-*`) |
 | `internal/sync` | `remote_sync_state` machine, Immich library scan trigger worker |

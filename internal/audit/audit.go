@@ -57,6 +57,7 @@ const (
 	EventActorAuditExported  = "actor_audit.exported"
 	EventAssetArchived       = "asset.archived"
 	EventAssetRestored       = "asset.restored"
+	EventAssetTrashed        = "asset.trashed"
 	EventUserCreated         = "user.created"
 	EventUserDisabled        = "user.disabled"
 	EventUserUpdated         = "user.updated"

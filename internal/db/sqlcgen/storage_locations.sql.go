@@ -140,7 +140,7 @@ func (q *Queries) GetStorageLocationByPath(ctx context.Context, rootPath string)
 const listNodeCountsByLocation = `-- name: ListNodeCountsByLocation :many
 SELECT storage_location_id, COUNT(*) AS node_count
 FROM media_nodes
-WHERE lifecycle_state != 'ARCHIVED'
+WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 GROUP BY storage_location_id
 `
 

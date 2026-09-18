@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,6 +18,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
+	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -818,85 +817,14 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		return fmt.Errorf("lookup node for deletion: %w", err)
 	}
 
-	// Schema fix #6 / Spec Pillar 5: never delete row from database; set lifecycle_state='MISSING'.
-	// Preserves soft-delete state if the node is already ARCHIVED.
-	if node.LifecycleState != "ARCHIVED" {
-		if err := q.MarkNodeMissing(ctx, node.ID); err != nil {
-			return err
-		}
-	}
-
-	// Purge remote sync state for this deleted node
-	if err := q.DeleteRemoteSyncStateForNode(ctx, node.ID); err != nil {
-		d.log.Warn("agent: delete remote sync state for node", "nodeID", node.ID, "err", err)
-	}
-
-	// Move physical master file to .trash/<rel_path> buffer inside storage location
-	if d.guard != nil && node.FilePath != "" {
-		if loc, err := d.guard.Resolve(node.FilePath); err == nil {
-			// Ensure Tier 3 and read-only locations are never targeted for deletion or trashing
-			if !loc.ReadOnly && loc.Tier != "TIER3_MASTER_ARCHIVE" {
-				if relPath, err := filepath.Rel(loc.RootPath, node.FilePath); err == nil && !strings.HasPrefix(relPath, "..") {
-					trashPath := filepath.Join(loc.RootPath, ".trash", relPath)
-					// Guard against overwriting pre-existing trashed files if the same relPath is trashed again
-					trashExt := filepath.Ext(trashPath)
-					trashStem := strings.TrimSuffix(trashPath, trashExt)
-					uniqueTrashPath := trashPath
-					collisionIdx := 0
-					for {
-						if _, err := os.Stat(uniqueTrashPath); os.IsNotExist(err) {
-							break
-						}
-						collisionIdx++
-						uniqueTrashPath = fmt.Sprintf("%s_%d%s", trashStem, collisionIdx, trashExt)
-					}
-					trashPath = uniqueTrashPath
-
-					now := time.Now().UTC()
-					if err := d.guard.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
-						d.log.Warn("agent: failed to create trash directory", "err", err)
-					} else if _, statErr := os.Stat(node.FilePath); statErr == nil {
-						if err := os.Rename(node.FilePath, trashPath); err != nil {
-							if copyErr := d.moveFile(node.FilePath, trashPath); copyErr != nil {
-								d.log.Warn("agent: failed to move file to trash", "err", copyErr)
-							} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
-								d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
-							}
-						} else if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
-							d.log.Warn("agent: failed to stamp trash mtime", "err", chErr)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Purge any Tier 2 Immich exports linked to this node (vanishes from gallery immediately)
-	edges, err := q.ListEdgesBySource(ctx, node.ID)
-	if err == nil {
-		for _, edge := range edges {
-			if edge.RelationshipType == "FINAL_EXPORT" || edge.Resolver == "immich_export" {
-				expNode, expErr := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
-				if expErr == nil {
-					var rmErr error
-					if d.guard != nil {
-						rmErr = d.guard.Remove(expNode.FilePath)
-					} else {
-						rmErr = os.Remove(expNode.FilePath)
-					}
-					if rmErr != nil && !os.IsNotExist(rmErr) {
-						d.log.Warn("agent: failed to unlink immich export file", "nodeID", expNode.ID, "err", rmErr)
-					} else {
-						if markErr := q.MarkNodeMissing(ctx, expNode.ID); markErr != nil {
-							d.log.Warn("agent: failed to mark export node missing", "nodeID", expNode.ID, "err", markErr)
-						}
-						if delErr := q.DeleteRemoteSyncStateForNode(ctx, expNode.ID); delErr != nil {
-							d.log.Warn("agent: failed to delete remote sync state for export node", "nodeID", expNode.ID, "err", delErr)
-						}
-					}
-				}
-			}
-		}
+	// EVENT_NODE_DELETED is a deliberate user-initiated delete from the
+	// companion agent. Map it to TRASHED (the new lifecycle state for user
+	// trash, distinguishing it from MISSING which is scan-detected
+	// disappearance). Use the *Tx variant because we're already inside
+	// ProcessPending's InTx; the public pipeline.TrashAsset would deadlock
+	// the writer pool (single connection per Invariant 2).
+	if _, trashErr := pipeline.TrashAssetTx(ctx, q, d.guard, d.log, node.ID, false); trashErr != nil {
+		return fmt.Errorf("trash asset (agent EVENT_NODE_DELETED): %w", trashErr)
 	}
 
 	// If Immich client is wired, trigger external library rescan
@@ -907,46 +835,6 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 
 	return nil
-}
-
-func (d *Drainer) moveFile(src, dst string) error {
-	var in *os.File
-	var err error
-	if d.guard != nil {
-		in, err = d.guard.OpenRead(src)
-	} else {
-		in, err = os.Open(src)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	var out *os.File
-	if d.guard != nil {
-		out, err = d.guard.Create(dst)
-	} else {
-		out, err = os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, in); err != nil {
-		if d.guard != nil {
-			_ = d.guard.Remove(dst)
-		} else {
-			_ = os.Remove(dst)
-		}
-		return err
-	}
-	_ = in.Close()
-	_ = out.Close()
-	if d.guard != nil {
-		return d.guard.Remove(src)
-	}
-	return os.Remove(src)
 }
 
 // applyPathRebased returns the freshly inserted node's ID when NodeUUID was

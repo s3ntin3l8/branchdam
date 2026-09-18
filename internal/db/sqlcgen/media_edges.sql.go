@@ -65,7 +65,7 @@ WITH RECURSIVE ancestors(id) AS (
     JOIN ancestors a ON e.target_node_id = a.id
     JOIN media_nodes n ON e.source_node_id = n.id
     WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
-      AND n.lifecycle_state <> 'ARCHIVED'
+      AND n.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT ancestors.id FROM ancestors
 `
@@ -312,7 +312,7 @@ WITH RECURSIVE descendants(id) AS (
     JOIN descendants d ON e.source_node_id = d.id
     JOIN media_nodes n ON e.target_node_id = n.id
     WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
-      AND n.lifecycle_state <> 'ARCHIVED'
+      AND n.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT descendants.id FROM descendants
 `
@@ -507,7 +507,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
-  AND lifecycle_state <> 'ARCHIVED'
+  AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 `
 
 // Column list matches the media_nodes table exactly (including
@@ -577,7 +577,7 @@ WITH RECURSIVE ancestors(ancestor_id) AS (
     JOIN ancestors a ON e.target_node_id = a.ancestor_id
     JOIN media_nodes n ON e.source_node_id = n.id
     WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
-      AND n.lifecycle_state <> 'ARCHIVED'
+      AND n.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id,
        media_nodes.mtime_unix, media_nodes.size_bytes
