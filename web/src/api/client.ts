@@ -28,6 +28,8 @@ import type {
   MfaChallengeInput,
   MfaDisableInput,
   MfaEnableInput,
+  MfaEnableResponse,
+  MfaChallengeResponse,
   MfaSetupResponse,
   NodeMetadatum,
   PairingAuditResponse,
