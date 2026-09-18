@@ -235,6 +235,33 @@ func (q *Queries) ListAttributionUsers(ctx context.Context, arg ListAttributionU
 	return items, nil
 }
 
+const reconcileLocalExternalUID = `-- name: ReconcileLocalExternalUID :exec
+UPDATE users
+SET external_uid = ?2
+WHERE id = ?1
+`
+
+type ReconcileLocalExternalUIDParams struct {
+	ID          int64
+	ExternalUid string
+}
+
+// Realigns external_uid on an existing user row. Used by the local
+// reconciliation path in internal/users.Service.resolveLocal when a
+// username-based lookup finds a source='local' row whose stored
+// external_uid no longer matches the current username -- typically
+// because an admin renamed the local user without an accompany-side
+// sync to external_uid. session/middleware sets ExternalUID=username
+// for local principals, so a renamed user lands here on their next
+// request and attribution silently NULLs until this UPDATE runs.
+// Caller (resolveLocal) verifies source='local' and the pre-update
+// external_uid mismatch before invoking, so this query is a targeted
+// single-row UPDATE with no further filtering.
+func (q *Queries) ReconcileLocalExternalUID(ctx context.Context, arg ReconcileLocalExternalUIDParams) error {
+	_, err := q.db.ExecContext(ctx, reconcileLocalExternalUID, arg.ID, arg.ExternalUid)
+	return err
+}
+
 const refreshAttributionUserSeen = `-- name: RefreshAttributionUserSeen :exec
 UPDATE users
 SET username = ?2, email = ?3, last_seen_at = unixepoch()

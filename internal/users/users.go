@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -86,13 +87,30 @@ type Service struct {
 	db          *db.DB
 	systemUser  Attribution
 	systemCache bool // true once EnsureSystemUser has run successfully
+	log         *slog.Logger
 }
 
 // NewService constructs an attribution service. It does NOT provision the
 // system user -- callers that need background attribution must call
-// EnsureSystemUser at boot before starting any workers.
+// EnsureSystemUser at boot before starting any workers. The service
+// starts with a discard logger; wire a real one with WithLogger at boot
+// so resolveLocal's reconciliation path has somewhere to surface drift.
 func NewService(database *db.DB) *Service {
-	return &Service{db: database}
+	return &Service{
+		db:  database,
+		log: slog.New(slog.DiscardHandler),
+	}
+}
+
+// WithLogger installs a structured logger on the service. Chainable, so
+// cmd/branchdam can do NewService(database).WithLogger(log) at boot.
+// A nil logger is ignored (the discard default stays in place) so
+// callers don't need to nil-guard.
+func (s *Service) WithLogger(log *slog.Logger) *Service {
+	if log != nil {
+		s.log = log
+	}
+	return s
 }
 
 // EnsureSystemUser lazy-provisions the system sentinel row and caches its
@@ -248,6 +266,22 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 // resolveLocal handles the auth_provider="local" case of ResolveOrCreate.
 // Local users already exist in the users table (source='local',
 // password_hash set) so we only need a lookup+refresh -- no INSERT.
+//
+// Drift reconciliation: the (auth_provider, external_uid) lookup uses
+// p.ExternalUID, which session/middleware sets to the current
+// username. If a username rename ever goes through without a parallel
+// external_uid update (admin tool, direct SQL, a yet-to-land user-
+// edit endpoint), the (local, p.ExternalUID) lookup would miss and
+// attribution for that user would silently NULL on every subsequent
+// request. To self-heal, a miss falls through to a username-based
+// lookup; if that finds a source='local' row with a mismatched
+// external_uid, we UPDATE external_uid to match p.ExternalUID (== p.Name
+// for a local principal) inside the same write transaction and log the
+// drift at INFO. The follow-up GetAttributionUserByExternalUID then
+// hits, and ResolveOrCreate returns a usable Attribution. If the
+// username lookup also misses, or finds a non-'local' row, we return
+// the original sql.ErrNoRows wrapped (callers surface the warn as
+// before).
 func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attribution, error) {
 	var out Attribution
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -255,7 +289,22 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 			AuthProvider: AuthProviderLocal,
 			ExternalUid:  p.ExternalUID,
 		})
-		if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			reconciledID, reconErr := s.reconcileLocalDrift(ctx, q, p)
+			if reconErr != nil {
+				return fmt.Errorf("resolve local user: %w", err)
+			}
+			if reconciledID == 0 {
+				return fmt.Errorf("resolve local user: %w", err)
+			}
+			row, err = q.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+				AuthProvider: AuthProviderLocal,
+				ExternalUid:  p.ExternalUID,
+			})
+			if err != nil {
+				return fmt.Errorf("load local attribution user after reconciliation: %w", err)
+			}
+		} else if err != nil {
 			return fmt.Errorf("resolve local user: %w", err)
 		}
 		if err := q.RefreshAttributionUserSeen(ctx, sqlcgen.RefreshAttributionUserSeenParams{
@@ -282,4 +331,40 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 		return Attribution{}, err
 	}
 	return out, nil
+}
+
+// reconcileLocalDrift is the self-heal path for a (local, external_uid)
+// miss in resolveLocal: look up the user by username (p.Name ==
+// p.ExternalUID for local-session Principals), confirm the row is
+// source='local' with a mismatched external_uid, and UPDATE the column
+// inside the caller's transaction. Returns the row's id on success,
+// 0 when no row qualifies (caller falls back to the original
+// sql.ErrNoRows), or a non-nil error. The mismatch-already-correct
+// case returns 0 so the caller doesn't mask the original ErrNoRows
+// with a logged "reconciliation succeeded" entry that the next
+// request would re-trigger.
+func (s *Service) reconcileLocalDrift(ctx context.Context, q *sqlcgen.Queries, p auth.Principal) (int64, error) {
+	byName, err := q.GetUserByUsername(ctx, p.Name)
+	if err != nil {
+		return 0, nil
+	}
+	if byName.Source != AuthProviderLocal {
+		return 0, nil
+	}
+	if byName.ExternalUid == p.ExternalUID {
+		return 0, nil
+	}
+	if err := q.ReconcileLocalExternalUID(ctx, sqlcgen.ReconcileLocalExternalUIDParams{
+		ID:          byName.ID,
+		ExternalUid: p.ExternalUID,
+	}); err != nil {
+		return 0, err
+	}
+	s.log.Info("users: reconciled drifted local external_uid",
+		"user_id", byName.ID,
+		"username", p.Name,
+		"old_external_uid", byName.ExternalUid,
+		"new_external_uid", p.ExternalUID,
+	)
+	return byName.ID, nil
 }
