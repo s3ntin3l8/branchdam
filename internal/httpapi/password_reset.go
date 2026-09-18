@@ -103,7 +103,7 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// RequestPasswordReset; they are user-controlled and CodeQL's
 	// go/log-injection rule flags them in slog output regardless of
 	// the lgtm suppression.
-	s.localAuth.log.Warn("password-reset: token minted (operator: retrieve via admin pending-resets panel)",
+	s.localAuth.log.Warn("password-reset: token minted (operator: retrieve via admin pending-resets panel)", // lgtm[go/log-injection]
 		"user_id", issue.Token.UserID,
 		"token_id", issue.Token.ID,
 		"expires_at", issue.ExpiresAt.Unix(),
@@ -148,7 +148,7 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 				ctx, cancel := context.WithTimeout(context.Background(), emailpkg.SendTimeout)
 				defer cancel()
 				if sendErr := s.localAuth.email.Send(ctx, recipient, subject, htmlBody, textBody); sendErr != nil {
-					s.localAuth.log.Warn("password-reset: email delivery failed",
+					s.localAuth.log.Warn("password-reset: email delivery failed", // lgtm[go/log-injection]
 						"user_id", userID,
 						"error", sendErr.Error(),
 					)
