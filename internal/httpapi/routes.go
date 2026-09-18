@@ -180,6 +180,15 @@ type MeOutput struct {
 		// "uploaded by" display. 0 means attribution isn't wired or
 		// the principal isn't usable (machine, anonymous).
 		AttributionUserID int64 `json:"attributionUserId,omitempty"`
+		// MFARequired is true when the local user has MFA enrolled
+		// and the current session has NOT yet been MFA-verified.
+		// The SPA uses this to branch to the MFA challenge form on
+		// page load / reload (review suggestion, PR #459).
+		MFARequired bool `json:"mfaRequired,omitempty"`
+		// MFAVerified is true when the local user has MFA enrolled
+		// AND the current session has been MFA-verified. The SPA
+		// uses this to know that the challenge step is complete.
+		MFAVerified bool `json:"mfaVerified,omitempty"`
 	}
 }
 
@@ -200,6 +209,14 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 		if localView.UserID != 0 {
 			out.Body.IsLocal = true
 			out.Body.LocalUserID = localView.UserID
+			// Expose MFA state so the SPA can branch to the challenge
+			// form on page load / reload (review suggestion, PR #459).
+			if s.localAuth != nil && s.localAuth.mfa != nil {
+				out.Body.MFAVerified = localView.MFAVerified
+				if !localView.MFAVerified && s.localAuth.mfa.HasMFA(ctx, localView.UserID) {
+					out.Body.MFARequired = true
+				}
+			}
 		}
 		// Lazy-resolve the attribution user id so the SPA can pin the
 		// "My uploads" filter without a separate round-trip. The
