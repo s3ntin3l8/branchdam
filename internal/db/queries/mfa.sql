@@ -33,8 +33,18 @@ FROM mfa_recovery_codes
 WHERE user_id = ?1 AND code_hash = ?2 AND used_at IS NULL
 LIMIT 1;
 
--- name: MarkRecoveryCodeUsed :exec
-UPDATE mfa_recovery_codes SET used_at = ?2 WHERE id = ?1;
+-- name: MarkRecoveryCodeUsed :execrows
+-- Mark a recovery code as used. The AND used_at IS NULL guard is
+-- defense-in-depth against the double-consume race that FindUnused-
+-- RecoveryCode's own used_at IS NULL filter can't prevent on its own:
+-- two concurrent ValidateRecoveryCode calls can both pass the SELECT
+-- (the row's used_at is still NULL at read time), then both proceed
+-- to UPDATE. Without the guard here, both UPDATEs succeed and the
+-- same code is counted as consumed twice. With the guard, only the
+-- first UPDATE matches a row; the second sees used_at != NULL and
+-- RowsAffected=0, which the caller treats as "code was already
+-- consumed".
+UPDATE mfa_recovery_codes SET used_at = ?2 WHERE id = ?1 AND used_at IS NULL;
 
 -- name: DeleteRecoveryCodes :exec
 DELETE FROM mfa_recovery_codes WHERE user_id = ?1;

@@ -59,12 +59,18 @@ import (
 )
 
 const (
-	DefaultTOTPPeriod     = 30
-	DefaultTOTPDigits     = 6
-	DefaultTOTPAlgo       = "SHA1"
-	DriftTolerance        = 1
-	RecoveryCodeCount     = 8
-	RecoveryCodeLength    = 10
+	DefaultTOTPPeriod = 30
+	DefaultTOTPDigits = 6
+	DefaultTOTPAlgo   = "SHA1"
+	DriftTolerance    = 1
+	RecoveryCodeCount = 8
+	// RecoveryCodeLength is the character length of each recovery
+	// code. The alphabet below is 32 chars (A-Z minus I/O + 2-9), so
+	// each code carries log2(32)=5 bits/char. 16 chars = 80 bits of
+	// entropy per code (PR #459 review follow-up; the 10-char / 50-bit
+	// default was brute-forceable from an offline DB dump in seconds,
+	// even with the per-user salt added in the previous round).
+	RecoveryCodeLength    = 16
 	PendingSecretTTL      = 15 * time.Minute
 	recoveryCodeSaltBytes = 16
 )
@@ -125,15 +131,25 @@ func (s *Service) Setup(ctx context.Context, userID int64, username string) (*Se
 //
 // Refuses a pending secret older than PendingSecretTTL (Issue 7): the
 // user must call /mfa/setup again. Refuses if MFA is already enabled --
-// the handler layer enforces this earlier; the redundant check here is
-// belt-and-braces against the credentials row appearing between
-// handler check and store.
+// the handler layer (handleMFAEnable + handleMFASetup) enforces this
+// earlier; the redundant check here is belt-and-braces against the
+// credentials row appearing between handler check and store, and
+// against any future direct callsite that skips the handler.
 //
 // All RecoveryCodeCount inserts happen inside ONE write transaction
 // (Issue 11): a failure mid-loop used to commit a partial set while
 // Enable returned an error, leaving the user with no plaintext codes
 // but a partial DB set. Now the whole set either commits or rolls back.
 func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]string, error) {
+	// Belt-and-braces guard against a stale mfa_credentials row
+	// (handler must reject earlier, but Enable is reachable from
+	// other callsites in the future -- e.g. an admin "reset MFA"
+	// helper). Refusing here keeps the secret envelope + pending
+	// rows consistent instead of overwriting a live credentials row
+	// and orphaning the existing recovery codes.
+	if s.HasMFA(ctx, userID) {
+		return nil, fmt.Errorf("MFA is already enabled; disable it first")
+	}
 	row, err := s.db.Reader.GetMFAPendingSecret(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get pending secret: %w", err)
@@ -310,13 +326,25 @@ func (s *Service) ValidateRecoveryCode(ctx context.Context, userID int64, code s
 	}
 
 	now := time.Now().Unix()
-	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	// Atomicity note: MarkRecoveryCodeUsed's UPDATE is gated on
+	// used_at IS NULL (sqlc :execrows), so even if two concurrent
+	// ValidateRecoveryCode calls both passed FindUnusedRecoveryCode
+	// (the SELECT's used_at IS NULL filter can't serialise them on
+	// its own), only the first UPDATE matches the row. The second
+	// sees RowsAffected=0 -- the code was already consumed between
+	// our SELECT and UPDATE -- and we return false rather than
+	// double-counting a single-use code.
+	affected, err := s.db.InTxResult(ctx, func(q *sqlcgen.Queries) (int64, error) {
 		return q.MarkRecoveryCodeUsed(ctx, sqlcgen.MarkRecoveryCodeUsedParams{
 			ID:     row.ID,
 			UsedAt: sql.NullInt64{Int64: now, Valid: true},
 		})
-	}); err != nil {
+	})
+	if err != nil {
 		return false, fmt.Errorf("mark recovery code used: %w", err)
+	}
+	if affected != 1 {
+		return false, nil
 	}
 
 	return true, nil
@@ -431,8 +459,11 @@ func generateRecoveryCode(length int) (string, error) {
 
 // hashRecoveryCode returns hex(sha256(salt || code)). salt is the
 // per-user 16-byte random salt stored on mfa_credentials (Issue 8);
-// without it the 50-bit recovery codes are brute-forceable from an
-// offline DB dump in seconds.
+// without it the recovery codes are brute-forceable from an offline
+// DB dump in seconds. (The codes themselves are 80 bits as of
+// RecoveryCodeLength=16; the salt matters because the codes are still
+// in a small character alphabet and an unsalted hash makes a rainbow
+// table across all salts-and-codes viable.)
 func hashRecoveryCode(code, salt string) string {
 	h := sha256.New()
 	h.Write([]byte(salt))

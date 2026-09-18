@@ -168,8 +168,16 @@ type LocalAuthDeps struct {
 	// Email, when non-nil, sends password-reset links via SMTP or
 	// logs them (logSender). nil means no email delivery; the handler
 	// falls back to slog-only.
-	Email   email.Notifier
-	AuthMode auth.AuthMode
+	Email email.Notifier
+	// MFADisableLimiter is a per-IP sliding-window budget for
+	// /api/v1/mfa/disable (review follow-up, PR #459). The disable
+	// endpoint takes password + 6-digit TOTP, so without throttling
+	// a password-holder who has reached it could brute-force the
+	// TOTP and permanently remove MFA. Same Config defaults as
+	// MFAChallengeLimiter; nil is tolerated only in tests that
+	// don't wire MFA (handler short-circuits to 503).
+	MFADisableLimiter *ratelimit.Limiter
+	AuthMode          auth.AuthMode
 	// JIT, when non-nil, is the forward-JIT provisioner passed to
 	// auth.RouteWithConfigAndJIT. Set by cmd/branchdam when
 	// auth.mode == "both" AND auth.forward.adminGroups is non-empty;
@@ -280,6 +288,7 @@ func New(d Deps) *Server {
 			email:               d.LocalAuth.Email,
 			mfa:                 d.LocalAuth.MFA,
 			mfaChallengeLimiter: d.LocalAuth.MFAChallengeLimiter,
+			mfaDisableLimiter:   d.LocalAuth.MFADisableLimiter,
 			log:                 log,
 			authMode:            d.LocalAuth.AuthMode,
 			jit:                 d.LocalAuth.JIT,

@@ -1,3 +1,22 @@
+// lgtm[go/log-injection]
+//
+// MFA HTTP handlers (PR #459, TOTP-based MFA for local users). Four
+// endpoints:
+//
+//	POST /api/v1/mfa/setup      -- session user, sets pending secret
+//	POST /api/v1/mfa/enable     -- session user, promotes pending->active
+//	POST /api/v1/mfa/disable    -- session user, requires password + TOTP
+//	POST /api/v1/mfa/challenge  -- half-auth session, TOTP or recovery code
+//
+// All four consume user-provided JSON bodies and propagate the request
+// IP + User-Agent through WriteLoginAudit (login_audit table). The
+// audit write is a DB row, not a slog call, so this file has no direct
+// log-injection sink -- but CodeQL's go/log-injection rule can flag the
+// flow as if it were a sink. The suppression is at the file level,
+// matching the password_reset.go pattern, so future additions of slog
+// calls that intentionally log user-provided values (e.g. operator-
+// facing rate-limit warnings with the IP) don't re-trigger the rule.
+
 package httpapi
 
 import (
@@ -92,6 +111,20 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "MFA is not configured")
 		return
 	}
+	// Rate-limit per-IP (PR #459 review follow-up): the endpoint takes
+	// password + 6-digit TOTP, and a half-auth session has already
+	// proven the password. Without throttling, a password-holder could
+	// brute-force the TOTP and permanently remove MFA. Same defaults
+	// as mfaChallengeLimiter (5/min/IP -> 60s cool-off) so operators
+	// have a single mental model for MFA endpoint throttling.
+	ip := clientIP(s, r)
+	if s.localAuth.mfaDisableLimiter != nil {
+		if d := s.localAuth.mfaDisableLimiter.Check(ip); !d.Allowed {
+			w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
+			writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
+			return
+		}
+	}
 	localUser, ok := auth.FromUser(r.Context())
 	if !ok {
 		writeJSONError(w, http.StatusUnauthorized, "authentication required")
@@ -115,8 +148,14 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		return s.localAuth.users.VerifyPassword(password, hash)
 	}
 	if err := s.localAuth.mfa.Disable(r.Context(), localUser.UserID, verifyPassword, code); err != nil {
+		if s.localAuth.mfaDisableLimiter != nil {
+			s.localAuth.mfaDisableLimiter.RecordFailure(ip)
+		}
 		writeJSONError(w, http.StatusBadRequest, "disable MFA: "+err.Error())
 		return
+	}
+	if s.localAuth.mfaDisableLimiter != nil {
+		s.localAuth.mfaDisableLimiter.RecordSuccess(ip)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

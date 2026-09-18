@@ -43,6 +43,7 @@ func mfaGateTestServer(t *testing.T) (*Server, *db.DB, *users.Service, *mfa.Serv
 	loginLimiter := ratelimit.New()
 	resetLimiter := ratelimit.New()
 	mfaChallengeLimiter := ratelimit.New()
+	mfaDisableLimiter := ratelimit.New()
 	sessionMw := session.New(svc, session.Config{CookieName: "branchdam_session"})
 
 	box, err := secrets.NewBox("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
@@ -70,6 +71,7 @@ func mfaGateTestServer(t *testing.T) (*Server, *db.DB, *users.Service, *mfa.Serv
 			Reset:               users.NewPasswordResetService(svc, users.PasswordResetServiceOptions{TokenTTL: time.Hour}),
 			MFA:                 mfaSvc,
 			MFAChallengeLimiter: mfaChallengeLimiter,
+			MFADisableLimiter:   mfaDisableLimiter,
 			AuthMode:            auth.AuthModeLocal,
 		},
 	})

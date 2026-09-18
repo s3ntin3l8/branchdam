@@ -625,7 +625,17 @@ type Querier interface {
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
 	MarkNodeMissing(ctx context.Context, id int64) error
-	MarkRecoveryCodeUsed(ctx context.Context, arg MarkRecoveryCodeUsedParams) error
+	// Mark a recovery code as used. The AND used_at IS NULL guard is
+	// defense-in-depth against the double-consume race that FindUnused-
+	// RecoveryCode's own used_at IS NULL filter can't prevent on its own:
+	// two concurrent ValidateRecoveryCode calls can both pass the SELECT
+	// (the row's used_at is still NULL at read time), then both proceed
+	// to UPDATE. Without the guard here, both UPDATEs succeed and the
+	// same code is counted as consumed twice. With the guard, only the
+	// first UPDATE matches a row; the second sees used_at != NULL and
+	// RowsAffected=0, which the caller treats as "code was already
+	// consumed".
+	MarkRecoveryCodeUsed(ctx context.Context, arg MarkRecoveryCodeUsedParams) (int64, error)
 	// Terminal failure: records the error, the attempt time, and increments
 	// retry_count -- what ResetRemoteSyncStateFailed's bound is measured against.
 	MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error

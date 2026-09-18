@@ -43,6 +43,7 @@ type localAuthHandlers struct {
 	email               email.Notifier
 	mfa                 *mfa.Service
 	mfaChallengeLimiter *ratelimit.Limiter
+	mfaDisableLimiter   *ratelimit.Limiter
 	log                 *slog.Logger
 	authMode            auth.AuthMode
 	jit                 auth.JITProvisioner

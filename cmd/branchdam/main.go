@@ -370,6 +370,15 @@ func main() {
 		// brute-force 3 tries per 30s. 5/min/IP matches loginLimiter's
 		// default fast threshold (60s cool-off after 5 failures).
 		mfaChallengeLimiter := ratelimit.New()
+		// mfaDisableLimiter is a per-IP sliding-window failure budget
+		// for /api/v1/mfa/disable (PR #459 review follow-up). The
+		// endpoint takes password + 6-digit TOTP, so without
+		// throttling a password-holder who reaches it could brute-
+		// force the TOTP and permanently remove MFA. Same default
+		// Config as mfaChallengeLimiter (5 failures/min -> 60s
+		// cool-off) -- reusing the threshold keeps operator mental
+		// model simple.
+		mfaDisableLimiter := ratelimit.New()
 		sessionMw := session.New(usersService, session.Config{
 			CookieName: "branchdam_session",
 			Log:        log,
@@ -421,6 +430,7 @@ func main() {
 			Email:               emailNotifier,
 			MFA:                 mfa.NewService(database, secretBox, log),
 			MFAChallengeLimiter: mfaChallengeLimiter,
+			MFADisableLimiter:   mfaDisableLimiter,
 			AuthMode:            authMode,
 		}
 		// Pre-build the JIT provisioner closure so httpapi/Handler()
