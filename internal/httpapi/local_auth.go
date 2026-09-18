@@ -483,8 +483,8 @@ func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleAdminUpdateUser: PATCH /api/v1/admin/users/{id}
-// (admin-only, gated by requireSettingsAdmin). Toggles is_admin and/or
-// re-enables a disabled account (disabledAt: null).
+// (admin-only, gated by requireSettingsAdmin). Toggles is_admin. Re-enabling
+// a disabled account is handled by POST /api/v1/admin/users/{id}/enable.
 func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.requireSettingsAdmin(r.Context()); err != nil {
 		var statusErr huma.StatusError
@@ -552,10 +552,7 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.audit != nil {
-		details := map[string]any{"id": id}
-		if body.IsAdmin != nil {
-			details["isAdmin"] = *body.IsAdmin
-		}
+		details := map[string]any{"action": "set_admin", "isAdmin": *body.IsAdmin}
 		if err := s.audit.WriteActorAudit(r.Context(), principalFromCtx(r.Context()), audit.EventUserUpdated, "user", strconv.FormatInt(id, 10), details); err != nil {
 			s.log.Warn("failed to write actor audit for user update", "error", err)
 		}
@@ -620,7 +617,7 @@ func (s *Server) handleAdminEnableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.audit != nil {
-		details := map[string]any{"id": id}
+		details := map[string]any{"action": "enable"}
 		if err := s.audit.WriteActorAudit(r.Context(), principalFromCtx(r.Context()), audit.EventUserUpdated, "user", strconv.FormatInt(id, 10), details); err != nil {
 			s.log.Warn("failed to write actor audit for user enable", "error", err)
 		}
