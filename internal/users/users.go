@@ -292,7 +292,7 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 		if errors.Is(err, sql.ErrNoRows) {
 			reconciledID, reconErr := s.reconcileLocalDrift(ctx, q, p)
 			if reconErr != nil {
-				return fmt.Errorf("resolve local user: %w", err)
+				return reconErr
 			}
 			if reconciledID == 0 {
 				return fmt.Errorf("resolve local user: %w", err)
