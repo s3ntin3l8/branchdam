@@ -44,15 +44,6 @@ func MFAGate(m *mfa.Service, log *slog.Logger) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// No local MFA enrolled? Then there's nothing to gate:
-			// /login only marks a session half-authed when MFA is
-			// enrolled (HandleLogin returns mfaRequired=true and
-			// sets mfa_verified_at=NULL only in that branch); a
-			// password-only user gets a fully-verified session and
-			// never reaches this path with UserID != 0 and
-			// MFAVerified=false unless their MFA status flipped
-			// after login (an admin reset clears it -- see Issue
-			// 10). Either way, no enrolled MFA means no gate.
 			if !m.HasMFA(r.Context(), view.UserID) {
 				next.ServeHTTP(w, r)
 				return
@@ -61,6 +52,11 @@ func MFAGate(m *mfa.Service, log *slog.Logger) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			log.Info("mfa gate: blocking unverified session",
+				"userID", view.UserID,
+				"path", r.URL.Path,
+				"method", r.Method,
+			)
 			writeMFAChallengeRequired(w)
 		})
 	}
