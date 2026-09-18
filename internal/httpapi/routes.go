@@ -637,6 +637,8 @@ func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*R
 				return nil, huma.Error409Conflict(restoreErr.Error())
 			case errors.Is(restoreErr, pipeline.ErrAssetPathCollision):
 				return nil, huma.Error409Conflict(restoreErr.Error())
+			case errors.Is(restoreErr, pipeline.ErrAssetAlreadyExists):
+				return nil, huma.Error409Conflict(restoreErr.Error())
 			default:
 				return nil, huma.Error500InternalServerError("restore trashed asset", restoreErr)
 			}

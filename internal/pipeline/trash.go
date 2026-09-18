@@ -61,6 +61,7 @@ var (
 	ErrAssetTrashFileMissing = errors.New("pipeline: asset is TRASHED but its file is missing from .trash/")
 	ErrAssetHasSuperseded    = errors.New("pipeline: asset has been superseded; restore forbidden")
 	ErrAssetPathCollision    = errors.New("pipeline: another live asset already occupies the restore target path")
+	ErrAssetAlreadyExists    = errors.New("pipeline: original file and trash copy both exist; ambiguous restore")
 )
 
 // TrashAsset moves the master file to <root>/.trash/<rel_path>, marks the node
@@ -297,6 +298,20 @@ func moveToTrash(guard *storage.Guard, rootPath, filePath, nodeUUID string, log 
 // we can compute the exact .trash path without scanning. Returns
 // ErrAssetTrashFileMissing if no .trash copy can be found (TTL expired and
 // the pruner already removed it).
+//
+// Three terminal cases:
+//   - original path missing, trash copy present: rename trash -> original.
+//     This is the normal restore.
+//   - original path present, no trash copy: the trashed node was logical-only
+//     (Tier 3 master archive or read-only tier -- bytes never moved). The
+//     row's TRASHED state was the user-visible signal; nothing to do on
+//     disk. Silent no-op, log info.
+//   - original path present AND trash copy present: ambiguous -- a re-ingest
+//     or manual copy may have placed new bytes at the original path while a
+//     trash copy still exists. Returning ErrAssetAlreadyExists forces the
+//     caller (HTTP layer / drainer) to surface the conflict to the user
+//     instead of silently overwriting one copy with the other. Same shape
+//     as the live-path collision check earlier in the restore pipeline.
 func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog.Logger) error {
 	loc, err := guard.Resolve(filePath)
 	if err != nil {
@@ -321,24 +336,48 @@ func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog
 	}
 	trashPath := filepath.Join(loc.RootPath, ".trash", stem+"."+uuidShort+ext)
 
+	originalExists := false
 	if _, statErr := os.Stat(filePath); statErr == nil {
-		return nil
+		originalExists = true
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat original %s: %w", filePath, statErr)
 	}
 
-	if _, err := os.Stat(trashPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("%w: %s", ErrAssetTrashFileMissing, trashPath)
-		}
+	trashExists := false
+	if _, err := os.Stat(trashPath); err == nil {
+		trashExists = true
+	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat %s: %w", trashPath, err)
 	}
-	if err := guard.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		return fmt.Errorf("mkdir restore parent: %w", err)
+
+	switch {
+	case !originalExists && trashExists:
+		// Normal restore: rename .trash/<rel>.<uuid>.<ext> -> <rel>.<ext>.
+		if err := guard.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			return fmt.Errorf("mkdir restore parent: %w", err)
+		}
+		if err := os.Rename(trashPath, filePath); err != nil {
+			return fmt.Errorf("rename %s -> %s: %w", trashPath, filePath, err)
+		}
+		log.Info("restored from trash", "from", trashPath, "to", filePath)
+		return nil
+
+	case originalExists && !trashExists:
+		// Logical-only trash (Tier 3 / read-only / virtual tier): the bytes
+		// never moved because they were protected. The DB row was marked
+		// TRASHED as a user-visible signal; nothing to do on disk.
+		log.Info("restore: file already at original path (logical-only trash); no disk move needed",
+			"path", filePath)
+		return nil
+
+	case !originalExists && !trashExists:
+		return fmt.Errorf("%w: %s", ErrAssetTrashFileMissing, trashPath)
+
+	default:
+		// originalExists && trashExists: ambiguous. Refuse to silently
+		// clobber either copy. Caller decides what to do.
+		return fmt.Errorf("%w: original path %s and trash copy %s both exist; refusing to silently clobber", ErrAssetAlreadyExists, filePath, trashPath)
 	}
-	if err := os.Rename(trashPath, filePath); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", trashPath, filePath, err)
-	}
-	log.Info("restored from trash", "from", trashPath, "to", filePath)
-	return nil
 }
 
 // purgeLinkedExports deletes the files for every Tier-2 export node linked to

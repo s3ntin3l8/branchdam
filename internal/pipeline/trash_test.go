@@ -159,3 +159,55 @@ func TestMoveToTrash_MissingSourceFileIsOK(t *testing.T) {
 	_, err := os.Stat(trashPath)
 	require.True(t, os.IsNotExist(err))
 }
+
+func TestRestoreFromTrash_LogicalOnlyTrashIsNoop(t *testing.T) {
+	// Tier 3 / read-only / virtual tiers: the bytes never moved during
+	// trash, so the original path always still has the file. Restore
+	// is a logical-only no-op (the DB row flips to ACTIVE; no disk
+	// move). Confirms the "original exists, no trash copy" branch.
+	root := t.TempDir()
+	guard := newTrashTestGuard(t, root)
+
+	srcDir := filepath.Join(root, "2026", "08")
+	require.NoError(t, os.MkdirAll(srcDir, 0o755))
+	orig := filepath.Join(srcDir, "TIER3.JPG")
+	require.NoError(t, os.WriteFile(orig, []byte("tier3 protected bytes"), 0o644))
+
+	// No trash copy on disk -- logical-only trash scenario.
+	err := restoreFromTrash(guard, orig, "018d3b2f-7630-7e50-9844-3d96e95924aa", testLogger())
+	require.NoError(t, err)
+
+	// Original is untouched.
+	data, err := os.ReadFile(orig)
+	require.NoError(t, err)
+	require.Equal(t, []byte("tier3 protected bytes"), data)
+}
+
+func TestRestoreFromTrash_BothCopiesExistReturnsErrAssetAlreadyExists(t *testing.T) {
+	// A re-ingest or manual copy may have placed new bytes at the
+	// original path while a trash copy still exists. Refuse to silently
+	// clobber either copy: this is the "ambiguous restore" branch.
+	root := t.TempDir()
+	guard := newTrashTestGuard(t, root)
+
+	srcDir := filepath.Join(root, "2026", "08")
+	require.NoError(t, os.MkdirAll(srcDir, 0o755))
+	orig := filepath.Join(srcDir, "BOTH.JPG")
+	require.NoError(t, os.WriteFile(orig, []byte("new bytes from re-ingest"), 0o644))
+
+	uuidShort := "cafef00d"[:8]
+	trashPath := filepath.Join(root, ".trash", "2026", "08", "BOTH."+uuidShort+".JPG")
+	require.NoError(t, os.MkdirAll(filepath.Dir(trashPath), 0o755))
+	require.NoError(t, os.WriteFile(trashPath, []byte("trashed bytes"), 0o644))
+
+	err := restoreFromTrash(guard, orig, "cafef00d-1234-5678-9abc-def012345678", testLogger())
+	require.ErrorIs(t, err, ErrAssetAlreadyExists)
+
+	// Neither copy is clobbered.
+	origData, err := os.ReadFile(orig)
+	require.NoError(t, err)
+	require.Equal(t, []byte("new bytes from re-ingest"), origData)
+	trashData, err := os.ReadFile(trashPath)
+	require.NoError(t, err)
+	require.Equal(t, []byte("trashed bytes"), trashData)
+}
