@@ -17,6 +17,7 @@ const StorageHealthPage = lazy(() => import("./pages/StorageHealthPage"));
 const CompanionPairingsPage = lazy(() => import("./pages/CompanionPairingsPage"));
 const AuditLogPage = lazy(() => import("./pages/AuditLogPage"));
 const UsersPage = lazy(() => import("./pages/UsersPage"));
+const PasswordResetPage = lazy(() => import("./pages/PasswordResetPage"));
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   return (
@@ -157,6 +158,11 @@ export default function App() {
           </Suspense>
         } />
       </Route>
+      <Route path="/password-reset" element={
+        <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
+          <PasswordResetPage />
+        </Suspense>
+      } />
     </Routes>
   );
 }

@@ -123,41 +123,53 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// Without this, an attacker could distinguish "user exists" (full
 	// SMTP round-trip before 200) from "user does not exist" (200
 	// immediately), defeating the byte-identical response defense.
+	// The user lookup ALSO runs inside the goroutine: if it ran on the
+	// request hot path, a found-user would pay a DB round-trip the
+	// not-found path doesn't, leaving a timing side-channel the
+	// byte-identical response was meant to close. By moving the lookup
+	// off the request hot path, both branches (found and not-found)
+	// pay exactly the same DB round-trips before the 200 response is
+	// written.
+	//
 	// Errors are logged from the goroutine; the caller never sees
 	// them. We copy every value the goroutine needs into locals
 	// (request context is canceled when the handler returns, so we
 	// cannot share r, user, issue with the goroutine).
 	if s.localAuth.email != nil {
-		user, lookupErr := s.localAuth.users.GetUserByID(r.Context(), issue.Token.UserID)
-		if lookupErr == nil && user.Email.Valid && user.Email.String != "" {
-			baseURL := passwordResetBaseURL(s, r)
-			resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
-			subject := "Reset your branchDAM password"
-			username := user.Username
-			recipient := user.Email.String
-			expiresLabel := issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2")
-			userID := issue.Token.UserID
+		baseURL := passwordResetBaseURL(s, r)
+		resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
+		subject := "Reset your branchDAM password"
+		expiresLabel := issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2")
+		userID := issue.Token.UserID
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), emailpkg.SendTimeout)
+			defer cancel()
+			user, lookupErr := s.localAuth.users.GetUserByID(ctx, userID)
+			if lookupErr != nil || !user.Email.Valid || user.Email.String == "" {
+				// Token-mint already happened; just skip delivery. No
+				// slog.WARN -- a missing/empty email is an operator
+				// configuration choice (the admin UI doesn't require
+				// email on local users) and spamming the log every time
+				// such a user requests a reset would be noise.
+				return
+			}
 			htmlBody := emailpkg.PasswordResetHTML(emailpkg.ResetEmailData{
-				Username:  username,
+				Username:  user.Username,
 				ResetLink: resetLink,
 				ExpiresAt: expiresLabel,
 			})
 			textBody := emailpkg.PasswordResetText(emailpkg.ResetEmailData{
-				Username:  username,
+				Username:  user.Username,
 				ResetLink: resetLink,
 				ExpiresAt: expiresLabel,
 			})
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), emailpkg.SendTimeout)
-				defer cancel()
-				if sendErr := s.localAuth.email.Send(ctx, recipient, subject, htmlBody, textBody); sendErr != nil {
-					s.localAuth.log.Warn("password-reset: email delivery failed",
-						slog.Int64("user_id", userID),
-						slog.String("error", sendErr.Error()),
-					)
-				}
-			}()
-		}
+			if sendErr := s.localAuth.email.Send(ctx, user.Email.String, subject, htmlBody, textBody); sendErr != nil {
+				s.localAuth.log.Warn("password-reset: email delivery failed",
+					slog.Int64("user_id", userID),
+					slog.String("error", sendErr.Error()),
+				)
+			}
+		}()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

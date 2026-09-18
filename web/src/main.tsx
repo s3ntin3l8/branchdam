@@ -17,6 +17,7 @@ const CompanionPairingsPage = lazy(() => import("./pages/CompanionPairingsPage")
 const AuditLogPage = lazy(() => import("./pages/AuditLogPage"));
 const UsersPage = lazy(() => import("./pages/UsersPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
+const PasswordResetPage = lazy(() => import("./pages/PasswordResetPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -69,6 +70,7 @@ const router = createBrowserRouter([
       { path: "audit-log", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit log…</div>}><AuditLogPage /></Suspense> },
       { path: "users", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading users…</div>}><UsersPage /></Suspense> },
       { path: "login", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><LoginPage /></Suspense> },
+      { path: "password-reset", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><PasswordResetPage /></Suspense> },
     ],
   },
 ]);
