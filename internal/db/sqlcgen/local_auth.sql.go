@@ -52,11 +52,26 @@ type CreateForwardJITUserParams struct {
 	CreatedBy string
 }
 
+type CreateForwardJITUserRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+}
+
 // Inserts a source='forward-jit' user with password_hash = NULL. The
 // schema CHECK constraint enforces this. email is required (callers
 // refuse the JIT when the forward-auth email header is empty). created_by is
 // 'forward:<forward-auth username>'.
-func (q *Queries) CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (User, error) {
+func (q *Queries) CreateForwardJITUser(ctx context.Context, arg CreateForwardJITUserParams) (CreateForwardJITUserRow, error) {
 	row := q.db.QueryRowContext(ctx, createForwardJITUser,
 		arg.Username,
 		arg.Email,
@@ -64,7 +79,7 @@ func (q *Queries) CreateForwardJITUser(ctx context.Context, arg CreateForwardJIT
 		arg.CreatedAt,
 		arg.CreatedBy,
 	)
-	var i User
+	var i CreateForwardJITUserRow
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
@@ -102,11 +117,26 @@ type CreateLocalUserParams struct {
 	CreatedBy    string
 }
 
+type CreateLocalUserRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+}
+
 // Inserts a source='local' user. password_hash is the argon2id encoded
 // string. created_by is 'setup' for the first admin, 'self' for self-
 // registration flows (none in v1), or 'user:<principal name>' for admin-
 // created users. Returns the inserted row.
-func (q *Queries) CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (User, error) {
+func (q *Queries) CreateLocalUser(ctx context.Context, arg CreateLocalUserParams) (CreateLocalUserRow, error) {
 	row := q.db.QueryRowContext(ctx, createLocalUser,
 		arg.Username,
 		arg.Email,
@@ -115,7 +145,7 @@ func (q *Queries) CreateLocalUser(ctx context.Context, arg CreateLocalUserParams
 		arg.CreatedAt,
 		arg.CreatedBy,
 	)
-	var i User
+	var i CreateLocalUserRow
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
@@ -140,7 +170,7 @@ INSERT INTO sessions (
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
 )
-RETURNING id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
+RETURNING id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at, mfa_verified_at
 `
 
 type CreateSessionParams struct {
@@ -182,6 +212,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.Ip,
 		&i.UserAgent,
 		&i.RevokedAt,
+		&i.MfaVerifiedAt,
 	)
 	return i, err
 }
@@ -204,16 +235,17 @@ func (q *Queries) DisableUser(ctx context.Context, arg DisableUserParams) error 
 }
 
 const getSessionByCookieID = `-- name: GetSessionByCookieID :one
-SELECT id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
+SELECT id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at, mfa_verified_at
 FROM sessions
 WHERE cookie_id = ?1
 `
 
 // Hot path: called by SessionMiddleware on every authenticated browser
-// request. Returns the full row including revoked_at so the middleware
-// can reject post-revoke cookies in one query. The partial index
-// sessions_user_active_idx covers the active-set variant but the
-// revoke check needs the full row, so we don't use it here.
+// request. Returns the full row including revoked_at and mfa_verified_at
+// so the middleware can reject post-revoke cookies and enforce MFA in
+// one query. The partial index sessions_user_active_idx covers the
+// active-set variant but the revoke check needs the full row, so we
+// don't use it here.
 func (q *Queries) GetSessionByCookieID(ctx context.Context, cookieID string) (Session, error) {
 	row := q.db.QueryRowContext(ctx, getSessionByCookieID, cookieID)
 	var i Session
@@ -228,6 +260,7 @@ func (q *Queries) GetSessionByCookieID(ctx context.Context, cookieID string) (Se
 		&i.Ip,
 		&i.UserAgent,
 		&i.RevokedAt,
+		&i.MfaVerifiedAt,
 	)
 	return i, err
 }
@@ -243,13 +276,28 @@ type GetUserByEmailSourceParams struct {
 	Source string
 }
 
+type GetUserByEmailSourceRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+}
+
 // Used by the JIT provisioning path: a forward-auth request with email E
 // and source 'forward-jit' either matches an existing admin or triggers
 // a fresh INSERT in CreateForwardJITUser. Partial unique index
 // users_email_source_uniq covers this.
-func (q *Queries) GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (User, error) {
+func (q *Queries) GetUserByEmailSource(ctx context.Context, arg GetUserByEmailSourceParams) (GetUserByEmailSourceRow, error) {
 	row := q.db.QueryRowContext(ctx, getUserByEmailSource, arg.Email, arg.Source)
-	var i User
+	var i GetUserByEmailSourceRow
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
@@ -273,9 +321,24 @@ FROM users
 WHERE id = ?1
 `
 
-func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
+type GetUserByIDRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+}
+
+func (q *Queries) GetUserByID(ctx context.Context, id int64) (GetUserByIDRow, error) {
 	row := q.db.QueryRowContext(ctx, getUserByID, id)
-	var i User
+	var i GetUserByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
@@ -299,12 +362,27 @@ FROM users
 WHERE username = ?1
 `
 
+type GetUserByUsernameRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+}
+
 // Used by /api/v1/login to resolve the presented username to a user row.
 // The lookup is username-only; password verification happens in Go against
 // password_hash. Index: users.username UNIQUE already covers this.
-func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User, error) {
+func (q *Queries) GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error) {
 	row := q.db.QueryRowContext(ctx, getUserByUsername, username)
-	var i User
+	var i GetUserByUsernameRow
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
@@ -358,9 +436,11 @@ func (q *Queries) InsertLoginAudit(ctx context.Context, arg InsertLoginAuditPara
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
-FROM users
-ORDER BY id ASC
+SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.source, u.created_at, u.created_by, u.disabled_at, u.auth_provider, u.external_uid, u.last_seen_at,
+       CASE WHEN mc.user_id IS NOT NULL THEN 1 ELSE 0 END AS mfa_enabled
+FROM users u
+LEFT JOIN mfa_credentials mc ON mc.user_id = u.id
+ORDER BY u.id ASC
 LIMIT ?1 OFFSET ?2
 `
 
@@ -369,17 +449,33 @@ type ListUsersParams struct {
 	Offset int64
 }
 
+type ListUsersRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+	MfaEnabled   int64
+}
+
 // Paginated user list for the admin UI. Order by id ASC so paging is
 // stable across inserts (new users go to the END, not the middle).
-func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error) {
+func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error) {
 	rows, err := q.db.QueryContext(ctx, listUsers, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []User{}
+	items := []ListUsersRow{}
 	for rows.Next() {
-		var i User
+		var i ListUsersRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Username,
@@ -393,6 +489,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.AuthProvider,
 			&i.ExternalUid,
 			&i.LastSeenAt,
+			&i.MfaEnabled,
 		); err != nil {
 			return nil, err
 		}
@@ -501,11 +598,26 @@ type UpdateUserPasswordHashParams struct {
 	PasswordHash sql.NullString
 }
 
+type UpdateUserPasswordHashRow struct {
+	ID           int64
+	Username     string
+	Email        sql.NullString
+	PasswordHash sql.NullString
+	IsAdmin      int64
+	Source       string
+	CreatedAt    int64
+	CreatedBy    string
+	DisabledAt   sql.NullInt64
+	AuthProvider string
+	ExternalUid  string
+	LastSeenAt   int64
+}
+
 // Rotates the password hash. Used by /api/v1/password-reset/confirm
 // (self-service) and /api/v1/admin/users/{id}/reset-password (admin).
-func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (User, error) {
+func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (UpdateUserPasswordHashRow, error) {
 	row := q.db.QueryRowContext(ctx, updateUserPasswordHash, arg.ID, arg.PasswordHash)
-	var i User
+	var i UpdateUserPasswordHashRow
 	err := row.Scan(
 		&i.ID,
 		&i.Username,

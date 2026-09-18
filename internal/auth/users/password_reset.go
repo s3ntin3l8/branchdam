@@ -141,7 +141,7 @@ func (p *PasswordResetService) RequestPasswordReset(ctx context.Context, email, 
 // ConfirmResult is the outcome of ConfirmPasswordReset. NewPassword
 // is set on the new-password flow; User is the rotated user.
 type ConfirmResult struct {
-	User sqlcgen.User
+	User sqlcgen.UpdateUserPasswordHashRow
 }
 
 // ConfirmPasswordReset validates a plaintext token, rotates the
@@ -171,7 +171,7 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		tokenID  int64
 	}
 	var (
-		rotated         sqlcgen.User
+		rotated         sqlcgen.UpdateUserPasswordHashRow
 		failureAuditRow *failureAudit
 	)
 	err := p.svc.withTx(ctx, func(q *sqlcgen.Queries) error {
@@ -262,6 +262,19 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		if err := revokeAllUserSessionsTx(ctx, q, user.ID, now.Unix()); err != nil {
 			return fmt.Errorf("password-reset: revoke sessions: %w", err)
 		}
+		// Clear MFA credentials + recovery codes (Issue 10): the
+		// self-service confirm path uses a token delivered out of
+		// band (operator pass-through, mail), so an attacker who
+		// already owns the inbox can mint a token AND know the
+		// password. Leaving MFA enrolled lets them walk straight in
+		// via /mfa/challenge. Clearing MFA forces re-enrollment, which
+		// requires the user to physically re-add their authenticator.
+		if err := q.DeleteMFACredentials(ctx, user.ID); err != nil {
+			return fmt.Errorf("password-reset: clear mfa credentials: %w", err)
+		}
+		if err := q.DeleteRecoveryCodes(ctx, user.ID); err != nil {
+			return fmt.Errorf("password-reset: clear mfa recovery codes: %w", err)
+		}
 
 		details := fmt.Sprintf(`{"token_id":%d,"kind":"self-service-confirm"}`, consumed.ID)
 		return q.InsertLoginAudit(ctx, sqlcgen.InsertLoginAuditParams{
@@ -305,7 +318,7 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 // is the freshly-minted plaintext password -- the caller returns it
 // in the response body exactly once.
 type AdminResetResult struct {
-	User        sqlcgen.User
+	User        sqlcgen.GetUserByIDRow
 	NewPassword string
 }
 
@@ -332,13 +345,24 @@ func (p *PasswordResetService) AdminResetPassword(ctx context.Context, targetUse
 		if err != nil {
 			return err
 		}
-		user = rotated
+		user = sqlcgen.GetUserByIDRow(rotated)
 		// Revoke every active session for the target user. The reset
 		// is the operator's signal that the existing credential is
 		// compromised; a session the legitimate user had on a phone,
 		// or that an attacker had stolen, must not survive. Idempotent.
 		if err := revokeAllUserSessionsTx(ctx, q, user.ID, now.Unix()); err != nil {
 			return fmt.Errorf("password-reset: revoke sessions: %w", err)
+		}
+		// Clear MFA credentials and recovery codes (Issue 10). A user
+		// who lost phone + recovery codes would otherwise be locked
+		// out forever: /mfa/disable requires a valid TOTP, so without
+		// this clear neither the user nor an admin can disable MFA
+		// after a password reset.
+		if err := q.DeleteMFACredentials(ctx, user.ID); err != nil {
+			return fmt.Errorf("password-reset: clear mfa credentials: %w", err)
+		}
+		if err := q.DeleteRecoveryCodes(ctx, user.ID); err != nil {
+			return fmt.Errorf("password-reset: clear mfa recovery codes: %w", err)
 		}
 		details := fmt.Sprintf(`{"actor":"%s","target_user_id":%d,"kind":"admin-reset"}`, sanitizeForJSON(actor), user.ID)
 		return q.InsertLoginAudit(ctx, sqlcgen.InsertLoginAuditParams{
@@ -394,7 +418,7 @@ func (p *PasswordResetService) RevokeToken(ctx context.Context, tokenID int64) e
 // future-proof: when #410 (MFA) needs to record password_changed_at
 // for its re-auth grace window, the rotation logic here is the only
 // place to add it.
-func updateUserPasswordHash(ctx context.Context, q *sqlcgen.Queries, userID int64, hash string, _ int64) (sqlcgen.User, error) {
+func updateUserPasswordHash(ctx context.Context, q *sqlcgen.Queries, userID int64, hash string, _ int64) (sqlcgen.UpdateUserPasswordHashRow, error) {
 	return q.UpdateUserPasswordHash(ctx, sqlcgen.UpdateUserPasswordHashParams{
 		ID:           userID,
 		PasswordHash: sql.NullString{String: hash, Valid: true},

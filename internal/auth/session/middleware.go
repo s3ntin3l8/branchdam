@@ -165,8 +165,9 @@ func (m *Middleware) Middleware(next http.Handler) http.Handler {
 		}
 
 		view := LocalUserView{
-			UserID:  user.ID,
-			IsAdmin: user.IsAdmin != 0,
+			UserID:      user.ID,
+			IsAdmin:     user.IsAdmin != 0,
+			MFAVerified: session.MfaVerifiedAt.Valid,
 		}
 		ctx := withLocalUser(r.Context(), view)
 

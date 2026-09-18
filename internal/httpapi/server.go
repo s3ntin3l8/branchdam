@@ -22,6 +22,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/mfa"
 	"github.com/s3ntin3l8/branchdam/internal/auth/ratelimit"
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
@@ -152,12 +153,31 @@ type LocalAuthDeps struct {
 	// Always wired by cmd/branchdam when auth.mode is local/both; nil
 	// only in tests that don't construct a Deps.LocalAuth. The HTTP
 	// handlers short-circuit to 503 when Reset is nil.
-	Reset    *users.PasswordResetService
-	AuthMode auth.AuthMode
+	Reset *users.PasswordResetService
+	MFA   *mfa.Service
+	// MFAChallengeLimiter is a per-IP sliding-window budget for
+	// /api/v1/mfa/challenge (Issue 2, PR #459 review): a 6-digit
+	// TOTP with +/-1 drift is ~333k guesses per code window, so a
+	// password-holder who reaches /mfa/challenge could otherwise
+	// brute-force 3 tries per step. The handler records a failure
+	// on every wrong TOTP / recovery code; 5/min/IP matches the
+	// /login fast threshold. nil is tolerated only in tests that
+	// don't wire MFA -- the handler short-circuits to 503 in that
+	// case (matches the LoginLimiter pattern).
+	MFAChallengeLimiter *ratelimit.Limiter
 	// Email, when non-nil, sends password-reset links via SMTP or
 	// logs them (logSender). nil means no email delivery; the handler
 	// falls back to slog-only.
 	Email email.Notifier
+	// MFADisableLimiter is a per-IP sliding-window budget for
+	// /api/v1/mfa/disable (review follow-up, PR #459). The disable
+	// endpoint takes password + 6-digit TOTP, so without throttling
+	// a password-holder who has reached it could brute-force the
+	// TOTP and permanently remove MFA. Same Config defaults as
+	// MFAChallengeLimiter; nil is tolerated only in tests that
+	// don't wire MFA (handler short-circuits to 503).
+	MFADisableLimiter *ratelimit.Limiter
+	AuthMode          auth.AuthMode
 	// JIT, when non-nil, is the forward-JIT provisioner passed to
 	// auth.RouteWithConfigAndJIT. Set by cmd/branchdam when
 	// auth.mode == "both" AND auth.forward.adminGroups is non-empty;
@@ -260,15 +280,18 @@ func New(d Deps) *Server {
 	}
 	if d.LocalAuth != nil {
 		s.localAuth = &localAuthHandlers{
-			users:        d.LocalAuth.Users,
-			loginLimiter: d.LocalAuth.LoginLimiter,
-			resetLimiter: d.LocalAuth.ResetLimiter,
-			sessionMw:    d.LocalAuth.SessionMw,
-			reset:        d.LocalAuth.Reset,
-			email:        d.LocalAuth.Email,
-			log:          log,
-			authMode:     d.LocalAuth.AuthMode,
-			jit:          d.LocalAuth.JIT,
+			users:               d.LocalAuth.Users,
+			loginLimiter:        d.LocalAuth.LoginLimiter,
+			resetLimiter:        d.LocalAuth.ResetLimiter,
+			sessionMw:           d.LocalAuth.SessionMw,
+			reset:               d.LocalAuth.Reset,
+			email:               d.LocalAuth.Email,
+			mfa:                 d.LocalAuth.MFA,
+			mfaChallengeLimiter: d.LocalAuth.MFAChallengeLimiter,
+			mfaDisableLimiter:   d.LocalAuth.MFADisableLimiter,
+			log:                 log,
+			authMode:            d.LocalAuth.AuthMode,
+			jit:                 d.LocalAuth.JIT,
 		}
 	}
 	return s
@@ -366,6 +389,14 @@ func (s *Server) Handler() http.Handler {
 	if s.localAuth != nil {
 		authMode = s.localAuth.authMode
 		jit = s.localAuth.jit
+		// localBuilder is JUST the session middleware. The MFA gate
+		// (Issue 1, PR #459 review) is wired OUTSIDE the auth.Route
+		// chain below, because the gate needs to see the LocalUserView
+		// the session middleware attached and then 403 the request
+		// BEFORE the requireAdmin gate -- a half-authed user must
+		// not get a generic "admin authorization required" 403 that
+		// the SPA can't distinguish from "you're not an admin".
+		localBuilder = s.localAuth.sessionMw.Middleware
 		switch authMode {
 		case auth.AuthModeLocal:
 			localBuilder = s.localAuth.sessionMw.Middleware
@@ -375,6 +406,16 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
+	// MFA gate (Issue 1) wraps authzHandler so a half-authed user
+	// gets the SPA-actionable 403 with mfaChallengeRequired:true
+	// instead of the generic "admin authorization required" 403 that
+	// requireAdmin would emit. Must run AFTER auth.Route (which
+	// attaches LocalUserView) but BEFORE requireAdmin -- hence
+	// wrapping authzHandler and passing the wrapped chain as the
+	// auth.Route's `next` argument.
+	if s.localAuth != nil && s.localAuth.mfa != nil {
+		authzHandler = MFAGate(s.localAuth.mfa, s.log)(authzHandler)
+	}
 	// Pass adminGroups + requireEmail only when s.cfg() is non-nil;
 	// tests that build a Server without Config (see routes_test.go's
 	// fullTestServer helper) would otherwise deref a nil cfg here.

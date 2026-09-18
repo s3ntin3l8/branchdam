@@ -80,9 +80,11 @@ RETURNING id, username, email, password_hash, is_admin, source, created_at, crea
 -- name: ListUsers :many
 -- Paginated user list for the admin UI. Order by id ASC so paging is
 -- stable across inserts (new users go to the END, not the middle).
-SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at
-FROM users
-ORDER BY id ASC
+SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.source, u.created_at, u.created_by, u.disabled_at, u.auth_provider, u.external_uid, u.last_seen_at,
+       CASE WHEN mc.user_id IS NOT NULL THEN 1 ELSE 0 END AS mfa_enabled
+FROM users u
+LEFT JOIN mfa_credentials mc ON mc.user_id = u.id
+ORDER BY u.id ASC
 LIMIT ?1 OFFSET ?2;
 
 -- name: CreateSession :one
@@ -97,15 +99,16 @@ INSERT INTO sessions (
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
 )
-RETURNING id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at;
+RETURNING id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at, mfa_verified_at;
 
 -- name: GetSessionByCookieID :one
 -- Hot path: called by SessionMiddleware on every authenticated browser
--- request. Returns the full row including revoked_at so the middleware
--- can reject post-revoke cookies in one query. The partial index
--- sessions_user_active_idx covers the active-set variant but the
--- revoke check needs the full row, so we don't use it here.
-SELECT id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at
+-- request. Returns the full row including revoked_at and mfa_verified_at
+-- so the middleware can reject post-revoke cookies and enforce MFA in
+-- one query. The partial index sessions_user_active_idx covers the
+-- active-set variant but the revoke check needs the full row, so we
+-- don't use it here.
+SELECT id, cookie_id, user_id, created_at, last_seen_at, expires_at, idle_expires_at, ip, user_agent, revoked_at, mfa_verified_at
 FROM sessions
 WHERE cookie_id = ?1;
 

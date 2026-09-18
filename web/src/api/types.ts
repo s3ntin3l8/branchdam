@@ -34,6 +34,16 @@ export interface Me {
   // (forward-only deployments, machine principals, anonymous
   // requests) -- the filter is then disabled.
   attributionUserId?: number;
+  // mfaRequired is true when the local user has MFA enrolled and
+  // the current session has NOT yet been MFA-verified. The SPA
+  // uses this to branch to the MFA challenge form on page load /
+  // reload (review suggestion, PR #459 round-3 #1). Mirrors
+  // MeOutput.Body.MFARequired in internal/httpapi/routes.go.
+  mfaRequired?: boolean;
+  // mfaVerified is true when the local user has MFA enrolled AND
+  // the current session has been MFA-verified. Mirrors
+  // MeOutput.Body.MFAVerified in internal/httpapi/routes.go.
+  mfaVerified?: boolean;
 }
 
 export interface SetupStatus {
@@ -615,6 +625,7 @@ export interface AttributionUser {
   isAdmin?: boolean;
   source?: string;
   disabledAt?: number;
+  mfaEnabled?: boolean;
 }
 
 export interface ListUsersResponse {
@@ -677,4 +688,39 @@ export interface AuditQueryParams {
   untilUnix?: number;
   limit?: number;
   offset?: number;
+}
+
+// MFA (PR #410)
+
+export interface MfaSetupResponse {
+  otpauthURI: string;
+  asciiQR: string;
+}
+
+export interface MfaEnableInput {
+  code: string;
+}
+
+export interface MfaEnableResponse {
+  ok: boolean;
+  recoveryCodes: string[];
+  notice: string;
+}
+
+export interface MfaChallengeInput {
+  code: string;
+}
+
+export interface MfaChallengeResponse {
+  ok: boolean;
+}
+
+export interface MfaDisableInput {
+  password: string;
+  code: string;
+}
+
+export interface LoginResponse {
+  ok: boolean;
+  mfaRequired?: boolean;
 }

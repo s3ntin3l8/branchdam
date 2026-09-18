@@ -1,11 +1,14 @@
 import { lazy, Suspense } from "react";
 import { NavLink, Outlet, Route, Routes } from "react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
+import { api } from "./api/client";
 import { AuthErrorBanner } from "./components/AuthErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { UserMenu } from "./components/UserMenu";
 import BrandMark from "./components/BrandMark";
+import MfaChallengeForm from "./components/MfaChallengeForm";
 
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
@@ -37,10 +40,60 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 // Layout wraps every route. It owns the SSE hook, the auth banner, and the
 // nav sidebar. useEventStream must run here (not in App's body) so it's
 // inside the Router context that useNavigation/useBlocker require.
+//
+// When me.mfaRequired is true (half-authed session after a page reload
+// during an MFA challenge), the layout renders only the MFA challenge
+// form instead of the full nav shell. This closes the reload-during-
+// challenge gap identified in PR #459 round-3 suggestion #1: without
+// this, a reload strands the SPA half-authenticated because the 403
+// from MFAGate on every API call renders a dead shell.
 export function Layout() {
   const { disconnected } = useEventStream();
   const { data: me } = useMe();
   const { data: unlinkedCount } = useUnlinkedCount();
+  const queryClient = useQueryClient();
+
+  const mfaChallengeMutation = useMutation({
+    mutationFn: api.mfaChallenge,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+
+  const logoutMutation = useMutation({
+    mutationFn: api.logout,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+
+  if (me?.mfaRequired) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-neutral-950">
+        <div className="w-full max-w-sm rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow">
+          <div className="mb-4 flex items-center gap-2">
+            <BrandMark className="h-5 w-5 text-brand" />
+            <span className="text-lg font-semibold">
+              <span className="font-normal">branch</span>DAM
+            </span>
+          </div>
+          <MfaChallengeForm
+            onSubmit={(code) => mfaChallengeMutation.mutate({ code })}
+            pending={mfaChallengeMutation.isPending}
+            error={mfaChallengeMutation.error?.message}
+          />
+          <button
+            type="button"
+            onClick={() => logoutMutation.mutate()}
+            disabled={logoutMutation.isPending}
+            className="mt-4 w-full text-xs text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
+          >
+            {logoutMutation.isPending ? "Signing out…" : "Sign out"}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen">

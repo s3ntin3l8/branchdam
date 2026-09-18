@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router";
 import {
   useAdminResetPassword,
   useCreateUser,
@@ -60,6 +61,7 @@ function Modal({ open, onClose, title, children }: ModalProps) {
 export default function UsersPage() {
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
+  const navigate = useNavigate();
   const pageSize = 25;
   const { data: me } = useMe();
   const { data, isLoading, error } = useUsers({ limit: pageSize, offset: page * pageSize });
@@ -274,6 +276,7 @@ export default function UsersPage() {
                 <th scope="col" className="px-4 py-3">User</th>
                 <th scope="col" className="px-4 py-3">Email</th>
                 <th scope="col" className="px-4 py-3">Role</th>
+                <th scope="col" className="px-4 py-3">MFA</th>
                 <th scope="col" className="px-4 py-3">Provider</th>
                 <th scope="col" className="px-4 py-3">Created</th>
                 <th scope="col" className="px-4 py-3">Last Seen</th>
@@ -304,13 +307,30 @@ export default function UsersPage() {
                     </td>
                     <td className="px-4 py-3">
                       {user.isAdmin ? (
-                        <span className="rounded border border-amber-800/60 bg-amber-950/80 px-2 py-0.5 text-xs text-amber-300">
+                        <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
                           Admin
                         </span>
                       ) : (
-                        <span className="rounded border border-neutral-700 bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300">
+                        <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
                           User
                         </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {user.mfaEnabled ? (
+                        <span className="rounded border border-emerald-800/60 bg-emerald-950/80 px-2 py-0.5 text-xs text-emerald-300">
+                          Enabled
+                        </span>
+                      ) : user.source === "local" && isSelf ? (
+                        <button
+                          type="button"
+                          onClick={() => navigate("/mfa/setup")}
+                          className="rounded border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+                        >
+                          Set up
+                        </button>
+                      ) : (
+                        <span className="text-xs text-neutral-500">—</span>
                       )}
                     </td>
                     <td className="px-4 py-3">

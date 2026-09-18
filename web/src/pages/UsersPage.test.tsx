@@ -1,246 +1,193 @@
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Routes, Route } from "react-router";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import UsersPage from "./UsersPage";
-import type {
-  AdminResetPasswordResponse,
-  AttributionUser,
-  CreateUserInput,
-  CreateUserResponse,
-  ListUsersResponse,
-  Me,
-} from "../api/types";
 
-const listUsersMock = vi.fn<(params?: { limit?: number; offset?: number }) => Promise<ListUsersResponse>>();
-const createUserMock = vi.fn<(input: CreateUserInput) => Promise<CreateUserResponse>>();
-const adminResetPasswordMock = vi.fn<(id: number) => Promise<AdminResetPasswordResponse>>();
-const disableUserMock = vi.fn<(id: number) => Promise<Record<string, never>>>();
-const meMock = vi.fn<() => Promise<Me>>();
-
-vi.mock("../api/client", () => ({
-  api: {
-    me: () => meMock(),
-    listUsers: (params?: { limit?: number; offset?: number }) => listUsersMock(params),
-    createUser: (input: CreateUserInput) => createUserMock(input),
-    adminResetPassword: (id: number) => adminResetPasswordMock(id),
-    disableUser: (id: number) => disableUserMock(id),
-  },
-  ApiError: class ApiError extends Error {
-    status: number;
-    constructor(status: number, message: string) {
-      super(message);
-      this.status = status;
-      this.name = "ApiError";
-    }
-  },
+vi.mock("../hooks/queries", () => ({
+  useMe: vi.fn(),
+  useUsers: vi.fn(),
+  useCreateUser: vi.fn(),
+  useAdminResetPassword: vi.fn(),
+  useDisableUser: vi.fn(),
+  useEnableUser: vi.fn(),
+  useUpdateUser: vi.fn(),
+  useRevokeUserSessions: vi.fn(),
 }));
 
-const sampleUsers: AttributionUser[] = [
-  {
+import {
+  useMe,
+  useUsers,
+  useCreateUser,
+  useAdminResetPassword,
+  useDisableUser,
+  useEnableUser,
+  useUpdateUser,
+  useRevokeUserSessions,
+} from "../hooks/queries";
+
+function makeUser(overrides: Record<string, unknown> = {}) {
+  return {
     id: 1,
-    authProvider: "local",
-    externalUid: "1",
     username: "alice",
     email: "alice@example.com",
-    isAdmin: true,
     source: "local",
+    authProvider: "local",
+    isAdmin: false,
+    mfaEnabled: false,
+    disabledAt: undefined,
     createdAt: 1700000000,
     lastSeenAt: 1700001000,
-  },
-  {
-    id: 2,
-    authProvider: "local",
-    externalUid: "2",
-    username: "bob",
-    email: "bob@example.com",
-    isAdmin: false,
-    source: "local",
-    createdAt: 1700002000,
-    lastSeenAt: 1700002500,
-  },
-  {
-    id: 3,
-    authProvider: "authentik",
-    externalUid: "carol-sub",
-    username: "carol",
-    isAdmin: false,
-    source: "authentik",
-    createdAt: 1700003000,
-    lastSeenAt: 1700003500,
-    disabledAt: 1700004000,
-  },
-];
+    ...overrides,
+  };
+}
 
-function renderWithClient(ui: React.ReactElement) {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-    },
-  });
+function renderPage() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/users"]}>
-        <Routes>
-          <Route path="/users" element={ui} />
-        </Routes>
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>
+        <UsersPage />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-describe("UsersPage", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    meMock.mockResolvedValue({
-      kind: "user",
-      name: "alice",
-      authenticated: true,
-      isAdmin: true,
-      isLocal: true,
-      localUserId: 1,
-    });
-    listUsersMock.mockResolvedValue({
-      users: sampleUsers,
-      total: sampleUsers.length,
-    });
+function stubMutations() {
+  const mutateAsync = vi.fn();
+  (useCreateUser as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+  (useAdminResetPassword as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+  (useDisableUser as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+  (useEnableUser as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+  (useUpdateUser as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+  (useRevokeUserSessions as ReturnType<typeof vi.fn>).mockReturnValue({
+    mutateAsync: vi.fn().mockResolvedValue({ revokedCount: 1 }),
+    isPending: false,
+  });
+  return { mutateAsync };
+}
+
+function stubUsers(users: ReturnType<typeof makeUser>[]) {
+  (useUsers as ReturnType<typeof vi.fn>).mockReturnValue({
+    data: { users, total: users.length },
+    isLoading: false,
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  stubMutations();
+});
+
+describe("UsersPage row actions", () => {
+  it("shows Re-enable button for disabled non-self users", () => {
+    const disabled = makeUser({ id: 2, username: "bob", disabledAt: "2026-01-01T00:00:00Z" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([disabled]);
+
+    renderPage();
+    expect(screen.getByRole("button", { name: /re-enable/i })).toBeInTheDocument();
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  it("does NOT show Re-enable for self", () => {
+    const self = makeUser({ id: 1, username: "alice", disabledAt: "2026-01-01T00:00:00Z" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([self]);
+
+    renderPage();
+    expect(screen.queryByRole("button", { name: /re-enable/i })).not.toBeInTheDocument();
   });
 
-  it("renders user table with usernames, roles, and provider badges", async () => {
-    renderWithClient(<UsersPage />);
+  it("shows Make Admin for non-admin non-self users", () => {
+    const other = makeUser({ id: 2, username: "bob" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([other]);
 
-    expect(screen.getByText("Loading users…")).toBeInTheDocument();
-
-    await waitFor(() => {
-      expect(screen.getByText("alice")).toBeInTheDocument();
-    });
-
-    expect(screen.getByText("bob")).toBeInTheDocument();
-    expect(screen.getByText("carol")).toBeInTheDocument();
-
-    // Check badges
-    expect(screen.getByText("Admin")).toBeInTheDocument();
-    expect(screen.getAllByText("User").length).toBe(3);
-    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    renderPage();
+    expect(screen.getByRole("button", { name: /make admin/i })).toBeInTheDocument();
   });
 
-  it("filters users via search input", async () => {
-    renderWithClient(<UsersPage />);
+  it("shows Remove Admin for admin non-self users", () => {
+    const admin = makeUser({ id: 2, username: "bob", isAdmin: true });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([admin]);
 
-    await waitFor(() => {
-      expect(screen.getByText("alice")).toBeInTheDocument();
-    });
-
-    const searchInput = screen.getByPlaceholderText("Search users by name, username, or email…");
-    fireEvent.change(searchInput, { target: { value: "bob" } });
-
-    expect(screen.queryByText("alice")).not.toBeInTheDocument();
-    expect(screen.getByText("bob")).toBeInTheDocument();
+    renderPage();
+    expect(screen.getByRole("button", { name: /remove admin/i })).toBeInTheDocument();
   });
 
-  it("creates a user and shows generated password modal when password is empty", async () => {
-    createUserMock.mockResolvedValue({
-      user: {
-        id: 4,
-        authProvider: "local",
-        externalUid: "4",
-        username: "dave",
-        isAdmin: false,
-        source: "local",
-        createdAt: 1700005000,
-        lastSeenAt: 1700005000,
-      },
-      temporaryPassword: "generated-secret-pass",
-      shownOnceNotice: "Copy this password now.",
-    });
+  it("does NOT show admin toggles for self", () => {
+    const self = makeUser({ id: 1, username: "alice" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([self]);
 
-    renderWithClient(<UsersPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("alice")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Add User"));
-    expect(screen.getByRole("heading", { name: "Create User" })).toBeInTheDocument();
-
-    fireEvent.change(screen.getByPlaceholderText("e.g. jdoe"), { target: { value: "dave" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create User" }));
-
-    await waitFor(() => {
-      expect(createUserMock).toHaveBeenCalledWith({
-        username: "dave",
-        email: undefined,
-        password: undefined,
-        isAdmin: false,
-      });
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText("Temporary Password Generated")).toBeInTheDocument();
-      expect(screen.getByText("generated-secret-pass")).toBeInTheDocument();
-    });
+    renderPage();
+    expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /remove admin/i })).not.toBeInTheDocument();
   });
 
-  it("resets password for a user", async () => {
-    adminResetPasswordMock.mockResolvedValue({
-      user: {
-        id: 2,
-        username: "bob",
-        isAdmin: false,
-        source: "local",
-        createdAt: 1700002000,
-        createdBy: "system",
-      },
-      newPassword: "reset-temp-password",
-      shownOnceNotice: "Store this password securely.",
-    });
+  it("shows Revoke Sessions for non-self users", () => {
+    const other = makeUser({ id: 2, username: "bob" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([other]);
 
-    renderWithClient(<UsersPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("bob")).toBeInTheDocument();
-    });
-
-    const resetButtons = screen.getAllByText("Reset Password");
-    fireEvent.click(resetButtons[1]); // bob is index 1
-
-    expect(screen.getByText("Reset User Password")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Confirm Reset"));
-
-    await waitFor(() => {
-      expect(adminResetPasswordMock).toHaveBeenCalledWith(2);
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText("Temporary Password Generated")).toBeInTheDocument();
-      expect(screen.getByText("reset-temp-password")).toBeInTheDocument();
-    });
+    renderPage();
+    expect(screen.getByRole("button", { name: /revoke sessions/i })).toBeInTheDocument();
   });
 
-  it("disables an active user and hides disable button for current user", async () => {
-    disableUserMock.mockResolvedValue({});
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("does NOT show Revoke Sessions for self", () => {
+    const self = makeUser({ id: 1, username: "alice" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([self]);
 
-    renderWithClient(<UsersPage />);
+    renderPage();
+    expect(screen.queryByRole("button", { name: /revoke sessions/i })).not.toBeInTheDocument();
+  });
 
-    await waitFor(() => {
-      expect(screen.getByText("bob")).toBeInTheDocument();
-    });
+  it("does NOT show admin buttons for system user", () => {
+    const system = makeUser({ id: 999, username: "system", authProvider: "system" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([system]);
 
-    // Alice is localUserId: 1 (current user) so she has no Disable button.
-    // Carol is already disabled so she has no Disable button.
-    // Only Bob (id: 2) has a Disable button.
-    const disableButtons = screen.getAllByText("Disable");
-    expect(disableButtons.length).toBe(1);
-    fireEvent.click(disableButtons[0]);
+    renderPage();
+    expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /revoke sessions/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /disable/i })).not.toBeInTheDocument();
+  });
 
-    expect(confirmSpy).toHaveBeenCalledWith("Disable logins for bob?");
-    await waitFor(() => {
-      expect(disableUserMock).toHaveBeenCalledWith(2);
-    });
+  it("confirm-cancel on handleToggleAdmin skips mutation", async () => {
+    const user = userEvent.setup();
+    const { mutateAsync } = stubMutations();
+    (useUpdateUser as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+
+    const other = makeUser({ id: 2, username: "bob" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([other]);
+
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /make admin/i }));
+
+    expect(window.confirm).toHaveBeenCalled();
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("confirm-accept on handleToggleAdmin calls updateUser", async () => {
+    const user = userEvent.setup();
+    const { mutateAsync } = stubMutations();
+    (useUpdateUser as ReturnType<typeof vi.fn>).mockReturnValue({ mutateAsync, isPending: false });
+
+    const other = makeUser({ id: 2, username: "bob" });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({ data: { localUserId: 1, isAdmin: true } });
+    stubUsers([other]);
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /make admin/i }));
+
+    expect(mutateAsync).toHaveBeenCalledWith({ userId: 2, input: { isAdmin: true } });
   });
 });

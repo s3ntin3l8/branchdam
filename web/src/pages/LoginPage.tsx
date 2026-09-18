@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { api } from "../api/client";
+import MfaChallengeForm from "../components/MfaChallengeForm";
 
 // LoginPage is the entry point for local-auth deployments. It calls
 // /api/v1/setup/status on mount: if the users table is empty, it renders
@@ -35,6 +36,18 @@ export default function LoginPage() {
 
   const loginMutation = useMutation({
     mutationFn: api.login,
+    onSuccess: (data) => {
+      if (data.mfaRequired) {
+        // Don't navigate -- show the MFA challenge form.
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+      navigate("/", { replace: true });
+    },
+  });
+
+  const mfaChallengeMutation = useMutation({
+    mutationFn: api.mfaChallenge,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["me"] });
       navigate("/", { replace: true });
@@ -55,6 +68,26 @@ export default function LoginPage() {
 
   if (status.readyForSetup) {
     return <SetupForm onSubmit={(input) => setupMutation.mutate(input)} pending={setupMutation.isPending} error={setupMutation.error?.message} />;
+  }
+
+  // Show MFA challenge when login returned mfaRequired.
+  if (loginMutation.data?.mfaRequired) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-neutral-950">
+        <div className="w-full max-w-sm rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow">
+          <div className="mb-4 flex items-center gap-2">
+            <span className="text-lg font-semibold">
+              <span className="font-normal">branch</span>DAM
+            </span>
+          </div>
+          <MfaChallengeForm
+            onSubmit={(code) => mfaChallengeMutation.mutate({ code })}
+            pending={mfaChallengeMutation.isPending}
+            error={mfaChallengeMutation.error?.message}
+          />
+        </div>
+      </div>
+    );
   }
 
   return (

@@ -2,6 +2,7 @@ package users
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,8 +16,10 @@ import (
 // newPasswordResetService builds a Service + PasswordResetService
 // against a fresh on-disk SQLite file, with migrations applied. Used
 // by every test in this file; mirrors newTestService from
-// users_test.go.
-func newPasswordResetService(t *testing.T, ttl time.Duration) (*Service, *PasswordResetService) {
+// users_test.go. The DB is returned alongside the service so tests
+// can seed raw table rows (mfa_credentials / mfa_recovery_codes) for
+// the Issue 10 clearing assertions.
+func newPasswordResetService(t *testing.T, ttl time.Duration) (*Service, *PasswordResetService, *db.DB) {
 	t.Helper()
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "users.db")
@@ -25,7 +28,7 @@ func newPasswordResetService(t *testing.T, ttl time.Duration) (*Service, *Passwo
 	t.Cleanup(func() { _ = database.Close() })
 	svc := NewService(database, testSecretBase64, ServiceOptions{})
 	reset := NewPasswordResetService(svc, PasswordResetServiceOptions{TokenTTL: ttl})
-	return svc, reset
+	return svc, reset, database
 }
 
 // makeLocalUser inserts a local user with the given email so the
@@ -63,7 +66,7 @@ func emailFromAny(v any) string {
 }
 
 func TestRequestPasswordReset_NoSuchUser_ReturnsFalse(t *testing.T) {
-	_, reset := newPasswordResetService(t, time.Hour)
+	_, reset, _ := newPasswordResetService(t, time.Hour)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "ghost@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
 	assert.False(t, ok, "no user exists -- request must return ok=false")
@@ -71,7 +74,7 @@ func TestRequestPasswordReset_NoSuchUser_ReturnsFalse(t *testing.T) {
 }
 
 func TestRequestPasswordReset_HappyPath_MintsToken(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	_ = makeLocalUser(t, svc, "alice", "alice@example.com", "correct horse battery staple", true)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -83,7 +86,7 @@ func TestRequestPasswordReset_HappyPath_MintsToken(t *testing.T) {
 }
 
 func TestRequestPasswordReset_DisabledUser_SilentlyIgnored(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "correct horse battery staple", true)
 	require.NoError(t, svc.DisableUser(context.Background(), id, time.Now()))
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
@@ -93,7 +96,7 @@ func TestRequestPasswordReset_DisabledUser_SilentlyIgnored(t *testing.T) {
 }
 
 func TestConfirmPasswordReset_HappyPath(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -110,7 +113,7 @@ func TestConfirmPasswordReset_HappyPath(t *testing.T) {
 }
 
 func TestConfirmPasswordReset_RejectsReusedToken(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	_ = makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -123,7 +126,7 @@ func TestConfirmPasswordReset_RejectsReusedToken(t *testing.T) {
 }
 
 func TestConfirmPasswordReset_RejectsExpiredToken(t *testing.T) {
-	svc, reset := newPasswordResetService(t, 50*time.Millisecond)
+	svc, reset, _ := newPasswordResetService(t, 50*time.Millisecond)
 	_ = makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -134,19 +137,19 @@ func TestConfirmPasswordReset_RejectsExpiredToken(t *testing.T) {
 }
 
 func TestConfirmPasswordReset_RejectsShortPassword(t *testing.T) {
-	_, reset := newPasswordResetService(t, time.Hour)
+	_, reset, _ := newPasswordResetService(t, time.Hour)
 	_, err := reset.ConfirmPasswordReset(context.Background(), "any-token", "short", "127.0.0.1", "test")
 	assert.ErrorIs(t, err, ErrTokenNotFound, "short password should fail with the same generic error, not a 422 -- keeps confirm 1:1 with token validity")
 }
 
 func TestConfirmPasswordReset_RejectsEmptyToken(t *testing.T) {
-	_, reset := newPasswordResetService(t, time.Hour)
+	_, reset, _ := newPasswordResetService(t, time.Hour)
 	_, err := reset.ConfirmPasswordReset(context.Background(), "", "any password here", "127.0.0.1", "test")
 	assert.ErrorIs(t, err, ErrTokenNotFound)
 }
 
 func TestConfirmPasswordReset_RejectsTamperedToken(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	_ = makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -157,7 +160,7 @@ func TestConfirmPasswordReset_RejectsTamperedToken(t *testing.T) {
 }
 
 func TestAdminResetPassword_RotatesAndReturnsNew(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
 	result, err := reset.AdminResetPassword(context.Background(), id, "admin:bob", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -171,13 +174,13 @@ func TestAdminResetPassword_RotatesAndReturnsNew(t *testing.T) {
 }
 
 func TestAdminResetPassword_NoSuchUser(t *testing.T) {
-	_, reset := newPasswordResetService(t, time.Hour)
+	_, reset, _ := newPasswordResetService(t, time.Hour)
 	_, err := reset.AdminResetPassword(context.Background(), 9999, "admin:bob", "127.0.0.1", "test")
 	assert.ErrorIs(t, err, ErrUserNotFound)
 }
 
 func TestRevokeToken_Idempotent(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	_ = makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)
@@ -189,7 +192,7 @@ func TestRevokeToken_Idempotent(t *testing.T) {
 }
 
 func TestListPending_OnlyUnconsumedAndUnexpired(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	_ = makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	_ = makeLocalUser(t, svc, "bob", "bob@example.com", "old password", false)
 	// 3 tokens: 2 for alice, 1 for bob
@@ -209,7 +212,7 @@ func TestListPending_OnlyUnconsumedAndUnexpired(t *testing.T) {
 }
 
 func TestListPendingForUser_FiltersByUser(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	aliceID := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	bobID := makeLocalUser(t, svc, "bob", "bob@example.com", "old password", false)
 	_, _, _ = reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
@@ -227,7 +230,7 @@ func TestListPendingForUser_FiltersByUser(t *testing.T) {
 func TestTokenTTL_DefaultWhenZero(t *testing.T) {
 	// The constructor must fall back to 24h when TokenTTL is zero
 	// or negative -- the test exercises the zero case directly.
-	_, reset := newPasswordResetService(t, 0)
+	_, reset, _ := newPasswordResetService(t, 0)
 	assert.Equal(t, 24*time.Hour, reset.TokenTTL(), "zero TokenTTL should fall back to 24h")
 }
 
@@ -249,7 +252,7 @@ func TestConfirmPasswordReset_RevokesExistingSessions(t *testing.T) {
 	// survive the rotation. Sessions are independent DB cookies
 	// validated separately from password_hash, so just rotating the
 	// hash is insufficient.
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	cookie1 := mintSessionForResetTest(t, svc, id)
 	cookie2 := mintSessionForResetTest(t, svc, id)
@@ -273,7 +276,7 @@ func TestAdminResetPassword_RevokesExistingSessions(t *testing.T) {
 	// admin-initiated path: when an operator resets a user's password
 	// (compromised credentials, lost device, offboarding), every
 	// active session must be revoked, not just the password rotated.
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
 	cookie1 := mintSessionForResetTest(t, svc, id)
 	cookie2 := mintSessionForResetTest(t, svc, id)
@@ -295,7 +298,7 @@ func TestConfirmPasswordReset_FailureDoesNotRevokeSessions(t *testing.T) {
 	// 404-returning path runs the password-rotation logic only on
 	// a successful consume (a row was returned by the CAS); a
 	// ErrTokenNotFound return path does nothing.
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	cookie := mintSessionForResetTest(t, svc, id)
 
@@ -314,7 +317,7 @@ func TestAdminResetPassword_FailureDoesNotRevokeSessions(t *testing.T) {
 	// also guards against future bugs where a partially-applied
 	// state could leak: a tx failure mid-rotation must not also
 	// revoke sessions for an unrelated user.
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
 	cookie := mintSessionForResetTest(t, svc, id)
 
@@ -336,7 +339,7 @@ func TestAdminResetPassword_FailureDoesNotRevokeSessions(t *testing.T) {
 // regression that swaps the CAS update for an unconditional
 // session-revoke would break this test but not the HTTP one.
 func TestConfirmPasswordReset_BadTokenDoesNotRevoke(t *testing.T) {
-	svc, reset := newPasswordResetService(t, time.Hour)
+	svc, reset, _ := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 	cookie := mintSessionForResetTest(t, svc, id)
 
@@ -348,4 +351,83 @@ func TestConfirmPasswordReset_BadTokenDoesNotRevoke(t *testing.T) {
 	sess, err := svc.GetSessionByCookieID(context.Background(), cookie)
 	require.NoError(t, err)
 	assert.False(t, sess.RevokedAt.Valid, "session must remain active on a failed (wrong-token) confirm -- matches the no-side-effects invariant for ErrTokenNotFound")
+}
+
+// TestAdminResetPassword_ClearsMFACredentials pins Issue 10 (PR #459
+// review): admin-initiated password reset must delete the target
+// user's mfa_credentials and mfa_recovery_codes rows. Without this
+// clear, a user who lost phone + recovery codes would be permanently
+// locked out: /mfa/disable requires a valid TOTP, so neither the
+// user nor an admin can disable MFA after the reset.
+//
+// The test directly inserts the credential and recovery rows via
+// ExecInTx (no MFA service needed -- just the raw table writes).
+// Asserts both rows are gone after AdminResetPassword.
+func TestAdminResetPassword_ClearsMFACredentials(t *testing.T) {
+	svc, reset, database := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
+
+	_, err := database.ExecInTx(context.Background(),
+		"INSERT INTO mfa_credentials (user_id, secret_encrypted, algo, digits, period, last_used_step, recovery_code_salt) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+		id, "v1:dummy", "SHA1", 6, 30, "salt-1234567890",
+	)
+	require.NoError(t, err)
+	_, err = database.ExecInTx(context.Background(),
+		"INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES (?1, ?2)",
+		id, "hash1",
+	)
+	require.NoError(t, err)
+	_, err = database.ExecInTx(context.Background(),
+		"INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES (?1, ?2)",
+		id, "hash2",
+	)
+	require.NoError(t, err)
+
+	_, err = reset.AdminResetPassword(context.Background(), id, "admin:bob", "127.0.0.1", "test")
+	require.NoError(t, err)
+
+	// mfa_credentials row for this user must be gone.
+	_, err = database.Reader.GetMFACredentials(context.Background(), id)
+	assert.ErrorIs(t, err, sql.ErrNoRows, "mfa_credentials row must be cleared by admin reset")
+
+	// mfa_recovery_codes rows for this user must be gone.
+	count, err := database.Reader.CountRecoveryCodesForUser(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count, "mfa_recovery_codes rows must be cleared by admin reset")
+}
+
+// TestConfirmPasswordReset_ClearsMFACredentials pins the same property
+// for the self-service confirm path: an attacker who has access to the
+// user's email (to mint a token) AND the user's password (to log in
+// immediately) would otherwise walk straight in via /mfa/challenge.
+// Clearing MFA on confirm forces re-enrollment, which requires the
+// legitimate user to physically re-add their authenticator.
+func TestConfirmPasswordReset_ClearsMFACredentials(t *testing.T) {
+	svc, reset, database := newPasswordResetService(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
+
+	_, err := database.ExecInTx(context.Background(),
+		"INSERT INTO mfa_credentials (user_id, secret_encrypted, algo, digits, period, last_used_step, recovery_code_salt) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+		id, "v1:dummy", "SHA1", 6, 30, "salt-1234567890",
+	)
+	require.NoError(t, err)
+	_, err = database.ExecInTx(context.Background(),
+		"INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES (?1, ?2)",
+		id, "hash1",
+	)
+	require.NoError(t, err)
+
+	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	_, err = reset.ConfirmPasswordReset(context.Background(), issue.PlaintextToken, "new password 123", "127.0.0.1", "test")
+	require.NoError(t, err)
+
+	_, err = database.Reader.GetMFACredentials(context.Background(), id)
+	assert.ErrorIs(t, err, sql.ErrNoRows, "mfa_credentials row must be cleared by self-service reset confirm")
+
+	count, err := database.Reader.CountRecoveryCodesForUser(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count, "mfa_recovery_codes rows must be cleared by self-service reset confirm")
 }

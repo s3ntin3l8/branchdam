@@ -185,6 +185,32 @@ func (d *DB) InTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	return nil
 }
 
+// InTxResult is the value-returning variant of InTx: callers that
+// need the closure's int64 (typically a sqlc :execrows rows-affected
+// count for a conditional UPDATE) use this. Mirrors InTx's contract:
+// fn's error rolls back, fn's return value is propagated after a
+// successful commit. Single-writer-connection semantics identical
+// to InTx -- same atomicity, same serialization point.
+func (d *DB) InTxResult(ctx context.Context, fn func(*sqlcgen.Queries) (int64, error)) (int64, error) {
+	tx, err := d.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin transaction: %w", err)
+	}
+
+	res, err := fn(sqlcgen.New(tx))
+	if err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return 0, fmt.Errorf("%w (rollback also failed: %v)", err, rbErr)
+		}
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit transaction: %w", err)
+	}
+	return res, nil
+}
+
 // ExecInTx runs a raw SQL statement inside a single write transaction on
 // the writer pool's one connection, returning the sql.Result so callers can
 // read RowsAffected. Test fixtures that need to set columns no sqlc query

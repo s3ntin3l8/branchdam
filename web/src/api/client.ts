@@ -23,7 +23,14 @@ import type {
   ListPairingsResponse,
   ListUsersResponse,
   LoginInput,
+  LoginResponse,
   Me,
+  MfaChallengeInput,
+  MfaDisableInput,
+  MfaEnableInput,
+  MfaEnableResponse,
+  MfaChallengeResponse,
+  MfaSetupResponse,
   NodeMetadatum,
   PairingAuditResponse,
   PasswordResetConfirmInput,
@@ -155,7 +162,7 @@ export const api = {
       body: JSON.stringify(input),
     }),
   login: (input: LoginInput) =>
-    request<{ ok: boolean }>("/api/v1/login", {
+    request<LoginResponse>("/api/v1/login", {
       method: "POST",
       body: JSON.stringify(input),
     }),
@@ -179,6 +186,25 @@ export const api = {
       `/api/v1/admin/users/${userId}/reset-password`,
       { method: "POST", body: JSON.stringify({} as AdminResetPasswordInput) }
     ),
+
+  // MFA endpoints (PR #410).
+  mfaSetup: () =>
+    request<MfaSetupResponse>("/api/v1/mfa/setup", { method: "POST" }),
+  mfaEnable: (input: MfaEnableInput) =>
+    request<MfaEnableResponse>("/api/v1/mfa/enable", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  mfaChallenge: (input: MfaChallengeInput) =>
+    request<MfaChallengeResponse>("/api/v1/mfa/challenge", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  mfaDisable: (input: MfaDisableInput) =>
+    request<{ ok: boolean }>("/api/v1/mfa/disable", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
 
   listAssets: (params: AssetQueryParams = {}) => {
     const qs = new URLSearchParams();
