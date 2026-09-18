@@ -86,22 +86,8 @@ func getOrCreateForwardJIT(ctx context.Context, svc *Service, name, email string
 		}
 		return sqlcgen.GetUserByEmailSourceRow{}, err
 	}
-	// Convert CreateForwardJITUserRow to GetUserByEmailSourceRow for return type compatibility
 	log.Info("auth: forward-JIT provisioned local admin", "email", email, "isAdmin", isAdmin)
-	return sqlcgen.GetUserByEmailSourceRow{
-		ID:           created.ID,
-		Username:     created.Username,
-		Email:        created.Email,
-		PasswordHash: created.PasswordHash,
-		IsAdmin:      created.IsAdmin,
-		Source:       created.Source,
-		CreatedAt:    created.CreatedAt,
-		CreatedBy:    created.CreatedBy,
-		DisabledAt:   created.DisabledAt,
-		AuthProvider: created.AuthProvider,
-		ExternalUid:  created.ExternalUid,
-		LastSeenAt:   created.LastSeenAt,
-	}, nil
+	return sqlcgen.GetUserByEmailSourceRow(created), nil
 }
 
 // getOrCreateForwardJITByUsername is the email-less fallback path.
@@ -128,20 +114,7 @@ func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username
 		return sqlcgen.GetUserByUsernameRow{}, err
 	}
 	log.Info("auth: forward-JIT provisioned local admin (username-keyed, no email)", "username", username)
-	return sqlcgen.GetUserByUsernameRow{
-		ID:           created.ID,
-		Username:     created.Username,
-		Email:        created.Email,
-		PasswordHash: created.PasswordHash,
-		IsAdmin:      created.IsAdmin,
-		Source:       created.Source,
-		CreatedAt:    created.CreatedAt,
-		CreatedBy:    created.CreatedBy,
-		DisabledAt:   created.DisabledAt,
-		AuthProvider: created.AuthProvider,
-		ExternalUid:  created.ExternalUid,
-		LastSeenAt:   created.LastSeenAt,
-	}, nil
+	return sqlcgen.GetUserByUsernameRow(created), nil
 }
 
 // slicesContainsAny returns true if any element of a is in b. Cheap

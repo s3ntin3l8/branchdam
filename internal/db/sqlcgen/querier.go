@@ -65,6 +65,9 @@ type Querier interface {
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
 	CountPairingAudit(ctx context.Context, pairingID int64) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
+	// Used by tests to assert mfa_recovery_codes rows are gone after
+	// password reset (Issue 10). Returns 0 when the user has no rows.
+	CountRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error)
 	// Observability for #182's automatic-retry bound: how many PUSH_FAILED rows
 	// for this remote have a retry_count at or past the bound, so
 	// ResetRemoteSyncStateFailed will never re-claim them again on its own.

@@ -363,6 +363,13 @@ func main() {
 		// defensive posture as loginLimiter (no per-account, to avoid
 		// leaking which addresses are registered via lockout timing).
 		resetLimiter := ratelimit.New()
+		// mfaChallengeLimiter is a per-IP sliding-window failure budget
+		// for /api/v1/mfa/challenge (Issue 2, PR #459 review): a 6-digit
+		// TOTP with +/-1 drift gives ~333k guesses per step, so a
+		// password-holder who reached /mfa/challenge could otherwise
+		// brute-force 3 tries per 30s. 5/min/IP matches loginLimiter's
+		// default fast threshold (60s cool-off after 5 failures).
+		mfaChallengeLimiter := ratelimit.New()
 		sessionMw := session.New(usersService, session.Config{
 			CookieName: "branchdam_session",
 			Log:        log,
@@ -406,14 +413,15 @@ func main() {
 			BaseURL:  cfg.Auth.Email.BaseURL,
 		}, log)
 		localAuthDeps = &httpapi.LocalAuthDeps{
-			Users:        usersService,
-			LoginLimiter: loginLimiter,
-			ResetLimiter: resetLimiter,
-			SessionMw:    sessionMw,
-			Reset:        passwordResetService,
-			Email:        emailNotifier,
-			MFA:          mfa.NewService(database, secretBox, log),
-			AuthMode:     authMode,
+			Users:               usersService,
+			LoginLimiter:        loginLimiter,
+			ResetLimiter:        resetLimiter,
+			SessionMw:           sessionMw,
+			Reset:               passwordResetService,
+			Email:               emailNotifier,
+			MFA:                 mfa.NewService(database, secretBox, log),
+			MFAChallengeLimiter: mfaChallengeLimiter,
+			AuthMode:            authMode,
 		}
 		// Pre-build the JIT provisioner closure so httpapi/Handler()
 		// can pass it to auth.RouteWithConfigAndJIT. nil when no admin

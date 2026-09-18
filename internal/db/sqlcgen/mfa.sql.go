@@ -11,12 +11,25 @@ import (
 )
 
 const clearMFAPendingSecret = `-- name: ClearMFAPendingSecret :exec
-UPDATE users SET mfa_pending_secret = NULL WHERE id = ?1
+UPDATE users SET mfa_pending_secret = NULL, mfa_pending_secret_created_at = NULL WHERE id = ?1
 `
 
 func (q *Queries) ClearMFAPendingSecret(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, clearMFAPendingSecret, id)
 	return err
+}
+
+const countRecoveryCodesForUser = `-- name: CountRecoveryCodesForUser :one
+SELECT COUNT(*) FROM mfa_recovery_codes WHERE user_id = ?1
+`
+
+// Used by tests to assert mfa_recovery_codes rows are gone after
+// password reset (Issue 10). Returns 0 when the user has no rows.
+func (q *Queries) CountRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRecoveryCodesForUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const deleteMFACredentials = `-- name: DeleteMFACredentials :exec
@@ -63,7 +76,7 @@ func (q *Queries) FindUnusedRecoveryCode(ctx context.Context, arg FindUnusedReco
 
 const getMFACredentials = `-- name: GetMFACredentials :one
 
-SELECT user_id, secret_encrypted, algo, digits, period, last_used_step
+SELECT user_id, secret_encrypted, algo, digits, period, last_used_step, recovery_code_salt
 FROM mfa_credentials
 WHERE user_id = ?1
 `
@@ -80,23 +93,25 @@ func (q *Queries) GetMFACredentials(ctx context.Context, userID int64) (MfaCrede
 		&i.Digits,
 		&i.Period,
 		&i.LastUsedStep,
+		&i.RecoveryCodeSalt,
 	)
 	return i, err
 }
 
 const getMFAPendingSecret = `-- name: GetMFAPendingSecret :one
-SELECT id, mfa_pending_secret FROM users WHERE id = ?1
+SELECT id, mfa_pending_secret, mfa_pending_secret_created_at FROM users WHERE id = ?1
 `
 
 type GetMFAPendingSecretRow struct {
-	ID               int64
-	MfaPendingSecret sql.NullString
+	ID                        int64
+	MfaPendingSecret          sql.NullString
+	MfaPendingSecretCreatedAt sql.NullInt64
 }
 
 func (q *Queries) GetMFAPendingSecret(ctx context.Context, id int64) (GetMFAPendingSecretRow, error) {
 	row := q.db.QueryRowContext(ctx, getMFAPendingSecret, id)
 	var i GetMFAPendingSecretRow
-	err := row.Scan(&i.ID, &i.MfaPendingSecret)
+	err := row.Scan(&i.ID, &i.MfaPendingSecret, &i.MfaPendingSecretCreatedAt)
 	return i, err
 }
 
@@ -155,16 +170,17 @@ func (q *Queries) MarkRecoveryCodeUsed(ctx context.Context, arg MarkRecoveryCode
 }
 
 const setMFAPendingSecret = `-- name: SetMFAPendingSecret :exec
-UPDATE users SET mfa_pending_secret = ?2 WHERE id = ?1
+UPDATE users SET mfa_pending_secret = ?2, mfa_pending_secret_created_at = ?3 WHERE id = ?1
 `
 
 type SetMFAPendingSecretParams struct {
-	ID               int64
-	MfaPendingSecret sql.NullString
+	ID                        int64
+	MfaPendingSecret          sql.NullString
+	MfaPendingSecretCreatedAt sql.NullInt64
 }
 
 func (q *Queries) SetMFAPendingSecret(ctx context.Context, arg SetMFAPendingSecretParams) error {
-	_, err := q.db.ExecContext(ctx, setMFAPendingSecret, arg.ID, arg.MfaPendingSecret)
+	_, err := q.db.ExecContext(ctx, setMFAPendingSecret, arg.ID, arg.MfaPendingSecret, arg.MfaPendingSecretCreatedAt)
 	return err
 }
 
@@ -197,23 +213,25 @@ func (q *Queries) UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStep
 }
 
 const upsertMFACredentials = `-- name: UpsertMFACredentials :exec
-INSERT INTO mfa_credentials (user_id, secret_encrypted, algo, digits, period, last_used_step)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+INSERT INTO mfa_credentials (user_id, secret_encrypted, algo, digits, period, last_used_step, recovery_code_salt)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 ON CONFLICT (user_id) DO UPDATE SET
     secret_encrypted = excluded.secret_encrypted,
     algo = excluded.algo,
     digits = excluded.digits,
     period = excluded.period,
-    last_used_step = excluded.last_used_step
+    last_used_step = excluded.last_used_step,
+    recovery_code_salt = excluded.recovery_code_salt
 `
 
 type UpsertMFACredentialsParams struct {
-	UserID          int64
-	SecretEncrypted string
-	Algo            string
-	Digits          int64
-	Period          int64
-	LastUsedStep    int64
+	UserID           int64
+	SecretEncrypted  string
+	Algo             string
+	Digits           int64
+	Period           int64
+	LastUsedStep     int64
+	RecoveryCodeSalt string
 }
 
 func (q *Queries) UpsertMFACredentials(ctx context.Context, arg UpsertMFACredentialsParams) error {
@@ -224,6 +242,7 @@ func (q *Queries) UpsertMFACredentials(ctx context.Context, arg UpsertMFACredent
 		arg.Digits,
 		arg.Period,
 		arg.LastUsedStep,
+		arg.RecoveryCodeSalt,
 	)
 	return err
 }

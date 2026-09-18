@@ -34,8 +34,8 @@ func newTestService(t *testing.T) (*Service, *db.DB) {
 func createTestUser(t *testing.T, database *db.DB, username string) int64 {
 	t.Helper()
 	res, err := database.ExecInTx(context.Background(),
-		"INSERT INTO users (username, source, password_hash, is_admin, created_at, created_by) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-		username, "local", "test-hash-not-a-real-argon2", time.Now().Unix(), "test",
+		"INSERT INTO users (username, source, password_hash, is_admin, created_at, created_by, auth_provider, external_uid) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7)",
+		username, "local", "test-hash-not-a-real-argon2", time.Now().Unix(), "test", "local", "local:"+username,
 	)
 	require.NoError(t, err)
 	id, err := res.LastInsertId()
@@ -106,14 +106,18 @@ func TestValidateTOTPCode(t *testing.T) {
 	_, err = svc.Enable(context.Background(), userID, code)
 	require.NoError(t, err)
 
-	// Re-generate for the current step (may have ticked).
+	// Re-generate for a strictly-future step: Enable consumed the
+	// current step (last_used_step), so re-using the same step's
+	// code is rejected by Issue 6's replay protection.
 	step = time.Now().Unix() / int64(DefaultTOTPPeriod)
-	validCode := computeTOTP(secret, step)
+	futureStep := step + 1
+	validCode := computeTOTP(secret, futureStep)
 
 	valid, err := svc.ValidateTOTPCode(context.Background(), userID, validCode)
 	require.NoError(t, err)
 	assert.True(t, valid)
 
+	// Wrong code still fails.
 	valid, err = svc.ValidateTOTPCode(context.Background(), userID, "000000")
 	require.NoError(t, err)
 	assert.False(t, valid)
@@ -223,6 +227,126 @@ func TestHasMFA(t *testing.T) {
 	_, err = svc.Enable(context.Background(), userID, code)
 	require.NoError(t, err)
 	assert.True(t, svc.HasMFA(context.Background(), userID))
+}
+
+// TestValidateTOTPCode_RejectsReplay pins Issue 6's replay protection:
+// once a step has been accepted, the same step's code is rejected on
+// every subsequent call within the same 30s window. Without this gate,
+// an attacker who observes a valid code (e.g. via a phishing copy-
+// paste) could replay it for the same window.
+func TestValidateTOTPCode_RejectsReplay(t *testing.T) {
+	svc, database := newTestService(t)
+	userID := createTestUser(t, database, "kira")
+
+	setupResult, err := svc.Setup(context.Background(), userID, "kira")
+	require.NoError(t, err)
+	secret := extractSecret(setupResult.OtpauthURI)
+	step := time.Now().Unix() / int64(DefaultTOTPPeriod)
+	code := computeTOTP(secret, step)
+	_, err = svc.Enable(context.Background(), userID, code)
+	require.NoError(t, err)
+
+	// First accept advances last_used_step.
+	step = time.Now().Unix() / int64(DefaultTOTPPeriod)
+	firstCode := computeTOTP(secret, step+1)
+	valid, err := svc.ValidateTOTPCode(context.Background(), userID, firstCode)
+	require.NoError(t, err)
+	assert.True(t, valid)
+
+	// Replaying the SAME code must fail -- the step is no longer
+	// strictly greater than last_used_step.
+	valid, err = svc.ValidateTOTPCode(context.Background(), userID, firstCode)
+	require.NoError(t, err)
+	assert.False(t, valid, "replay of an accepted code must be rejected")
+}
+
+// TestEnable_RejectsExpiredPendingSecret pins Issue 7's TTL enforcement:
+// a pending secret older than PendingSecretTTL is refused at Enable
+// time. The test sets up a user, manually rewinds the
+// mfa_pending_secret_created_at column past the TTL, and confirms the
+// next Enable returns the "expired" error and clears the stale row.
+func TestEnable_RejectsExpiredPendingSecret(t *testing.T) {
+	svc, database := newTestService(t)
+	userID := createTestUser(t, database, "leon")
+
+	_, err := svc.Setup(context.Background(), userID, "leon")
+	require.NoError(t, err)
+
+	// Rewind the pending-secret timestamp past PendingSecretTTL.
+	// The TTL constant lives in this package; use it directly so a
+	// future config knob change is reflected here too.
+	stale := time.Now().Add(-2 * PendingSecretTTL).Unix()
+	_, err = database.ExecInTx(context.Background(),
+		"UPDATE users SET mfa_pending_secret_created_at = ?1 WHERE id = ?2",
+		stale, userID,
+	)
+	require.NoError(t, err)
+
+	secret := ""
+	{
+		row, err := database.Reader.GetMFAPendingSecret(context.Background(), userID)
+		require.NoError(t, err)
+		require.True(t, row.MfaPendingSecret.Valid)
+		secret, err = testDecrypt(row.MfaPendingSecret.String)
+		require.NoError(t, err)
+	}
+	step := time.Now().Unix() / int64(DefaultTOTPPeriod)
+	code := computeTOTP(secret, step)
+
+	_, err = svc.Enable(context.Background(), userID, code)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired")
+
+	// Stale pending row should be cleared by Enable so the next
+	// /mfa/setup call isn't blocked by an old envelope.
+	row, err := database.Reader.GetMFAPendingSecret(context.Background(), userID)
+	require.NoError(t, err)
+	assert.False(t, row.MfaPendingSecret.Valid, "Enable should clear the stale pending secret")
+}
+
+// TestRecoveryCodes_AreSaltedPerUser pins Issue 8: recovery codes for
+// one user must NOT verify against a different user's salt (otherwise
+// the per-user salt isn't actually doing anything). Uses the same
+// plaintext code twice across two enrolled users with different salts.
+func TestRecoveryCodes_AreSaltedPerUser(t *testing.T) {
+	svc, database := newTestService(t)
+	u1 := createTestUser(t, database, "mia")
+	u2 := createTestUser(t, database, "nia")
+
+	enroll := func(t *testing.T, userID int64) []string {
+		t.Helper()
+		setupResult, err := svc.Setup(context.Background(), userID, "x")
+		require.NoError(t, err)
+		secret := extractSecret(setupResult.OtpauthURI)
+		step := time.Now().Unix() / int64(DefaultTOTPPeriod)
+		codes, err := svc.Enable(context.Background(), userID, computeTOTP(secret, step))
+		require.NoError(t, err)
+		return codes
+	}
+	u1Codes := enroll(t, u1)
+	u2Codes := enroll(t, u2)
+
+	// u1's code must NOT validate against u2 (different salt).
+	for _, c := range u1Codes {
+		valid, err := svc.ValidateRecoveryCode(context.Background(), u2, c)
+		require.NoError(t, err)
+		assert.False(t, valid, "u1's recovery code must not validate against u2")
+	}
+	// u2's code must NOT validate against u1.
+	for _, c := range u2Codes {
+		valid, err := svc.ValidateRecoveryCode(context.Background(), u1, c)
+		require.NoError(t, err)
+		assert.False(t, valid, "u2's recovery code must not validate against u1")
+	}
+}
+
+// testDecrypt is a thin wrapper around the same Box used by newTestService
+// so the TTL test can recover the secret without depending on the
+// mfa.Service.Open API. Lives here (test only) instead of exporting an
+// internal helper.
+func testDecrypt(ciphertext string) (string, error) {
+	box := testBox(&testing.T{})
+	return box.Open(ciphertext)
 }
 
 // extractSecret parses the TOTP secret from an otpauth:// URI.

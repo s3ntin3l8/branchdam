@@ -154,12 +154,13 @@ type MediaNode struct {
 }
 
 type MfaCredential struct {
-	UserID          int64
-	SecretEncrypted string
-	Algo            string
-	Digits          int64
-	Period          int64
-	LastUsedStep    int64
+	UserID           int64
+	SecretEncrypted  string
+	Algo             string
+	Digits           int64
+	Period           int64
+	LastUsedStep     int64
+	RecoveryCodeSalt string
 }
 
 type MfaRecoveryCode struct {
@@ -249,19 +250,20 @@ type StorageLocation struct {
 }
 
 type User struct {
-	ID               int64
-	Username         string
-	Email            sql.NullString
-	PasswordHash     sql.NullString
-	IsAdmin          int64
-	Source           string
-	CreatedAt        int64
-	CreatedBy        string
-	DisabledAt       sql.NullInt64
-	AuthProvider     string
-	ExternalUid      string
-	LastSeenAt       int64
-	MfaPendingSecret sql.NullString
+	ID                        int64
+	Username                  string
+	Email                     sql.NullString
+	PasswordHash              sql.NullString
+	IsAdmin                   int64
+	Source                    string
+	CreatedAt                 int64
+	CreatedBy                 string
+	DisabledAt                sql.NullInt64
+	AuthProvider              string
+	ExternalUid               string
+	LastSeenAt                int64
+	MfaPendingSecret          sql.NullString
+	MfaPendingSecretCreatedAt sql.NullInt64
 }
 
 type VMediaEdgesResolved struct {

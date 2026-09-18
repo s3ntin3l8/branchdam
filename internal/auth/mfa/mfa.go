@@ -5,28 +5,48 @@
 //
 // MFA enrollment flow:
 //  1. POST /mfa/setup -> generates secret, stores as mfa_pending_secret
-//  2. POST /mfa/enable {code} -> validates code, promotes to mfa_credentials,
-//     mints 8 recovery codes, returns them once
+//     with mfa_pending_secret_created_at stamped for PendingSecretTTL
+//  2. POST /mfa/enable {code} -> validates code (and TTL), promotes to
+//     mfa_credentials with a random per-user recovery_code_salt, mints
+//     8 recovery codes (each sha256(salt||code)), returns them once
 //
 // Login flow (when user has mfa_credentials):
-//  1. POST /login -> password OK -> creates half-auth session (mfa_verified_at=NULL)
-//     -> returns {mfaRequired: true}
-//  2. POST /mfa/challenge {code} -> validates TOTP or recovery code
-//     -> sets mfa_verified_at -> returns {ok: true}
+//  1. POST /login -> password OK -> creates half-auth session
+//     (mfa_verified_at=NULL) -> returns {mfaRequired: true}
+//  2. POST /mfa/challenge {code} -> validates TOTP (with replay
+//     protection via last_used_step) or recovery code -> sets
+//     mfa_verified_at -> returns {ok: true}
 //
 // Disable flow:
 //  3. POST /mfa/disable {password, code} -> verifies password + TOTP
 //     -> deletes mfa_credentials + recovery codes
+//
+// Hardening notes (review feedback on PR #459):
+//   - last_used_step is read on every TOTP validate: a candidate step
+//     <= stored step is rejected, so a code observed once cannot be
+//     replayed within the same 30s window (Issue 6).
+//   - PendingSecretTTL is enforced at Enable time via
+//     mfa_pending_secret_created_at: a pending secret older than the
+//     TTL is rejected and the user has to call /mfa/setup again
+//     (Issue 7).
+//   - Recovery code hashes use sha256(recovery_code_salt||code) -- a
+//     16-byte per-user random salt, stored alongside the TOTP secret
+//     envelope on mfa_credentials (Issue 8).
+//   - TOTP comparison uses crypto/subtle.ConstantTimeCompare, not the
+//     hand-rolled early-exit loop (Issue 9).
 package mfa
 
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math"
@@ -39,13 +59,14 @@ import (
 )
 
 const (
-	DefaultTOTPPeriod  = 30
-	DefaultTOTPDigits  = 6
-	DefaultTOTPAlgo    = "SHA1"
-	DriftTolerance     = 1
-	RecoveryCodeCount  = 8
-	RecoveryCodeLength = 10
-	PendingSecretTTL   = 15 * time.Minute
+	DefaultTOTPPeriod     = 30
+	DefaultTOTPDigits     = 6
+	DefaultTOTPAlgo       = "SHA1"
+	DriftTolerance        = 1
+	RecoveryCodeCount     = 8
+	RecoveryCodeLength    = 10
+	PendingSecretTTL      = 15 * time.Minute
+	recoveryCodeSaltBytes = 16
 )
 
 type Service struct {
@@ -77,10 +98,12 @@ func (s *Service) Setup(ctx context.Context, userID int64, username string) (*Se
 		return nil, fmt.Errorf("encrypt secret: %w", err)
 	}
 
+	now := time.Now().Unix()
 	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.SetMFAPendingSecret(ctx, sqlcgen.SetMFAPendingSecretParams{
-			ID:               userID,
-			MfaPendingSecret: sql.NullString{String: encrypted, Valid: true},
+			ID:                        userID,
+			MfaPendingSecret:          sql.NullString{String: encrypted, Valid: true},
+			MfaPendingSecretCreatedAt: sql.NullInt64{Int64: now, Valid: true},
 		})
 	}); err != nil {
 		return nil, fmt.Errorf("store pending secret: %w", err)
@@ -95,6 +118,21 @@ func (s *Service) Setup(ctx context.Context, userID int64, username string) (*Se
 	}, nil
 }
 
+// Enable validates the presented TOTP code against the pending secret,
+// promotes it to mfa_credentials, and mints RecoveryCodeCount recovery
+// codes (each salted + sha256-hashed). Returns the plaintext codes
+// exactly once.
+//
+// Refuses a pending secret older than PendingSecretTTL (Issue 7): the
+// user must call /mfa/setup again. Refuses if MFA is already enabled --
+// the handler layer enforces this earlier; the redundant check here is
+// belt-and-braces against the credentials row appearing between
+// handler check and store.
+//
+// All RecoveryCodeCount inserts happen inside ONE write transaction
+// (Issue 11): a failure mid-loop used to commit a partial set while
+// Enable returned an error, leaving the user with no plaintext codes
+// but a partial DB set. Now the whole set either commits or rolls back.
 func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]string, error) {
 	row, err := s.db.Reader.GetMFAPendingSecret(ctx, userID)
 	if err != nil {
@@ -102,6 +140,17 @@ func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]stri
 	}
 	if !row.MfaPendingSecret.Valid || row.MfaPendingSecret.String == "" {
 		return nil, fmt.Errorf("no pending MFA setup; call /mfa/setup first")
+	}
+	if !row.MfaPendingSecretCreatedAt.Valid {
+		return nil, fmt.Errorf("no pending MFA setup; call /mfa/setup first")
+	}
+	if time.Since(time.Unix(row.MfaPendingSecretCreatedAt.Int64, 0)) > PendingSecretTTL {
+		// Clear the stale pending secret so the next /mfa/setup
+		// call isn't blocked by an old envelope.
+		_ = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.ClearMFAPendingSecret(ctx, userID)
+		})
+		return nil, fmt.Errorf("pending MFA setup expired; call /mfa/setup again")
 	}
 
 	secret, err := s.box.Open(row.MfaPendingSecret.String)
@@ -115,35 +164,46 @@ func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]stri
 		return nil, fmt.Errorf("invalid TOTP code")
 	}
 
-	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		if err := q.UpsertMFACredentials(ctx, sqlcgen.UpsertMFACredentialsParams{
-			UserID:          userID,
-			SecretEncrypted: row.MfaPendingSecret.String,
-			Algo:            DefaultTOTPAlgo,
-			Digits:          int64(DefaultTOTPDigits),
-			Period:          int64(DefaultTOTPPeriod),
-			LastUsedStep:    step,
-		}); err != nil {
-			return fmt.Errorf("upsert mfa credentials: %w", err)
-		}
-		return q.ClearMFAPendingSecret(ctx, userID)
-	}); err != nil {
-		return nil, err
+	salt, err := generateRecoveryCodeSalt()
+	if err != nil {
+		return nil, fmt.Errorf("generate recovery code salt: %w", err)
 	}
 
-	codes, hashes, err := generateRecoveryCodes(RecoveryCodeCount)
+	codes, hashes, err := generateRecoveryCodes(RecoveryCodeCount, salt)
 	if err != nil {
 		return nil, fmt.Errorf("generate recovery codes: %w", err)
 	}
-	for _, hash := range hashes {
-		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-			return q.InsertRecoveryCodes(ctx, sqlcgen.InsertRecoveryCodesParams{
+
+	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if err := q.UpsertMFACredentials(ctx, sqlcgen.UpsertMFACredentialsParams{
+			UserID:           userID,
+			SecretEncrypted:  row.MfaPendingSecret.String,
+			Algo:             DefaultTOTPAlgo,
+			Digits:           int64(DefaultTOTPDigits),
+			Period:           int64(DefaultTOTPPeriod),
+			LastUsedStep:     step,
+			RecoveryCodeSalt: salt,
+		}); err != nil {
+			return fmt.Errorf("upsert mfa credentials: %w", err)
+		}
+		if err := q.ClearMFAPendingSecret(ctx, userID); err != nil {
+			return fmt.Errorf("clear pending secret: %w", err)
+		}
+		// Insert all recovery codes in this single tx; a failure
+		// on any one rolls back the whole set, leaving Enable's
+		// "no codes returned to user" contract consistent with
+		// the DB state (Issue 11).
+		for _, hash := range hashes {
+			if err := q.InsertRecoveryCodes(ctx, sqlcgen.InsertRecoveryCodesParams{
 				UserID:   userID,
 				CodeHash: hash,
-			})
-		}); err != nil {
-			return nil, fmt.Errorf("insert recovery code: %w", err)
+			}); err != nil {
+				return fmt.Errorf("insert recovery code: %w", err)
+			}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return codes, nil
@@ -187,6 +247,13 @@ func (s *Service) Disable(ctx context.Context, userID int64, verifyPassword func
 	})
 }
 
+// ValidateTOTPCode checks the presented code against the user's TOTP
+// credentials with both drift tolerance and replay protection
+// (Issue 6): a candidate step <= the stored last_used_step is
+// rejected, so an attacker who observes a valid code cannot replay
+// it within the same 30s window. The accepted step is then written
+// back as the new last_used_step, so the same comparison rejects any
+// future replay attempt in that window.
 func (s *Service) ValidateTOTPCode(ctx context.Context, userID int64, code string) (bool, error) {
 	creds, err := s.db.Reader.GetMFACredentials(ctx, userID)
 	if err != nil {
@@ -204,14 +271,15 @@ func (s *Service) ValidateTOTPCode(ctx context.Context, userID int64, code strin
 	now := time.Now().Unix()
 	step := now / int64(creds.Period)
 
-	if !validateTOTP(secret, code, step) {
+	acceptedStep, ok := acceptTOTP(secret, code, step, creds.LastUsedStep)
+	if !ok {
 		return false, nil
 	}
 
 	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.UpdateLastUsedStep(ctx, sqlcgen.UpdateLastUsedStepParams{
 			UserID:       userID,
-			LastUsedStep: step,
+			LastUsedStep: acceptedStep,
 		})
 	}); err != nil {
 		s.log.Warn("failed to update last_used_step", "userID", userID, "error", err)
@@ -221,7 +289,14 @@ func (s *Service) ValidateTOTPCode(ctx context.Context, userID int64, code strin
 }
 
 func (s *Service) ValidateRecoveryCode(ctx context.Context, userID int64, code string) (bool, error) {
-	hash := hashRecoveryCode(code)
+	creds, err := s.db.Reader.GetMFACredentials(ctx, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("get mfa credentials: %w", err)
+	}
+	hash := hashRecoveryCode(code, creds.RecoveryCodeSalt)
 
 	row, err := s.db.Reader.FindUnusedRecoveryCode(ctx, sqlcgen.FindUnusedRecoveryCodeParams{
 		UserID:   userID,
@@ -256,12 +331,15 @@ func (s *Service) HasMFA(ctx context.Context, userID int64) bool {
 
 func generateSecret(length int) (string, error) {
 	buf := make([]byte, length)
-	if _, err := generateRandomBytes(buf); err != nil {
+	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf), nil
 }
 
+// validateTOTP is the pure check used at setup/disable time, where
+// there's no prior last_used_step to defend against. ValidateTOTPCode
+// is the per-session entry point that adds replay protection.
 func validateTOTP(secret, code string, step int64) bool {
 	for i := -DriftTolerance; i <= DriftTolerance; i++ {
 		candidateStep := step + int64(i)
@@ -269,11 +347,30 @@ func validateTOTP(secret, code string, step int64) bool {
 			continue
 		}
 		expected := computeTOTP(secret, candidateStep)
-		if subtleConstantTimeEqual(code, expected) {
+		if subtle.ConstantTimeCompare([]byte(code), []byte(expected)) == 1 {
 			return true
 		}
 	}
 	return false
+}
+
+// acceptTOTP mirrors validateTOTP but additionally enforces
+// lastUsedStep < candidateStep (Issue 6: replay protection within the
+// same 30s window). Returns the step that was accepted, so the caller
+// can persist it as the new last_used_step and a future identical
+// challenge fails on the same gate.
+func acceptTOTP(secret, code string, step, lastUsedStep int64) (int64, bool) {
+	for i := -DriftTolerance; i <= DriftTolerance; i++ {
+		candidateStep := step + int64(i)
+		if candidateStep <= lastUsedStep {
+			continue
+		}
+		expected := computeTOTP(secret, candidateStep)
+		if subtle.ConstantTimeCompare([]byte(code), []byte(expected)) == 1 {
+			return candidateStep, true
+		}
+	}
+	return 0, false
 }
 
 func computeTOTP(secret string, step int64) string {
@@ -296,21 +393,17 @@ func computeTOTP(secret string, step int64) string {
 	return fmt.Sprintf("%0*d", DefaultTOTPDigits, code)
 }
 
-func subtleConstantTimeEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // --- Recovery codes ---
 
-func generateRecoveryCodes(count int) (codes []string, hashes []string, err error) {
+func generateRecoveryCodeSalt() (string, error) {
+	buf := make([]byte, recoveryCodeSaltBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("read salt: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func generateRecoveryCodes(count int, salt string) (codes []string, hashes []string, err error) {
 	codes = make([]string, count)
 	hashes = make([]string, count)
 	for i := 0; i < count; i++ {
@@ -319,7 +412,7 @@ func generateRecoveryCodes(count int) (codes []string, hashes []string, err erro
 			return nil, nil, genErr
 		}
 		codes[i] = code
-		hashes[i] = hashRecoveryCode(code)
+		hashes[i] = hashRecoveryCode(code, salt)
 	}
 	return codes, hashes, nil
 }
@@ -327,7 +420,7 @@ func generateRecoveryCodes(count int) (codes []string, hashes []string, err erro
 func generateRecoveryCode(length int) (string, error) {
 	const charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	buf := make([]byte, length)
-	if _, err := generateRandomBytes(buf); err != nil {
+	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	for i := range buf {
@@ -336,7 +429,13 @@ func generateRecoveryCode(length int) (string, error) {
 	return string(buf), nil
 }
 
-func hashRecoveryCode(code string) string {
-	h := sha256.Sum256([]byte(code))
-	return fmt.Sprintf("%x", h)
+// hashRecoveryCode returns hex(sha256(salt || code)). salt is the
+// per-user 16-byte random salt stored on mfa_credentials (Issue 8);
+// without it the 50-bit recovery codes are brute-forceable from an
+// offline DB dump in seconds.
+func hashRecoveryCode(code, salt string) string {
+	h := sha256.New()
+	h.Write([]byte(salt))
+	h.Write([]byte(code))
+	return hex.EncodeToString(h.Sum(nil))
 }

@@ -35,16 +35,17 @@ var errSetupComplete = errors.New("setup already complete")
 // user service, login rate limiter, and session middleware (which
 // knows the cookie name + timeouts).
 type localAuthHandlers struct {
-	users        *users.Service
-	loginLimiter *ratelimit.Limiter
-	resetLimiter *ratelimit.Limiter
-	sessionMw    *session.Middleware
-	reset        *users.PasswordResetService
-	email        email.Notifier
-	mfa          *mfa.Service
-	log          *slog.Logger
-	authMode     auth.AuthMode
-	jit          auth.JITProvisioner
+	users               *users.Service
+	loginLimiter        *ratelimit.Limiter
+	resetLimiter        *ratelimit.Limiter
+	sessionMw           *session.Middleware
+	reset               *users.PasswordResetService
+	email               email.Notifier
+	mfa                 *mfa.Service
+	mfaChallengeLimiter *ratelimit.Limiter
+	log                 *slog.Logger
+	authMode            auth.AuthMode
+	jit                 auth.JITProvisioner
 }
 
 // registerLocalAuthRoutes mounts /api/v1/setup/status,

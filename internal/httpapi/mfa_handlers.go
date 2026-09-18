@@ -126,6 +126,20 @@ func (s *Server) handleMFAChallenge(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "MFA is not configured")
 		return
 	}
+	// Rate-limit per-IP (Issue 2): a 6-digit TOTP with +/-1 drift
+	// gives ~333k guesses per step, so a password-holder who reaches
+	// this endpoint could otherwise brute-force. 5 attempts per
+	// minute matches the /login fast threshold (same Limiter with
+	// the default Config); the rate limiter is read-only at /check
+	// time, and the handler records a failure on every wrong code.
+	ip := clientIP(s, r)
+	if s.localAuth.mfaChallengeLimiter != nil {
+		if d := s.localAuth.mfaChallengeLimiter.Check(ip); !d.Allowed {
+			w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
+			writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
+			return
+		}
+	}
 	localUser, ok := auth.FromUser(r.Context())
 	if !ok {
 		writeJSONError(w, http.StatusUnauthorized, "authentication required")
@@ -168,9 +182,15 @@ func (s *Server) handleMFAChallenge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !valid {
-		s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: localUser.UserID, Valid: true}, "", source, outcome, clientIP(s, r), r.UserAgent(), "{}")
+		if s.localAuth.mfaChallengeLimiter != nil {
+			s.localAuth.mfaChallengeLimiter.RecordFailure(ip)
+		}
+		s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: localUser.UserID, Valid: true}, "", source, outcome, ip, r.UserAgent(), "{}")
 		writeJSONError(w, http.StatusUnauthorized, "invalid code")
 		return
+	}
+	if s.localAuth.mfaChallengeLimiter != nil {
+		s.localAuth.mfaChallengeLimiter.RecordSuccess(ip)
 	}
 
 	// Mark session as MFA-verified.
@@ -194,7 +214,7 @@ func (s *Server) handleMFAChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: localUser.UserID, Valid: true}, "", source, "ok", clientIP(s, r), r.UserAgent(), "{}")
+	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: localUser.UserID, Valid: true}, "", source, "ok", ip, r.UserAgent(), "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

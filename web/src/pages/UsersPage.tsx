@@ -306,11 +306,22 @@ export default function UsersPage() {
                       {user.email || "—"}
                     </td>
                     <td className="px-4 py-3">
+                      {user.isAdmin ? (
+                        <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
+                          Admin
+                        </span>
+                      ) : (
+                        <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
+                          User
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
                       {user.mfaEnabled ? (
                         <span className="rounded border border-emerald-800/60 bg-emerald-950/80 px-2 py-0.5 text-xs text-emerald-300">
                           Enabled
                         </span>
-                      ) : user.source === "local" && !isSelf ? (
+                      ) : user.source === "local" && isSelf ? (
                         <button
                           type="button"
                           onClick={() => navigate("/mfa/setup")}
