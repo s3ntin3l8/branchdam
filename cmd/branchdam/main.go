@@ -246,7 +246,7 @@ func main() {
 	// can attribute their writes to a stable id. Wired into
 	// Deps.Attribution / Deps.Audit below; ScanDeps.StartedByUserID uses
 	// the system user id for the SweeperSupervisor's INCREMENTAL passes.
-	attributionSvc := attributionusers.NewService(database)
+	attributionSvc := attributionusers.NewService(database).WithLogger(log)
 	if _, err := attributionSvc.EnsureSystemUser(ctx); err != nil {
 		log.Error("attribution: ensure system user", "err", err)
 		os.Exit(1)

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -59,11 +60,19 @@ func TestMergePrincipals_Both_OnlyForward(t *testing.T) {
 
 func TestMergePrincipals_Both_Both_UnionGroupsAndPreferLocal(t *testing.T) {
 	local := &Principal{
-		Kind: KindUser, Name: "alice", Email: "alice@example.com",
+		Kind:          KindUser,
+		Name:          "alice",
+		Email:         "alice@example.com",
+		ExternalUID:   "alice",
+		AuthProvider:  AuthProviderLocal,
 		Authenticated: true,
 	}
 	fwd := &Principal{
-		Kind: KindUser, Name: "alice", Email: "alice@authentik",
+		Kind:          KindUser,
+		Name:          "alice",
+		Email:         "alice@authentik",
+		ExternalUID:   "abc123-uuid",
+		AuthProvider:  "authentik",
 		Groups:        []string{"dam-admins", "users"},
 		Authenticated: true,
 	}
@@ -72,6 +81,9 @@ func TestMergePrincipals_Both_Both_UnionGroupsAndPreferLocal(t *testing.T) {
 	assert.Equal(t, "alice", got.Name)
 	// Local email wins on collision (it's the interactive login's source of truth).
 	assert.Equal(t, "alice@example.com", got.Email)
+	// Local ExternalUID/AuthProvider win (interactive login).
+	assert.Equal(t, "alice", got.ExternalUID)
+	assert.Equal(t, AuthProviderLocal, got.AuthProvider)
 	// Groups union even though local has none.
 	assert.Equal(t, []string{"dam-admins", "users"}, got.Groups)
 	assert.True(t, got.Authenticated)
@@ -156,3 +168,107 @@ func TestRouteWithConfig_AgentPathSkipsBothChains(t *testing.T) {
 }
 
 func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// fakeChainWithView is a ChainBuilder that sets both a Principal and a
+// LocalUserView on the request context. Used to test that LocalUserView
+// survives the capture-merge flow in RouteWithConfigAndJIT.
+func fakeChainWithView(p Principal, view LocalUserView) ChainBuilder {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			if p.Name != "" || p.Email != "" || len(p.Groups) > 0 || p.Authenticated {
+				ctx = WithPrincipal(ctx, p)
+			}
+			if view.UserID != 0 {
+				ctx = WithLocalUserView(ctx, view)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func TestRouteWithConfig_BothMode_LocalViewPropagated(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	// No forward-auth headers — local chain only.
+
+	var observedLocalView *LocalUserView
+	rec := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		v, ok := FromUser(r.Context())
+		if ok {
+			observedLocalView = &v
+		}
+	})
+
+	localChain := fakeChainWithView(
+		Principal{Kind: KindUser, Name: "bob", Authenticated: true},
+		LocalUserView{UserID: 42, IsAdmin: true},
+	)
+
+	h := RouteWithConfig(AgentConfig{APIKey: ""}, AuthModeBoth, localChain, testLogger(), rec)
+	h.ServeHTTP(w, r)
+
+	if observedLocalView == nil {
+		t.Fatal("LocalUserView not propagated through capture merge")
+	}
+	if observedLocalView.UserID != 42 {
+		t.Errorf("LocalUserView.UserID = %d, want 42", observedLocalView.UserID)
+	}
+	if !observedLocalView.IsAdmin {
+		t.Error("LocalUserView.IsAdmin = false, want true")
+	}
+}
+
+func TestRouteWithConfig_BothMode_JITDoesNotOverwriteLocalView(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	r.Header.Set("X-Authentik-Username", "alice-fwd")
+
+	var observedLocalView *LocalUserView
+	var observedPrincipal *Principal
+	rec := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if p, ok := From(r.Context()); ok {
+			observedPrincipal = &p
+		}
+		v, ok := FromUser(r.Context())
+		if ok {
+			observedLocalView = &v
+		}
+	})
+
+	// Local chain fires with a session — JIT should NOT run (localCap.principal != nil).
+	localChain := fakeChainWithView(
+		Principal{Kind: KindUser, Name: "alice-local", Authenticated: true},
+		LocalUserView{UserID: 7, IsAdmin: false},
+	)
+
+	// JIT provisioner that would create a view — should not be called.
+	jitCalled := false
+	jit := func(_ context.Context, _ *Principal, _ []string, _ bool) (LocalUserView, error) {
+		jitCalled = true
+		return LocalUserView{UserID: 99, IsAdmin: true}, nil
+	}
+
+	h := RouteWithConfigAndJIT(
+		AgentConfig{APIKey: ""}, AuthModeBoth, localChain,
+		jit, nil, false, testLogger(), rec,
+	)
+	h.ServeHTTP(w, r)
+
+	if jitCalled {
+		t.Error("JIT provisioner should not fire when local session exists")
+	}
+	if observedLocalView == nil {
+		t.Fatal("LocalUserView not propagated from local session")
+	}
+	if observedLocalView.UserID != 7 {
+		t.Errorf("LocalUserView.UserID = %d, want 7 (from local session, not JIT)", observedLocalView.UserID)
+	}
+	if observedPrincipal == nil {
+		t.Fatal("Principal not propagated")
+	}
+	// Local name wins in merge.
+	if observedPrincipal.Name != "alice-local" {
+		t.Errorf("Principal.Name = %q, want %q", observedPrincipal.Name, "alice-local")
+	}
+}

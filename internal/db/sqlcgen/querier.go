@@ -671,6 +671,21 @@ type Querier interface {
 	// untouched -- no CASCADE, no rewrite needed.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
 	RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error
+	// Realigns external_uid AND auth_provider on an existing user row.
+	// Used by the local reconciliation path in
+	// internal/users.Service.resolveLocal when a username-based lookup
+	// finds a source='local' row whose stored external_uid no longer
+	// matches the current username -- typically because an admin renamed
+	// the local user without an accompany-side sync to external_uid, or
+	// because migration 00028 Down rewrote auth_provider to
+	// 'forward-link' and external_uid to the raw username. The
+	// session/middleware sets ExternalUID=username for local principals,
+	// so a renamed or Down-affected user lands here on their next
+	// request and attribution silently NULLs until this UPDATE runs.
+	// Caller (resolveLocal) verifies source='local' and the pre-update
+	// external_uid mismatch before invoking, so this query is a
+	// targeted single-row UPDATE with no further filtering.
+	ReconcileLocalExternalUID(ctx context.Context, arg ReconcileLocalExternalUIDParams) error
 	// Every row still 'RUNNING' at process startup, before this process has
 	// created any scan_jobs row of its own, was left behind by a previous
 	// process that never reached a terminal state -- SIGKILL, OOM-kill,

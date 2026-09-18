@@ -1,13 +1,19 @@
 package users
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
 func newService(t *testing.T) *Service {
@@ -293,4 +299,277 @@ func TestResolveOrCreate_RefreshesLastSeenAt(t *testing.T) {
 		t.Logf("first.ID=%d row.LastSeenAt=%d", first.ID, row.LastSeenAt)
 	}
 	_ = first // first.ID is the row id; last_seen_at lives in row
+}
+
+// TestResolveOrCreate_LocalUser: local-session Principals (auth_provider="local")
+// should resolve to the existing local user row via lookup, not INSERT.
+// The INSERT path uses source='forward-link' which would violate the CHECK
+// constraint on source/password_hash for source='local' rows.
+func TestResolveOrCreate_LocalUser(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+
+	// Insert a local user row directly (simulating CreateLocalUser).
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('testlocal', 'testlocal@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'local', 'testlocal')`,
+	)
+	if err != nil {
+		t.Fatalf("insert local user: %v", err)
+	}
+
+	// ResolveOrCreate with a local-session Principal.
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "testlocal",
+		Email:         "testlocal@example.com",
+		ExternalUID:   "testlocal",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatal("ResolveOrCreate returned ID=0")
+	}
+	if got.AuthProvider != "local" {
+		t.Errorf("AuthProvider = %q, want %q", got.AuthProvider, "local")
+	}
+	if got.ExternalUID != "testlocal" {
+		t.Errorf("ExternalUID = %q, want %q", got.ExternalUID, "testlocal")
+	}
+
+	// Verify no duplicate row was created (unique index check).
+	row, err := svc.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+		AuthProvider: "local",
+		ExternalUid:  "testlocal",
+	})
+	if err != nil {
+		t.Fatalf("lookup local user: %v", err)
+	}
+	_ = row // existence is the assertion; GetAttributionUserByExternalUID returns one row or errors
+}
+
+// TestResolveOrCreate_LocalUser_RefreshesFields: the local-user branch
+// of ResolveOrCreate should refresh denormalized username/email like
+// the forward-auth branch does.
+func TestResolveOrCreate_LocalUser_RefreshesFields(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('bob', 'bob@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'local', 'bob')`,
+	)
+	if err != nil {
+		t.Fatalf("insert local user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "bob-renamed",
+		Email:         "bob2@example.com",
+		ExternalUID:   "bob",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.Username != "bob-renamed" {
+		t.Errorf("Username = %q, want %q", got.Username, "bob-renamed")
+	}
+	if !got.Email.Valid || got.Email.String != "bob2@example.com" {
+		t.Errorf("Email = %+v, want bob2@example.com", got.Email)
+	}
+}
+
+// TestResolveOrCreate_LocalUser_ReconcilesDriftedExternalUID covers the
+// self-heal path: a source='local' row exists but its stored
+// external_uid no longer matches the current username (e.g. an admin
+// renamed the user without an accompany-side external_uid sync).
+// session/middleware sets ExternalUID=username on every local login, so
+// the (local, p.ExternalUID) lookup would miss and attribution would
+// silently NULL on every subsequent request. resolveLocal catches the
+// miss, looks up by p.Name, finds a source='local' row with a
+// mismatched external_uid, realigns external_uid inside the same write
+// tx, and returns a usable Attribution.
+func TestResolveOrCreate_LocalUser_ReconcilesDriftedExternalUID(t *testing.T) {
+	var buf bytes.Buffer
+	svc := newService(t).WithLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+
+	// Drifted state: the row's stored external_uid is the OLD username
+	// 'oldname', the request carries the NEW username via ExternalUID.
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('newname', 'newname@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'local', 'oldname')`,
+	)
+	if err != nil {
+		t.Fatalf("insert drifted local user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "newname",
+		Email:         "newname@example.com",
+		ExternalUID:   "newname",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatal("ResolveOrCreate returned ID=0 after reconciliation")
+	}
+	if got.ExternalUID != "newname" {
+		t.Errorf("ExternalUID = %q, want %q (drift should have self-healed)", got.ExternalUID, "newname")
+	}
+	if got.Username != "newname" {
+		t.Errorf("Username = %q, want %q", got.Username, "newname")
+	}
+
+	// Verify the row's external_uid was actually UPDATE'd in place.
+	row, err := svc.db.Reader.GetUserByUsername(ctx, "newname")
+	if err != nil {
+		t.Fatalf("GetUserByUsername post-reconcile: %v", err)
+	}
+	if row.ExternalUid != "newname" {
+		t.Errorf("stored external_uid = %q, want %q", row.ExternalUid, "newname")
+	}
+	if !strings.Contains(buf.String(), "reconciled drifted local external_uid") {
+		t.Errorf("expected reconciliation INFO log, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "old_external_uid=oldname") {
+		t.Errorf("expected log to surface old external_uid, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "new_external_uid=newname") {
+		t.Errorf("expected log to surface new external_uid, got %q", buf.String())
+	}
+}
+
+// TestResolveOrCreate_LocalUser_RepairAuthProvider: when 00028 Down
+// rewrote auth_provider to 'forward-link', the self-heal path must
+// also repair auth_provider back to 'local' -- not just external_uid.
+// Without this, a post-Down row would keep auth_provider='forward-link'
+// and attribution would keep missing even after external_uid is
+// realigned.
+func TestResolveOrCreate_LocalUser_RepairAuthProvider(t *testing.T) {
+	var buf bytes.Buffer
+	svc := newService(t).WithLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+
+	// Simulate 00028-Down state: auth_provider='forward-link',
+	// external_uid=raw username.
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('alice', 'alice@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 0, 'local', unixepoch(), 'test', 'forward-link', 'alice')`,
+	)
+	if err != nil {
+		t.Fatalf("insert forward-link user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "alice",
+		Email:         "alice@example.com",
+		ExternalUID:   "alice",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatal("ResolveOrCreate returned ID=0 after reconciliation")
+	}
+
+	// Verify auth_provider was repaired to 'local'.
+	row, err := svc.db.Reader.GetUserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername post-reconcile: %v", err)
+	}
+	if row.AuthProvider != "local" {
+		t.Errorf("auth_provider = %q, want %q (should have been repaired from forward-link)", row.AuthProvider, "local")
+	}
+	if row.ExternalUid != "alice" {
+		t.Errorf("external_uid = %q, want %q", row.ExternalUid, "alice")
+	}
+}
+
+// TestResolveOrCreate_LocalUser_MissReturnsOriginalErr: when neither
+// (local, ExternalUID) nor (username) finds a usable source='local' row,
+// resolveLocal falls back to the original sql.ErrNoRows so callers
+// surface the same warn they used to -- reconciliation is opt-in via
+// the username-based lookup, not a silent rewrite. Guards against a
+// future change that confuses "no user" with "drift" and silently
+// returns 0.
+func TestResolveOrCreate_LocalUser_MissReturnsOriginalErr(t *testing.T) {
+	var buf bytes.Buffer
+	svc := newService(t).WithLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "ghost",
+		ExternalUID:   "ghost",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	_, err := svc.ResolveOrCreate(ctx, p)
+	if err == nil {
+		t.Fatal("expected error for missing local user, got nil")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected sql.ErrNoRows in chain, got %v", err)
+	}
+	if strings.Contains(buf.String(), "reconciled drifted local external_uid") {
+		t.Errorf("reconciliation logged despite no candidate row: %q", buf.String())
+	}
+}
+
+// TestResolveOrCreate_LocalUser_NonLocalRowByName: a username lookup
+// may find a row of a different source (forward-jit, forward-link).
+// resolveLocal must NOT reconcile across source boundaries -- that
+// would clobber an unrelated identity. Verify the original miss
+// surfaces instead.
+func TestResolveOrCreate_LocalUser_NonLocalRowByName(t *testing.T) {
+	var buf bytes.Buffer
+	svc := newService(t).WithLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+
+	// Authentik-shaped forward-jit row that happens to share a username
+	// with the request. ResolveOrCreate must treat that as a different
+	// identity, not a drift to reconcile.
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('bob', 'bob@example.com', NULL, 0, 'forward-jit', unixepoch(), 'forward:test', 'authentik', 'stable-uid-bob')`,
+	)
+	if err != nil {
+		t.Fatalf("insert forward-jit user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "bob",
+		ExternalUID:   "bob",
+		AuthProvider:  auth.AuthProviderLocal,
+		Authenticated: true,
+	}
+	_, err = svc.ResolveOrCreate(ctx, p)
+	if err == nil {
+		t.Fatal("expected error: local resolve should not silently succeed against a non-local row")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected sql.ErrNoRows in chain, got %v", err)
+	}
+	if strings.Contains(buf.String(), "reconciled drifted local external_uid") {
+		t.Errorf("reconciliation logged despite non-local row: %q", buf.String())
+	}
 }
