@@ -30,6 +30,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/email"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/httpapi"
 	"github.com/s3ntin3l8/branchdam/internal/pairing"
@@ -393,12 +394,23 @@ func main() {
 		passwordResetService := users.NewPasswordResetService(usersService, users.PasswordResetServiceOptions{
 			TokenTTL: resetTTL,
 		})
+		emailNotifier := email.New(email.Config{
+			Provider: cfg.Auth.Email.Provider,
+			Host:     cfg.Auth.Email.Host,
+			Port:     cfg.Auth.Email.Port,
+			Username: cfg.Auth.Email.Username,
+			Password: cfg.Auth.Email.Password,
+			From:     cfg.Auth.Email.From,
+			TLS:      cfg.Auth.Email.TLS,
+			BaseURL:  cfg.Auth.Email.BaseURL,
+		}, log)
 		localAuthDeps = &httpapi.LocalAuthDeps{
 			Users:        usersService,
 			LoginLimiter: loginLimiter,
 			ResetLimiter: resetLimiter,
 			SessionMw:    sessionMw,
 			Reset:        passwordResetService,
+			Email:        emailNotifier,
 			AuthMode:     authMode,
 		}
 		// Pre-build the JIT provisioner closure so httpapi/Handler()

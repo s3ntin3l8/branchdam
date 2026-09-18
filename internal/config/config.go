@@ -152,6 +152,37 @@ type Auth struct {
 
 	Local   AuthLocal   `yaml:"local"`
 	Forward AuthForward `yaml:"forward"`
+	Email   AuthEmail   `yaml:"email"`
+}
+
+// AuthEmail configures outbound email delivery for password-reset
+// links and other transactional email. Provider selects the backend:
+// "smtp" for real delivery, "log" (default) for slog-only dev mode.
+type AuthEmail struct {
+	// Provider is "smtp" or "log". Default "log".
+	Provider string `yaml:"provider"`
+	// Host is the SMTP server hostname.
+	Host string `yaml:"host"`
+	// Port is the SMTP server port. Default 587.
+	Port int `yaml:"port"`
+	// Username for SMTP AUTH. Empty = no authentication.
+	Username string `yaml:"username"`
+	// Password for SMTP AUTH. Supports ${VAR} expansion.
+	Password string `yaml:"password"`
+	// From is the sender address, e.g. "branchDAM <noreply@example.com>".
+	From string `yaml:"from"`
+	// TLS selects the TLS mode: "starttls" (default), "implicit", or "none".
+	TLS string `yaml:"tls"`
+	// BaseURL is the public-facing base URL used to build password-reset
+	// links in outbound email, e.g. "https://branchdam.example.com". When
+	// set, the link is derived from this value (NOT from the inbound
+	// request's Host header, which is attacker-controlled in a header-
+	// poisoning attack). When empty, the password-reset handler logs a
+	// WARN and falls back to the inbound request's scheme+Host -- safe in
+	// a single-host deployment behind a trusted reverse proxy, unsafe in
+	// any multi-tenant or direct-internet-exposed setup. Operators should
+	// set this explicitly in production.
+	BaseURL string `yaml:"baseURL"`
 }
 
 // AuthLocal configures the local-auth chain (only meaningful when

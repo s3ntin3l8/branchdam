@@ -116,6 +116,14 @@ the only one most operators ever touch; the rest have safe defaults.
 | `local.rateLimit.coolOffSlow` | duration | `5m` | Cool-off applied when the slow threshold trips. |
 | `forward.adminGroups` | list of string | empty | Forward-auth asserted group names that trigger JIT provisioning of a local `is_admin=1` account. Only meaningful when `auth.mode='both'`. Empty list disables JIT entirely. |
 | `forward.requireEmailForJIT` | bool | `true` | When true, refuse JIT provisioning if the forward-auth asserted email is empty. A homelab Authentik deployment that doesn't surface email can set this to `false`; the JIT user is then keyed by username. |
+| `email.provider` | string | `log` | Outbound-email backend. `log` (default) prints would-be-sent messages to slog — the password-reset handler still mints tokens either way, but the rendered preview (and the `smtp` send) both require `email.baseURL` to be set; see below. `smtp` delivers via `auth.email.host:port`. |
+| `email.host` | string | — | SMTP server hostname. Used by `provider=smtp`. |
+| `email.port` | int | `587` | SMTP server port. `587` for STARTTLS, `465` for implicit TLS, `25` for plain. |
+| `email.username` | string | empty | SMTP AUTH username. Empty = no AUTH. |
+| `email.password` | string | empty | SMTP AUTH password. Supports `${VAR}` expansion; keep in a gitignored `.env`. |
+| `email.from` | string | — | Sender address, e.g. `branchDAM <noreply@example.com>`. Format-validated at send time (`mail.ParseAddress`); a CR/LF in the configured value refuses to send. |
+| `email.tls` | string | `starttls` | TLS mode. `starttls` (default): require STARTTLS — refuses to send if the server doesn't advertise it (no silent downgrade). `implicit`: TLS-from-dial (port 465). `none`: plain (dev only). |
+| `email.baseURL` | string | empty | Public-facing base URL used to build links in outbound messages, e.g. `https://branchdam.example.com`. **Required for the reset link to be sent at all, for every provider** (including `log`): there is no fallback to the inbound request's `Host` header, which is attacker-controlled. When `baseURL` is unset, the handler logs a `WARN` and skips email delivery for that request — including the `provider=log` preview — rather than embed an untrusted host in the link. |
 
 When `auth.mode` is `local` or `both`, the server **refuses to boot**
 unless `BRANCHDAM_SECRET_KEY` is set and is valid base64-decoded 32 bytes

@@ -21,6 +21,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth/session"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/email"
 )
 
 // errSetupComplete is the sentinel the setup handler returns when
@@ -38,6 +39,7 @@ type localAuthHandlers struct {
 	resetLimiter *ratelimit.Limiter
 	sessionMw    *session.Middleware
 	reset        *users.PasswordResetService
+	email        email.Notifier
 	log          *slog.Logger
 	authMode     auth.AuthMode
 	jit          auth.JITProvisioner
@@ -722,6 +724,34 @@ func clientIP(s *Server, r *http.Request) string {
 		return strings.TrimSpace(fwd)
 	}
 	return remoteIP.String()
+}
+
+// passwordResetBaseURL returns the operator-declared base URL to embed
+// in an outbound password-reset email, and whether one is configured.
+//
+// This deliberately has NO fallback to the inbound request's Host
+// header (or X-Forwarded-Proto/r.URL), for ANY provider -- including
+// provider=log. Earlier revisions fell back to the request when
+// auth.email.baseURL was unset; that let an attacker send a reset
+// request with a spoofed Host header and have the victim's email
+// carry a reset link pointing at the attacker's domain, handing over
+// the one-time token on click (CWE-640). A later revision tried to
+// keep the fallback for provider=log only (reasoning that logSender
+// never transmits externally, so there's no real victim inbox for
+// that branch) -- but CodeQL's go/email-content-injection query
+// resolves Send through the email.Notifier INTERFACE and can't see
+// that a provider string comparison guarantees which concrete Send
+// implementation runs, so it conservatively re-flagged the Host-
+// derived value as reaching smtpSender.Send's parameters regardless
+// (verified live on PR #460: the alert reopened on that revision).
+// The caller must skip sending the reset email entirely when ok is
+// false, for every provider -- see handlePasswordResetRequest.
+func passwordResetBaseURL(s *Server) (baseURL string, ok bool) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.Auth.Email.BaseURL == "" {
+		return "", false
+	}
+	return strings.TrimRight(cfg.Auth.Email.BaseURL, "/"), true
 }
 
 // currentTrustedProxies reads s.cfg().HTTP.TrustedProxies through a
