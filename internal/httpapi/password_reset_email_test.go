@@ -2,11 +2,16 @@
 // base-URL selection (CodeQL go/email-content-injection alert #86 on
 // PR #460). Earlier revisions fell back to the inbound request's Host
 // header whenever auth.email.baseURL was unset, embedding attacker-
-// controlled data directly in an SMTP-delivered reset email. That
-// fallback now only applies to the dev-mode provider=log preview
-// (logSender never transmits anything externally, so there's no
-// victim inbox for a spoofed Host header to reach); provider=smtp
-// fails closed instead of falling back.
+// controlled data directly in the reset email. A follow-up revision
+// tried to keep that fallback for provider=log only, reasoning that
+// logSender never transmits externally -- but CodeQL resolves Send
+// through the email.Notifier interface and can't see that a provider
+// string comparison guarantees which concrete Send runs, so it
+// re-flagged the Host-derived value as reaching smtpSender.Send
+// regardless (confirmed live: the alert reopened on that revision).
+// passwordResetBaseURL therefore has no Host-header fallback for any
+// provider; these tests pin that an unset baseURL skips delivery
+// entirely, for both provider=smtp and provider=log.
 package httpapi
 
 import (
@@ -15,7 +20,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,10 +45,9 @@ import (
 // handlePasswordResetRequest dispatches Send from a background
 // goroutine.
 type recordingNotifier struct {
-	mu        sync.Mutex
-	calls     int
-	textBody  string
-	returnErr error
+	mu       sync.Mutex
+	calls    int
+	textBody string
 }
 
 func (n *recordingNotifier) Send(_ context.Context, _, _, _, textBody string) error {
@@ -52,7 +55,7 @@ func (n *recordingNotifier) Send(_ context.Context, _, _, _, textBody string) er
 	defer n.mu.Unlock()
 	n.calls++
 	n.textBody = textBody
-	return n.returnErr
+	return nil
 }
 
 func (n *recordingNotifier) callCount() int {
@@ -143,13 +146,22 @@ func TestHandlePasswordResetRequest_SMTP_SkipsEmailWhenBaseURLUnset(t *testing.T
 	rr := requestPasswordReset(t, srv, "attacker.example", userEmail)
 	assert.Equal(t, http.StatusOK, rr.Code)
 
-	// The goroutine path is never entered when baseURL is unset for
-	// provider=smtp -- there is nothing to wait on -- so no
-	// synchronization is needed here.
-	assert.Equal(t, 0, notifier.callCount(), "must not fall back to the Host header for a real (SMTP) send; delivery should be skipped entirely")
+	// The goroutine path is never entered when baseURL is unset -- there
+	// is nothing to wait on -- so no synchronization is needed here.
+	assert.Equal(t, 0, notifier.callCount(), "must not fall back to the Host header; email delivery should be skipped entirely")
 }
 
-func TestHandlePasswordResetRequest_SMTP_SendsEmailWhenBaseURLConfigured(t *testing.T) {
+func TestHandlePasswordResetRequest_LogProvider_SkipsEmailWhenBaseURLUnset(t *testing.T) {
+	notifier := &recordingNotifier{}
+	srv, userEmail := passwordResetEmailTestServer(t, "log", "", notifier)
+
+	rr := requestPasswordReset(t, srv, "attacker.example", userEmail)
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	assert.Equal(t, 0, notifier.callCount(), "provider=log must also skip delivery when baseURL is unset -- the interface-level fix has no per-provider carve-out")
+}
+
+func TestHandlePasswordResetRequest_SendsEmailWhenBaseURLConfigured(t *testing.T) {
 	notifier := &recordingNotifier{}
 	srv, userEmail := passwordResetEmailTestServer(t, "smtp", "https://branchdam.example.com", notifier)
 
@@ -160,27 +172,5 @@ func TestHandlePasswordResetRequest_SMTP_SendsEmailWhenBaseURLConfigured(t *test
 		return notifier.callCount() == 1
 	}, time.Second, 5*time.Millisecond, "email delivery runs in a background goroutine")
 	assert.Contains(t, notifier.lastTextBody(), "https://branchdam.example.com/password-reset?token=")
-	assert.NotContains(t, notifier.lastTextBody(), "attacker.example", "the spoofed Host header must never reach an SMTP-delivered reset link")
-}
-
-// TestHandlePasswordResetRequest_LogProvider_FallsBackToHostForPreview
-// pins the documented default: provider=log (the default) still
-// renders a preview even without auth.email.baseURL configured,
-// because logSender only writes to the server's own slog output and
-// never transmits the rendered link to an external recipient -- so
-// falling back to the request's Host header here does not reproduce
-// the SMTP-delivery poisoning vector that provider=smtp must fail
-// closed against.
-func TestHandlePasswordResetRequest_LogProvider_FallsBackToHostForPreview(t *testing.T) {
-	notifier := &recordingNotifier{}
-	srv, userEmail := passwordResetEmailTestServer(t, "log", "", notifier)
-
-	rr := requestPasswordReset(t, srv, "branchdam.example", userEmail)
-	assert.Equal(t, http.StatusOK, rr.Code)
-
-	require.Eventually(t, func() bool {
-		return notifier.callCount() == 1
-	}, time.Second, 5*time.Millisecond, "the log-mode preview should still be rendered without auth.email.baseURL configured")
-	assert.True(t, strings.Contains(notifier.lastTextBody(), "http://branchdam.example/password-reset?token="),
-		"expected the Host-derived base URL in the dev-mode preview, got: %s", notifier.lastTextBody())
+	assert.NotContains(t, notifier.lastTextBody(), "attacker.example", "the spoofed Host header must never reach the reset link")
 }

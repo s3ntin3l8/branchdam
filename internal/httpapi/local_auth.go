@@ -515,53 +515,31 @@ func clientIP(s *Server, r *http.Request) string {
 }
 
 // passwordResetBaseURL returns the operator-declared base URL to embed
-// in an outbound (SMTP-delivered) password-reset email, and whether
-// one is configured.
+// in an outbound password-reset email, and whether one is configured.
 //
 // This deliberately has NO fallback to the inbound request's Host
-// header (or X-Forwarded-Proto/r.URL) -- unlike requestBaseURL below.
-// Earlier revisions fell back to the request when auth.email.baseURL
-// was unset; that let an attacker send a reset request with a spoofed
-// Host header and have the victim's email carry a reset link pointing
-// at the attacker's domain, handing over the one-time token on click
-// (CWE-640; CodeQL go/email-content-injection flags exactly this flow:
-// r.Host reaching an SMTP-delivered email body). The caller must skip
-// sending a real (provider=smtp) reset email entirely when ok is
-// false, rather than construct a link from request data -- see
-// handlePasswordResetRequest.
+// header (or X-Forwarded-Proto/r.URL), for ANY provider -- including
+// provider=log. Earlier revisions fell back to the request when
+// auth.email.baseURL was unset; that let an attacker send a reset
+// request with a spoofed Host header and have the victim's email
+// carry a reset link pointing at the attacker's domain, handing over
+// the one-time token on click (CWE-640). A later revision tried to
+// keep the fallback for provider=log only (reasoning that logSender
+// never transmits externally, so there's no real victim inbox for
+// that branch) -- but CodeQL's go/email-content-injection query
+// resolves Send through the email.Notifier INTERFACE and can't see
+// that a provider string comparison guarantees which concrete Send
+// implementation runs, so it conservatively re-flagged the Host-
+// derived value as reaching smtpSender.Send's parameters regardless
+// (verified live on PR #460: the alert reopened on that revision).
+// The caller must skip sending the reset email entirely when ok is
+// false, for every provider -- see handlePasswordResetRequest.
 func passwordResetBaseURL(s *Server) (baseURL string, ok bool) {
 	cfg := s.cfg()
 	if cfg == nil || cfg.Auth.Email.BaseURL == "" {
 		return "", false
 	}
 	return strings.TrimRight(cfg.Auth.Email.BaseURL, "/"), true
-}
-
-// requestBaseURL derives a base URL from the inbound request's Host
-// header (and X-Forwarded-Proto). It exists ONLY for the dev-mode
-// provider=log preview: logSender writes the rendered link to the
-// server's own slog output and never transmits it to an external
-// recipient, so embedding request-derived data there does not
-// reproduce the SMTP-delivery poisoning vector passwordResetBaseURL's
-// doc comment describes -- there is no victim inbox for an attacker's
-// spoofed Host header to reach. Do NOT use this for anything that
-// leaves the server (provider=smtp); use passwordResetBaseURL there
-// and fail closed when it returns ok=false.
-func requestBaseURL(r *http.Request) string {
-	scheme := "http"
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" {
-		scheme = "https"
-	} else if r.TLS != nil {
-		scheme = "https"
-	}
-	host := r.Host
-	if host == "" {
-		host = r.URL.Host
-	}
-	if host == "" {
-		return scheme + "://localhost"
-	}
-	return scheme + "://" + host
 }
 
 // currentTrustedProxies reads s.cfg().HTTP.TrustedProxies through a
