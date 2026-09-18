@@ -74,7 +74,7 @@ SELECT n.id, n.file_path, n.file_name, n.file_ext, n.fast_hash, n.full_hash
 FROM media_nodes n
 LEFT JOIN remote_sync_state rs
        ON rs.node_id = n.id AND rs.remote = ?1
-WHERE n.lifecycle_state != 'ARCHIVED'
+WHERE n.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND (n.file_path = ?2 OR n.file_path LIKE ?2 || '/%')
   AND rs.node_id IS NULL
 ORDER BY n.id ASC

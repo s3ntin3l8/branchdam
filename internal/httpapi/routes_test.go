@@ -1239,8 +1239,8 @@ func TestDeleteAsset(t *testing.T) {
 	if err := json.Unmarshal(rrAfter.Body.Bytes(), &after); err != nil {
 		t.Fatalf("unmarshal after: %v", err)
 	}
-	if after.LifecycleState != "ARCHIVED" {
-		t.Fatalf("expected ARCHIVED after soft-delete, got %s", after.LifecycleState)
+	if after.LifecycleState != "TRASHED" {
+		t.Fatalf("expected TRASHED after soft-delete, got %s", after.LifecycleState)
 	}
 
 	// Soft-deleting an already ARCHIVED asset is an idempotent 200

@@ -143,7 +143,7 @@ export interface Asset {
   fullHash?: string;
   indexingStatus: "PENDING" | "INDEXED_SHALLOW" | "INDEXED_FULL" | "INDEX_FAILED";
   graphStatus: "UNLINKED" | "LINKED" | "NEEDS_REVIEW" | "ROOT";
-  lifecycleState: "ACTIVE" | "MISSING" | "ARCHIVED" | "HIDDEN";
+  lifecycleState: "ACTIVE" | "MISSING" | "ARCHIVED" | "HIDDEN" | "TRASHED";
   storageLocationId: number;
   originalDocumentId?: string;
   cameraModel?: string;

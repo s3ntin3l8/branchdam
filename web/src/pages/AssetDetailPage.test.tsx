@@ -17,6 +17,7 @@ vi.mock("../api/client", () => ({
     listStorageLocations: vi.fn(),
     inheritMetadata: vi.fn(),
     deleteAsset: vi.fn(),
+    trashAsset: vi.fn(),
     restoreAsset: vi.fn(),
     thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
     streamUrl: vi.fn((id: number) => `/api/v1/assets/${id}/stream`),
@@ -141,7 +142,7 @@ describe("AssetDetailPage purge control", () => {
   });
 });
 
-describe("AssetDetailPage archive control", () => {
+describe("AssetDetailPage trash control", () => {
   it("does not mutate until the dialog is confirmed, and Cancel dismisses it", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
@@ -150,28 +151,28 @@ describe("AssetDetailPage archive control", () => {
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    await userEvent.click(await screen.findByRole("button", { name: /archive asset/i }));
-    expect(await screen.findByRole("dialog", { name: /archive asset/i })).toBeInTheDocument();
-    expect(api.deleteAsset).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole("button", { name: /trash/i }));
+    expect(await screen.findByRole("dialog", { name: /trash/i })).toBeInTheDocument();
+    expect(api.trashAsset).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(api.deleteAsset).not.toHaveBeenCalled();
+    expect(api.trashAsset).not.toHaveBeenCalled();
   });
 
-  it("archives on confirm and closes the dialog", async () => {
+  it("trashes on confirm and closes the dialog", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
-    vi.mocked(api.deleteAsset).mockResolvedValueOnce({ ok: true });
+    vi.mocked(api.trashAsset).mockResolvedValueOnce({ ok: true });
 
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    await userEvent.click(await screen.findByRole("button", { name: /archive asset/i }));
-    await userEvent.click(await screen.findByRole("button", { name: /confirm archive/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /trash/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /confirm trash/i }));
 
-    await waitFor(() => expect(api.deleteAsset).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(api.trashAsset).toHaveBeenCalledWith(42, { keepExports: false }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
@@ -183,12 +184,12 @@ describe("AssetDetailPage archive control", () => {
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    await userEvent.click(await screen.findByRole("button", { name: /archive asset/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /trash/i }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(api.deleteAsset).not.toHaveBeenCalled();
+    expect(api.trashAsset).not.toHaveBeenCalled();
   });
 });
 

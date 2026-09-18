@@ -5,7 +5,7 @@ import {
   useAssetLineage,
   useAssetMetadata,
   useAssetSyncStatus,
-  useDeleteAsset,
+  useTrashAsset,
   useInheritMetadata,
   usePruneCache,
   useRestoreAsset,
@@ -197,16 +197,17 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
 }
 
 function AssetDeleteControl({ asset }: { asset: Asset }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const deleteAsset = useDeleteAsset();
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [freeUpOpen, setFreeUpOpen] = useState(false);
+  const trashAsset = useTrashAsset();
   const restoreAsset = useRestoreAsset();
 
-  if (asset.lifecycleState === "ARCHIVED") {
+  if (asset.lifecycleState === "ARCHIVED" || asset.lifecycleState === "TRASHED") {
     if (asset.supersededBy) {
       return (
         <div className="flex items-center gap-2">
           <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
-            Archived (Superseded)
+            {asset.lifecycleState === "ARCHIVED" ? "Archived (Superseded)" : "Trashed (Superseded)"}
           </span>
           <Link
             to={`/assets/${asset.supersededBy}`}
@@ -217,11 +218,14 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
         </div>
       );
     }
+    const label = asset.lifecycleState === "ARCHIVED" ? "Archived" : "Trashed";
+    const spanClass =
+      asset.lifecycleState === "ARCHIVED"
+        ? "rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400"
+        : "rounded border border-orange-800/80 bg-orange-950/60 px-2.5 py-1 text-xs text-orange-300";
     return (
       <div className="flex items-center gap-2">
-        <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
-          Archived
-        </span>
+        <span className={spanClass}>{label}</span>
         <button
           type="button"
           onClick={() => restoreAsset.mutate(asset.id)}
@@ -240,42 +244,76 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
   }
 
   return (
-    <>
+    <div className="flex flex-wrap items-center gap-2">
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
-        disabled={deleteAsset.isPending}
+        onClick={() => setTrashOpen(true)}
+        disabled={trashAsset.isPending}
         className="rounded border border-red-800/80 bg-red-950/60 px-2.5 py-1 text-xs font-medium text-red-300 hover:bg-red-900/60 disabled:opacity-50"
       >
-        {deleteAsset.isPending ? "Archiving…" : "Archive Asset"}
+        Trash
+      </button>
+      <button
+        type="button"
+        onClick={() => setFreeUpOpen(true)}
+        disabled={trashAsset.isPending}
+        className="rounded border border-amber-800/80 bg-amber-950/60 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-900/60 disabled:opacity-50"
+        title="Trash the master file but keep Tier-2 export copies on disk."
+      >
+        Free Up Space
       </button>
 
-      {isOpen && (
+      {trashOpen && (
         <ConfirmDialog
-          titleId="archive-asset-title"
-          title="Archive Asset"
+          titleId="trash-asset-title"
+          title="Trash Asset"
           body={
             <>
-              Are you sure you want to soft-delete (archive) <strong className="text-white">{asset.fileName}</strong>?
-              The media node will be marked <code className="text-amber-400">ARCHIVED</code> and removed from active lineage.
-              Note: Extracted metadata (EXIF/ffprobe tags) for this node will be pruned on the next background scan.
-              The underlying file on disk is never deleted.
+              Move <strong className="text-white">{asset.fileName}</strong> to <code className="text-amber-400">.trash/</code>?
+              The master file and any linked Tier-2 export copies will be removed from their original locations.
+              The media node is marked <code className="text-amber-400">TRASHED</code> and the bytes are auto-purged after 30 days unless restored.
             </>
           }
-          confirmLabel="Confirm Archive"
-          pendingLabel="Archiving…"
-          isPending={deleteAsset.isPending}
-          error={deleteAsset.isError ? deleteAsset.error : undefined}
-          errorLabel="Failed to archive"
+          confirmLabel="Confirm Trash"
+          pendingLabel="Trashing…"
+          isPending={trashAsset.isPending}
+          error={trashAsset.isError ? trashAsset.error : undefined}
+          errorLabel="Failed to trash"
           onConfirm={() => {
-            deleteAsset.mutate(asset.id, {
-              onSuccess: () => setIsOpen(false),
-            });
+            trashAsset.mutate(
+              { id: asset.id, keepExports: false },
+              { onSuccess: () => setTrashOpen(false) },
+            );
           }}
-          onCancel={() => setIsOpen(false)}
+          onCancel={() => setTrashOpen(false)}
         />
       )}
-    </>
+
+      {freeUpOpen && (
+        <ConfirmDialog
+          titleId="free-up-space-title"
+          title="Free Up Space"
+          body={
+            <>
+              Move <strong className="text-white">{asset.fileName}</strong> to <code className="text-amber-400">.trash/</code> but keep any Tier-2 export copies on disk?
+              The master file is removed from the archive; cloud galleries are left untouched. Auto-purged after 30 days unless restored.
+            </>
+          }
+          confirmLabel="Confirm Free Up Space"
+          pendingLabel="Trashing…"
+          isPending={trashAsset.isPending}
+          error={trashAsset.isError ? trashAsset.error : undefined}
+          errorLabel="Failed to trash"
+          onConfirm={() => {
+            trashAsset.mutate(
+              { id: asset.id, keepExports: true },
+              { onSuccess: () => setFreeUpOpen(false) },
+            );
+          }}
+          onCancel={() => setFreeUpOpen(false)}
+        />
+      )}
+    </div>
   );
 }
 

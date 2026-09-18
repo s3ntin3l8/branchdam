@@ -70,7 +70,7 @@ describe("AssetListPage", () => {
   });
 });
 
-describe("AssetListPage per-row archive", () => {
+describe("AssetListPage per-row trash", () => {
   it("does not mutate until confirmed, and Cancel dismisses the dialog", async () => {
     vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
@@ -79,7 +79,7 @@ describe("AssetListPage per-row archive", () => {
     renderWithClient(<AssetListPage />);
     await waitFor(() => expect(screen.getByText("/scratch/photo1.jpg")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(api.deleteAsset).not.toHaveBeenCalled();
 
@@ -88,7 +88,7 @@ describe("AssetListPage per-row archive", () => {
     expect(api.deleteAsset).not.toHaveBeenCalled();
   });
 
-  it("archives on confirm", async () => {
+  it("trashes on confirm", async () => {
     vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
     vi.mocked(api.listAssets).mockResolvedValue({ assets: [baseAsset({ id: 1 })], total: 1 });
@@ -97,8 +97,8 @@ describe("AssetListPage per-row archive", () => {
     renderWithClient(<AssetListPage />);
     await waitFor(() => expect(screen.getByText("/scratch/photo1.jpg")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: "Archive" }));
-    await userEvent.click(await screen.findByRole("button", { name: /confirm archive/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await userEvent.click(await screen.findByRole("button", { name: /confirm trash/i }));
 
     await waitFor(() => expect(api.deleteAsset).toHaveBeenCalledWith(1));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -123,20 +123,20 @@ describe("AssetListPage per-row archive", () => {
     renderWithClient(<AssetListPage />);
     await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
 
-    const archiveButtons = screen.getAllByRole("button", { name: "Archive" });
+    const archiveButtons = screen.getAllByRole("button", { name: "Trash" });
 
     // Row A: open, confirm, fail -> dialog stays open showing the error.
     await userEvent.click(archiveButtons[0]);
-    await userEvent.click(await screen.findByRole("button", { name: /confirm archive/i }));
-    await waitFor(() => expect(screen.getByText(/failed to archive: .*row a failed/i)).toBeInTheDocument());
+    await userEvent.click(await screen.findByRole("button", { name: /confirm trash/i }));
+    await waitFor(() => expect(screen.getByText(/failed to trash: .*row a failed/i)).toBeInTheDocument());
 
     // Cancel row A's dialog, then open row B's dialog fresh.
     await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getAllByRole("button", { name: "Archive" })[1]);
+    await userEvent.click(screen.getAllByRole("button", { name: "Trash" })[1]);
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(screen.queryByText(/failed to archive/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/failed to trash/i)).not.toBeInTheDocument();
   });
 });
 
@@ -215,7 +215,7 @@ describe("AssetListPage restore", () => {
   });
 });
 
-describe("AssetListPage batch archive", () => {
+describe("AssetListPage batch trash", () => {
   const assets = [
     baseAsset({ id: 1, filePath: "/scratch/a.jpg", fileName: "a.jpg" }),
     baseAsset({ id: 2, filePath: "/scratch/b.jpg", fileName: "b.jpg" }),
@@ -239,7 +239,7 @@ describe("AssetListPage batch archive", () => {
     expect(screen.getByText("2 selected")).toBeInTheDocument();
   });
 
-  it("issues one archive call per selected id on confirm", async () => {
+  it("issues one trash call per selected id on confirm", async () => {
     vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
     vi.mocked(api.listAssets).mockResolvedValue({ assets, total: 3 });
@@ -250,10 +250,10 @@ describe("AssetListPage batch archive", () => {
     const listCallsBeforeBatch = vi.mocked(api.listAssets).mock.calls.length;
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
-    await userEvent.click(screen.getByRole("button", { name: "Archive selected" }));
+    await userEvent.click(screen.getByRole("button", { name: "Trash selected" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /confirm archive/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm trash/i }));
 
     await waitFor(() => expect(api.deleteAsset).toHaveBeenCalledTimes(2));
     expect(api.deleteAsset).toHaveBeenCalledWith(1);
@@ -278,7 +278,7 @@ describe("AssetListPage batch archive", () => {
     await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
-    await userEvent.click(screen.getByRole("button", { name: "Archive selected" }));
+    await userEvent.click(screen.getByRole("button", { name: "Trash selected" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
@@ -297,7 +297,7 @@ describe("AssetListPage batch archive", () => {
     await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
-    await userEvent.click(screen.getByRole("button", { name: "Archive selected" }));
+    await userEvent.click(screen.getByRole("button", { name: "Trash selected" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
     await userEvent.keyboard("{Escape}");
@@ -318,11 +318,11 @@ describe("AssetListPage batch archive", () => {
     await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
-    await userEvent.click(screen.getByRole("button", { name: "Archive selected" }));
-    await userEvent.click(await screen.findByRole("button", { name: /confirm archive/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Trash selected" }));
+    await userEvent.click(await screen.findByRole("button", { name: /confirm trash/i }));
 
     await waitFor(() => expect(api.deleteAsset).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByText(/1 failed to archive/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/1 failed to trash/)).toBeInTheDocument());
     expect(screen.getByText("1 selected")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Select b.jpg" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Select a.jpg" })).not.toBeChecked();

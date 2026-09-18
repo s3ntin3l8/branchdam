@@ -13,7 +13,7 @@ type Querier interface {
 	AgentCreatedVirtualNode(ctx context.Context, arg AgentCreatedVirtualNodeParams) (bool, error)
 	// Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
 	// row FIRST, before inserting the new one. The partial unique index
-	// (WHERE lifecycle_state != 'ARCHIVED') means a live row and a new live
+	// (WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')) means a live row and a new live
 	// row can never share file_path even for an instant within the
 	// transaction -- archiving first, not after, is what keeps that true.
 	ArchiveMediaNode(ctx context.Context, id int64) error
@@ -625,6 +625,12 @@ type Querier interface {
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
 	MarkNodeMissing(ctx context.Context, id int64) error
+	// pipeline.TrashAsset calls this on the master node and on every linked
+	// FINAL_EXPORT/immich_export edge target (when keepExports=false). The
+	// pipeline function has already moved the bytes to <root>/.trash/<rel>
+	// before this UPDATE; the lifecycle_state change is the durable record
+	// that the file is no longer at its original path.
+	MarkNodeTrashed(ctx context.Context, id int64) error
 	// Mark a recovery code as used. The AND used_at IS NULL guard is
 	// defense-in-depth against the double-consume race that FindUnused-
 	// RecoveryCode's own used_at IS NULL filter can't prevent on its own:
@@ -819,7 +825,7 @@ type Querier interface {
 	// it in place -- a MISSING row found alive again is not a version collision
 	// and must not stay MISSING.
 	//
-	// The WHERE lifecycle_state != 'ARCHIVED' clause and MISSING-only CASE
+	// The WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED') clause and MISSING-only CASE
 	// make #226's now-possible concurrent FULL_SCAN + manual differential
 	// INCREMENTAL against the same Tier-3 location safe rather than merely
 	// untested: if a concurrent FULL_SCAN archives this node (a version
@@ -838,6 +844,12 @@ type Querier interface {
 	TouchSession(ctx context.Context, arg TouchSessionParams) error
 	// Restores an archived media node back to ACTIVE state.
 	UnarchiveMediaNode(ctx context.Context, id int64) error
+	// pipeline.RestoreTrashedAsset calls this on the master node and on any
+	// linked TRASHED export node (same transaction). The pipeline function
+	// has already moved the bytes back from .trash/<rel> to the original
+	// path before this UPDATE; the lifecycle_state change is the durable
+	// record that the asset is queryable again.
+	UntrashNode(ctx context.Context, id int64) error
 	// Refresh the cached QR SVG after a key rotation. The SVG is computed
 	// outside the transaction (in pairing.Service) so this UPDATE is a
 	// pure byte-write with no rendering dependency.

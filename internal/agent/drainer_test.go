@@ -480,11 +480,11 @@ func TestDrainer_NodeMoved_And_Deleted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Processed)
 
-	// Verify lifecycle_state is MISSING (not removed from DB)
+	// Verify lifecycle_state is TRASHED (not removed from DB)
 	err = env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		node, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
 		require.NoError(t, err)
-		require.Equal(t, "MISSING", node.LifecycleState)
+		require.Equal(t, "TRASHED", node.LifecycleState)
 		return nil
 	})
 	require.NoError(t, err)
@@ -1284,10 +1284,10 @@ func TestDrainer_NodeDeleted_PurgesRemoteSyncStateAndTriggersImmichScan(t *testi
 	require.Equal(t, 1, stats.Processed)
 	require.True(t, scanner.scanned)
 
-	// Verify media_nodes lifecycle_state is MISSING
+	// Verify media_nodes lifecycle_state is TRASHED
 	node, err := env.db.Reader.GetMediaNodeByID(context.Background(), nodeID)
 	require.NoError(t, err)
-	require.Equal(t, "MISSING", node.LifecycleState)
+	require.Equal(t, "TRASHED", node.LifecycleState)
 
 	// Verify remote_sync_state is deleted
 	syncRows, err := env.db.Reader.ListRemoteSyncStateByNode(context.Background(), nodeID)
@@ -1396,8 +1396,12 @@ func TestDrainer_NodeDeleted_MovesToTrashAndUnlinksImmichExport(t *testing.T) {
 	_, statErr := os.Stat(masterFile)
 	require.True(t, os.IsNotExist(statErr), "original master file should no longer exist at original path")
 
-	// 2. Master file moved to .trash/<relPath>
-	trashPath := filepath.Join(env.staging, ".trash", "2026", "08", "IMG_0042.JPG")
+	// 2. Master file moved to .trash/<relPath>.<nodeUUID-short>.<ext>
+	masterUUIDShort := masterUUID
+	if len(masterUUIDShort) > 8 {
+		masterUUIDShort = masterUUIDShort[:8]
+	}
+	trashPath := filepath.Join(env.staging, ".trash", "2026", "08", "IMG_0042."+masterUUIDShort+".JPG")
 	trashData, err := os.ReadFile(trashPath)
 	require.NoError(t, err, "master file must be safely moved into .trash buffer")
 	require.Equal(t, []byte("master image bytes"), trashData)
@@ -1406,14 +1410,14 @@ func TestDrainer_NodeDeleted_MovesToTrashAndUnlinksImmichExport(t *testing.T) {
 	_, expStatErr := os.Stat(exportFile)
 	require.True(t, os.IsNotExist(expStatErr), "Immich export file must be removed from disk immediately")
 
-	// 4. DB nodes are marked MISSING
+	// 4. DB nodes are marked TRASHED
 	mNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), masterNodeID)
 	require.NoError(t, err)
-	require.Equal(t, "MISSING", mNode.LifecycleState)
+	require.Equal(t, "TRASHED", mNode.LifecycleState)
 
 	eNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), exportNodeID)
 	require.NoError(t, err)
-	require.Equal(t, "MISSING", eNode.LifecycleState)
+	require.Equal(t, "TRASHED", eNode.LifecycleState)
 
 	// 5. Remote sync state for both is deleted
 	mSync, err := env.db.Reader.ListRemoteSyncStateByNode(context.Background(), masterNodeID)
@@ -1429,10 +1433,13 @@ func TestDrainer_NodeDeleted_AvoidsOverwritingExistingTrashFile(t *testing.T) {
 	env := setupTestDB(t)
 	drainer := agent.NewDrainer(env.db, env.guard, slog.Default())
 
-	// Pre-create existing file in .trash
+	// Pre-create an unrelated file at the canonical .trash/<rel> path so we
+	// can verify the trash routine does NOT clobber it: the new scheme is
+	// .trash/<rel>.<node_uuid>.<ext>, so the pre-existing file's name does
+	// not include the second node's UUID.
 	trashPath := filepath.Join(env.staging, ".trash", "IMG_9999.JPG")
 	require.NoError(t, os.MkdirAll(filepath.Dir(trashPath), 0o755))
-	require.NoError(t, os.WriteFile(trashPath, []byte("first deleted version"), 0o644))
+	require.NoError(t, os.WriteFile(trashPath, []byte("unrelated trash file"), 0o644))
 
 	// Now create a new master file at the same original path
 	masterFile := filepath.Join(env.staging, "IMG_9999.JPG")
@@ -1465,16 +1472,21 @@ func TestDrainer_NodeDeleted_AvoidsOverwritingExistingTrashFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Processed)
 
-	// The original trash file should be preserved
+	// The pre-existing trash file is untouched
 	origTrashData, err := os.ReadFile(trashPath)
 	require.NoError(t, err)
-	require.Equal(t, []byte("first deleted version"), origTrashData)
+	require.Equal(t, []byte("unrelated trash file"), origTrashData)
 
-	// The second trash file should be saved as IMG_9999_1.JPG
-	suffixedTrashPath := filepath.Join(env.staging, ".trash", "IMG_9999_1.JPG")
-	suffixedData, err := os.ReadFile(suffixedTrashPath)
-	require.NoError(t, err, "second deleted file should be saved under suffixed name")
-	require.Equal(t, []byte("second deleted version"), suffixedData)
+	// The new node's trash copy lives at .trash/<rel>.<uuid>.<ext>, distinct
+	// from any other node that might have trashed the same rel path.
+	uuidShort := masterUUID
+	if len(uuidShort) > 8 {
+		uuidShort = uuidShort[:8]
+	}
+	uuidTrashPath := filepath.Join(env.staging, ".trash", "IMG_9999."+uuidShort+".JPG")
+	uuidData, err := os.ReadFile(uuidTrashPath)
+	require.NoError(t, err, "second deleted file should be saved under uuid-suffixed name")
+	require.Equal(t, []byte("second deleted version"), uuidData)
 }
 
 func strPtr(s string) *string { return &s }
@@ -1679,10 +1691,10 @@ func TestDrainer_NodeDeleted_Tier3MasterNeverTargetedForDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Processed)
 
-	// DB row is marked MISSING
+	// DB row is marked TRASHED
 	node, err := env.db.Reader.GetMediaNodeByID(context.Background(), nodeID)
 	require.NoError(t, err)
-	require.Equal(t, "MISSING", node.LifecycleState)
+	require.Equal(t, "TRASHED", node.LifecycleState)
 
 	// Tier 3 physical file must remain completely untouched (NOT moved to .trash, NOT removed)
 	data, err := os.ReadFile(tier3File)
@@ -1763,10 +1775,10 @@ func TestDrainer_NodeDeleted_ImmichExportInReadOnlyTier_RefusedByGuard(t *testin
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Processed)
 
-	// Master was trashed and marked MISSING
+	// Master was trashed and marked TRASHED
 	mNode, err := env.db.Reader.GetMediaNodeByID(context.Background(), masterID)
 	require.NoError(t, err)
-	require.Equal(t, "MISSING", mNode.LifecycleState)
+	require.Equal(t, "TRASHED", mNode.LifecycleState)
 
 	// Read-only export file is preserved on disk because Guard rejected the deletion
 	data, err := os.ReadFile(exportFile)

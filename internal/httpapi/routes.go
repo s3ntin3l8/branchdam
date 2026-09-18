@@ -56,6 +56,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
 	huma.Delete(api, "/api/v1/assets/{id}", s.handleDeleteAsset)
+	huma.Post(api, "/api/v1/assets/{id}/trash", s.handleTrashAsset)
 	huma.Post(api, "/api/v1/assets/{id}/restore", s.handleRestoreAsset)
 	huma.Get(api, "/api/v1/assets/{id}/metadata", s.handleGetAssetMetadata)
 	huma.Get(api, "/api/v1/assets/{id}/graph", s.handleAssetGraph)
@@ -524,10 +525,49 @@ type DeleteAssetOutput struct {
 	}
 }
 
-// handleDeleteAsset marks the media node ARCHIVED (soft-delete). Media node rows
-// are never removed from SQLite (Invariant 1: No CASCADE, rows are never deleted).
+// handleDeleteAsset trashes the asset's master file and any linked Tier-2
+// exports (keepExports=false): the bytes are moved to <root>/.trash/<rel>
+// and the row's lifecycle_state becomes TRASHED. Media node rows are never
+// removed from SQLite (Invariant 1: No CASCADE, rows are never deleted) --
+// the row remains, restorable via POST /api/v1/assets/{id}/restore for 30 days.
 func (s *Server) handleDeleteAsset(ctx context.Context, in *AssetPathInput) (*DeleteAssetOutput, error) {
-	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
+	return s.doTrashAsset(ctx, in.ID, false)
+}
+
+// TrashAssetInput is POST /api/v1/assets/{id}/trash's body.
+type TrashAssetInput struct {
+	ID   int64 `path:"id"`
+	Body struct {
+		// KeepExports=false (default) trashes both master and linked Tier-2
+		// export files (destructive). KeepExports=true moves only the master
+		// to .trash/, leaving Tier-2 exports live on disk -- the cloud
+		// gallery stays intact ("Free Up Space" semantics).
+		KeepExports bool `json:"keepExports"`
+	}
+}
+
+type TrashAssetOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
+}
+
+// handleTrashAsset is the explicit trash endpoint with keepExports control.
+// DELETE /api/v1/assets/{id} is the shorthand for {keepExports: false}.
+func (s *Server) handleTrashAsset(ctx context.Context, in *TrashAssetInput) (*TrashAssetOutput, error) {
+	out, err := s.doTrashAsset(ctx, in.ID, in.Body.KeepExports)
+	if err != nil {
+		return nil, err
+	}
+	return &TrashAssetOutput{Body: out.Body}, nil
+}
+
+func (s *Server) doTrashAsset(ctx context.Context, assetID int64, keepExports bool) (*DeleteAssetOutput, error) {
+	// Pre-flight load: needed only to (a) translate ErrNoRows into 404 before
+	// opening a tx, and (b) populate the audit-event details with file
+	// metadata. Idempotency for already-TRASHED nodes is handled inside
+	// pipeline.TrashAsset (the tx returns the existing row unchanged).
+	prior, err := s.db.Reader.GetMediaNodeByID(ctx, assetID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, huma.Error404NotFound("asset not found")
 	}
@@ -535,22 +575,25 @@ func (s *Server) handleDeleteAsset(ctx context.Context, in *AssetPathInput) (*De
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
 
-	if node.LifecycleState != "ARCHIVED" {
-		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-			return q.ArchiveMediaNode(ctx, in.ID)
-		}); err != nil {
-			return nil, huma.Error500InternalServerError("archive asset", err)
+	trashed, trashErr := pipeline.TrashAsset(ctx, s.db, s.guard, s.log, assetID, keepExports)
+	if trashErr != nil {
+		if errors.Is(trashErr, pipeline.ErrAssetNotTrashed) {
+			return nil, huma.Error409Conflict(trashErr.Error())
 		}
+		return nil, huma.Error500InternalServerError("trash asset", trashErr)
+	}
 
-		if s.audit != nil {
-			details := map[string]any{
-				"assetId":  in.ID,
-				"filePath": node.FilePath,
-				"fileName": node.FileName,
-			}
-			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetArchived, "asset", strconv.FormatInt(in.ID, 10), details); err != nil {
-				s.log.Warn("failed to write actor audit for asset archive", "error", err)
-			}
+	// Skip the audit on a no-op idempotent re-trash so we don't flood the
+	// actor_audit log with one row per repeat click.
+	if trashed.LifecycleState == "TRASHED" && prior.LifecycleState != "TRASHED" && s.audit != nil {
+		details := map[string]any{
+			"assetId":     assetID,
+			"filePath":    prior.FilePath,
+			"fileName":    prior.FileName,
+			"keepExports": keepExports,
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetTrashed, "asset", strconv.FormatInt(assetID, 10), details); err != nil {
+			s.log.Warn("failed to write actor audit for asset trash", "error", err)
 		}
 	}
 
@@ -565,8 +608,10 @@ type RestoreAssetOutput struct {
 	}
 }
 
-// handleRestoreAsset transitions an ARCHIVED media node back to ACTIVE.
-// If another live node currently occupies the file path, returns 409 Conflict.
+// handleRestoreAsset transitions an ARCHIVED or TRASHED media node back to
+// ACTIVE. If another live node currently occupies the file path, returns 409
+// Conflict. For TRASHED nodes, the file is moved back from <root>/.trash/<rel>
+// to its original path by pipeline.RestoreTrashedAsset.
 func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*RestoreAssetOutput, error) {
 	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -576,11 +621,31 @@ func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*R
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
 
-	if node.LifecycleState != "ARCHIVED" && node.LifecycleState != "ACTIVE" {
-		return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset lifecycle state is %s (expected ARCHIVED)", node.LifecycleState))
+	if node.LifecycleState != "ARCHIVED" && node.LifecycleState != "TRASHED" && node.LifecycleState != "ACTIVE" {
+		return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset lifecycle state is %s (expected ARCHIVED or TRASHED)", node.LifecycleState))
 	}
 
-	if node.LifecycleState == "ARCHIVED" {
+	switch node.LifecycleState {
+	case "TRASHED":
+		if _, restoreErr := pipeline.RestoreTrashedAsset(ctx, s.db, s.guard, s.log, in.ID); restoreErr != nil {
+			switch {
+			case errors.Is(restoreErr, pipeline.ErrAssetNotTrashed):
+				return nil, huma.Error409Conflict(restoreErr.Error())
+			case errors.Is(restoreErr, pipeline.ErrAssetHasSuperseded):
+				return nil, huma.Error409Conflict(restoreErr.Error())
+			case errors.Is(restoreErr, pipeline.ErrAssetTrashFileMissing):
+				return nil, huma.Error409Conflict(restoreErr.Error())
+			case errors.Is(restoreErr, pipeline.ErrAssetPathCollision):
+				return nil, huma.Error409Conflict(restoreErr.Error())
+			case errors.Is(restoreErr, pipeline.ErrAssetAlreadyExists):
+				return nil, huma.Error409Conflict(restoreErr.Error())
+			default:
+				return nil, huma.Error500InternalServerError("restore trashed asset", restoreErr)
+			}
+		}
+		writeAssetRestoredAudit(s, ctx, node)
+
+	case "ARCHIVED":
 		if node.SupersededBy.Valid && node.SupersededBy.Int64 != 0 {
 			return nil, huma.Error409Conflict(fmt.Sprintf("cannot restore asset: asset has been superseded by asset ID %d", node.SupersededBy.Int64))
 		}
@@ -614,21 +679,26 @@ func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*R
 			return nil, huma.Error500InternalServerError("restore asset", err)
 		}
 
-		if s.audit != nil {
-			details := map[string]any{
-				"assetId":  in.ID,
-				"filePath": node.FilePath,
-				"fileName": node.FileName,
-			}
-			if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetRestored, "asset", strconv.FormatInt(in.ID, 10), details); err != nil {
-				s.log.Warn("failed to write actor audit for asset restore", "error", err)
-			}
-		}
+		writeAssetRestoredAudit(s, ctx, node)
 	}
 
 	out := &RestoreAssetOutput{}
 	out.Body.OK = true
 	return out, nil
+}
+
+func writeAssetRestoredAudit(s *Server, ctx context.Context, node sqlcgen.MediaNode) {
+	if s.audit == nil {
+		return
+	}
+	details := map[string]any{
+		"assetId":  node.ID,
+		"filePath": node.FilePath,
+		"fileName": node.FileName,
+	}
+	if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventAssetRestored, "asset", strconv.FormatInt(node.ID, 10), details); err != nil {
+		s.log.Warn("failed to write actor audit for asset restore", "error", err)
+	}
 }
 
 type nodeMetadatumDTO struct {

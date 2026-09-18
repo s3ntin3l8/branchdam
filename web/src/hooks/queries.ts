@@ -230,6 +230,19 @@ export function useDeleteAsset() {
   });
 }
 
+export function useTrashAsset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, keepExports }: { id: number; keepExports: boolean }) =>
+      api.trashAsset(id, { keepExports }),
+    onSuccess: (_data, vars) => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      void queryClient.invalidateQueries({ queryKey: ["asset", vars.id] });
+      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", vars.id] });
+    },
+  });
+}
+
 export function useRestoreAsset() {
   const queryClient = useQueryClient();
   return useMutation({

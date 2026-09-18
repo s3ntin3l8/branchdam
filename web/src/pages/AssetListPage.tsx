@@ -119,7 +119,9 @@ export default function AssetListPage() {
     setRestoreTargetId(null);
   }
 
-  const selectableIds = assets.filter((a) => a.lifecycleState !== "ARCHIVED").map((a) => a.id);
+  const selectableIds = assets
+    .filter((a) => a.lifecycleState !== "ARCHIVED" && a.lifecycleState !== "TRASHED")
+    .map((a) => a.id);
   const allSelectableSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
   const someSelected = selectedIds.size > 0;
 
@@ -314,6 +316,7 @@ export default function AssetListPage() {
               <option value="ACTIVE">ACTIVE</option>
               <option value="MISSING">MISSING</option>
               <option value="ARCHIVED">ARCHIVED</option>
+              <option value="TRASHED">TRASHED</option>
               <option value="HIDDEN">HIDDEN</option>
             </select>
           </div>
@@ -392,7 +395,7 @@ export default function AssetListPage() {
           <div className="flex items-center gap-3">
             {batchError && (
               <span className="text-red-400">
-                {batchError.count} failed to archive: {batchError.message}
+                {batchError.count} failed to trash: {batchError.message}
               </span>
             )}
             <button
@@ -407,7 +410,7 @@ export default function AssetListPage() {
               onClick={() => setBatchDialogOpen(true)}
               className="rounded border border-red-800/80 bg-red-950/60 px-2.5 py-1 font-medium text-red-300 hover:bg-red-900/60"
             >
-              Archive selected
+              Trash selected
             </button>
           </div>
         </div>
@@ -474,6 +477,7 @@ export default function AssetListPage() {
                       a.lifecycleState === "ACTIVE" ? "bg-emerald-950 text-emerald-300 border border-emerald-800/60" :
                       a.lifecycleState === "MISSING" ? "bg-red-950 text-red-300 border border-red-800/60" :
                       a.lifecycleState === "ARCHIVED" ? "bg-neutral-800 text-neutral-400 border border-neutral-700" :
+                      a.lifecycleState === "TRASHED" ? "bg-orange-950 text-orange-300 border border-orange-800/60" :
                       "bg-amber-950 text-amber-300 border border-amber-800/60"
                     }`}>
                       {a.lifecycleState}
@@ -485,7 +489,7 @@ export default function AssetListPage() {
                   <td className="py-2 pr-4 text-neutral-500 text-xs">{formatUploadedBy(a.uploadedByUserId)}</td>
                   <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{a.fastHash ?? "—"}</td>
                   <td className="py-2 pr-4 text-xs">
-                    {a.lifecycleState === "ARCHIVED" ? (
+                    {a.lifecycleState === "ARCHIVED" || a.lifecycleState === "TRASHED" ? (
                       <div className="flex flex-col items-start gap-1">
                         <button
                           type="button"
@@ -507,7 +511,7 @@ export default function AssetListPage() {
                         onClick={() => openArchiveDialog(a)}
                         className="rounded border border-red-800/80 bg-red-950/60 px-2 py-1 font-medium text-red-300 hover:bg-red-900/60"
                       >
-                        Archive
+                        Trash
                       </button>
                     )}
                   </td>
@@ -549,20 +553,20 @@ export default function AssetListPage() {
       {archiveTarget && (
         <ConfirmDialog
           titleId="archive-asset-title"
-          title="Archive Asset"
+          title="Trash Asset"
           body={
             <>
-              Are you sure you want to soft-delete (archive){" "}
-              <strong className="text-white">{archiveTarget.fileName}</strong>? The media node will be marked{" "}
-              <code className="text-amber-400">ARCHIVED</code> and removed from active lineage. The underlying file
-              on disk is never deleted.
+              Move <strong className="text-white">{archiveTarget.fileName}</strong> to{" "}
+              <code className="text-amber-400">.trash/</code>? The media node and any linked Tier-2 export copies
+              will be removed from their original locations, marked{" "}
+              <code className="text-amber-400">TRASHED</code>, and auto-purged after 30 days unless restored.
             </>
           }
-          confirmLabel="Confirm Archive"
-          pendingLabel="Archiving…"
+          confirmLabel="Confirm Trash"
+          pendingLabel="Trashing…"
           isPending={deleteAsset.isPending}
           error={deleteAsset.isError ? deleteAsset.error : undefined}
-          errorLabel="Failed to archive"
+          errorLabel="Failed to trash"
           onConfirm={() => {
             deleteAsset.mutate(archiveTarget.id, {
               onSuccess: () => setArchiveTarget(null),
@@ -575,14 +579,14 @@ export default function AssetListPage() {
       {batchDialogOpen && (
         <ConfirmDialog
           titleId="batch-archive-title"
-          title="Archive Selected Assets"
+          title="Trash Selected Assets"
           body={
             batchPending && batchProgress
-              ? `Archiving ${batchProgress.done}/${batchProgress.total}…`
-              : `Are you sure you want to archive ${selectedIds.size} asset${selectedIds.size === 1 ? "" : "s"}? Each will be marked ARCHIVED and removed from active lineage. The underlying files on disk are never deleted.`
+              ? `Trashing ${batchProgress.done}/${batchProgress.total}…`
+              : `Are you sure you want to trash ${selectedIds.size} asset${selectedIds.size === 1 ? "" : "s"}? Each will be moved to .trash/, marked TRASHED, and auto-purged after 30 days unless restored.`
           }
-          confirmLabel="Confirm Archive"
-          pendingLabel="Archiving…"
+          confirmLabel="Confirm Trash"
+          pendingLabel="Trashing…"
           isPending={batchPending}
           onConfirm={() => {
             void runBatchArchive();

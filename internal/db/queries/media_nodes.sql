@@ -11,7 +11,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE lifecycle_state != 'ARCHIVED'
+WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
 ORDER BY id DESC
 LIMIT ?1 OFFSET ?2;
@@ -20,7 +20,7 @@ LIMIT ?1 OFFSET ?2;
 -- Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
 SELECT COUNT(*)
 FROM media_nodes
-WHERE lifecycle_state != 'ARCHIVED'
+WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL;
 
 -- name: ListMediaNodesFiltered :many
@@ -68,7 +68,7 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
 -- the result always non-NULL.
 SELECT DISTINCT COALESCE(camera_model, '') AS camera_model
 FROM media_nodes
-WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state != 'ARCHIVED'
+WHERE camera_model IS NOT NULL AND camera_model != '' AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 ORDER BY camera_model ASC;
 
 
@@ -99,7 +99,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED';
+WHERE file_path = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
 -- name: GetMissingNodeByFastHash :one
 -- Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
@@ -129,7 +129,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE fast_hash = ?1 AND lifecycle_state != 'ARCHIVED';
+WHERE fast_hash = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
 -- name: ListLiveNodesByDocumentID :many
 -- Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
@@ -144,7 +144,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE document_id = ?1 AND lifecycle_state != 'ARCHIVED';
+WHERE document_id = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
 -- name: ListLiveNodesByFilenameStem :many
 -- Tier-2 filenameStem resolver: candidate parents sharing a normalized
@@ -164,7 +164,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE filename_stem = ?1 AND lifecycle_state != 'ARCHIVED'
+WHERE filename_stem = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 LIMIT ?2;
 
 -- name: ListTier3Candidates :many
@@ -184,7 +184,7 @@ WHERE camera_serial = ?1
   AND captured_at_unix >= ?2
   AND captured_at_unix <= ?3
   AND id <> ?4
-  AND lifecycle_state != 'ARCHIVED';
+  AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
 -- name: ListLiveNodesByFileName :many
 -- Look up live media nodes sharing exact file_name for fallback path matching.
@@ -197,7 +197,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE file_name = ?1 AND lifecycle_state != 'ARCHIVED';
+WHERE file_name = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
 -- name: UpdateMediaNodeGraphStatus :exec
 UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1;
@@ -233,7 +233,7 @@ RETURNING id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 -- name: ArchiveMediaNode :exec
 -- Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
 -- row FIRST, before inserting the new one. The partial unique index
--- (WHERE lifecycle_state != 'ARCHIVED') means a live row and a new live
+-- (WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')) means a live row and a new live
 -- row can never share file_path even for an instant within the
 -- transaction -- archiving first, not after, is what keeps that true.
 UPDATE media_nodes SET lifecycle_state = 'ARCHIVED', updated_at = unixepoch() WHERE id = ?1;
@@ -263,7 +263,7 @@ WHERE id = ?1;
 -- it in place -- a MISSING row found alive again is not a version collision
 -- and must not stay MISSING.
 --
--- The WHERE lifecycle_state != 'ARCHIVED' clause and MISSING-only CASE
+-- The WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED') clause and MISSING-only CASE
 -- make #226's now-possible concurrent FULL_SCAN + manual differential
 -- INCREMENTAL against the same Tier-3 location safe rather than merely
 -- untested: if a concurrent FULL_SCAN archives this node (a version
@@ -278,7 +278,7 @@ UPDATE media_nodes
 SET mtime_unix = ?2, last_seen_at = unixepoch(),
     lifecycle_state = CASE WHEN lifecycle_state = 'MISSING' THEN 'ACTIVE' ELSE lifecycle_state END,
     updated_at = unixepoch()
-WHERE lifecycle_state != 'ARCHIVED' AND id = ?1;
+WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED') AND id = ?1;
 
 -- name: UpdateMediaNodeFullHash :exec
 -- Escalation path for T1: computed lazily, only when fast_hash collides
@@ -355,6 +355,22 @@ WHERE id = ?1;
 -- name: MarkNodeMissing :exec
 UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
 
+-- name: MarkNodeTrashed :exec
+-- pipeline.TrashAsset calls this on the master node and on every linked
+-- FINAL_EXPORT/immich_export edge target (when keepExports=false). The
+-- pipeline function has already moved the bytes to <root>/.trash/<rel>
+-- before this UPDATE; the lifecycle_state change is the durable record
+-- that the file is no longer at its original path.
+UPDATE media_nodes SET lifecycle_state = 'TRASHED', updated_at = unixepoch() WHERE id = ?1;
+
+-- name: UntrashNode :exec
+-- pipeline.RestoreTrashedAsset calls this on the master node and on any
+-- linked TRASHED export node (same transaction). The pipeline function
+-- has already moved the bytes back from .trash/<rel> to the original
+-- path before this UPDATE; the lifecycle_state change is the durable
+-- record that the asset is queryable again.
+UPDATE media_nodes SET lifecycle_state = 'ACTIVE', updated_at = unixepoch() WHERE id = ?1;
+
 -- name: MarkUnseenNodesMissing :execrows
 -- Phase 1 (#31): at the end of a clean full scan, every ACTIVE node under the
 -- scanned storage location whose last_seen_at predates the scan's start is
@@ -400,7 +416,7 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE file_path = ?1 AND lifecycle_state != 'ARCHIVED';
+WHERE file_path = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
 -- name: RebaseNodePathByUUID :exec
 UPDATE media_nodes
@@ -445,7 +461,7 @@ WITH RECURSIVE lineage(root, id) AS (
     JOIN lineage l ON e.target_node_id = l.id
     JOIN media_nodes a ON a.id = e.source_node_id
     WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
-      AND a.lifecycle_state <> 'ARCHIVED'
+      AND a.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
        n.mtime_unix, n.storage_location_id
