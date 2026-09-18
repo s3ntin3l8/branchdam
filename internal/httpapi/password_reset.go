@@ -113,7 +113,7 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	if s.localAuth.email != nil {
 		user, lookupErr := s.localAuth.users.GetUserByID(r.Context(), issue.Token.UserID)
 		if lookupErr == nil && user.Email.Valid && user.Email.String != "" {
-			baseURL := requestBaseURL(r)
+			baseURL := passwordResetBaseURL(s, r)
 			resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
 			subject := "Reset your branchDAM password"
 			htmlBody := emailpkg.PasswordResetHTML(emailpkg.ResetEmailData{

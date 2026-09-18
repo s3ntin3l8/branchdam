@@ -177,3 +177,110 @@ func handleMockSMTP(conn net.Conn, mu *mu, received *[]string) {
 }
 
 type mu = sync.Mutex
+
+func TestSMTPSender_RejectsCRLFInTo(t *testing.T) {
+	sender := &smtpSender{
+		cfg: Config{
+			Provider: "smtp",
+			Host:     "127.0.0.1",
+			Port:     25,
+			From:     "test@branchdam.local",
+			TLS:      "none",
+		},
+		log: slog.New(slog.DiscardHandler),
+	}
+	err := sender.Send(context.Background(), "user@example.com\r\nBcc: attacker@example.com", "Test", "<p>Hi</p>", "Hi")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid to address")
+}
+
+func TestSMTPSender_RejectsCRLFInFrom(t *testing.T) {
+	sender := &smtpSender{
+		cfg: Config{
+			Provider: "smtp",
+			Host:     "127.0.0.1",
+			Port:     25,
+			From:     "test@branchdam.local\r\nBcc: attacker@example.com",
+			TLS:      "none",
+		},
+		log: slog.New(slog.DiscardHandler),
+	}
+	err := sender.Send(context.Background(), "user@example.com", "Test", "<p>Hi</p>", "Hi")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid from address")
+}
+
+func TestSMTPSender_StartTLSFailsClosedWhenUnsupported(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SMTP integration test in short mode")
+	}
+
+	// Start a local TCP listener that does NOT advertise STARTTLS.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	addr := listener.Addr().(*net.TCPAddr)
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = c.Write([]byte("220 mock SMTP\r\n"))
+				buf := make([]byte, 4096)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					for _, line := range strings.Split(string(buf[:n]), "\r\n") {
+						upper := strings.ToUpper(line)
+						switch {
+						case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
+							// Deliberately omit STARTTLS from the EHLO response
+							_, _ = c.Write([]byte("250-mock\r\n250 OK\r\n"))
+						case strings.HasPrefix(upper, "QUIT"):
+							_, _ = c.Write([]byte("221 Bye\r\n"))
+							return
+						default:
+							_, _ = c.Write([]byte("250 OK\r\n"))
+						}
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	sender := &smtpSender{
+		cfg: Config{
+			Provider: "smtp",
+			Host:     "127.0.0.1",
+			Port:     addr.Port,
+			From:     "test@branchdam.local",
+			TLS:      "starttls",
+			Username: "u",
+			Password: "p",
+		},
+		log: slog.New(slog.DiscardHandler),
+	}
+
+	// tls=starttls but server didn't advertise STARTTLS -> must error
+	// rather than silently fall through to plaintext AUTH.
+	err = sender.Send(context.Background(), "user@example.com", "Test", "<p>Hi</p>", "Hi")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "STARTTLS")
+}
+
+func TestBuildMessage_Uses8BitTransferEncoding(t *testing.T) {
+	msg := buildMessage("sender@example.com", "recipient@example.com", "Test Subject", "<p>Hi</p>", "Hi")
+	s := string(msg)
+	assert.Contains(t, s, "Content-Transfer-Encoding: 8bit")
+	// Both text/plain and text/html parts
+	assert.Equal(t, 2, strings.Count(s, "Content-Transfer-Encoding: 8bit"))
+	// And NO quoted-printable anywhere (issue 3: CTE used to lie about QP)
+	assert.NotContains(t, s, "quoted-printable")
+}

@@ -402,6 +402,7 @@ func main() {
 			Password: cfg.Auth.Email.Password,
 			From:     cfg.Auth.Email.From,
 			TLS:      cfg.Auth.Email.TLS,
+			BaseURL:  cfg.Auth.Email.BaseURL,
 		}, log)
 		localAuthDeps = &httpapi.LocalAuthDeps{
 			Users:        usersService,

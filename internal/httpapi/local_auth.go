@@ -519,6 +519,11 @@ func clientIP(s *Server, r *http.Request) string {
 // before falling back to the request's own scheme. The Host header
 // provides the hostname; when empty, the request URL is used as a
 // last resort.
+//
+// IMPORTANT: this trusts the Host header, which an attacker can
+// control. Do NOT use it for security-sensitive URL construction
+// (e.g. links embedded in outbound email). Use the configured baseURL
+// (passwordResetBaseURL below) instead, with a documented fallback.
 func requestBaseURL(r *http.Request) string {
 	scheme := "http"
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" {
@@ -534,6 +539,21 @@ func requestBaseURL(r *http.Request) string {
 		return scheme + "://localhost"
 	}
 	return scheme + "://" + host
+}
+
+// passwordResetBaseURL returns the base URL to embed in outbound
+// password-reset emails. It prefers the operator-declared
+// auth.email.baseURL (immune to Host header poisoning), and logs a
+// WARN when falling back to the inbound request's Host header so the
+// misconfiguration is visible in logs.
+func passwordResetBaseURL(s *Server, r *http.Request) string {
+	if cfg := s.cfg(); cfg != nil && cfg.Auth.Email.BaseURL != "" {
+		return strings.TrimRight(cfg.Auth.Email.BaseURL, "/")
+	}
+	if s.log != nil {
+		s.log.Warn("password-reset: auth.email.baseURL is unset; falling back to inbound request Host header. Set auth.email.baseURL in config.yaml to prevent reset-link header-poisoning attacks.")
+	}
+	return requestBaseURL(r)
 }
 
 // currentTrustedProxies reads s.cfg().HTTP.TrustedProxies through a
