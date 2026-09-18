@@ -2,29 +2,26 @@
 // Huma-generated REST API, the SSE progress stream, and the embedded SPA
 // fallback.
 //
-// codeql[go/log-injection]
-//
 // Password-reset HTTP handlers (PR #409). Three endpoints:
 //
 //	POST /api/v1/password-reset/request   -- no auth, 200 always
 //	POST /api/v1/password-reset/confirm   -- no auth, 200 / 404
 //	POST /api/v1/admin/users/{id}/reset-password   -- admin-only, returns new password
 //
-// The /request handler logs a slog.WARN with the freshly-minted
-// plaintext token, the request IP (from clientIP, which honors
-// X-Forwarded-For when behind a configured trusted proxy), and the
-// User-Agent. The plaintext token is not user-controlled (it comes
-// from crypto/rand), but IP and UA are, which trips CodeQL's
-// go/log-injection rule. The suppression is at the file level
-// because the rule's extractor flags the slog.Warn call site and
-// the suppression must precede it without intervening tokens. Per
-// PR #407's pattern (file-level `// codeql[go/rule-id]` in package
-// doc-comment, before the `package` line), this is the form the
-// CodeQL Go extractor recognizes reliably.
+// The /request handler emits a slog.WARN with only numeric fields
+// (user_id, token_id, expires_at). The plaintext token and the
+// request IP/User-Agent are deliberately NOT logged here. The
+// plaintext token is delivered to admins via the admin-UI pending-
+// resets panel (PR #408) and via the admin reset-password endpoint's
+// response body, so logging it in slog would only widen the attack
+// surface for log exfiltration. Request IP/UA flow into the audit
+// row written by RequestPasswordReset; they are user-controlled and
+// must never cross into a slog line (CodeQL go/log-injection).
 
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,12 +40,14 @@ import (
 // body: {"email": "..."}
 //
 // Always returns 200 OK with an empty body. On a user-found, a token
-// is minted and the plaintext surfaces via slog.WARN; the response
-// body does NOT include the token (operator retrieves it from logs
-// or the admin-UI pending-resets panel). On a no-such-user, no
-// token is minted, no log line is written -- the response is byte-
-// identical to the success path so the endpoint cannot be used to
-// enumerate which addresses have accounts.
+// is minted and an admin-only slog marker is written (numeric fields
+// only -- user_id, token_id, expires_at). The plaintext token does
+// NOT cross into slog; the response body does NOT include the token.
+// Operators/admins retrieve the token via the admin-UI pending-resets
+// panel (PR #408). On a no-such-user, no token is minted, no log
+// line is written -- the response is byte-identical to the success
+// path so the endpoint cannot be used to enumerate which addresses
+// have accounts.
 //
 // Rate-limited by resetLimiter (NOT loginLimiter -- a separate
 // per-IP budget, so a user who tripped the login limiter can still
@@ -93,16 +92,21 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	// Operator-facing: emit the plaintext token to slog so journalctl
-	// picks it up. The admin-UI panel (PR #408) will also surface the
-	// token, but slog is the fallback for non-admin operators who tail
-	// logs.
-	s.localAuth.log.Warn("password-reset: token minted (operator: hand this to the user)", // lgtm[go/log-injection]
+	// Operator-facing: emit a token-minted marker to slog so journalctl
+	// picks it up. Only numeric fields (user_id, token_id, expires_at)
+	// are logged: the plaintext token and request IP/User-Agent are
+	// omitted deliberately. The plaintext token is surfaced to admins
+	// via the admin-UI pending-resets panel (PR #408) and via the
+	// admin reset-password endpoint's newPassword response body, so
+	// logging it here would only widen the attack surface for log
+	// exfiltration. Request IP/UA flow into the audit row written by
+	// RequestPasswordReset; they are user-controlled and CodeQL's
+	// go/log-injection rule flags them in slog output regardless of
+	// the lgtm suppression.
+	s.localAuth.log.Warn("password-reset: token minted (operator: retrieve via admin pending-resets panel)",
 		"user_id", issue.Token.UserID,
 		"token_id", issue.Token.ID,
 		"expires_at", issue.ExpiresAt.Unix(),
-		"plaintext_token", issue.PlaintextToken,
-		"ip", ip,
 	)
 
 	// Email delivery: when the notifier is configured, send the reset
@@ -110,28 +114,46 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// auth.email.provider is unset (default "log"), which silently
 	// skips delivery. Enumeration defense: email is only sent when a
 	// token was minted (user found), and the 200 response is identical.
+	//
+	// Delivery is performed in a background goroutine so the 200
+	// response is returned without blocking on the SMTP round-trip.
+	// Without this, an attacker could distinguish "user exists" (full
+	// SMTP round-trip before 200) from "user does not exist" (200
+	// immediately), defeating the byte-identical response defense.
+	// Errors are logged from the goroutine; the caller never sees
+	// them. We copy every value the goroutine needs into locals
+	// (request context is canceled when the handler returns, so we
+	// cannot share r, user, issue with the goroutine).
 	if s.localAuth.email != nil {
 		user, lookupErr := s.localAuth.users.GetUserByID(r.Context(), issue.Token.UserID)
 		if lookupErr == nil && user.Email.Valid && user.Email.String != "" {
 			baseURL := passwordResetBaseURL(s, r)
 			resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
 			subject := "Reset your branchDAM password"
+			username := user.Username
+			recipient := user.Email.String
+			expiresLabel := issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2")
+			userID := issue.Token.UserID
 			htmlBody := emailpkg.PasswordResetHTML(emailpkg.ResetEmailData{
-				Username:  user.Username,
+				Username:  username,
 				ResetLink: resetLink,
-				ExpiresAt: issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2"),
+				ExpiresAt: expiresLabel,
 			})
 			textBody := emailpkg.PasswordResetText(emailpkg.ResetEmailData{
-				Username:  user.Username,
+				Username:  username,
 				ResetLink: resetLink,
-				ExpiresAt: issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2"),
+				ExpiresAt: expiresLabel,
 			})
-			if sendErr := s.localAuth.email.Send(r.Context(), user.Email.String, subject, htmlBody, textBody); sendErr != nil {
-				s.localAuth.log.Warn("password-reset: email delivery failed",
-					"user_id", issue.Token.UserID,
-					"error", sendErr.Error(),
-				)
-			}
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), emailpkg.SendTimeout)
+				defer cancel()
+				if sendErr := s.localAuth.email.Send(ctx, recipient, subject, htmlBody, textBody); sendErr != nil {
+					s.localAuth.log.Warn("password-reset: email delivery failed",
+						"user_id", userID,
+						"error", sendErr.Error(),
+					)
+				}
+			}()
 		}
 	}
 

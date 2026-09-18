@@ -115,14 +115,24 @@ func newSMTPSender(cfg Config, log *slog.Logger) *smtpSender {
 // avoid a stalled server hanging the password-reset request handler.
 const sendTimeout = 30 * time.Second
 
+// SendTimeout is exported so background goroutines that have detached
+// from a request context (e.g. password_reset.go's deferred email
+// delivery) can apply the same upper bound without re-deriving it.
+const SendTimeout = sendTimeout
+
 func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody string) error {
 	// Validate From + To with mail.ParseAddress BEFORE doing any I/O.
 	// mail.ParseAddress rejects bare CR/LF and other header-injection
 	// shapes, so a stored user email containing "\r\nBcc: attacker@"
-	// fails closed here instead of injecting SMTP envelopes.
-	if _, err := mail.ParseAddress(s.cfg.From); err != nil {
+	// fails closed here instead of injecting SMTP envelopes. We also
+	// need the parsed From below -- RFC 5321's MAIL FROM envelope takes
+	// an angle-addr (just "user@domain"), NOT the display-name form
+	// ("branchDAM <user@domain>") that the MIME From: header carries.
+	parsedFrom, err := mail.ParseAddress(s.cfg.From)
+	if err != nil {
 		return fmt.Errorf("email: invalid from address %q: %w", s.cfg.From, err)
 	}
+	envelopeFrom := parsedFrom.Address
 	if _, err := mail.ParseAddress(to); err != nil {
 		return fmt.Errorf("email: invalid to address %q: %w", to, err)
 	}
@@ -143,7 +153,6 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 
 	// Dial with context-aware timeout.
 	var conn net.Conn
-	var err error
 	dialer := net.Dialer{}
 
 	if s.cfg.TLS == "implicit" {
@@ -197,7 +206,7 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 		}
 	}
 
-	if err := client.Mail(s.cfg.From); err != nil {
+	if err := client.Mail(envelopeFrom); err != nil {
 		return fmt.Errorf("email: mail from: %w", err)
 	}
 	if err := client.Rcpt(to); err != nil {

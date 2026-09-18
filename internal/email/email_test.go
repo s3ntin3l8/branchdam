@@ -84,6 +84,7 @@ func TestSMTPSender_LocalSMTPFixture(t *testing.T) {
 	addr := listener.Addr().(*net.TCPAddr)
 	var mu sync.Mutex
 	var received []string
+	var mailFrom string
 
 	go func() {
 		for {
@@ -91,7 +92,7 @@ func TestSMTPSender_LocalSMTPFixture(t *testing.T) {
 			if err != nil {
 				return
 			}
-			go handleMockSMTP(conn, &mu, &received)
+			go handleMockSMTP(conn, &mu, &received, &mailFrom)
 		}
 	}()
 
@@ -115,9 +116,66 @@ func TestSMTPSender_LocalSMTPFixture(t *testing.T) {
 	assert.Contains(t, received[0], "From: test@branchdam.local")
 	assert.Contains(t, received[0], "To: user@example.com")
 	assert.Contains(t, received[0], "Subject: Test")
+	// MAIL FROM envelope is the bare angle-addr (RFC 5321), not the
+	// display-name form. The From config is already bare here, but the
+	// envelope path also goes through mail.ParseAddress + .Address.
+	assert.Equal(t, "<test@branchdam.local>", mailFrom)
 }
 
-func handleMockSMTP(conn net.Conn, mu *mu, received *[]string) {
+func TestSMTPSender_MailFromEnvelopeUsesAngleAddr(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SMTP integration test in short mode")
+	}
+
+	// Regression for the display-name leakage: configuring
+	// "branchDAM <noreply@example.com>" must NOT produce
+	// MAIL FROM:<branchDAM <noreply@example.com>> (invalid RFC 5321).
+	// The MIME From: header still renders the display-name form;
+	// only the SMTP envelope is stripped to the angle-addr.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	var mu sync.Mutex
+	var received []string
+	var mailFrom string
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleMockSMTP(conn, &mu, &received, &mailFrom)
+		}
+	}()
+
+	sender := &smtpSender{
+		cfg: Config{
+			Provider: "smtp",
+			Host:     "127.0.0.1",
+			Port:     addr.Port,
+			From:     "branchDAM <noreply@example.com>",
+			TLS:      "none",
+		},
+		log: slog.New(slog.DiscardHandler),
+	}
+
+	err = sender.Send(context.Background(), "user@example.com", "Test", "<p>Hi</p>", "Hi")
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Envelope: just the angle-addr.
+	assert.Equal(t, "<noreply@example.com>", mailFrom)
+	// MIME header: still the display-name form, so the recipient's
+	// mail client shows a real sender name.
+	require.Len(t, received, 1)
+	assert.Contains(t, received[0], "From: branchDAM <noreply@example.com>")
+}
+
+func handleMockSMTP(conn net.Conn, mu *mu, received *[]string, mailFrom *string) {
 	defer func() { _ = conn.Close() }()
 
 	// SmtpServer is the minimal mock.
@@ -160,6 +218,14 @@ func handleMockSMTP(conn net.Conn, mu *mu, received *[]string) {
 			case strings.HasPrefix(upper, "EHLO") || strings.HasPrefix(upper, "HELO"):
 				_, _ = conn.Write([]byte("250-mock\r\n250 OK\r\n"))
 			case strings.HasPrefix(upper, "MAIL FROM"):
+				mu.Lock()
+				// Capture the angle-addr argument only, not the
+				// "MAIL FROM:" command token. The SMTP wire format
+				// is "MAIL FROM:<addr>"; strip the verb. Preserve
+				// the original case (we ToUpper'd for the switch).
+				arg := line[len("MAIL FROM:"):]
+				*mailFrom = arg
+				mu.Unlock()
 				_, _ = conn.Write([]byte("250 OK\r\n"))
 			case strings.HasPrefix(upper, "RCPT TO"):
 				_, _ = conn.Write([]byte("250 OK\r\n"))
