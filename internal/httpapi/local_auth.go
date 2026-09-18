@@ -567,8 +567,10 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		"isAdmin":      user.IsAdmin == 1,
 		"source":       user.Source,
 		"authProvider": user.AuthProvider,
+		"externalUid":  user.ExternalUid,
 		"createdAt":    user.CreatedAt,
 		"createdBy":    user.CreatedBy,
+		"lastSeenAt":   user.LastSeenAt,
 	}
 	if user.Email.Valid {
 		respUser["email"] = user.Email.String
@@ -645,6 +647,10 @@ func (s *Server) handleAdminRevokeSessions(w http.ResponseWriter, r *http.Reques
 	id, ok := pathInt64Param(r, "id")
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest, "missing or invalid user id")
+		return
+	}
+	if localUser, ok := auth.FromUser(r.Context()); ok && localUser.UserID == id {
+		writeJSONError(w, http.StatusBadRequest, "cannot revoke your own sessions")
 		return
 	}
 	if _, err := s.localAuth.users.GetUserByID(r.Context(), id); err != nil {

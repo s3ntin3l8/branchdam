@@ -428,3 +428,255 @@ func TestLocalAuthAdminDisableUser_CannotDisableSelf(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "cannot disable current user")
 }
+
+// TestLocalAuthAdminUpdateUser_HappyPath: PATCH on a non-admin user
+// promoting them to admin returns 200 with the full updated user
+// shape. Pins the contract that PATCH's response carries every
+// AttributionUser field (including the freshly-added externalUid +
+// lastSeenAt from the Hermes re-review) so the SPA's typecheck passes.
+func TestLocalAuthAdminUpdateUser_HappyPath(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	// Create a non-admin user (auto-assigned id 1; the calling admin is
+	// only authenticated via adminPrincipal() which doesn't carry a
+	// LocalUserView, so the self-target guard does not fire).
+	createBody := []byte(`{"username":"target","password":"password123","isAdmin":false}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	// Promote user 1 to admin via PATCH.
+	patchBody := []byte(`{"isAdmin":true}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/users/1", bytes.NewReader(patchBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "response: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"ok":true`)
+	assert.Contains(t, rr.Body.String(), `"isAdmin":true`)
+	assert.Contains(t, rr.Body.String(), `"username":"target"`)
+	// Hermes re-review Issue 1: the PATCH response must carry the
+	// same AttributionUser-required fields the create endpoint does.
+	// For source='local' rows, external_uid stores the username
+	// (CreateLocalUser's INSERT pins ?1 into both columns); lastSeenAt
+	// defaults to unixepoch() on insert, so for a brand-new user it
+	// equals createdAt.
+	assert.Contains(t, rr.Body.String(), `"externalUid":"target"`, "externalUid must be present (for local users, equals the username)")
+	assert.Contains(t, rr.Body.String(), `"lastSeenAt":`, "lastSeenAt must be present so the SPA's AttributionUser type-checks")
+	assert.Contains(t, rr.Body.String(), `"createdAt":`)
+	assert.Contains(t, rr.Body.String(), `"createdBy":`)
+	assert.Contains(t, rr.Body.String(), `"source":"local"`)
+}
+
+// TestLocalAuthAdminUpdateUser_AlreadyActive: PATCH on a user whose
+// isAdmin already matches the requested value returns 400 "no
+// changes requested" rather than a silent no-op 200. The handler
+// compares the new value to the current row and rejects no-ops so
+// the audit log doesn't fill up with redundant entries.
+func TestLocalAuthAdminUpdateUser_AlreadyActive(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	// Create user with isAdmin=true (the calling admin has no
+	// LocalUserView, so self-target guard doesn't fire).
+	createBody := []byte(`{"username":"alreadyadmin","password":"password123","isAdmin":true}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	// PATCH asking for isAdmin=true on a user that's already admin.
+	patchBody := []byte(`{"isAdmin":true}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/users/1", bytes.NewReader(patchBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "no changes requested")
+}
+
+// TestLocalAuthAdminUpdateUser_NotFound: PATCH with a user id that
+// has no row returns 404 (not 400 -- the id parses fine, the row is
+// just absent). Pins the GetUserByID-NotFound branch.
+func TestLocalAuthAdminUpdateUser_NotFound(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	patchBody := []byte(`{"isAdmin":true}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/users/99999", bytes.NewReader(patchBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Contains(t, rr.Body.String(), "user not found")
+}
+
+// TestLocalAuthAdminEnableUser_HappyPath: disable, then enable via
+// POST /enable. Pins the 200 contract and the "user not disabled"
+// 400 path's absence here.
+func TestLocalAuthAdminEnableUser_HappyPath(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	// Create user, then disable it.
+	createBody := []byte(`{"username":"re-enable-me","password":"password123"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	disableReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/disable", nil)
+	disableReq = disableReq.WithContext(auth.WithPrincipal(disableReq.Context(), adminPrincipal()))
+	disableRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(disableRR, disableReq)
+	require.Equal(t, http.StatusOK, disableRR.Code)
+
+	// Re-enable via POST /enable.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/enable", nil)
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "response: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"ok":true`)
+	assert.Contains(t, rr.Body.String(), `"id":1`)
+}
+
+// TestLocalAuthAdminEnableUser_AlreadyActive: POST /enable on a user
+// whose disabled_at is NULL returns 400 "user is not disabled" --
+// the handler explicitly checks disabled_at before issuing the SQL
+// UPDATE so a redundant /enable call can't silently succeed.
+func TestLocalAuthAdminEnableUser_AlreadyActive(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	createBody := []byte(`{"username":"alreadyactive","password":"password123"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/enable", nil)
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "user is not disabled")
+}
+
+// TestLocalAuthAdminEnableUser_NotFound: POST /enable on a missing
+// user id 404s. Same lookup-then-update shape as /disable.
+func TestLocalAuthAdminEnableUser_NotFound(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/99999/enable", nil)
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Contains(t, rr.Body.String(), "user not found")
+}
+
+// TestLocalAuthAdminRevokeSessions_CannotRevokeSelf: Hermes re-review
+// Issue 2 -- /revoke-sessions must guard against the calling admin
+// targeting their own user id, just like /disable and PATCH do.
+// Revoking your own sessions would kill the session cookie attached
+// to this very request mid-flight; the session middleware drops
+// revoked sessions to anonymous on the next request, which would
+// surface a confusing 401 to the SPA.
+func TestLocalAuthAdminRevokeSessions_CannotRevokeSelf(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	createBody := []byte(`{"username":"self","password":"password123"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	// Caller's LocalUserView matches the target id.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/revoke-sessions", nil)
+	ctx := auth.WithPrincipal(req.Context(), adminPrincipal())
+	ctx = auth.WithLocalUserView(ctx, auth.LocalUserView{UserID: 1, IsAdmin: true})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "cannot revoke your own sessions")
+}
+
+// TestLocalAuthAdminRevokeSessions_HappyPath: revoke all sessions
+// for a different user returns 200 with the revokedCount. Seeds
+// two sessions for the target, asserts both are revoked and the
+// count surfaces in the response.
+func TestLocalAuthAdminRevokeSessions_HappyPath(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	// Create target user (id 1) and seed two sessions.
+	createBody := []byte(`{"username":"victim","password":"password123"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(auth.WithPrincipal(createReq.Context(), adminPrincipal()))
+	createRR := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code)
+
+	usersSvc := srv.localAuth.users
+	now := time.Now()
+	for i := 0; i < 2; i++ {
+		cid, _, err := usersSvc.MintCookieValue()
+		require.NoError(t, err)
+		_, err = usersSvc.CreateSession(context.Background(), 1, cid, "127.0.0.1", "test", now.Add(time.Hour), now.Add(time.Minute))
+		require.NoError(t, err)
+	}
+
+	// Caller is a different user id (2) -- self-target guard does not fire.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/revoke-sessions", nil)
+	ctx := auth.WithPrincipal(req.Context(), adminPrincipal())
+	ctx = auth.WithLocalUserView(ctx, auth.LocalUserView{UserID: 2, IsAdmin: true})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "response: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"ok":true`)
+	assert.Contains(t, rr.Body.String(), `"revokedCount":2`)
+}
+
+// TestLocalAuthAdminRevokeSessions_NotFound: /revoke-sessions on a
+// missing user id 404s. Same lookup-then-revoke shape as /disable.
+func TestLocalAuthAdminRevokeSessions_NotFound(t *testing.T) {
+	srv := localAuthTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/99999/revoke-sessions", nil)
+	req = req.WithContext(auth.WithPrincipal(req.Context(), adminPrincipal()))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Contains(t, rr.Body.String(), "user not found")
+}
