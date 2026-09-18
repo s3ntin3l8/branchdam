@@ -828,9 +828,9 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	// a prior version-collision supersede), don't try to re-trash it --
 	// the row is already in a terminal-retired state. This matches the
 	// pre-trash-asset behavior where MarkNodeMissing was guarded by
-	// `node.LifecycleState != "ARCHIVED"`. ErrAssetNotTrashed is added
-	// to the fatal-error set in processEvent for this specific path so
-	// ARCHIVED events don't burn retries.
+	// `node.LifecycleState != "ARCHIVED"`. No isFatal entry needed: the
+	// guard makes TrashAssetTx unreachable for the ARCHIVED case, so
+	// ErrAssetNotTrashed cannot be returned from this path.
 	if node.LifecycleState != "ARCHIVED" {
 		if _, trashErr := pipeline.TrashAssetTx(ctx, q, d.guard, d.log, node.ID, false); trashErr != nil {
 			return fmt.Errorf("trash asset (agent EVENT_NODE_DELETED): %w", trashErr)
