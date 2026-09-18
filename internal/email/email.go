@@ -69,13 +69,16 @@ type logSender struct {
 // operator-localized template for `subject`, a rendered HTML/text
 // body) and intentionally logged at INFO so a development operator
 // running without an SMTP server still sees the rendered message.
-// All fields use typed slog.String() to satisfy CodeQL
-// go/log-injection.
+// Unlike smtpSender.Send, this path never runs `to` through
+// mail.ParseAddress, so CR/LF are stripped here with
+// sanitizeControlChars before the values reach slog -- otherwise a
+// stored email/subject containing newlines could forge extra log
+// lines (CodeQL go/log-injection).
 func (s *logSender) Send(_ context.Context, to, subject, htmlBody, textBody string) error {
 	s.log.Info("email: not sent (log-only mode)",
-		slog.String("to", to),
-		slog.String("subject", subject),
-		slog.String("body_preview", truncate(textBody, 200)),
+		slog.String("to", sanitizeControlChars(to)),
+		slog.String("subject", sanitizeControlChars(subject)),
+		slog.String("body_preview", sanitizeControlChars(truncate(textBody, 200))),
 	)
 	// htmlBody is unused by design: the dev-mode preview is the
 	// plain-text part, which is shorter and easier to eyeball than
@@ -213,11 +216,6 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 	if err != nil {
 		return fmt.Errorf("email: data: %w", err)
 	}
-	// lgtm[go/email-content-injection] Header injection is prevented
-	// by sanitizeMIMEHeader (CR/LF/NUL strip). Body content (username,
-	// reset link) is HTML-escaped by PasswordResetHTML/PasswordResetText
-	// templates before reaching this function. The MIME boundary is a
-	// hardcoded constant.
 	if _, err := w.Write(msg); err != nil {
 		return fmt.Errorf("email: write: %w", err)
 	}
@@ -225,7 +223,10 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 		return fmt.Errorf("email: close data: %w", err)
 	}
 
-	s.log.Info("email: sent", "to", to, "subject", subject)
+	s.log.Info("email: sent",
+		slog.String("to", sanitizeControlChars(to)),
+		slog.String("subject", sanitizeControlChars(subject)),
+	)
 	return client.Quit()
 }
 
@@ -234,17 +235,21 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 // determinism (no user-controlled content in the boundary).
 //
 // Header values (from, to, subject) are sanitized by
-// sanitizeMIMEHeader to strip CR, LF, and NUL bytes before they
-// reach the MIME output, preventing header injection.
+// sanitizeControlChars to strip CR, LF, and NUL bytes before they
+// reach the MIME output, preventing header injection. Body values
+// (htmlBody, textBody) are expected to already be sanitized by their
+// callers -- see PasswordResetHTML/PasswordResetText in templates.go,
+// which strip control chars from user-controlled fields (Username)
+// and HTML-escape them for the HTML part.
 func buildMessage(from, to, subject, htmlBody, textBody string) []byte {
 	const boundary = "branchdam-reset-boundary"
 
 	// Sanitize MIME header values: strip CR, LF, and NUL to prevent
 	// header injection (attacker-controlled From/To/Subject breaking
 	// the MIME structure).
-	safeFrom := sanitizeMIMEHeader(from)
-	safeTo := sanitizeMIMEHeader(to)
-	safeSubject := sanitizeMIMEHeader(subject)
+	safeFrom := sanitizeControlChars(from)
+	safeTo := sanitizeControlChars(to)
+	safeSubject := sanitizeControlChars(subject)
 
 	var b strings.Builder
 
@@ -293,9 +298,9 @@ func truncate(s string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-// sanitizeMIMEHeader strips CR, LF, and NUL bytes from s to prevent
+// sanitizeControlChars strips CR, LF, and NUL bytes from s to prevent
 // MIME header injection. This is applied to all user-derived values
 // (From, To, Subject) before they reach buildMessage.
-func sanitizeMIMEHeader(s string) string {
+func sanitizeControlChars(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(s)
 }

@@ -136,7 +136,28 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// (request context is canceled when the handler returns, so we
 	// cannot share r, user, issue with the goroutine).
 	if s.localAuth.email != nil {
-		baseURL := passwordResetBaseURL(s, r)
+		// baseURL prefers the operator-declared auth.email.baseURL.
+		// When unset, provider=smtp fails closed (see below) rather than
+		// fall back to the inbound request's Host header: an attacker
+		// could otherwise spoof Host and redirect a real, externally-
+		// delivered reset email to their own domain (CWE-640; the exact
+		// flow CodeQL's go/email-content-injection query traces). The
+		// default provider=log falls back to requestBaseURL instead,
+		// which is safe here: logSender only writes the rendered preview
+		// to the server's own slog output, never to an external inbox,
+		// so there is no victim for a spoofed Host header to reach.
+		baseURL, ok := passwordResetBaseURL(s)
+		if !ok {
+			cfg := s.cfg()
+			isSMTP := cfg != nil && strings.EqualFold(cfg.Auth.Email.Provider, "smtp")
+			if isSMTP {
+				s.localAuth.log.Warn("password-reset: auth.email.baseURL is not configured; skipping email delivery. Set auth.email.baseURL in config.yaml to enable the emailed reset link.")
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+				return
+			}
+			s.localAuth.log.Warn("password-reset: auth.email.baseURL is unset; using the inbound request's Host header for the dev-mode log-only preview. Set auth.email.baseURL before switching to provider=smtp.")
+			baseURL = requestBaseURL(r)
+		}
 		resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
 		subject := "Reset your branchDAM password"
 		expiresLabel := issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2")

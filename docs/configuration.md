@@ -123,7 +123,7 @@ the only one most operators ever touch; the rest have safe defaults.
 | `email.password` | string | empty | SMTP AUTH password. Supports `${VAR}` expansion; keep in a gitignored `.env`. |
 | `email.from` | string | — | Sender address, e.g. `branchDAM <noreply@example.com>`. Format-validated at send time (`mail.ParseAddress`); a CR/LF in the configured value refuses to send. |
 | `email.tls` | string | `starttls` | TLS mode. `starttls` (default): require STARTTLS — refuses to send if the server doesn't advertise it (no silent downgrade). `implicit`: TLS-from-dial (port 465). `none`: plain (dev only). |
-| `email.baseURL` | string | empty | Public-facing base URL used to build links in outbound messages, e.g. `https://branchdam.example.com`. When unset, the password-reset handler logs a `WARN` and falls back to the inbound request's `Host` header — which an attacker can poison, so set this explicitly in any deployment where the `Host` header is not tightly controlled by a single trusted reverse proxy. |
+| `email.baseURL` | string | empty | Public-facing base URL used to build links in outbound messages, e.g. `https://branchdam.example.com`. **Required for `provider=smtp`**: the inbound request's `Host` header is attacker-controlled, so a real, externally-delivered reset email never falls back to it — when `baseURL` is unset, the handler logs a `WARN` and skips SMTP delivery for that request rather than embed an untrusted host in a link sent to someone's inbox. `provider=log` (the default) still falls back to the `Host` header for its slog-only preview, since that preview never leaves the server. |
 
 When `auth.mode` is `local` or `both`, the server **refuses to boot**
 unless `BRANCHDAM_SECRET_KEY` is set and is valid base64-decoded 32 bytes

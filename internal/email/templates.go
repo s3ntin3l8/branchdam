@@ -16,9 +16,12 @@ type ResetEmailData struct {
 
 // PasswordResetHTML returns the HTML body for the password-reset email.
 // The template is strict: no remote images, no scripts, no stylesheets
-// beyond inline styles. User-controlled fields (Username) are escaped.
+// beyond inline styles. User-controlled fields (Username) have CR/LF/NUL
+// stripped (sanitizeControlChars) before HTML-escaping, so a stored
+// username can't inject extra lines into the rendered message body
+// (CodeQL go/email-content-injection).
 func PasswordResetHTML(data ResetEmailData) string {
-	escapedUser := html.EscapeString(data.Username)
+	escapedUser := html.EscapeString(sanitizeControlChars(data.Username))
 	escapedLink := html.EscapeString(data.ResetLink)
 	escapedExpiry := html.EscapeString(data.ExpiresAt)
 
@@ -67,10 +70,14 @@ Sent by branchDAM
 
 // PasswordResetText returns the plain-text fallback for the
 // password-reset email. No HTML, no markup, just the essentials.
+// User-controlled fields (Username) have CR/LF/NUL stripped
+// (sanitizeControlChars): there's no markup to escape into here, but
+// an unstripped username could still inject extra lines into the body.
 func PasswordResetText(data ResetEmailData) string {
+	username := sanitizeControlChars(data.Username)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Password Reset\n\n")
-	fmt.Fprintf(&b, "Hi %s,\n\n", data.Username)
+	fmt.Fprintf(&b, "Hi %s,\n\n", username)
 	fmt.Fprintf(&b, "Someone requested a password reset for your branchDAM account.\n")
 	fmt.Fprintf(&b, "If this was you, visit the link below to set a new password:\n\n")
 	fmt.Fprintf(&b, "%s\n\n", data.ResetLink)

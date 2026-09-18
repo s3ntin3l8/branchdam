@@ -514,16 +514,39 @@ func clientIP(s *Server, r *http.Request) string {
 	return remoteIP.String()
 }
 
-// requestBaseURL derives the public-facing base URL from the incoming
-// request. It checks X-Forwarded-Proto (for reverse-proxy deployments)
-// before falling back to the request's own scheme. The Host header
-// provides the hostname; when empty, the request URL is used as a
-// last resort.
+// passwordResetBaseURL returns the operator-declared base URL to embed
+// in an outbound (SMTP-delivered) password-reset email, and whether
+// one is configured.
 //
-// IMPORTANT: this trusts the Host header, which an attacker can
-// control. Do NOT use it for security-sensitive URL construction
-// (e.g. links embedded in outbound email). Use the configured baseURL
-// (passwordResetBaseURL below) instead, with a documented fallback.
+// This deliberately has NO fallback to the inbound request's Host
+// header (or X-Forwarded-Proto/r.URL) -- unlike requestBaseURL below.
+// Earlier revisions fell back to the request when auth.email.baseURL
+// was unset; that let an attacker send a reset request with a spoofed
+// Host header and have the victim's email carry a reset link pointing
+// at the attacker's domain, handing over the one-time token on click
+// (CWE-640; CodeQL go/email-content-injection flags exactly this flow:
+// r.Host reaching an SMTP-delivered email body). The caller must skip
+// sending a real (provider=smtp) reset email entirely when ok is
+// false, rather than construct a link from request data -- see
+// handlePasswordResetRequest.
+func passwordResetBaseURL(s *Server) (baseURL string, ok bool) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.Auth.Email.BaseURL == "" {
+		return "", false
+	}
+	return strings.TrimRight(cfg.Auth.Email.BaseURL, "/"), true
+}
+
+// requestBaseURL derives a base URL from the inbound request's Host
+// header (and X-Forwarded-Proto). It exists ONLY for the dev-mode
+// provider=log preview: logSender writes the rendered link to the
+// server's own slog output and never transmits it to an external
+// recipient, so embedding request-derived data there does not
+// reproduce the SMTP-delivery poisoning vector passwordResetBaseURL's
+// doc comment describes -- there is no victim inbox for an attacker's
+// spoofed Host header to reach. Do NOT use this for anything that
+// leaves the server (provider=smtp); use passwordResetBaseURL there
+// and fail closed when it returns ok=false.
 func requestBaseURL(r *http.Request) string {
 	scheme := "http"
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" {
@@ -539,21 +562,6 @@ func requestBaseURL(r *http.Request) string {
 		return scheme + "://localhost"
 	}
 	return scheme + "://" + host
-}
-
-// passwordResetBaseURL returns the base URL to embed in outbound
-// password-reset emails. It prefers the operator-declared
-// auth.email.baseURL (immune to Host header poisoning), and logs a
-// WARN when falling back to the inbound request's Host header so the
-// misconfiguration is visible in logs.
-func passwordResetBaseURL(s *Server, r *http.Request) string {
-	if cfg := s.cfg(); cfg != nil && cfg.Auth.Email.BaseURL != "" {
-		return strings.TrimRight(cfg.Auth.Email.BaseURL, "/")
-	}
-	if s.log != nil {
-		s.log.Warn("password-reset: auth.email.baseURL is unset; falling back to inbound request Host header. Set auth.email.baseURL in config.yaml to prevent reset-link header-poisoning attacks.")
-	}
-	return requestBaseURL(r)
 }
 
 // currentTrustedProxies reads s.cfg().HTTP.TrustedProxies through a

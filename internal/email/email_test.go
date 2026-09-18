@@ -2,6 +2,7 @@ package email
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"strings"
@@ -16,6 +17,30 @@ func TestLogSender_Send(t *testing.T) {
 	sender := &logSender{log: slog.New(slog.DiscardHandler)}
 	err := sender.Send(context.Background(), "user@example.com", "Test Subject", "<p>html</p>", "plain text")
 	require.NoError(t, err)
+}
+
+// TestLogSender_StripsCRLFFromLoggedFields guards against CodeQL
+// go/log-injection (alert #91): unlike smtpSender.Send, logSender never
+// runs `to` through mail.ParseAddress, so a stored email/subject/body
+// containing CR/LF must be stripped before it reaches slog, or an
+// attacker-controlled value could forge extra log lines.
+func TestLogSender_StripsCRLFFromLoggedFields(t *testing.T) {
+	var buf strings.Builder
+	sender := &logSender{log: slog.New(slog.NewJSONHandler(&buf, nil))}
+
+	err := sender.Send(context.Background(),
+		"victim@example.com\r\nlevel=ERROR msg=forged",
+		"Subject\nInjected-Header: evil",
+		"<p>html</p>",
+		"body\r\ntext with\nnewlines",
+	)
+	require.NoError(t, err)
+
+	var record map[string]any
+	require.NoError(t, json.Unmarshal([]byte(buf.String()), &record))
+	assert.Equal(t, "victim@example.comlevel=ERROR msg=forged", record["to"])
+	assert.Equal(t, "SubjectInjected-Header: evil", record["subject"])
+	assert.Equal(t, "bodytext withnewlines", record["body_preview"])
 }
 
 func TestBuildMessage(t *testing.T) {
@@ -69,6 +94,36 @@ func TestPasswordResetHTML_EscapesUserInput(t *testing.T) {
 	html := PasswordResetHTML(data)
 	assert.NotContains(t, html, "<script>")
 	assert.Contains(t, html, "&lt;script&gt;")
+}
+
+// TestPasswordResetHTML_StripsCRLFFromUsername and its Text counterpart
+// guard against CodeQL go/email-content-injection (alert #86): a stored
+// username containing CR/LF could otherwise inject extra lines into the
+// rendered email body.
+func TestPasswordResetHTML_StripsCRLFFromUsername(t *testing.T) {
+	data := ResetEmailData{
+		Username:  "alice\r\nBcc: attacker@evil.com",
+		ResetLink: "https://example.com/reset?token=safe",
+		ExpiresAt: "24 hours",
+	}
+	html := PasswordResetHTML(data)
+	assert.NotContains(t, html, "\r")
+	// CR/LF stripped means "Bcc: ..." merges onto the same line as the
+	// greeting instead of starting a line of its own.
+	assert.NotContains(t, html, "\nBcc: attacker@evil.com")
+	assert.Contains(t, html, "aliceBcc: attacker@evil.com")
+}
+
+func TestPasswordResetText_StripsCRLFFromUsername(t *testing.T) {
+	data := ResetEmailData{
+		Username:  "bob\r\nBcc: attacker@evil.com",
+		ResetLink: "https://example.com/reset?token=safe",
+		ExpiresAt: "24 hours",
+	}
+	text := PasswordResetText(data)
+	assert.NotContains(t, text, "\r")
+	assert.NotContains(t, text, "\nBcc: attacker@evil.com")
+	assert.Contains(t, text, "Hi bobBcc: attacker@evil.com,")
 }
 
 func TestSMTPSender_LocalSMTPFixture(t *testing.T) {
