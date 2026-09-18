@@ -97,6 +97,13 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// picks it up. The admin-UI panel (PR #408) will also surface the
 	// token, but slog is the fallback for non-admin operators who tail
 	// logs.
+	//
+	// codeql[go/log-injection]: the `user_id` and `token_id` values
+	// are numeric (int64) and `plaintext_token` is a hex-encoded
+	// crypto/rand token — none are user-controlled strings that could
+	// inject log formatting. `ip` comes from clientIP which returns a
+	// validated net.IP.String(). Intentionally logged at WARN for
+	// operator visibility.
 	s.localAuth.log.Warn("password-reset: token minted (operator: hand this to the user)",
 		"user_id", issue.Token.UserID,
 		"token_id", issue.Token.ID,
