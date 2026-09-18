@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/s3ntin3l8/branchdam/compare/v0.22.0...v0.23.0) (2026-09-18)
+
+
+### Features
+
+* implement trash asset with TRASHED lifecycle state ([#462](https://github.com/s3ntin3l8/branchdam/issues/462)) ([9a974e6](https://github.com/s3ntin3l8/branchdam/commit/9a974e67d70577fc33f67709e006c781271469c3))
+
 ## [0.22.0](https://github.com/s3ntin3l8/branchdam/compare/v0.21.0...v0.22.0) (2026-09-18)
 
 
