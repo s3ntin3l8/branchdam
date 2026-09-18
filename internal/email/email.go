@@ -66,7 +66,7 @@ type logSender struct {
 
 // Send is the log-only delivery path. The to/subject/body fields are
 // user- or admin-derived (a stored user email address for `to`, an
-// operator-localized template for `subject`, a renderered HTML/text
+// operator-localized template for `subject`, a rendered HTML/text
 // body) and intentionally logged at WARN so a development operator
 // running without an SMTP server still sees the rendered message.
 //
@@ -157,19 +157,21 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 	if err != nil {
 		return fmt.Errorf("email: dial %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Apply the deadline to the underlying conn so smtp.Client's
 	// subsequent reads/writes (EHLO, STARTTLS, AUTH, MAIL, RCPT, DATA,
 	// Quit) cannot outrun it. A stalled SMTP server now fails the
 	// request instead of hanging the password-reset handler.
-	conn.SetDeadline(deadline)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return fmt.Errorf("email: set conn deadline: %w", err)
+	}
 
 	client, err := smtp.NewClient(conn, s.cfg.Host)
 	if err != nil {
 		return fmt.Errorf("email: smtp client: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// STARTTLS if requested and server supports it. When tls=starttls
 	// (the default) and the server doesn't advertise STARTTLS, we

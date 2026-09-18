@@ -79,7 +79,7 @@ func TestSMTPSender_LocalSMTPFixture(t *testing.T) {
 	// Start a local TCP listener that speaks minimal SMTP.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	addr := listener.Addr().(*net.TCPAddr)
 	var mu sync.Mutex
@@ -118,7 +118,7 @@ func TestSMTPSender_LocalSMTPFixture(t *testing.T) {
 }
 
 func handleMockSMTP(conn net.Conn, mu *mu, received *[]string) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// SmtpServer is the minimal mock.
 	// We use a simple state machine: 220 -> accept EHLO/MAIL/RCPT/DATA -> 250
@@ -218,7 +218,7 @@ func TestSMTPSender_StartTLSFailsClosedWhenUnsupported(t *testing.T) {
 	// Start a local TCP listener that does NOT advertise STARTTLS.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	addr := listener.Addr().(*net.TCPAddr)
 
@@ -229,7 +229,7 @@ func TestSMTPSender_StartTLSFailsClosedWhenUnsupported(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_, _ = c.Write([]byte("220 mock SMTP\r\n"))
 				buf := make([]byte, 4096)
 				for {
