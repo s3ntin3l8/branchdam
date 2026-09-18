@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -176,4 +177,99 @@ func TestMFAGate_NoMFAEnrolled_AllowsAllAPIPaths(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	assert.NotEqual(t, http.StatusForbidden, rr.Code, "no MFA enrolled -> gate must NOT 403; response was %d body=%s", rr.Code, rr.Body.String())
+}
+
+// TestMeExposesMFAState verifies that GET /api/v1/me exposes
+// mfaRequired and mfaVerified for local users. The half-auth session
+// (mfa_verified_at=NULL) must show mfaRequired=true, mfaVerified=false.
+// After updating mfa_verified_at, the same endpoint must show
+// mfaRequired=false, mfaVerified=true. This closes the regression gap
+// identified in PR #459 round-4 review: the backend fields were added
+// but never tested.
+func TestMeExposesMFAState(t *testing.T) {
+	srv, database, svc, _ := mfaGateTestServer(t)
+
+	// Create a local user with MFA enrolled.
+	cookieValue, userID := mintHalfAuthSessionForUser(t, database, svc, "alice", "password123", true)
+
+	// --- Half-auth session (mfa_verified_at = NULL) ---
+	req := withSessionCookie(http.MethodGet, "/api/v1/me", cookieValue, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("half-auth /me status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var meHalf struct {
+		MFARequired bool `json:"mfaRequired"`
+		MFAVerified bool `json:"mfaVerified"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &meHalf); err != nil {
+		t.Fatalf("half-auth unmarshal: %v", err)
+	}
+	if !meHalf.MFARequired {
+		t.Error("half-auth: mfaRequired = false, want true")
+	}
+	if meHalf.MFAVerified {
+		t.Error("half-auth: mfaVerified = true, want false")
+	}
+
+	// --- Fully-auth session (mfa_verified_at = now) ---
+	ctx := context.Background()
+	_, err := database.ExecInTx(ctx,
+		"UPDATE sessions SET mfa_verified_at = unixepoch() WHERE id = (SELECT id FROM sessions WHERE user_id = ?1 ORDER BY id DESC LIMIT 1)",
+		userID,
+	)
+	require.NoError(t, err)
+
+	rr2 := httptest.NewRecorder()
+	req2 := withSessionCookie(http.MethodGet, "/api/v1/me", cookieValue, nil)
+	srv.Handler().ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("fully-auth /me status = %d, body = %s", rr2.Code, rr2.Body.String())
+	}
+	var meFull struct {
+		MFARequired bool `json:"mfaRequired"`
+		MFAVerified bool `json:"mfaVerified"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &meFull); err != nil {
+		t.Fatalf("fully-auth unmarshal: %v", err)
+	}
+	if meFull.MFARequired {
+		t.Error("fully-auth: mfaRequired = true, want false")
+	}
+	if !meFull.MFAVerified {
+		t.Error("fully-auth: mfaVerified = false, want true")
+	}
+}
+
+// TestMeNoMFAFieldsWhenNoMFA verifies that /me omits mfaRequired and
+// mfaVerified when the user has no MFA enrolled (the fields should be
+// absent / zero-value, not true).
+func TestMeNoMFAFieldsWhenNoMFA(t *testing.T) {
+	srv, database, svc, _ := mfaGateTestServer(t)
+
+	cookieValue, _ := mintHalfAuthSessionForUser(t, database, svc, "bob", "password123", false)
+
+	req := withSessionCookie(http.MethodGet, "/api/v1/me", cookieValue, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/me status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var me struct {
+		MFARequired bool `json:"mfaRequired"`
+		MFAVerified bool `json:"mfaVerified"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &me); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if me.MFARequired {
+		t.Error("no-MFA user: mfaRequired = true, want false")
+	}
+	if me.MFAVerified {
+		t.Error("no-MFA user: mfaVerified = true, want false")
+	}
 }

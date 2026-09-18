@@ -60,6 +60,13 @@ export function Layout() {
     },
   });
 
+  const logoutMutation = useMutation({
+    mutationFn: api.logout,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+
   if (me?.mfaRequired) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-neutral-950">
@@ -75,6 +82,14 @@ export function Layout() {
             pending={mfaChallengeMutation.isPending}
             error={mfaChallengeMutation.error?.message}
           />
+          <button
+            type="button"
+            onClick={() => logoutMutation.mutate()}
+            disabled={logoutMutation.isPending}
+            className="mt-4 w-full text-xs text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
+          >
+            {logoutMutation.isPending ? "Signing out…" : "Sign out"}
+          </button>
         </div>
       </div>
     );
