@@ -122,10 +122,20 @@ WHERE id = ?1 AND revoked_at IS NULL;
 -- Sets revoked_at on a single session (used by DELETE /api/v1/session).
 UPDATE sessions SET revoked_at = ?2 WHERE id = ?1;
 
--- name: RevokeAllUserSessions :exec
+-- name: RevokeAllUserSessions :execrows
 -- Used by admin "log out everywhere" action and by DisableUser's
--- companion flow (future admin endpoint). Idempotent.
+-- companion flow (future admin endpoint). Idempotent. Returns the
+-- number of sessions actually revoked (0 when user has no active
+-- sessions, >=1 otherwise).
 UPDATE sessions SET revoked_at = ?2 WHERE user_id = ?1 AND revoked_at IS NULL;
+
+-- name: ReenableUser :exec
+-- Clears disabled_at, re-enabling the account. Idempotent.
+UPDATE users SET disabled_at = NULL WHERE id = ?1;
+
+-- name: SetAdmin :exec
+-- Toggles the is_admin flag.
+UPDATE users SET is_admin = ?2 WHERE id = ?1;
 
 -- name: InsertLoginAudit :exec
 -- Append-only. The two indexes on (user_id, created_at) and (ip, created_at)

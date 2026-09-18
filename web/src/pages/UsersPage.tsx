@@ -3,7 +3,10 @@ import {
   useAdminResetPassword,
   useCreateUser,
   useDisableUser,
+  useEnableUser,
   useMe,
+  useRevokeUserSessions,
+  useUpdateUser,
   useUsers,
 } from "../hooks/queries";
 import { ApiError } from "../api/client";
@@ -64,6 +67,9 @@ export default function UsersPage() {
   const createUserMutation = useCreateUser();
   const resetPasswordMutation = useAdminResetPassword();
   const disableUserMutation = useDisableUser();
+  const enableUserMutation = useEnableUser();
+  const updateUserMutation = useUpdateUser();
+  const revokeUserSessionsMutation = useRevokeUserSessions();
 
   // Create user modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -158,6 +164,35 @@ export default function UsersPage() {
       await disableUserMutation.mutateAsync(user.id);
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to disable user.");
+    }
+  };
+
+  const handleReEnable = async (user: AttributionUser) => {
+    try {
+      await enableUserMutation.mutateAsync(user.id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to re-enable user.");
+    }
+  };
+
+  const handleToggleAdmin = async (user: AttributionUser) => {
+    const newAdmin = !user.isAdmin;
+    const action = newAdmin ? "grant admin privileges to" : "remove admin privileges from";
+    if (!window.confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} ${user.username}?`)) return;
+    try {
+      await updateUserMutation.mutateAsync({ userId: user.id, input: { isAdmin: newAdmin } });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to update user.");
+    }
+  };
+
+  const handleRevokeSessions = async (user: AttributionUser) => {
+    if (!window.confirm(`Revoke all active sessions for ${user.username}? They will be logged out everywhere.`)) return;
+    try {
+      const res = await revokeUserSessionsMutation.mutateAsync(user.id);
+      alert(`Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to revoke sessions.");
     }
   };
 
@@ -292,6 +327,33 @@ export default function UsersPage() {
                     <td className="px-4 py-3 text-right">
                       {!isSystem && (
                         <div className="flex items-center justify-end gap-2">
+                          {isDisabled && !isSelf && (
+                            <button
+                              type="button"
+                              onClick={() => handleReEnable(user)}
+                              className="rounded border border-emerald-800/60 px-2.5 py-1 text-xs text-emerald-400 hover:border-emerald-600 hover:text-emerald-300"
+                            >
+                              Re-enable
+                            </button>
+                          )}
+                          {!isSelf && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleAdmin(user)}
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                            >
+                              {user.isAdmin ? "Remove Admin" : "Make Admin"}
+                            </button>
+                          )}
+                          {!isSelf && (
+                            <button
+                              type="button"
+                              onClick={() => handleRevokeSessions(user)}
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                            >
+                              Revoke Sessions
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => {

@@ -37,6 +37,7 @@ import type {
   PutSettingsRequest,
   PutStorageLocationRequest,
   RevokeCompanionPairingResponse,
+  RevokeUserSessionsResponse,
   RotateCompanionPairingRequest,
   RotateCompanionPairingResponse,
   ScanJob,
@@ -47,6 +48,8 @@ import type {
   StartScanRequest,
   StorageHealth,
   StorageLocation,
+  UpdateUserInput,
+  UpdateUserResponse,
   UploadOptions,
   UploadProgressEvent,
   WebUploadResponse,
@@ -111,6 +114,19 @@ export const api = {
     }),
   disableUser: (userId: number) =>
     request<{ ok: boolean; id: number; disabledAt: number }>(`/api/v1/admin/users/${userId}/disable`, {
+      method: "POST",
+    }),
+  enableUser: (userId: number) =>
+    request<{ ok: boolean; id: number }>(`/api/v1/admin/users/${userId}/enable`, {
+      method: "POST",
+    }),
+  updateUser: (userId: number, input: UpdateUserInput) =>
+    request<UpdateUserResponse>(`/api/v1/admin/users/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  revokeUserSessions: (userId: number) =>
+    request<RevokeUserSessionsResponse>(`/api/v1/admin/users/${userId}/revoke-sessions`, {
       method: "POST",
     }),
   listAudit: (params: AuditQueryParams = {}) => {

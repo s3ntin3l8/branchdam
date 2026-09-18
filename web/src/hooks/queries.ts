@@ -59,6 +59,37 @@ export function useDisableUser() {
   });
 }
 
+export function useEnableUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: number) => api.enableUser(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useUpdateUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, input }: { userId: number; input: import("../api/types").UpdateUserInput }) =>
+      api.updateUser(userId, input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useRevokeUserSessions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: number) => api.revokeUserSessions(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
 export function useAudit(params: import("../api/types").AuditQueryParams = {}) {
   return useQuery({
     queryKey: ["audit", params],

@@ -407,7 +407,17 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 	return items, nil
 }
 
-const revokeAllUserSessions = `-- name: RevokeAllUserSessions :exec
+const reenableUser = `-- name: ReenableUser :exec
+UPDATE users SET disabled_at = NULL WHERE id = ?1
+`
+
+// Clears disabled_at, re-enabling the account. Idempotent.
+func (q *Queries) ReenableUser(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, reenableUser, id)
+	return err
+}
+
+const revokeAllUserSessions = `-- name: RevokeAllUserSessions :execrows
 UPDATE sessions SET revoked_at = ?2 WHERE user_id = ?1 AND revoked_at IS NULL
 `
 
@@ -417,10 +427,15 @@ type RevokeAllUserSessionsParams struct {
 }
 
 // Used by admin "log out everywhere" action and by DisableUser's
-// companion flow (future admin endpoint). Idempotent.
-func (q *Queries) RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) error {
-	_, err := q.db.ExecContext(ctx, revokeAllUserSessions, arg.UserID, arg.RevokedAt)
-	return err
+// companion flow (future admin endpoint). Idempotent. Returns the
+// number of sessions actually revoked (0 when user has no active
+// sessions, >=1 otherwise).
+func (q *Queries) RevokeAllUserSessions(ctx context.Context, arg RevokeAllUserSessionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeAllUserSessions, arg.UserID, arg.RevokedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const revokeSession = `-- name: RevokeSession :exec
@@ -435,6 +450,21 @@ type RevokeSessionParams struct {
 // Sets revoked_at on a single session (used by DELETE /api/v1/session).
 func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) error {
 	_, err := q.db.ExecContext(ctx, revokeSession, arg.ID, arg.RevokedAt)
+	return err
+}
+
+const setAdmin = `-- name: SetAdmin :exec
+UPDATE users SET is_admin = ?2 WHERE id = ?1
+`
+
+type SetAdminParams struct {
+	ID      int64
+	IsAdmin int64
+}
+
+// Toggles the is_admin flag.
+func (q *Queries) SetAdmin(ctx context.Context, arg SetAdminParams) error {
+	_, err := q.db.ExecContext(ctx, setAdmin, arg.ID, arg.IsAdmin)
 	return err
 }
 
