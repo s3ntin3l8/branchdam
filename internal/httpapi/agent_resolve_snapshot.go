@@ -85,6 +85,13 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
 	}
 	b := in.Body
+	// Cross-check body.agentId against the Principal -- paired devices
+	// cannot submit a Resolve snapshot attributed to another device.
+	// The env-bootstrap path is exempt (no per-device claim to
+	// mismatch against; legacy shared-secret holder can drive any
+	// agent_id); issue #453 PR C narrowed the cross-talk via per-
+	// device HMAC signing. PR F will retire the carve-out entirely
+	// when the env-var field is removed.
 	if p.Name != "env-bootstrap" && b.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}

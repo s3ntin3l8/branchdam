@@ -1,0 +1,200 @@
+---
+# branchDAM Companion-Pairing Ansible playbook (reference).
+#
+# Mirrors kubeadm init's bootstrap-token pattern: a one-shot operator
+# step (pasting the branchdam:// URL into Ansible Vault) mints the
+# credentials the playbook needs; every subsequent run is unattended.
+# See ./README.md for the full operator walkthrough.
+#
+# The playbook is reference material -- copy it into your own Ansible
+# repo's playbooks/ tree and customize variable names, vault paths, and
+# the service-restart handler for your site. The shape below
+# (init starter config -> run pair CLI -> restart systemd service)
+# is the load-bearing part.
+#
+# Required variables:
+#
+#   vault_branchdam_pair_url: "branchdam://?server=https%3A%2F%2Fdam.example.com&key=<plaintext>&agent=dev-xxxxxxxx"
+#     The full pairing URL as emitted by branchDAM's Companion Pairing
+#     modal. The plaintext key is the only secret here; keep the vault
+#     file mode 0600.
+#
+#   branchdam_pair_agent_user: <linux-username>
+#     REQUIRED. The Linux user that owns branchdam-agent's config
+#     directory. Explicit on purpose -- ansible_user_id is a fact that
+#     requires gather_facts: true (and the gather is otherwise unused
+#     by this playbook), and silently defaulting to root would write
+#     credentials to /root/.config/... -- the wrong account for any
+#     workstation agent running under a non-root user.
+#
+# Optional variables:
+#
+#   branchdam_pair_agent_config_dir: "~/.config/branchdam-agent"
+#     (default) Where to write config.yaml. The pair CLI does NOT
+#     create this directory -- it calls config.Patch which reads the
+#     file before writing. The init step (above) does create it via
+#     os.MkdirAll (init.go:75), so on a fresh workstation init must
+#     run first; the args.creates guard makes the task idempotent.
+#
+#   branchdam_pair_agent_service: "branchdam-agent.service"
+#     (default) The systemd unit the workstation agent runs under,
+#     when installed as a system service. Set to "" to skip the
+#     restart -- e.g. when running the agent interactively, or when
+#     systemd isn't managing the agent on this host.
+#
+#   branchdam_pair_skip_init: false
+#     (default) Set true to skip the `branchdam-agent init` step on
+#     workstations where the agent is already partially configured
+#     (init overwrites an existing config unless -force is passed,
+#     so the default is conservative).
+#
+#   branchdam_pair_service_become: true
+#     (default) Whether the restart task should escalate. Required
+#     true for the default system unit `branchdam-agent.service`
+#     (which lives under /etc/systemd/system/); set false for a
+#     user-level unit (e.g. `systemctl --user enable`). When false,
+#     also set `branchdam_pair_service_scope: user` so the systemd
+#     module talks to the user's manager rather than the system one.
+#
+#   branchdam_pair_service_scope: "system"
+#     (default) Which systemd manager the restart task targets.
+#     Passes through to the systemd module's `scope:` argument.
+#     "system" (default) for the standard install; "user" for a
+#     user-level unit when `branchdam_pair_service_become: false`.
+#
+- name: Pair branchDAM workstation agent
+  hosts: "{{ target_host | default('localhost') }}"
+  connection: local
+  # We do NOT call gather_facts: this playbook doesn't read system
+  # facts, and enabling gather_facts would create the misleading
+  # impression that ansible_user_id is available. The Linux user
+  # is supplied explicitly via branchdam_pair_agent_user above.
+  gather_facts: false
+  vars:
+    branchdam_pair_bin: "branchdam-agent"
+    branchdam_pair_agent_config_dir: "~/.config/branchdam-agent"
+    branchdam_pair_agent_config_path: "{{ branchdam_pair_agent_config_dir }}/config.yaml"
+    branchdam_pair_agent_service: "branchdam-agent.service"
+    branchdam_pair_service_become: true
+    branchdam_pair_service_scope: "system"
+    branchdam_pair_skip_init: false
+
+  tasks:
+    - name: Fail fast if the agent user wasn't supplied
+      ansible.builtin.assert:
+        that:
+          - branchdam_pair_agent_user is defined
+          - branchdam_pair_agent_user | length > 0
+        fail_msg: >-
+          branchdam_pair_agent_user must be set explicitly. The agent
+          runs as a non-root user on a workstation; defaulting to root
+          would write credentials to /root/.config/branchdam-agent,
+          which the agent never reads.
+
+    - name: Fail fast if the pairing URL wasn't supplied
+      ansible.builtin.assert:
+        that:
+          - vault_branchdam_pair_url is defined
+          - vault_branchdam_pair_url | length > 0
+          # .startswith() is a Python string method -- Jinja forwards it
+          # to the string value, returns a boolean. The alternative
+          # Jinja test is 'is search("^branchdam://")'; .startswith is
+          # the simpler shape for a literal prefix because it avoids
+          # the search-test's regex syntax.
+          - vault_branchdam_pair_url.startswith('branchdam://')
+        fail_msg: >-
+          vault_branchdam_pair_url must be set to a non-empty
+          branchdam://... URL. Get one from the SPA's Companion
+          Pairing modal (Pair new device -> copy URL) and paste it
+          into host_vars/<host>/vault.yml.
+      no_log: true
+
+    - name: Parse the pairing URL into server / key / agent_id
+      ansible.builtin.set_fact:
+        # The agent CLI parses the URL itself and refuses on malformed
+        # input. We pass the URL through verbatim and rely on no_log
+        # on the pair task below to keep the plaintext key out of
+        # --check / -v output (and out of any task result registered
+        # into Ansible's controller-side history).
+        branchdam_pair_url: "{{ vault_branchdam_pair_url }}"
+      no_log: true
+
+    - name: Confirm branchdam-agent is installed
+      ansible.builtin.command:
+        cmd: "{{ branchdam_pair_bin }} --version"
+      register: branchdam_pair_version
+      changed_when: false
+      failed_when: branchdam_pair_version.rc != 0
+
+    - name: Write a starter config (idempotent -- skips if one already exists)
+      ansible.builtin.command:
+        # `init` writes the starter config and refuses to overwrite an
+        # existing one without -force. We rely on the refuses-to-
+        # overwrite behavior as the idempotency guard; the `creates:`
+        # below skips the task entirely once the file exists. No
+        # explicit changed_when -- the command module's default only
+        # reports "changed" when the command actually ran, which is
+        # exactly what we want for an idempotent task.
+        cmd: "{{ branchdam_pair_bin }} init -config {{ branchdam_pair_agent_config_path }}"
+      become: true
+      become_user: "{{ branchdam_pair_agent_user }}"
+      when: not branchdam_pair_skip_init
+      args:
+        creates: "{{ branchdam_pair_agent_config_path }}"
+
+    - name: Run branchdam-agent pair to validate + persist the credentials
+      ansible.builtin.command:
+        cmd: >-
+          {{ branchdam_pair_bin }} pair
+          -config {{ branchdam_pair_agent_config_path }}
+          -timeout 10s
+          {{ branchdam_pair_url }}
+      become: true
+      become_user: "{{ branchdam_pair_agent_user }}"
+      register: branchdam_pair_run
+      changed_when: >-
+        branchdam_pair_run.rc == 0
+        and ('paired with' in branchdam_pair_run.stdout)
+      # The CLI does the heavy lifting (URL parse, refuse leaky config,
+      # Hello() validation, atomic 0600 patch). Anything it surfaces on
+      # stdout is operator-actionable (e.g. "run preflight next"); we
+      # don't need to parse it.
+      # no_log is set so the plaintext key doesn't echo even when
+      # branchdam-agent prints it for a successful Hello() round-trip.
+      no_log: true
+
+    - name: Restart branchdam-agent service if managed by systemd
+      ansible.builtin.systemd:
+        name: "{{ branchdam_pair_agent_service }}"
+        state: restarted
+        daemon_reload: true
+        # scope is a module argument on ansible.builtin.systemd; the
+        # var defaults to "system" (the standard install) and operators
+        # with a user-level unit override to "user" alongside
+        # branchdam_pair_service_become: false.
+        scope: "{{ branchdam_pair_service_scope }}"
+      # Default system unit needs root; we don't pass an explicit
+      # become_user so Ansible's default (root) applies. The agent
+      # user is the wrong target for a system-unit restart -- it's
+      # non-root by design and doesn't own the unit's policy.
+      # Operators with a user-level unit set service_become: false
+      # (no escalation -- the agent user is already the right actor
+      # for `systemctl --user`) and service_scope: user (manager
+      # choice).
+      become: "{{ branchdam_pair_service_become }}"
+      when:
+        - branchdam_pair_agent_service | length > 0
+        - branchdam_pair_run.rc == 0
+      # No `failed_when: false` here -- if the service restart fails,
+      # the operator must see it. A running tray/ingest that keeps the
+      # old credentials will fail its next request anyway; the right
+      # thing is to surface that as a playbook failure, not silently
+      # pass.
+
+    - name: Show operator next steps
+      ansible.builtin.debug:
+        msg: >-
+          Paired as {{ branchdam_pair_url | regex_findall('agent=([^&]+)') | first | default('unknown') }}.
+          Next: run `branchdam-agent preflight -config {{ branchdam_pair_agent_config_path }}` on the target host
+          to confirm server reachability and round-trip the new credentials.
+          The systemd unit `{{ branchdam_pair_agent_service }}` was restarted (if it was set and managed by systemd).
