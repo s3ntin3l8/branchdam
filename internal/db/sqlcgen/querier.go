@@ -881,6 +881,13 @@ type Querier interface {
 	// belongs to another user -- the caller maps 0 to a 404 instead of
 	// reporting a silent false success.
 	RevokeUserPAT(ctx context.Context, arg RevokeUserPATParams) (int64, error)
+	// Bootstrap orphan cleanup: if the plaintext file write fails after
+	// the mint transaction committed, the row is a live non-expiring
+	// wildcard PAT no one can ever present. Revoke it (soft-delete, not
+	// a hard delete -- the no-delete audit invariant holds) so the DB
+	// matches reality. Keyed by hashed_key because the bootstrap path
+	// knows the hash, not the row id.
+	RevokeUserPATByHash(ctx context.Context, hashedKey string) (int64, error)
 	// Rotation: set expires_at on every currently-active key for this pairing
 	// that doesn't already have one. Idempotent -- re-running after the same
 	// clock has no effect.

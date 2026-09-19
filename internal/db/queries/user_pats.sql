@@ -61,6 +61,17 @@ UPDATE user_pats
 SET revoked_at = COALESCE(revoked_at, unixepoch())
 WHERE id = ?1 AND user_id = ?2 AND revoked_at IS NULL;
 
+-- name: RevokeUserPATByHash :execrows
+-- Bootstrap orphan cleanup: if the plaintext file write fails after
+-- the mint transaction committed, the row is a live non-expiring
+-- wildcard PAT no one can ever present. Revoke it (soft-delete, not
+-- a hard delete -- the no-delete audit invariant holds) so the DB
+-- matches reality. Keyed by hashed_key because the bootstrap path
+-- knows the hash, not the row id.
+UPDATE user_pats
+SET revoked_at = COALESCE(revoked_at, unixepoch())
+WHERE hashed_key = ?1 AND revoked_at IS NULL;
+
 -- name: TouchUserPAT :exec
 -- Best-effort last_used_at bump on every authenticated request. The
 -- auth path calls this async (go func() + background write); a flush

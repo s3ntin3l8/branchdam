@@ -109,6 +109,15 @@ func main() {
 			pairingPepper = k
 		}
 	}
+	// patPepper mirrors pairing.NewService's fallback: without
+	// BRANCHDAM_SECRET_KEY the pairing service runs on a fixed,
+	// documented dev pepper, and the PAT service must follow the same
+	// rule or httpapi.New panics on a nil pepper (round-4 review).
+	// Both hash under the identical key either way.
+	patPepper := pairingPepper
+	if len(patPepper) == 0 {
+		patPepper = pairing.DefaultPepper()
+	}
 
 	settingsStore, err := settings.NewStore(ctx, database, cfg, secretBox, log)
 	if err != nil {
@@ -336,7 +345,7 @@ func main() {
 	}
 	if bootstrapValue != "" {
 		dataDir := filepath.Dir(cfg.Database.Path)
-		if _, err := auth.RunBootstrapPAT(ctx, database, pairingPepper, bootstrapValue, dataDir, log); err != nil {
+		if _, err := auth.RunBootstrapPAT(ctx, database, patPepper, bootstrapValue, dataDir, log); err != nil {
 			if errors.Is(err, auth.ErrBootstrapAlreadyMinted) {
 				// consume-once: file exists from a prior boot, env var
 				// still set. Continue silently -- the operator's
@@ -477,7 +486,7 @@ func main() {
 		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
 		RequestRestart: requestRestart,
 		Pairing:        pairingService,
-		PAT:            auth.NewPATService(database, pairingPepper),
+		PAT:            auth.NewPATService(database, patPepper),
 		LocalAuth:      localAuthDeps,
 		Attribution:    attributionSvc,
 		Audit:          auditSvc,

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -126,6 +127,14 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 			// with a clear 403 instead of issuing a dead credential.
 			return nil, huma.Error403Forbidden("PAT owner is not a live admin (demoted, disabled, or no local admin row)", err)
 		}
+		if errors.Is(err, auth.ErrPATInvalidScope) {
+			// Scopes outside the grantable allowlist would mint a
+			// token that authenticates but passes no route group's
+			// scope gate -- dead on arrival. 400 with the allowed
+			// set in the message.
+			return nil, huma.Error400BadRequest(
+				fmt.Sprintf("scope is not grantable; allowed: %s", strings.Join(auth.PATGrantableScopes, ", ")), err)
+		}
 		return nil, huma.Error500InternalServerError("mint PAT", err)
 	}
 
@@ -134,7 +143,7 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 		details := map[string]any{
 			"name":              row.Name,
 			"scopes":            in.Body.Scopes,
-			"hashed_key_prefix": row.HashedKey[:8],
+			"hashed_key_prefix": auth.HashPrefix(row.HashedKey),
 		}
 		if err := s.audit.WriteActorAudit(ctx, p, audit.EventPATMinted, "user_pat", fmt.Sprintf("%d", row.ID), details); err != nil {
 			s.log.Warn("failed to write actor audit for PAT mint", "error", err)
@@ -150,7 +159,7 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 	scopes, _ := decodeScopesFromJSON(row.ScopesJson)
 	out.Body.Scopes = scopes
 	out.Body.CreatedAt = row.CreatedAt
-	out.Body.HashedKeyPrefix = row.HashedKey[:8]
+	out.Body.HashedKeyPrefix = auth.HashPrefix(row.HashedKey)
 	return out, nil
 }
 
@@ -209,7 +218,7 @@ func (s *Server) handleListPATs(ctx context.Context, in *ListPATsInput) (*ListPA
 			Name:            row.Name,
 			Scopes:          scopes,
 			CreatedAt:       row.CreatedAt,
-			HashedKeyPrefix: row.HashedKey[:8],
+			HashedKeyPrefix: auth.HashPrefix(row.HashedKey),
 		}
 		if row.LastUsedAt.Valid {
 			v := row.LastUsedAt.Int64

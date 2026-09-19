@@ -122,6 +122,14 @@ type Service struct {
 // secret key in production.
 var defaultPepper = sha256.Sum256([]byte("branchdam-pairing-default-pepper"))
 
+// DefaultPepper returns the deterministic fallback pepper used when no
+// BRANCHDAM_SECRET_KEY is configured. Exported so other consumers of
+// the same pepper (the PAT service, the bootstrap mint) can mirror
+// NewService's fallback instead of panicking on an empty key -- the
+// two services must always hash under the SAME pepper, so the fallback
+// has exactly one definition.
+func DefaultPepper() []byte { return defaultPepper[:] }
+
 // NewService constructs a Service backed by db. pepper is the raw 32-byte
 // HMAC key derived from BRANCHDAM_SECRET_KEY; pass nil to use a
 // deterministic fallback (not recommended for production). log may be nil

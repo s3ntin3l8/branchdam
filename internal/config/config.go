@@ -120,16 +120,17 @@ type Admin struct {
 	// admin operations. The minted PAT carries scopes=["*"], so it
 	// satisfies every scope-gated admin route.
 	//
-	// One-shot: subsequent server starts that find the bootstrap file
-	// already on disk refuse to mint a second token, and the env-var
-	// itself is treated as consumed-after-first-use. Operators who
-	// lose the file can re-mint by deleting it AND restarting, but the
-	// env-var stays set -- the second restart will see no file on
-	// disk and refuse to honor the env-var again. To re-bootstrap
-	// after a file loss, the operator must explicitly clear the env
-	// var AND restart, so the env var's "consume-once" lifetime
-	// matches its real security model: a leaked env var can't keep
-	// minting tokens after the first one was claimed.
+	// One-shot while the sentinel survives: subsequent starts that
+	// find the bootstrap file on disk refuse to mint again. The file's
+	// PRESENCE is the only consumed state -- nothing else persists a
+	// flag -- so deleting the file and restarting with the env var
+	// still set mints a second token. That deletion is the documented
+	// re-bootstrap path (docs/admin-pats.md), and an operator who
+	// wants the old token dead must also revoke its user_pats row.
+	// The security property is narrower than "consumed once": a leaked
+	// env var can't mint AGAIN while the sentinel survives, but it can
+	// re-mint after the file is deleted. Operators who never want a
+	// second token must clear the env var after the first boot.
 	//
 	// Empty (default) disables the bootstrap entirely: no file is
 	// written, no service-account user is created. Operators who

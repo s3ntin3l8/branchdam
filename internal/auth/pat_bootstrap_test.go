@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -277,5 +278,83 @@ func TestPATService_MintRequiresLiveAdminOwner(t *testing.T) {
 	// No users row at all -> same refusal.
 	if _, _, err := svc.Mint(ctx, 999999, "no-row", []string{"*"}, 0); !errors.Is(err, ErrPATOwnerNotAdmin) {
 		t.Fatalf("mint for row-less owner err = %v, want ErrPATOwnerNotAdmin", err)
+	}
+}
+
+// TestPATService_MintRejectsUnknownScope pins the round-4 allowlist:
+// patScopeFor only ever consults PATGrantableScopes, so a token
+// carrying anything else would authenticate but pass no scope gate --
+// a silent dead credential. Mint must refuse at the boundary.
+func TestPATService_MintRejectsUnknownScope(t *testing.T) {
+	database, _ := newBootstrapTestDB(t)
+	ctx := context.Background()
+	svc := NewPATService(database, patTestPepper)
+
+	var uid int64
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		id, err := q.EnsureBootstrapUser(ctx)
+		if err != nil {
+			return err
+		}
+		uid = id
+		return q.PromoteUserToAdmin(ctx, id)
+	}); err != nil {
+		t.Fatalf("seed admin user: %v", err)
+	}
+
+	if _, _, err := svc.Mint(ctx, uid, "dead", []string{"settings:write"}, 0); !errors.Is(err, ErrPATInvalidScope) {
+		t.Fatalf("mint with unknown scope err = %v, want ErrPATInvalidScope", err)
+	}
+	// Every allowlisted scope mints fine.
+	for _, scope := range PATGrantableScopes {
+		if _, _, err := svc.Mint(ctx, uid, "ok-"+scope, []string{scope}, 0); err != nil {
+			t.Fatalf("mint with allowlisted scope %q: %v", scope, err)
+		}
+	}
+}
+
+// TestRunBootstrapPAT_BlocksWhileAnotherBootHoldsLock pins the flock
+// serialization: the round-4 probe showed a live zero-byte claim being
+// stolen by a concurrent boot's crashed-claim recovery. A second boot
+// must block until the first releases the lock, then see the completed
+// sentinel.
+func TestRunBootstrapPAT_BlocksWhileAnotherBootHoldsLock(t *testing.T) {
+	database, root := newBootstrapTestDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	lockPath := filepath.Join(root, ".bootstrap-pat.lock")
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	defer func() { _ = lf.Close() }()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunBootstrapPAT(ctx, database, patTestPepper, "1", root, log)
+		done <- err
+	}()
+
+	// While the lock is held, the bootstrap must not proceed.
+	select {
+	case err := <-done:
+		t.Fatalf("RunBootstrapPAT completed while another boot holds the lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("release lock: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunBootstrapPAT after lock release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunBootstrapPAT did not proceed after the lock was released")
 	}
 }

@@ -475,7 +475,15 @@ func (s *Server) Handler() http.Handler {
 		inner := routed
 		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if auth.PATPresented(r) && !strings.HasPrefix(r.URL.Path, auth.AgentPathPrefix) {
-				patHandlers[patScopeFor(r.URL.Path)].ServeHTTP(w, r)
+				h := patHandlers[patScopeFor(r.URL.Path)]
+				if h == nil {
+					// patScopeFor drift guard: a future route group
+					// without a matching middleware entry falls back
+					// to the admin catch-all instead of a nil-handler
+					// panic into the recovery middleware.
+					h = patHandlers["admin"]
+				}
+				h.ServeHTTP(w, r)
 				return
 			}
 			inner.ServeHTTP(w, r)

@@ -185,6 +185,26 @@ func (q *Queries) RevokeUserPAT(ctx context.Context, arg RevokeUserPATParams) (i
 	return result.RowsAffected()
 }
 
+const revokeUserPATByHash = `-- name: RevokeUserPATByHash :execrows
+UPDATE user_pats
+SET revoked_at = COALESCE(revoked_at, unixepoch())
+WHERE hashed_key = ?1 AND revoked_at IS NULL
+`
+
+// Bootstrap orphan cleanup: if the plaintext file write fails after
+// the mint transaction committed, the row is a live non-expiring
+// wildcard PAT no one can ever present. Revoke it (soft-delete, not
+// a hard delete -- the no-delete audit invariant holds) so the DB
+// matches reality. Keyed by hashed_key because the bootstrap path
+// knows the hash, not the row id.
+func (q *Queries) RevokeUserPATByHash(ctx context.Context, hashedKey string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeUserPATByHash, hashedKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const touchUserPAT = `-- name: TouchUserPAT :exec
 UPDATE user_pats
 SET last_used_at = ?2

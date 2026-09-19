@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -191,7 +192,7 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 		principal := Principal{
 			Kind:          KindUser,
 			Name:          fmt.Sprintf("pat:%d", result.UserID),
-			ExternalUID:   fmt.Sprintf("pat:%s", hashPrefix(hash)),
+			ExternalUID:   fmt.Sprintf("pat:%s", HashPrefix(hash)),
 			Authenticated: true,
 		}
 		if !scopeSatisfied(result.Scopes, m.Scope) {
@@ -307,10 +308,11 @@ func hashToken(pepper []byte, plaintext string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// hashPrefix returns the first 8 hex chars of the hashed key -- enough
+// HashPrefix returns the first 8 hex chars of the hashed key -- enough
 // to make two PATs distinguishable in logs and actor_audit
-// details_json without leaking the full hash.
-func hashPrefix(hash string) string {
+// details_json without leaking the full hash. Guards short input so a
+// truncated hash never panics a handler.
+func HashPrefix(hash string) string {
 	if len(hash) < 8 {
 		return hash
 	}
@@ -402,6 +404,22 @@ var timeNowUnix = func() int64 { return time.Now().Unix() }
 // use -- a silent dead credential. The HTTP layer maps this to 403.
 var ErrPATOwnerNotAdmin = errors.New("PAT owner is not a live admin")
 
+// ErrPATInvalidScope is returned by Mint when a requested scope is
+// not in PATGrantableScopes. The route-group wiring (httpapi's
+// patScopeFor) only ever consults a fixed set of scopes; a token
+// carrying anything else would authenticate but pass no scope gate
+// -- the silent-dead-credential shape the mint-time checks exist to
+// prevent. The HTTP layer maps this to 400.
+var ErrPATInvalidScope = errors.New("scope is not grantable")
+
+// PATGrantableScopes is the allowlist of scope strings a minted token
+// may carry. It must stay in sync with the route-group scopes in
+// httpapi (patScopeFor) -- a scope no route group consults is a
+// permanently dead grant. "*" is the wildcard the bootstrap PAT
+// carries; "admin" is the catch-all every unscoped admin route group
+// requires.
+var PATGrantableScopes = []string{"admin", "pats:write", "pairings:write", "*"}
+
 // Mint creates a new PAT. Returns (plaintext, row, error). The
 // plaintext is shown to the operator exactly once via the API
 // response; the row carries the hashed_key. ExpiresAt is unix-seconds
@@ -426,6 +444,15 @@ func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes
 	scopesJSON, err := json.Marshal(scopes)
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal scopes: %w", err)
+	}
+	// Scope allowlist: patScopeFor only ever consults
+	// PATGrantableScopes, so a token carrying anything else would
+	// authenticate but pass no scope gate -- a silent dead
+	// credential. Reject at mint time instead.
+	for _, s := range scopes {
+		if !slices.Contains(PATGrantableScopes, s) {
+			return "", nil, fmt.Errorf("%w: %q", ErrPATInvalidScope, s)
+		}
 	}
 	var expiresAtArg sql.NullInt64
 	if expiresAt > 0 {
@@ -633,6 +660,28 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 		return "", errors.New("auth: RunBootstrapPAT requires non-nil *db.DB")
 	}
 
+	// Serialize concurrent boots. Without this, two processes racing
+	// RunBootstrapPAT interleave on the sentinel: boot A's fresh claim
+	// is a zero-byte file while its DB transaction runs, so boot B's
+	// crashed-claim recovery removes and re-claims it -- A's plaintext
+	// then lands on an unlinked inode (probe-verified in the round-4
+	// review) while BOTH mint wildcard PATs, one unrecoverable. An
+	// exclusive flock on a stable sibling lock file held for the whole
+	// sequence closes the race: B blocks until A finishes, then sees
+	// the completed sentinel and takes the consume-once path. The
+	// kernel releases the lock when a crashed boot's fd dies, so a
+	// dead process can't wedge the next boot.
+	lockPath := filepath.Join(dataDir, ".bootstrap-pat.lock")
+	lockF, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("open bootstrap lock: %w", err)
+	}
+	defer func() { _ = lockF.Close() }()
+	if err := syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("acquire bootstrap lock: %w", err)
+	}
+	defer func() { _ = syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN) }()
+
 	path := filepath.Join(dataDir, BootstrapPATFileName)
 	// Claim the path BEFORE touching the DB: O_CREATE|O_EXCL atomically
 	// fails with fs.ErrExist when anything (file, symlink -- dangling
@@ -686,11 +735,13 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// behind: its existence is the consume-once sentinel, so a
 	// half-failed boot would otherwise block re-bootstrap forever.
 	// (A crash, as opposed to a returned error, still can -- that's
-	// the zero-byte case handled above on the next boot.)
+	// the zero-byte case handled above on the next boot.) The success
+	// path closes the handle explicitly after Sync; this defer only
+	// runs on the failure paths.
 	committed := false
 	defer func() {
-		_ = f.Close()
 		if !committed {
+			_ = f.Close()
 			_ = os.Remove(path)
 		}
 	}()
@@ -700,6 +751,7 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// back and the file isn't written, so a partial-failure scenario
 	// can't leave a half-minted PAT behind.
 	var plaintext string
+	var hashed string
 	var userID int64
 	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		uid, err := q.EnsureBootstrapUser(ctx)
@@ -710,10 +762,11 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 			return fmt.Errorf("promote bootstrap user to admin: %w", err)
 		}
 		userID = uid
-		plain, hashed, err := mintBootstrapToken(pepper)
+		plain, h, err := mintBootstrapToken(pepper)
 		if err != nil {
 			return err
 		}
+		hashed = h
 		scopes := []string{"*"}
 		scopesJSON, err := json.Marshal(scopes)
 		if err != nil {
@@ -736,13 +789,28 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 		return "", err
 	}
 
+	// fail wraps a post-commit file error: the mint row is now committed
+	// but its plaintext never reaches disk, so revoke it (soft-delete --
+	// the no-hard-delete audit invariant holds) and leave no orphan
+	// live wildcard PAT behind. Best-effort: a revoke failure is logged,
+	// not substituted for the original error.
+	fail := func(err error) (string, error) {
+		if rerr := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			_, rerr := q.RevokeUserPATByHash(context.Background(), hashed)
+			return rerr
+		}); rerr != nil {
+			log.Error("bootstrap: revoke orphaned PAT after file write failure", "err", rerr.Error())
+		}
+		return "", err
+	}
+
 	// The plaintext is written to the already-claimed handle, so the
 	// sentinel and the secret appear atomically from the operator's
 	// point of view: no window where the file exists but is empty.
 	// (The DB commit above is the other half of the ordering problem
 	// -- see the comment before the tx.)
 	if _, err := f.WriteString(plaintext + "\n"); err != nil {
-		return "", fmt.Errorf("write bootstrap file: %w", err)
+		return fail(fmt.Errorf("write bootstrap file: %w", err))
 	}
 	// Sync before Close: without it a power loss right after a
 	// successful boot could leave a zero-byte or torn sentinel on
@@ -751,10 +819,10 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// recovers, at the cost of re-minting. Pushing the plaintext to
 	// stable storage makes "file present" mean "token recoverable".
 	if err := f.Sync(); err != nil {
-		return "", fmt.Errorf("sync bootstrap file: %w", err)
+		return fail(fmt.Errorf("sync bootstrap file: %w", err))
 	}
 	if err := f.Close(); err != nil {
-		return "", fmt.Errorf("close bootstrap file: %w", err)
+		return fail(fmt.Errorf("close bootstrap file: %w", err))
 	}
 	committed = true
 
