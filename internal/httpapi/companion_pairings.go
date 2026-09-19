@@ -150,6 +150,16 @@ func (s *Server) registerCompanionPairings(api huma.API) {
 	huma.Post(api, "/api/v1/companion/pairings/{id}/revoke", s.handleRevokePairing)
 	huma.Delete(api, "/api/v1/companion/pairings/{id}", s.handleDeletePairing)
 	huma.Get(api, "/api/v1/companion/pairings/{id}/audit", s.handlePairingAudit)
+
+	// Admin PAT endpoints (issue #453 PR E). Per-user admin PATs for
+	// unattended operator tooling -- the kubeadm-init bootstrap
+	// pattern lives in cmd/branchdam's startup hook; these endpoints
+	// let admins mint/revoke/list scoped tokens via the API itself.
+	if s.patService != nil {
+		huma.Post(api, "/api/v1/users/me/pats", s.handleCreatePAT)
+		huma.Get(api, "/api/v1/users/me/pats", s.handleListPATs)
+		huma.Post(api, "/api/v1/users/me/pats/{id}/revoke", s.handleRevokePAT)
+	}
 }
 
 func (s *Server) pairingSvc() (*pairing.Service, error) {

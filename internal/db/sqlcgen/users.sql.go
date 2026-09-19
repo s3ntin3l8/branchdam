@@ -59,6 +59,30 @@ func (q *Queries) CreateAttributionUser(ctx context.Context, arg CreateAttributi
 	return id, err
 }
 
+const ensureBootstrapUser = `-- name: EnsureBootstrapUser :one
+INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
+VALUES ('system', 'ansible-bootstrap', 'ansible-bootstrap', '', 'forward-link', NULL, unixepoch(), unixepoch(), 'admin-bootstrap')
+ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.external_uid
+RETURNING id
+`
+
+// Lazy-provisions the service-account user the bootstrap PAT belongs
+// to (issue #453 PR E). auth_provider='system' / external_uid=
+// 'ansible-bootstrap' can't collide with a real Authentik uid (those
+// are UUIDs) or with the system sentinel (whose external_uid is just
+// 'system'). The user is created with is_admin=1 by the caller --
+// this query only handles the existence half; the admin bit lives on
+// a separate UPDATE because is_admin isn't part of the INSERT
+// columns above (admin is set by the local-auth migration, and the
+// existing forward-link rows use NULL password_hash which the local-
+// auth schema accepts).
+func (q *Queries) EnsureBootstrapUser(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, ensureBootstrapUser)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const ensureSystemUser = `-- name: EnsureSystemUser :one
 INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
 VALUES ('system', 'system', 'system', '', 'forward-link', NULL, unixepoch(), unixepoch(), 'attribution-bootstrap')
@@ -233,6 +257,19 @@ func (q *Queries) ListAttributionUsers(ctx context.Context, arg ListAttributionU
 		return nil, err
 	}
 	return items, nil
+}
+
+const promoteUserToAdmin = `-- name: PromoteUserToAdmin :exec
+UPDATE users SET is_admin = 1 WHERE id = ?1
+`
+
+// Set users.is_admin = 1 for the supplied user id. Used by the
+// bootstrap mechanism to ensure the service-account user can mint
+// pairings and write settings via the PAT it carries. Idempotent --
+// setting an already-admin row is a no-op at the SQLite level.
+func (q *Queries) PromoteUserToAdmin(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, promoteUserToAdmin, id)
+	return err
 }
 
 const reconcileLocalExternalUID = `-- name: ReconcileLocalExternalUID :exec

@@ -1,0 +1,64 @@
+-- user_pats: per-user admin PATs for unattended operations. See
+-- 00033_user_pats.sql's header comment for the rationale and storage
+-- shape. All queries here are admin-gated -- RequirePAT middleware
+-- sits on the route and rejects without a valid+scoped token before
+-- the handler runs.
+--
+-- All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
+-- "SQL Syntax Traps" note.
+
+-- name: CreateUserPAT :one
+-- Mints a new PAT. hashed_key is HMAC-SHA256(pepper, plaintext);
+-- the caller has the plaintext to return to the operator exactly
+-- once and never persists. scopes_json is JSON-encoded by the Go
+-- layer; SQLite's json_valid CHECK on the column protects against
+-- malformed storage. expires_at is nullable for non-expiring tokens.
+INSERT INTO user_pats (user_id, name, hashed_key, scopes_json, created_at, expires_at)
+VALUES (?1, ?2, ?3, ?4, unixepoch(), ?5)
+RETURNING id, user_id, name, hashed_key, scopes_json, created_at, last_used_at, expires_at, revoked_at;
+
+-- name: GetUserPATByHash :one
+-- Hot path: called on every authenticated PAT request. UNIQUE on
+-- hashed_key makes this an indexed lookup. Returns NULL when no row
+-- matches (caller distinguishes miss from error via the sql.ErrNoRows
+-- sentinel).
+SELECT id, user_id, name, hashed_key, scopes_json, created_at, last_used_at, expires_at, revoked_at
+FROM user_pats
+WHERE hashed_key = ?1 AND revoked_at IS NULL;
+
+-- name: ListUserPATs :many
+-- Backs GET /api/v1/users/me/pats -- lists all the calling user's
+-- PATs, including revoked (so the UI can show "last used 3 days ago,
+-- revoked yesterday" history). Plaintext is never stored, so the
+-- "list" response has nothing to redact -- just metadata.
+SELECT id, user_id, name, hashed_key, scopes_json, created_at, last_used_at, expires_at, revoked_at
+FROM user_pats
+WHERE user_id = ?1
+ORDER BY created_at DESC
+LIMIT ?2 OFFSET ?3;
+
+-- name: CountUserPATs :one
+SELECT COUNT(*) FROM user_pats WHERE user_id = ?1;
+
+-- name: RevokeUserPAT :exec
+-- Soft-delete by setting revoked_at. Idempotent: revoking an
+-- already-revoked token is a no-op (revoked_at stays at the first
+-- revocation time). The caller checks affected rows == 1 to
+-- distinguish "revoked" from "never existed / wrong owner".
+UPDATE user_pats
+SET revoked_at = COALESCE(revoked_at, unixepoch())
+WHERE id = ?1 AND user_id = ?2 AND revoked_at IS NULL;
+
+-- name: TouchUserPAT :exec
+-- Best-effort last_used_at bump on every authenticated request. The
+-- auth path calls this async (go func() + background write); a flush
+-- failure is logged but never propagates back to the request -- the
+-- operator-visible cost of an auth path is one indexed PK lookup,
+-- not a write. The WHERE last_used_at IS NULL OR last_used_at < ?3
+-- throttles the writes: only the first request in any 60s window
+-- actually mutates the row, so a flood of requests from one token
+-- doesn't generate a flood of disk writes. Keyed by hashed_key so
+-- the middleware can call this without a second lookup.
+UPDATE user_pats
+SET last_used_at = ?2
+WHERE hashed_key = ?1 AND (last_used_at IS NULL OR last_used_at < ?2 - 60);

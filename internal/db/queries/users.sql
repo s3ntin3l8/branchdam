@@ -91,6 +91,29 @@ SELECT id
 FROM users
 WHERE auth_provider = 'system' AND external_uid = 'system';
 
+-- name: EnsureBootstrapUser :one
+-- Lazy-provisions the service-account user the bootstrap PAT belongs
+-- to (issue #453 PR E). auth_provider='system' / external_uid=
+-- 'ansible-bootstrap' can't collide with a real Authentik uid (those
+-- are UUIDs) or with the system sentinel (whose external_uid is just
+-- 'system'). The user is created with is_admin=1 by the caller --
+-- this query only handles the existence half; the admin bit lives on
+-- a separate UPDATE because is_admin isn't part of the INSERT
+-- columns above (admin is set by the local-auth migration, and the
+-- existing forward-link rows use NULL password_hash which the local-
+-- auth schema accepts).
+INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
+VALUES ('system', 'ansible-bootstrap', 'ansible-bootstrap', '', 'forward-link', NULL, unixepoch(), unixepoch(), 'admin-bootstrap')
+ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.external_uid
+RETURNING id;
+
+-- name: PromoteUserToAdmin :exec
+-- Set users.is_admin = 1 for the supplied user id. Used by the
+-- bootstrap mechanism to ensure the service-account user can mint
+-- pairings and write settings via the PAT it carries. Idempotent --
+-- setting an already-admin row is a no-op at the SQLite level.
+UPDATE users SET is_admin = 1 WHERE id = ?1;
+
 -- name: ListAttributionUsers :many
 -- Backs GET /api/v1/users (admin-only). Used by the pairing UI's
 -- "Owned by" selector (when it lands -- today defaults to the creating

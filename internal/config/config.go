@@ -69,6 +69,7 @@ type Config struct {
 	Agent      Agent    `yaml:"agent"`
 	Authz      Authz    `yaml:"authz"`
 	Auth       Auth     `yaml:"auth"`
+	Admin      Admin    `yaml:"admin"`
 	Immich     Immich   `yaml:"immich"`
 
 	StorageLocations []StorageLocation `yaml:"storageLocations"`
@@ -104,6 +105,36 @@ type Ingest struct {
 type Pruning struct {
 	// Enabled turns the pruning engine on or off (default true).
 	Enabled bool `yaml:"enabled"`
+}
+
+// Admin configures admin-only knobs that don't fit under Auth
+// (PATs, bootstrap, settings-store restart endpoints). Admin routes
+// require an admin Principal regardless of which auth chain produced
+// it -- see internal/auth/RequireAdmin.
+type Admin struct {
+	// BootstrapPAT, when non-empty, mints a one-shot admin PAT on
+	// startup and writes the plaintext to <dataDir>/bootstrap-pat.txt
+	// (mode 0600). The kubeadm-init bootstrap-token pattern: a single
+	// operator step at install time mints the credential the operator
+	// (or their Ansible tooling) needs to do subsequent unattended
+	// admin operations. The minted PAT carries scopes=["*"], so it
+	// satisfies every scope-gated admin route.
+	//
+	// One-shot: subsequent server starts that find the bootstrap file
+	// already on disk refuse to mint a second token, and the env-var
+	// itself is treated as consumed-after-first-use. Operators who
+	// lose the file can re-mint by deleting it AND restarting, but the
+	// env-var stays set -- the second restart will see no file on
+	// disk and refuse to honor the env-var again. To re-bootstrap
+	// after a file loss, the operator must explicitly clear the env
+	// var AND restart, so the env var's "consume-once" lifetime
+	// matches its real security model: a leaked env var can't keep
+	// minting tokens after the first one was claimed.
+	//
+	// Empty (default) disables the bootstrap entirely: no file is
+	// written, no service-account user is created. Operators who
+	// don't run unattended tooling don't need it.
+	BootstrapPAT string `yaml:"bootstrapPAT"`
 }
 
 // Thumbnails configures the JPEG thumbnail cache (internal/thumbs). The

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -322,6 +323,33 @@ func main() {
 	// is what lets a device-paired API key authenticate.
 	pairingService := pairing.NewService(database, log, pairingPepper)
 
+	// Admin PATs (issue #453 PR E): the kubeadm-init bootstrap-token
+	// pattern for unattended operator tooling. Mint once at startup if
+	// configured and the bootstrap file doesn't already exist; refuse
+	// to mint again on subsequent starts. The config field
+	// (admin.bootstrapPAT, typically ${ADMIN_BOOTSTRAP_PAT}) wins; a
+	// direct env var works too, so operators can bootstrap without
+	// editing config.yaml.
+	bootstrapValue := cfg.Admin.BootstrapPAT
+	if bootstrapValue == "" {
+		bootstrapValue = os.Getenv(auth.BootstrapMintsPAT)
+	}
+	if bootstrapValue != "" {
+		dataDir := filepath.Dir(cfg.Database.Path)
+		if _, err := auth.RunBootstrapPAT(ctx, database, pairingPepper, bootstrapValue, dataDir, log); err != nil {
+			if errors.Is(err, auth.ErrBootstrapAlreadyMinted) {
+				// consume-once: file exists from a prior boot, env var
+				// still set. Continue silently -- the operator's
+				// previous mint is in their vault, not ours.
+				log.Info("admin bootstrap: PAT already minted, skipping",
+					"path", filepath.Join(dataDir, auth.BootstrapPATFileName))
+			} else {
+				log.Error("admin bootstrap failed", "err", err.Error())
+				os.Exit(1)
+			}
+		}
+	}
+
 	// Local auth: only built when the configured mode is anything other
 	// than "forward". The service is also stateless and cheap, but
 	// skipping it in forward-only mode means every existing test (and
@@ -449,6 +477,7 @@ func main() {
 		Tracker: scanTracker, Shutdown: ctx.Done(), ThumbCache: thumbCache,
 		RequestRestart: requestRestart,
 		Pairing:        pairingService,
+		PAT:            auth.NewPATService(database, pairingPepper),
 		LocalAuth:      localAuthDeps,
 		Attribution:    attributionSvc,
 		Audit:          auditSvc,
