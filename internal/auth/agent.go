@@ -104,6 +104,15 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 	if !keyConfigured {
 		log.Warn("auth: no agent authentication configured -- set BRANCHDAM_AGENT_API_KEY or wire Companion Pairing (LookupKey); agent routes will fail closed with 503 until then", "minLength", MinAgentKeyLength)
 	}
+	// Defensive: signedRequests=true with an empty env-var key would HMAC
+	// over []byte("") -- trivially satisfiable by any holder of a valid
+	// paired key, so signing gives no defense for a pairing-only
+	// deployment. Per-device signing (issue #453 PR C) is the real fix;
+	// this warn ensures operators aren't told signing is active when the
+	// shared key is empty.
+	if cfg.SignedRequests && cfg.APIKey == "" {
+		log.Warn("auth: signedRequests=true but agent.apiKey is empty -- signature validation will HMAC over an empty key, which is not a meaningful defense. Pairing-only deployments should leave SignedRequests=false until per-device signing (issue #453 PR C) lands.")
+	}
 
 	window := cfg.ReplayWindow
 	if window <= 0 {
@@ -141,12 +150,20 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 			case provided == "":
 				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
 				return
-			case cfg.APIKey != "" && constantTimeEqual(provided, cfg.APIKey):
+			case len(cfg.APIKey) >= MinAgentKeyLength && constantTimeEqual(provided, cfg.APIKey):
 				// Env-var bootstrap path (legacy and current operator-migrating
 				// install). Authenticates as "env-bootstrap" so audit trails can
 				// distinguish a key that was server-wide rotated from a
 				// device-scoped key (the env-var key rotates every device at
 				// once, by definition).
+				//
+				// Length-gated on MinAgentKeyLength (not just != "") so a
+				// misconfigured-too-short env-var -- which the relaxed gate
+				// now lets through when pairing is wired -- never becomes a
+				// live machine principal. The settings validator (PR #454)
+				// catches this at save time, but the runtime gate cannot
+				// rely on the validator having run (config.yaml/env can be
+				// edited around it).
 				principal = Principal{Kind: KindMachine, Name: "env-bootstrap"}
 			case cfg.LookupKey != nil:
 				// Device-pairing path. The callback returns the agent_id for

@@ -282,3 +282,51 @@ func TestAgentChainNothingConfiguredStillFails503(t *testing.T) {
 		t.Error("handler was called despite no auth path configured")
 	}
 }
+
+// TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap locks in the
+// invariant called out in the agent.go MinAgentKeyLength doc comment
+// ("A shorter (or unset) key fails every agent request closed rather
+// than accepting a weak or empty secret"). The relaxed gate lets a
+// short env-var through when pairing is wired (paired traffic must
+// still work, see TestAgentChainLookupKeyOnlyShortAPIKey), but the
+// env-bootstrap branch must length-gate too -- otherwise a
+// misconfigured-short env-var becomes a live Principal{env-bootstrap,
+// KindMachine} (a principal that can act for any device) the moment
+// pairing is wired. Presented with the short env-var itself, the
+// request must 401, not authenticate as env-bootstrap.
+func TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap(t *testing.T) {
+	const weakKey = "short12" // 7 chars, well below MinAgentKeyLength
+
+	var got Principal
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{
+		APIKey: weakKey,
+		// LookupKey intentionally misses for everything presented here --
+		// we want the env-bootstrap branch to be the only candidate that
+		// could authenticate the presented weak key. A LookupKey that
+		// returned hit would mask the regression by authenticating via the
+		// pairing path instead.
+		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		p, ok := From(r.Context())
+		if ok {
+			got = p
+		}
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, weakKey) // present the weak env-var itself
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (weak env-var must not authenticate as env-bootstrap)", rr.Code)
+	}
+	if handlerCalled {
+		t.Errorf("handler was called; weak env-var should have been rejected before reaching it. Principal.Name = %q, Kind = %q", got.Name, got.Kind)
+	}
+	if got.Name == "env-bootstrap" {
+		t.Errorf("Principal.Name = %q -- weak env-var leaked through as env-bootstrap (the regression this test guards)", got.Name)
+	}
+}
