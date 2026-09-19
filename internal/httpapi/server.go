@@ -113,6 +113,13 @@ type Deps struct {
 	// pairing. cmd/branchdam sets this from internal/pairing.NewService.
 	Pairing *pairing.Service
 
+	// PAT, if set, wires admin Personal Access Tokens (issue #453 PR E).
+	// When nil, the PAT endpoints (POST/GET /api/v1/users/me/pats and
+	// revoke) are not registered -- same pattern as Pairing. The PAT
+	// middleware is wired into admin routes via the RequirePAT call site
+	// in server.go when this is non-nil.
+	PAT *auth.PATService
+
 	// LocalAuth bundles the user service + login rate limiter +
 	// session middleware + auth mode. Nil in forward-only mode.
 	LocalAuth *LocalAuthDeps
@@ -206,6 +213,9 @@ type Server struct {
 	thumbs         *thumbs.Cache
 	requestRestart func()
 	pairingService *pairing.Service
+	// patService wires admin Personal Access Tokens (issue #453 PR E).
+	// Nil-safe: the HTTP layer skips PAT middleware wiring when nil.
+	patService *auth.PATService
 
 	// localAuth is the bundle the local-auth endpoints depend on.
 	// Nil when auth.mode is "forward" -- see registerLocalAuthRoutes
@@ -275,6 +285,7 @@ func New(d Deps) *Server {
 		thumbs:         d.ThumbCache,
 		requestRestart: d.RequestRestart,
 		pairingService: d.Pairing,
+		patService:     d.PAT,
 		attribution:    d.Attribution,
 		audit:          d.Audit,
 	}
@@ -426,6 +437,59 @@ func (s *Server) Handler() http.Handler {
 		requireEmailForJIT = cfg.Auth.Forward.RequireEmailForJIT
 	}
 	routed := auth.RouteWithConfigAndJIT(agentCfg, authMode, localBuilder, jit, adminGroups, requireEmailForJIT, s.log, authzHandler)
+
+	// Admin PATs (issue #453 PR E): a request carrying a bdam_pat_
+	// Bearer token is authenticated by the PAT middleware and handed
+	// to authzHandler directly, BYPASSING auth.Route's forward/local
+	// identity extraction -- BrowserChain would otherwise overwrite
+	// the PAT principal with an unauthenticated empty one. Requests
+	// without a PAT header (and every agent-path request, where a PAT
+	// must never short-circuit AgentChain's key validation) continue
+	// through auth.Route unchanged.
+	//
+	// Scope is enforced per admin route group, not globally: the
+	// wrapper resolves the route group from the path prefix and hands
+	// the request to that group's PAT middleware. The bootstrap PAT
+	// (scopes ["*"]) satisfies every group; a narrowly-scoped token
+	// like ["pairings:write"] only passes the pairings group. Groups
+	// not listed here fall through to the "admin" scope -- the
+	// catch-all for admin routes that don't have a dedicated scope
+	// yet. Add a new prefix here when a route group grows its own
+	// scope.
+	if s.patService != nil {
+		patHandlers := map[string]http.Handler{
+			"admin":          s.patService.Middleware("admin").RequirePAT(authzHandler),
+			"pats:write":     s.patService.Middleware("pats:write").RequirePAT(authzHandler),
+			"pairings:write": s.patService.Middleware("pairings:write").RequirePAT(authzHandler),
+		}
+		patScopeFor := func(path string) string {
+			switch {
+			case strings.HasPrefix(path, "/api/v1/users/me/pats"):
+				return "pats:write"
+			case strings.HasPrefix(path, "/api/v1/companion/pairings"):
+				return "pairings:write"
+			default:
+				return "admin"
+			}
+		}
+		inner := routed
+		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if auth.PATPresented(r) && !strings.HasPrefix(r.URL.Path, auth.AgentPathPrefix) {
+				h := patHandlers[patScopeFor(r.URL.Path)]
+				if h == nil {
+					// patScopeFor drift guard: a future route group
+					// without a matching middleware entry falls back
+					// to the admin catch-all instead of a nil-handler
+					// panic into the recovery middleware.
+					h = patHandlers["admin"]
+				}
+				h.ServeHTTP(w, r)
+				return
+			}
+			inner.ServeHTTP(w, r)
+		})
+	}
+
 	routed = pairingForwardedMiddleware(routed)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))

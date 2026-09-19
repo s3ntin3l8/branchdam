@@ -266,6 +266,18 @@ type User struct {
 	MfaPendingSecretCreatedAt sql.NullInt64
 }
 
+type UserPat struct {
+	ID         int64
+	UserID     int64
+	Name       string
+	HashedKey  string
+	ScopesJson string
+	CreatedAt  int64
+	LastUsedAt sql.NullInt64
+	ExpiresAt  sql.NullInt64
+	RevokedAt  sql.NullInt64
+}
+
 type VMediaEdgesResolved struct {
 	ID                   int64
 	SourceNodeID         int64

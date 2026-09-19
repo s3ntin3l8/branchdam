@@ -155,6 +155,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	// directly on the mux from Handler() because Huma's response model
 	// is JSON-only and SVG needs raw image/svg+xml.
 	s.registerCompanionPairings(api)
+	s.registerPats(api)
 }
 
 // --- /api/v1/me ---

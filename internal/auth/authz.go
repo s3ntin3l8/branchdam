@@ -30,11 +30,18 @@ func writeForbidden(w http.ResponseWriter, detail string) {
 // user. IsAdmin consults it to honor the users.is_admin column as an
 // override on top of the config-driven authz.groups membership check.
 //
-// The session middleware (internal/auth/session) is the only producer;
-// it attaches the value via WithLocalUserView. Nil means "no local
-// session authenticated this request" (forward-only mode, or no
-// cookie). UserID is exposed so handlers can audit-log "admin alice
-// did X" without a second DB hit.
+// Two producers attach the value via WithLocalUserView:
+//
+//   - the session middleware (internal/auth/session) for cookie
+//     sessions -- the original and still the common case;
+//   - PATMiddleware.RequirePAT (issue #453 PR E) for Bearer-token
+//     admin PATs -- UserID is the token owner's users.id, IsAdmin is
+//     true (PATs are admin-only in this PR), MFAVerified is true (the
+//     token itself is the second factor).
+//
+// Absent means "no local session or PAT authenticated this request"
+// (forward-only mode, or no cookie/token). UserID is exposed so
+// handlers can audit-log "admin alice did X" without a second DB hit.
 type LocalUserView struct {
 	UserID      int64
 	IsAdmin     bool

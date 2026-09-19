@@ -91,6 +91,7 @@ type Querier interface {
 	// long-lived by design, so they must not block (or be blocked by) either.
 	CountRunningScansForLocationByKind(ctx context.Context, arg CountRunningScansForLocationByKindParams) (int64, error)
 	CountScanJobsFiltered(ctx context.Context, arg CountScanJobsFilteredParams) (int64, error)
+	CountUserPATs(ctx context.Context, userID int64) (int64, error)
 	// Local auth queries. The handlers in internal/httpapi/local_auth.go
 	// and the middleware in internal/auth/session.go both go through these --
 	// no raw SQL outside this file (per the project's sqlc convention,
@@ -172,6 +173,20 @@ type Querier interface {
 	// own <= 0 treatment) for the many test fixtures that don't care about it;
 	// pass it explicitly when a test needs a non-zero TTL persisted on the row.
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
+	// user_pats: per-user admin PATs for unattended operations. See
+	// 00033_user_pats.sql's header comment for the rationale and storage
+	// shape. All queries here are admin-gated -- RequirePAT middleware
+	// sits on the route and rejects without a valid+scoped token before
+	// the handler runs.
+	//
+	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
+	// "SQL Syntax Traps" note.
+	// Mints a new PAT. hashed_key is HMAC-SHA256(pepper, plaintext);
+	// the caller has the plaintext to return to the operator exactly
+	// once and never persists. scopes_json is JSON-encoded by the Go
+	// layer; SQLite's json_valid CHECK on the column protects against
+	// malformed storage. expires_at is nullable for non-expiring tokens.
+	CreateUserPAT(ctx context.Context, arg CreateUserPATParams) (UserPat, error)
 	// Backs M6: after seeding every location config.yaml currently lists,
 	// deactivate any PREVIOUSLY active location whose root_path is no longer
 	// among them -- an operator removing a location from config, rather than
@@ -196,6 +211,13 @@ type Querier interface {
 	DeleteRecoveryCodes(ctx context.Context, userID int64) error
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
+	// Set users.is_admin = 0 for the supplied user id. The mirror of
+	// PromoteUserToAdmin, used by user-management flows (an admin-UI
+	// demote action is planned in the issue #453 follow-ups) and, today,
+	// by the PAT live-authority tests that exercise a demoted owner's
+	// token failing closed. Idempotent -- demoting a non-admin row is a
+	// no-op.
+	DemoteUserFromAdmin(ctx context.Context, id int64) error
 	// Same recursive walk as WouldCreateCycle, but returns the whole descendant
 	// set of root_node_id in one query instead of one CTE per candidate parent.
 	// Reconciling a Resolve timeline snapshot (issue #448) tests many candidate
@@ -217,6 +239,25 @@ type Querier interface {
 	// workstation-agent increment -- this table and endpoint exist now so that
 	// increment is additive, not a schema migration.
 	EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventParams) (EnqueueAgentEventRow, error)
+	// Lazy-provisions the service-account user the bootstrap PAT belongs
+	// to (issue #453 PR E). auth_provider='system' / external_uid=
+	// 'ansible-bootstrap' can't collide with a real Authentik uid (those
+	// are UUIDs) or with the system sentinel (whose external_uid is just
+	// 'system'). The user is created with is_admin=1 by the caller --
+	// this query only handles the existence half; the admin bit lives on
+	// a separate UPDATE because is_admin isn't part of the INSERT
+	// columns above (admin is set by the local-auth migration, and the
+	// existing forward-link rows use NULL password_hash which the local-
+	// auth schema accepts).
+	//
+	// email is NULL, NOT '': 00018's partial unique index
+	// users_email_source_uniq ON (email, source) WHERE email IS NOT NULL
+	// treats '' as a value, and EnsureSystemUser already owns the
+	// ('', 'forward-link') pair -- a second forward-link row with '' would
+	// fail the boot with UNIQUE constraint violated (round-3 review).
+	// NULL is excluded from the index predicate, so any number of
+	// forward-link service rows can carry it.
+	EnsureBootstrapUser(ctx context.Context) (int64, error)
 	// Lazy-provisions the "system" attribution sentinel: background workers
 	// (SweeperSupervisor's INCREMENTAL passes, prune, anything that has no
 	// request Principal) attribute their writes to this user. Idempotent:
@@ -325,6 +366,14 @@ type Querier interface {
 	// reads self-documentingly and a future "system user has been renamed"
 	// rename has one obvious place to land.
 	GetSystemUserID(ctx context.Context) (int64, error)
+	// Live authority check for PAT minting (issue #453 PR E): the PAT
+	// lookup query requires the OWNER to be is_admin=1 with disabled_at
+	// NULL, so minting for anyone else would hand back a well-formed
+	// token that can never authenticate. Mint runs this check in the
+	// same transaction as the insert; both columns are returned so the
+	// caller decides (is_admin is 0/1 per 00018's CHECK; disabled_at
+	// NULL means the account can authenticate).
+	GetUserAdminStatus(ctx context.Context, id int64) (GetUserAdminStatusRow, error)
 	// Used by the JIT provisioning path: a forward-auth request with email E
 	// and source 'forward-jit' either matches an existing admin or triggers
 	// a fresh INSERT in CreateForwardJITUser. Partial unique index
@@ -335,6 +384,18 @@ type Querier interface {
 	// The lookup is username-only; password verification happens in Go against
 	// password_hash. Index: users.username UNIQUE already covers this.
 	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
+	// Hot path: called on every authenticated PAT request. UNIQUE on
+	// hashed_key makes this an indexed lookup. Returns NULL when no row
+	// matches (caller distinguishes miss from error via the sql.ErrNoRows
+	// sentinel).
+	//
+	// The JOIN on users is authority enforcement, not display: the WHERE
+	// requires the owner to be a live admin (is_admin = 1, disabled_at
+	// NULL), so demoting or disabling the owner invalidates every one of
+	// their tokens on the next request instead of freezing admin
+	// authority at mint time. A token whose owner fails the check
+	// surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
+	GetUserPATByHash(ctx context.Context, hashedKey string) (UserPat, error)
 	InactivateResolveEdge(ctx context.Context, id int64) error
 	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
 	// actor_audit: append-only event log for admin actions that aren't
@@ -595,6 +656,11 @@ type Querier interface {
 	// camera_serial with captured_at_unix within +/-2 seconds of a target timestamp,
 	// excluding a given node ID.
 	ListTier3Candidates(ctx context.Context, arg ListTier3CandidatesParams) ([]MediaNode, error)
+	// Backs GET /api/v1/users/me/pats -- lists all the calling user's
+	// PATs, including revoked (so the UI can show "last used 3 days ago,
+	// revoked yesterday" history). Plaintext is never stored, so the
+	// "list" response has nothing to redact -- just metadata.
+	ListUserPATs(ctx context.Context, arg ListUserPATsParams) ([]UserPat, error)
 	// Paginated user list for the admin UI. Order by id ASC so paging is
 	// stable across inserts (new users go to the END, not the middle).
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
@@ -686,6 +752,22 @@ type Querier interface {
 	// Returns no rows (sql.ErrNoRows) when the caller is already on the
 	// newest active key.
 	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
+	// Bootstrap-specific variant of PromoteUserToAdmin: sets is_admin = 1
+	// AND clears disabled_at for the ansible-bootstrap service account.
+	// Reactivation is correct HERE and only here: the operator re-running
+	// the bootstrap sequence intends the minted PAT to work, and the PAT
+	// lookup query (GetUserPATByHash) requires disabled_at IS NULL --
+	// promoting without reactivating would mint a wildcard token that
+	// 401s on every request while the boot logs success (round-3 review).
+	// Named distinctly so a future admin-UI promote action can't pick it
+	// up and inherit the reactivation side effect. Idempotent.
+	PromoteBootstrapUserToAdmin(ctx context.Context, id int64) error
+	// Set users.is_admin = 1 for the supplied user id. Does NOT touch
+	// disabled_at: a promote action must never silently re-enable a
+	// disabled account (round-5 review) -- reactivation is a separate,
+	// explicit decision (see PromoteBootstrapUserToAdmin for the one
+	// caller whose semantics include it). Idempotent.
+	PromoteUserToAdmin(ctx context.Context, id int64) error
 	// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
 	// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate
 	// in the live graph; their metadata is write-once historical data that grows
@@ -792,11 +874,34 @@ type Querier interface {
 	// Sets revoked_at on the pairing (does NOT touch keys -- the HTTP layer
 	// also revokes every key for the pairing in the same tx).
 	RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairingParams) error
+	// Crash-recovery hygiene, run inside the bootstrap mint transaction:
+	// a previous boot killed between the commit and the file write leaves
+	// a live name='bootstrap' wildcard row whose plaintext never reached
+	// disk; the next boot's re-mint would otherwise accumulate live
+	// bootstrap tokens forever (round-5 review). Revoking prior live
+	// bootstrap rows for this user in the same tx keeps exactly one
+	// live bootstrap token at any time. Scoped to the bootstrap user +
+	// the reserved name so an admin's own 'bootstrap'-named token on a
+	// different account is untouched.
+	RevokeLiveBootstrapPATs(ctx context.Context, userID int64) (int64, error)
 	// Admin "delete" / revoke. Idempotent: revoking an already-used or
 	// already-expired token matches the row but is a no-op.
 	RevokePasswordResetToken(ctx context.Context, arg RevokePasswordResetTokenParams) error
 	// Sets revoked_at on a single session (used by DELETE /api/v1/session).
 	RevokeSession(ctx context.Context, arg RevokeSessionParams) error
+	// Soft-delete by setting revoked_at. The WHERE keeps it to live rows
+	// owned by the calling user, so the affected-row count is
+	// meaningful: 1 = revoked, 0 = the id doesn't exist, isn't live, or
+	// belongs to another user -- the caller maps 0 to a 404 instead of
+	// reporting a silent false success.
+	RevokeUserPAT(ctx context.Context, arg RevokeUserPATParams) (int64, error)
+	// Bootstrap orphan cleanup: if the plaintext file write fails after
+	// the mint transaction committed, the row is a live non-expiring
+	// wildcard PAT no one can ever present. Revoke it (soft-delete, not
+	// a hard delete -- the no-delete audit invariant holds) so the DB
+	// matches reality. Keyed by hashed_key because the bootstrap path
+	// knows the hash, not the row id.
+	RevokeUserPATByHash(ctx context.Context, hashedKey string) (int64, error)
 	// Rotation: set expires_at on every currently-active key for this pairing
 	// that doesn't already have one. Idempotent -- re-running after the same
 	// clock has no effect.
@@ -842,6 +947,16 @@ type Querier interface {
 	// request, but the WHERE matches the active-set partial index path
 	// already loaded above so the planner is happy.
 	TouchSession(ctx context.Context, arg TouchSessionParams) error
+	// Best-effort last_used_at bump on every authenticated request. The
+	// auth path calls this async (go func() + background write); a flush
+	// failure is logged but never propagates back to the request -- the
+	// operator-visible cost of an auth path is one indexed PK lookup,
+	// not a write. The WHERE last_used_at IS NULL OR last_used_at < ?3
+	// throttles the writes: only the first request in any 60s window
+	// actually mutates the row, so a flood of requests from one token
+	// doesn't generate a flood of disk writes. Keyed by hashed_key so
+	// the middleware can call this without a second lookup.
+	TouchUserPAT(ctx context.Context, arg TouchUserPATParams) error
 	// Restores an archived media node back to ACTIVE state.
 	UnarchiveMediaNode(ctx context.Context, id int64) error
 	// pipeline.RestoreTrashedAsset calls this on the master node and on any

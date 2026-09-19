@@ -91,6 +91,69 @@ SELECT id
 FROM users
 WHERE auth_provider = 'system' AND external_uid = 'system';
 
+-- name: EnsureBootstrapUser :one
+-- Lazy-provisions the service-account user the bootstrap PAT belongs
+-- to (issue #453 PR E). auth_provider='system' / external_uid=
+-- 'ansible-bootstrap' can't collide with a real Authentik uid (those
+-- are UUIDs) or with the system sentinel (whose external_uid is just
+-- 'system'). The user is created with is_admin=1 by the caller --
+-- this query only handles the existence half; the admin bit lives on
+-- a separate UPDATE because is_admin isn't part of the INSERT
+-- columns above (admin is set by the local-auth migration, and the
+-- existing forward-link rows use NULL password_hash which the local-
+-- auth schema accepts).
+--
+-- email is NULL, NOT '': 00018's partial unique index
+-- users_email_source_uniq ON (email, source) WHERE email IS NOT NULL
+-- treats '' as a value, and EnsureSystemUser already owns the
+-- ('', 'forward-link') pair -- a second forward-link row with '' would
+-- fail the boot with UNIQUE constraint violated (round-3 review).
+-- NULL is excluded from the index predicate, so any number of
+-- forward-link service rows can carry it.
+INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
+VALUES ('system', 'ansible-bootstrap', 'ansible-bootstrap', NULL, 'forward-link', NULL, unixepoch(), unixepoch(), 'admin-bootstrap')
+ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.external_uid
+RETURNING id;
+
+-- name: PromoteUserToAdmin :exec
+-- Set users.is_admin = 1 for the supplied user id. Does NOT touch
+-- disabled_at: a promote action must never silently re-enable a
+-- disabled account (round-5 review) -- reactivation is a separate,
+-- explicit decision (see PromoteBootstrapUserToAdmin for the one
+-- caller whose semantics include it). Idempotent.
+UPDATE users SET is_admin = 1 WHERE id = ?1;
+
+-- name: PromoteBootstrapUserToAdmin :exec
+-- Bootstrap-specific variant of PromoteUserToAdmin: sets is_admin = 1
+-- AND clears disabled_at for the ansible-bootstrap service account.
+-- Reactivation is correct HERE and only here: the operator re-running
+-- the bootstrap sequence intends the minted PAT to work, and the PAT
+-- lookup query (GetUserPATByHash) requires disabled_at IS NULL --
+-- promoting without reactivating would mint a wildcard token that
+-- 401s on every request while the boot logs success (round-3 review).
+-- Named distinctly so a future admin-UI promote action can't pick it
+-- up and inherit the reactivation side effect. Idempotent.
+UPDATE users SET is_admin = 1, disabled_at = NULL WHERE id = ?1;
+
+-- name: DemoteUserFromAdmin :exec
+-- Set users.is_admin = 0 for the supplied user id. The mirror of
+-- PromoteUserToAdmin, used by user-management flows (an admin-UI
+-- demote action is planned in the issue #453 follow-ups) and, today,
+-- by the PAT live-authority tests that exercise a demoted owner's
+-- token failing closed. Idempotent -- demoting a non-admin row is a
+-- no-op.
+UPDATE users SET is_admin = 0 WHERE id = ?1;
+
+-- name: GetUserAdminStatus :one
+-- Live authority check for PAT minting (issue #453 PR E): the PAT
+-- lookup query requires the OWNER to be is_admin=1 with disabled_at
+-- NULL, so minting for anyone else would hand back a well-formed
+-- token that can never authenticate. Mint runs this check in the
+-- same transaction as the insert; both columns are returned so the
+-- caller decides (is_admin is 0/1 per 00018's CHECK; disabled_at
+-- NULL means the account can authenticate).
+SELECT is_admin, disabled_at FROM users WHERE id = ?1;
+
 -- name: ListAttributionUsers :many
 -- Backs GET /api/v1/users (admin-only). Used by the pairing UI's
 -- "Owned by" selector (when it lands -- today defaults to the creating

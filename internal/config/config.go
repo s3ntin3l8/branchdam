@@ -69,6 +69,7 @@ type Config struct {
 	Agent      Agent    `yaml:"agent"`
 	Authz      Authz    `yaml:"authz"`
 	Auth       Auth     `yaml:"auth"`
+	Admin      Admin    `yaml:"admin"`
 	Immich     Immich   `yaml:"immich"`
 
 	StorageLocations []StorageLocation `yaml:"storageLocations"`
@@ -104,6 +105,37 @@ type Ingest struct {
 type Pruning struct {
 	// Enabled turns the pruning engine on or off (default true).
 	Enabled bool `yaml:"enabled"`
+}
+
+// Admin configures admin-only knobs that don't fit under Auth
+// (PATs, bootstrap, settings-store restart endpoints). Admin routes
+// require an admin Principal regardless of which auth chain produced
+// it -- see internal/auth/RequireAdmin.
+type Admin struct {
+	// BootstrapPAT, when non-empty, mints a one-shot admin PAT on
+	// startup and writes the plaintext to <dataDir>/bootstrap-pat.txt
+	// (mode 0600). The kubeadm-init bootstrap-token pattern: a single
+	// operator step at install time mints the credential the operator
+	// (or their Ansible tooling) needs to do subsequent unattended
+	// admin operations. The minted PAT carries scopes=["*"], so it
+	// satisfies every scope-gated admin route.
+	//
+	// One-shot while the sentinel survives: subsequent starts that
+	// find the bootstrap file on disk refuse to mint again. The file's
+	// PRESENCE is the only consumed state -- nothing else persists a
+	// flag -- so deleting the file and restarting with the env var
+	// still set mints a second token. That deletion is the documented
+	// re-bootstrap path (docs/admin-pats.md), and an operator who
+	// wants the old token dead must also revoke its user_pats row.
+	// The security property is narrower than "consumed once": a leaked
+	// env var can't mint AGAIN while the sentinel survives, but it can
+	// re-mint after the file is deleted. Operators who never want a
+	// second token must clear the env var after the first boot.
+	//
+	// Empty (default) disables the bootstrap entirely: no file is
+	// written, no service-account user is created. Operators who
+	// don't run unattended tooling don't need it.
+	BootstrapPAT string `yaml:"bootstrapPAT"`
 }
 
 // Thumbnails configures the JPEG thumbnail cache (internal/thumbs). The
