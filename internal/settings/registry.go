@@ -445,12 +445,15 @@ var agentFields = []Field{
 		},
 		Validate: minLenString(auth.MinAgentKeyLength),
 		Editable: true,
-		Doc: "Single secret shared by every agent that is not individually paired. " +
-			"Two roles: (1) accepted as X-API-Key, granting a machine principal that " +
-			"can act for any device; (2) the HMAC key for signed requests -- rotating " +
-			"it re-keys signing for ALL agents, paired ones included. Required: agent " +
-			"routes return 503 while it is unset or under 32 characters, even for " +
-			"paired devices. Prefer Companion Pairing for new devices.",
+		Doc: "Optional when Companion Pairing is wired. Single secret shared by every " +
+			"agent that is not individually paired. Two roles: (1) accepted as X-API-Key, " +
+			"granting a machine principal that can act for any device (the " +
+			"'env-bootstrap' principal); (2) the HMAC key for signed requests -- rotating " +
+			"it re-keys signing for ALL agents, paired ones included. Leave unset when " +
+			"every agent authenticates via Companion Pairing (issue #453). The runtime " +
+			"503 fail-closed gate is satisfied by either a long-enough value here OR a " +
+			"wired LookupKey (the pairing service's KeyLookup callback). Prefer Companion " +
+			"Pairing for new devices; removal of this field is planned.",
 	},
 	{
 		Key:   "agent.signedRequests",

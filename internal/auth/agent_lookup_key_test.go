@@ -147,3 +147,186 @@ func TestAgentChainEnvVarAndLookupKeyBothConfigured(t *testing.T) {
 	// unused -- the per-case subChain above is what actually runs.
 	_ = chain
 }
+
+// TestAgentChainLookupKeyOnlyNoAPIKey covers the post-#453 pairing-only
+// deployment: LookupKey wired, APIKey unset, a valid paired key presented
+// -> authenticates as the paired device. Closes the test gap noted in
+// issue #453: "env key unset (or too short) + pairing wired" was never
+// exercised before, and is the exact configuration the relaxed gate now
+// allows.
+func TestAgentChainLookupKeyOnlyNoAPIKey(t *testing.T) {
+	var got Principal
+	var authHeader string
+	chain := AgentChainWithConfig(AgentConfig{
+		LookupKey: func(ctx context.Context, presented string) (string, error) { return "dev-abc12345", nil },
+	}, nil)(principalCapturingHandler(t, &got, &authHeader))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, "paired-device-plaintext-key")
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (pairing-only deployment must accept paired keys without an env-var set)", rr.Code)
+	}
+	if got.Kind != KindMachine {
+		t.Errorf("Kind = %q, want %q", got.Kind, KindMachine)
+	}
+	if got.Name != "dev-abc12345" {
+		t.Errorf("Principal.Name = %q, want %q", got.Name, "dev-abc12345")
+	}
+}
+
+// TestAgentChainLookupKeyOnlyShortAPIKey verifies the relaxed gate does
+// not brick paired traffic when an operator sets a too-short env-var key
+// alongside a wired LookupKey. The settings-validator catches this at
+// save time (internal/settings/registry.go's minLenString on agent.apiKey,
+// PR #454), but the runtime gate must also tolerate it -- a misconfigured
+// env-var that nothing is actually using must not 503 paired devices.
+func TestAgentChainLookupKeyOnlyShortAPIKey(t *testing.T) {
+	var got Principal
+	var authHeader string
+	chain := AgentChainWithConfig(AgentConfig{
+		APIKey:    "short12", // 7 chars, well below MinAgentKeyLength
+		LookupKey: func(ctx context.Context, presented string) (string, error) { return "dev-abc12345", nil },
+	}, nil)(principalCapturingHandler(t, &got, &authHeader))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, "paired-device-plaintext-key")
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (paired device must authenticate even when env-var is misconfigured short)", rr.Code)
+	}
+	if got.Name != "dev-abc12345" {
+		t.Errorf("Principal.Name = %q, want %q", got.Name, "dev-abc12345")
+	}
+}
+
+// TestAgentChainLookupKeyOnlyMissNoAPIKey: pairing-only deployment (env-var
+// unset), presented key doesn't match any active pairing -> 401 (not 503,
+// not 500). Operator monitoring should be able to distinguish "your key
+// is wrong" from "your database is unreachable" and from "no auth path
+// configured at all."
+func TestAgentChainLookupKeyOnlyMissNoAPIKey(t *testing.T) {
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{
+		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, "no-such-paired-key")
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (pairing-only miss is auth-fail, not 503 misconfig)", rr.Code)
+	}
+	if handlerCalled {
+		t.Error("handler was called despite a LookupKey miss with no env-var fallback")
+	}
+}
+
+// TestAgentChainLookupKeyOnlyMissShortAPIKey covers the corner where both
+// the env-var is misconfigured-short AND the pairing lookup misses: the
+// relaxed gate lets the request through to the switch, the env-var branch
+// is unreachable (constantTimeEqual fails on the too-short key), and the
+// LookupKey miss returns 401 -- NOT 503. A 503 here would have meant the
+// operator can't distinguish "your pairing flow isn't returning the key
+// you think it is" from "your env-var is too short".
+func TestAgentChainLookupKeyOnlyMissShortAPIKey(t *testing.T) {
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{
+		APIKey:    "short12",
+		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, "no-such-paired-key")
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+	if handlerCalled {
+		t.Error("handler was called despite a LookupKey miss")
+	}
+}
+
+// TestAgentChainNothingConfiguredStillFails503 verifies the relaxed gate
+// doesn't open the floodgates when neither path is configured: no env-var
+// AND no LookupKey means a true misconfiguration, and the historical
+// 503 fail-closed behavior must hold. Companion to
+// TestAgentChainFailsClosedOnMisconfiguredKey in agent_test.go.
+func TestAgentChainNothingConfiguredStillFails503(t *testing.T) {
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, "any-key-value")
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (neither env-var nor LookupKey must still fail closed)", rr.Code)
+	}
+	if handlerCalled {
+		t.Error("handler was called despite no auth path configured")
+	}
+}
+
+// TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap locks in the
+// invariant called out in the agent.go MinAgentKeyLength doc comment
+// ("A shorter (or unset) key fails every agent request closed rather
+// than accepting a weak or empty secret"). The relaxed gate lets a
+// short env-var through when pairing is wired (paired traffic must
+// still work, see TestAgentChainLookupKeyOnlyShortAPIKey), but the
+// env-bootstrap branch must length-gate too -- otherwise a
+// misconfigured-short env-var becomes a live Principal{env-bootstrap,
+// KindMachine} (a principal that can act for any device) the moment
+// pairing is wired. Presented with the short env-var itself, the
+// request must 401, not authenticate as env-bootstrap.
+func TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap(t *testing.T) {
+	const weakKey = "short12" // 7 chars, well below MinAgentKeyLength
+
+	var got Principal
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{
+		APIKey: weakKey,
+		// LookupKey intentionally misses for everything presented here --
+		// we want the env-bootstrap branch to be the only candidate that
+		// could authenticate the presented weak key. A LookupKey that
+		// returned hit would mask the regression by authenticating via the
+		// pairing path instead.
+		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		p, ok := From(r.Context())
+		if ok {
+			got = p
+		}
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, weakKey) // present the weak env-var itself
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (weak env-var must not authenticate as env-bootstrap)", rr.Code)
+	}
+	if handlerCalled {
+		t.Errorf("handler was called; weak env-var should have been rejected before reaching it. Principal.Name = %q, Kind = %q", got.Name, got.Kind)
+	}
+	if got.Name == "env-bootstrap" {
+		t.Errorf("Principal.Name = %q -- weak env-var leaked through as env-bootstrap (the regression this test guards)", got.Name)
+	}
+}
