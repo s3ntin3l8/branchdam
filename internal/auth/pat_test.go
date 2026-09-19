@@ -441,6 +441,48 @@ func TestRequirePAT_TouchThrottledInProcess(t *testing.T) {
 	waitForTouches(2)
 }
 
+// TestShouldTouchEvictsStaleEntries pins the lastTouch bound: when
+// the map hits maxLastTouchEntries, entries older than the throttle
+// window (which no longer suppress anything) are evicted, so a
+// long-lived server doesn't accumulate one entry per token ever seen.
+func TestShouldTouchEvictsStaleEntries(t *testing.T) {
+	mw := &PATMiddleware{}
+	now := time.Unix(1_700_000_000, 0)
+
+	// Fill the map past the cap: maxLastTouchEntries stale entries
+	// (older than the window, so they suppress nothing) plus one fresh
+	// entry (inside the window).
+	mw.touchMu.Lock()
+	mw.lastTouch = make(map[string]time.Time, maxLastTouchEntries+1)
+	for i := 0; i < maxLastTouchEntries; i++ {
+		mw.lastTouch["stale"+string(rune(i))] = now.Add(-2 * touchThrottleWindow)
+	}
+	fresh := "fresh-token"
+	mw.lastTouch[fresh] = now.Add(-time.Second)
+	mw.touchMu.Unlock()
+
+	if got := len(mw.lastTouch); got != maxLastTouchEntries+1 {
+		t.Fatalf("setup: len = %d, want %d", got, maxLastTouchEntries+1)
+	}
+
+	// A touch for a new token at `now` must evict the stale entries
+	// and record the new one, while the fresh entry stays throttled.
+	if !mw.shouldTouch("new-token", now) {
+		t.Error("shouldTouch(new) = false, want true")
+	}
+	mw.touchMu.Lock()
+	defer mw.touchMu.Unlock()
+	if _, ok := mw.lastTouch[fresh]; !ok {
+		t.Error("fresh entry was evicted despite being inside the window")
+	}
+	if got := len(mw.lastTouch); got > 3 {
+		t.Errorf("len after eviction = %d, want <= 3 (new + fresh + any still-active)", got)
+	}
+	if last, ok := mw.lastTouch["new-token"]; !ok || !last.Equal(now) {
+		t.Errorf("new-token lastTouch = %v (present %v), want %v", last, ok, now)
+	}
+}
+
 // TestScopeSatisfied covers the scope-matching helper directly so the
 // rules are explicit (test names document the contract).
 func TestScopeSatisfied(t *testing.T) {

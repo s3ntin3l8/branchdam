@@ -212,10 +212,11 @@ type Querier interface {
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
 	// Set users.is_admin = 0 for the supplied user id. The mirror of
-	// PromoteUserToAdmin: today it backs the PAT fail-closed test (a
-	// demoted owner's token must stop authenticating) and gives a future
-	// admin-UI demote action its query. Idempotent -- demoting a
-	// non-admin row is a no-op.
+	// PromoteUserToAdmin, used by user-management flows (an admin-UI
+	// demote action is planned in the issue #453 follow-ups) and, today,
+	// by the PAT live-authority tests that exercise a demoted owner's
+	// token failing closed. Idempotent -- demoting a non-admin row is a
+	// no-op.
 	DemoteUserFromAdmin(ctx context.Context, id int64) error
 	// Same recursive walk as WouldCreateCycle, but returns the whole descendant
 	// set of root_node_id in one query instead of one CTE per candidate parent.
@@ -357,6 +358,14 @@ type Querier interface {
 	// reads self-documentingly and a future "system user has been renamed"
 	// rename has one obvious place to land.
 	GetSystemUserID(ctx context.Context) (int64, error)
+	// Live authority check for PAT minting (issue #453 PR E): the PAT
+	// lookup query requires the OWNER to be is_admin=1 with disabled_at
+	// NULL, so minting for anyone else would hand back a well-formed
+	// token that can never authenticate. Mint runs this check in the
+	// same transaction as the insert; both columns are returned so the
+	// caller decides (is_admin is 0/1 per 00018's CHECK; disabled_at
+	// NULL means the account can authenticate).
+	GetUserAdminStatus(ctx context.Context, id int64) (GetUserAdminStatusRow, error)
 	// Used by the JIT provisioning path: a forward-auth request with email E
 	// and source 'forward-jit' either matches an existing admin or triggers
 	// a fresh INSERT in CreateForwardJITUser. Partial unique index

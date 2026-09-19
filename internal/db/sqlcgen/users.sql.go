@@ -64,10 +64,11 @@ UPDATE users SET is_admin = 0 WHERE id = ?1
 `
 
 // Set users.is_admin = 0 for the supplied user id. The mirror of
-// PromoteUserToAdmin: today it backs the PAT fail-closed test (a
-// demoted owner's token must stop authenticating) and gives a future
-// admin-UI demote action its query. Idempotent -- demoting a
-// non-admin row is a no-op.
+// PromoteUserToAdmin, used by user-management flows (an admin-UI
+// demote action is planned in the issue #453 follow-ups) and, today,
+// by the PAT live-authority tests that exercise a demoted owner's
+// token failing closed. Idempotent -- demoting a non-admin row is a
+// no-op.
 func (q *Queries) DemoteUserFromAdmin(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, demoteUserFromAdmin, id)
 	return err
@@ -213,6 +214,29 @@ func (q *Queries) GetSystemUserID(ctx context.Context) (int64, error) {
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const getUserAdminStatus = `-- name: GetUserAdminStatus :one
+SELECT is_admin, disabled_at FROM users WHERE id = ?1
+`
+
+type GetUserAdminStatusRow struct {
+	IsAdmin    int64
+	DisabledAt sql.NullInt64
+}
+
+// Live authority check for PAT minting (issue #453 PR E): the PAT
+// lookup query requires the OWNER to be is_admin=1 with disabled_at
+// NULL, so minting for anyone else would hand back a well-formed
+// token that can never authenticate. Mint runs this check in the
+// same transaction as the insert; both columns are returned so the
+// caller decides (is_admin is 0/1 per 00018's CHECK; disabled_at
+// NULL means the account can authenticate).
+func (q *Queries) GetUserAdminStatus(ctx context.Context, id int64) (GetUserAdminStatusRow, error) {
+	row := q.db.QueryRowContext(ctx, getUserAdminStatus, id)
+	var i GetUserAdminStatusRow
+	err := row.Scan(&i.IsAdmin, &i.DisabledAt)
+	return i, err
 }
 
 const listAttributionUsers = `-- name: ListAttributionUsers :many

@@ -94,6 +94,13 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 
 	plaintext, row, err := s.patService.Mint(ctx, uid, in.Body.Name, in.Body.Scopes, in.Body.ExpiresAt)
 	if err != nil {
+		if errors.Is(err, auth.ErrPATOwnerNotAdmin) {
+			// The PAT lookup authenticates only live-admin-owned
+			// tokens; minting for anyone else would return a
+			// well-formed token that 401s on first use. Fail here
+			// with a clear 403 instead of issuing a dead credential.
+			return nil, huma.Error403Forbidden("PAT owner is not a live admin (demoted, disabled, or no local admin row)", err)
+		}
 		return nil, huma.Error500InternalServerError("mint PAT", err)
 	}
 

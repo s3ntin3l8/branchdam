@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
 // newBootstrapTestDB opens a migrated SQLite database in a temp dir,
@@ -121,5 +122,90 @@ func TestRunBootstrapPAT_ClaimedFileRemovedOnDBFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, BootstrapPATFileName)); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("claim file must be removed after a failed boot (stat err=%v)", statErr)
+	}
+}
+
+// TestRunBootstrapPAT_ZeroByteSentinelRecovered: a crash (SIGKILL,
+// reboot) between the exclusive create and the DB commit skips the
+// cleanup defer and leaves a zero-byte sentinel. The next boot must
+// treat it as a crashed claim -- remove and re-mint -- not as
+// "already minted", or one crash would permanently block bootstrap.
+func TestRunBootstrapPAT_ZeroByteSentinelRecovered(t *testing.T) {
+	database, root := newBootstrapTestDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	path := filepath.Join(root, BootstrapPATFileName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed zero-byte sentinel: %v", err)
+	}
+
+	plaintext, err := RunBootstrapPAT(ctx, database, patTestPepper, "1", root, log)
+	if err != nil {
+		t.Fatalf("zero-byte sentinel must be recovered, got: %v", err)
+	}
+	if !strings.HasPrefix(plaintext, PATPrefix) {
+		t.Fatalf("plaintext %q missing prefix %q", plaintext, PATPrefix)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read bootstrap file: %v", err)
+	}
+	if strings.TrimSpace(string(content)) != plaintext {
+		t.Fatalf("file content = %q, want the minted plaintext", strings.TrimSpace(string(content)))
+	}
+}
+
+// TestPATService_MintRequiresLiveAdminOwner pins the mint-path half of
+// the live-authority model: the lookup query authenticates only
+// live-admin-owned tokens, so minting for a non-admin, disabled, or
+// row-less owner would return a token that 401s on first use. Mint
+// must refuse with ErrPATOwnerNotAdmin instead.
+func TestPATService_MintRequiresLiveAdminOwner(t *testing.T) {
+	database, _ := newBootstrapTestDB(t)
+	ctx := context.Background()
+	svc := NewPATService(database, patTestPepper)
+
+	// A user row that was never promoted.
+	var plainUserID int64
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		uid, err := q.EnsureBootstrapUser(ctx)
+		if err != nil {
+			return err
+		}
+		plainUserID = uid
+		return nil
+	}); err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	if _, _, err := svc.Mint(ctx, plainUserID, "dead", []string{"*"}, 0); !errors.Is(err, ErrPATOwnerNotAdmin) {
+		t.Fatalf("mint for non-admin owner err = %v, want ErrPATOwnerNotAdmin", err)
+	}
+
+	// Promote -> mint succeeds.
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.PromoteUserToAdmin(ctx, plainUserID)
+	}); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if _, _, err := svc.Mint(ctx, plainUserID, "live", []string{"*"}, 0); err != nil {
+		t.Fatalf("mint for admin owner: %v", err)
+	}
+
+	// Demote again -> mint refuses again (the check is live, not
+	// mint-history).
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.DemoteUserFromAdmin(ctx, plainUserID)
+	}); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	if _, _, err := svc.Mint(ctx, plainUserID, "dead-again", []string{"*"}, 0); !errors.Is(err, ErrPATOwnerNotAdmin) {
+		t.Fatalf("mint for demoted owner err = %v, want ErrPATOwnerNotAdmin", err)
+	}
+
+	// No users row at all -> same refusal.
+	if _, _, err := svc.Mint(ctx, 999999, "no-row", []string{"*"}, 0); !errors.Is(err, ErrPATOwnerNotAdmin) {
+		t.Fatalf("mint for row-less owner err = %v, want ErrPATOwnerNotAdmin", err)
 	}
 }

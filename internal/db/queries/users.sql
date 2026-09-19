@@ -116,11 +116,22 @@ UPDATE users SET is_admin = 1 WHERE id = ?1;
 
 -- name: DemoteUserFromAdmin :exec
 -- Set users.is_admin = 0 for the supplied user id. The mirror of
--- PromoteUserToAdmin: today it backs the PAT fail-closed test (a
--- demoted owner's token must stop authenticating) and gives a future
--- admin-UI demote action its query. Idempotent -- demoting a
--- non-admin row is a no-op.
+-- PromoteUserToAdmin, used by user-management flows (an admin-UI
+-- demote action is planned in the issue #453 follow-ups) and, today,
+-- by the PAT live-authority tests that exercise a demoted owner's
+-- token failing closed. Idempotent -- demoting a non-admin row is a
+-- no-op.
 UPDATE users SET is_admin = 0 WHERE id = ?1;
+
+-- name: GetUserAdminStatus :one
+-- Live authority check for PAT minting (issue #453 PR E): the PAT
+-- lookup query requires the OWNER to be is_admin=1 with disabled_at
+-- NULL, so minting for anyone else would hand back a well-formed
+-- token that can never authenticate. Mint runs this check in the
+-- same transaction as the insert; both columns are returned so the
+-- caller decides (is_admin is 0/1 per 00018's CHECK; disabled_at
+-- NULL means the account can authenticate).
+SELECT is_admin, disabled_at FROM users WHERE id = ?1;
 
 -- name: ListAttributionUsers :many
 -- Backs GET /api/v1/users (admin-only). Used by the pairing UI's

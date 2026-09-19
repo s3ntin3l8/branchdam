@@ -110,6 +110,14 @@ type PATMiddleware struct {
 // write is due.
 const touchThrottleWindow = 60 * time.Second
 
+// maxLastTouchEntries bounds the per-token last-touch map. It's a
+// soft cap: when exceeded, stale entries (older than the throttle
+// window, i.e. no longer suppressing anything) are evicted, and only
+// genuinely active tokens refill the map. A long-lived server mints
+// and retires tokens over months; without eviction the map would
+// hold one entry per token ever seen.
+const maxLastTouchEntries = 4096
+
 // shouldTouch reports whether enough time has passed since the last
 // async touch for this token to bother spawning the goroutine. Records
 // "now" as the new last-touch when it returns true, so concurrent
@@ -119,6 +127,13 @@ func (m *PATMiddleware) shouldTouch(hash string, now time.Time) bool {
 	defer m.touchMu.Unlock()
 	if m.lastTouch == nil {
 		m.lastTouch = make(map[string]time.Time)
+	}
+	if len(m.lastTouch) >= maxLastTouchEntries {
+		for k, v := range m.lastTouch {
+			if now.Sub(v) >= touchThrottleWindow {
+				delete(m.lastTouch, k)
+			}
+		}
 	}
 	if last, ok := m.lastTouch[hash]; ok && now.Sub(last) < touchThrottleWindow {
 		return false
@@ -357,6 +372,13 @@ func (s *PATService) Middleware(scope string) *PATMiddleware {
 // touching time.Now globally.
 var timeNowUnix = func() int64 { return time.Now().Unix() }
 
+// ErrPATOwnerNotAdmin is returned by Mint when the requested owner
+// has no users row, isn't is_admin=1, or has disabled_at set. The
+// PAT lookup query authenticates only live-admin-owned tokens, so
+// minting for such an owner would return a token that 401s on first
+// use -- a silent dead credential. The HTTP layer maps this to 403.
+var ErrPATOwnerNotAdmin = errors.New("PAT owner is not a live admin")
+
 // Mint creates a new PAT. Returns (plaintext, row, error). The
 // plaintext is shown to the operator exactly once via the API
 // response; the row carries the hashed_key. ExpiresAt is unix-seconds
@@ -364,6 +386,14 @@ var timeNowUnix = func() int64 { return time.Now().Unix() }
 //
 // Scopes is a JSON-encoded string of the form `["pairings:write",
 // "settings:write"]`. Pass `["*"]` for the bootstrap PAT.
+//
+// The owner must be a live admin: the lookup query authenticates
+// tokens only when the owner's users row has is_admin = 1 AND
+// disabled_at IS NULL, so minting for anyone else would return a
+// well-formed token that 401s on first use. Mint checks the owner's
+// status in the SAME transaction as the insert -- a demotion racing
+// the mint fails the mint, not the other way around. A failed check
+// returns ErrPATOwnerNotAdmin; the HTTP layer maps it to 403.
 func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes []string, expiresAt int64) (string, *sqlcgen.UserPat, error) {
 	plaintext, err := mintPATPlaintext()
 	if err != nil {
@@ -380,6 +410,20 @@ func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes
 	}
 	var row sqlcgen.UserPat
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// Owner authority check, in-tx with the insert: the lookup
+		// query requires a live admin owner, so minting for anyone
+		// else would produce a token that can never authenticate
+		// (silent dead credential). See ErrPATOwnerNotAdmin.
+		status, err := q.GetUserAdminStatus(ctx, userID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrPATOwnerNotAdmin
+			}
+			return fmt.Errorf("check owner admin status: %w", err)
+		}
+		if status.IsAdmin != 1 || status.DisabledAt.Valid {
+			return ErrPATOwnerNotAdmin
+		}
 		r, err := q.CreateUserPAT(ctx, sqlcgen.CreateUserPATParams{
 			UserID:     userID,
 			Name:       name,
@@ -573,25 +617,53 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// traverse one, so a symlink planted at <dataDir>/bootstrap-pat.txt
 	// can't redirect the (non-expiring, wildcard) plaintext elsewhere.
 	// Two concurrent boots therefore can't both mint: exactly one open
-	// succeeds, the other sees ErrBootstrapAlreadyMinted. The Lstat
-	// below only distinguishes "regular sentinel file" from "something
-	// else (symlink) planted here" for an accurate error message; the
-	// O_EXCL|O_NOFOLLOW open remains the actual enforcement, so the
-	// Lstat/open gap can't be raced into a followed symlink.
-	if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
-		return "", fmt.Errorf("bootstrap file %s is a symlink; refusing to write the plaintext through it", path)
+	// succeeds, the other sees the EEXIST branch below.
+	claim := func() (*os.File, error) {
+		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	f, err := claim()
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			// File exists -- consume-once: refuse.
+		if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("open bootstrap file: %w", err)
+		}
+		// Something already sits at the path -- Lstat (never Stat, so
+		// a symlink reports itself) distinguishes three cases:
+		info, lerr := os.Lstat(path)
+		if lerr != nil {
+			return "", fmt.Errorf("lstat bootstrap file: %w", lerr)
+		}
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			return "", fmt.Errorf("bootstrap file %s is a symlink; refusing to write the plaintext through it", path)
+		case info.Mode().IsRegular() && info.Size() == 0:
+			// A zero-byte sentinel is a crashed claim: SIGKILL or a
+			// reboot between the exclusive create and the DB commit
+			// skips the cleanup defer, and the empty file would
+			// otherwise block every future bootstrap while holding
+			// no token. Remove it and re-claim; if a second crashed
+			// boot left a non-empty file, that's a real sentinel and
+			// the next loop refusal applies.
+			if rerr := os.Remove(path); rerr != nil {
+				return "", fmt.Errorf("remove crashed bootstrap claim: %w", rerr)
+			}
+			f, err = claim()
+			if err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					return "", ErrBootstrapAlreadyMinted
+				}
+				return "", fmt.Errorf("open bootstrap file: %w", err)
+			}
+		default:
+			// Non-empty regular file (or an unexpected non-symlink
+			// type): a real sentinel -- consume-once, refuse.
 			return "", ErrBootstrapAlreadyMinted
 		}
-		return "", fmt.Errorf("open bootstrap file: %w", err)
 	}
 	// From here on, a failure must not leave the empty claim file
 	// behind: its existence is the consume-once sentinel, so a
 	// half-failed boot would otherwise block re-bootstrap forever.
+	// (A crash, as opposed to a returned error, still can -- that's
+	// the zero-byte case handled above on the next boot.)
 	committed := false
 	defer func() {
 		_ = f.Close()
@@ -648,6 +720,15 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// -- see the comment before the tx.)
 	if _, err := f.WriteString(plaintext + "\n"); err != nil {
 		return "", fmt.Errorf("write bootstrap file: %w", err)
+	}
+	// Sync before Close: without it a power loss right after a
+	// successful boot could leave a zero-byte or torn sentinel on
+	// disk despite the DB commit having succeeded -- and the
+	// zero-byte file is exactly the crash case the next boot now
+	// recovers, at the cost of re-minting. Pushing the plaintext to
+	// stable storage makes "file present" mean "token recoverable".
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("sync bootstrap file: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("close bootstrap file: %w", err)

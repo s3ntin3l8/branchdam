@@ -65,7 +65,11 @@ consume-once sentinel.
 All endpoints require an admin identity (session cookie, forward-auth,
 or a PAT). A PAT-authenticated request carries its owner's `users.id`,
 so the endpoints work identically regardless of which identity path
-authenticated the request.
+authenticated the request. Mint additionally requires the resolved
+owner to be a **live admin** (`users.is_admin = 1`, `disabled_at`
+NULL) — the same predicate the token lookup enforces — and returns
+403 otherwise, rather than issuing a well-formed token that would
+401 on first use.
 
 | Method | Path | Description |
 |---|---|---|
