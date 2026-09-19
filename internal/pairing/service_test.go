@@ -143,18 +143,23 @@ func TestKeyLookup_ActiveKeyReturnsAgentID(t *testing.T) {
 	pairing, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
 	require.NoError(t, err)
 
-	agentID, err := svc.KeyLookup(ctx, key.Plaintext)
+	result, err := svc.KeyLookup(ctx, key.Plaintext)
 	require.NoError(t, err)
-	assert.Equal(t, pairing.AgentID, agentID)
+	assert.Equal(t, pairing.AgentID, result.AgentID)
+	// The signing key must be non-empty for an authenticated hit -- it's
+	// the HMAC key AgentChain uses to validate signed requests from this
+	// device (issue #453 PR C). Length 32 == SHA-256 output bytes.
+	assert.Len(t, result.SigningKey, 32)
 }
 
 func TestKeyLookup_UnknownKeyReturnsEmpty(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
 
-	agentID, err := svc.KeyLookup(ctx, "no-such-key-anywhere")
+	result, err := svc.KeyLookup(ctx, "no-such-key-anywhere")
 	require.NoError(t, err)
-	assert.Empty(t, agentID)
+	assert.Empty(t, result.AgentID)
+	assert.Nil(t, result.SigningKey)
 }
 
 func TestKeyLookup_RevokedPairingReturnsEmpty(t *testing.T) {
@@ -167,9 +172,10 @@ func TestKeyLookup_RevokedPairingReturnsEmpty(t *testing.T) {
 	_, err = svc.RevokePairing(ctx, pairing.ID, "user:tester")
 	require.NoError(t, err)
 
-	agentID, err := svc.KeyLookup(ctx, key.Plaintext)
+	result, err := svc.KeyLookup(ctx, key.Plaintext)
 	require.NoError(t, err)
-	assert.Empty(t, agentID)
+	assert.Empty(t, result.AgentID)
+	assert.Nil(t, result.SigningKey)
 }
 
 func TestKeyLookup_ExpiredKeyReturnsEmpty(t *testing.T) {
@@ -215,14 +221,16 @@ func TestRotateKey_HappyPath(t *testing.T) {
 	assert.NotEqual(t, oldKey.Plaintext, newKey.Plaintext)
 
 	// Old key should still work (within grace window).
-	agentID, err := svc.KeyLookup(ctx, oldKey.Plaintext)
+	oldResult, err := svc.KeyLookup(ctx, oldKey.Plaintext)
 	require.NoError(t, err)
-	assert.Equal(t, pairing.AgentID, agentID)
+	assert.Equal(t, pairing.AgentID, oldResult.AgentID)
+	assert.Len(t, oldResult.SigningKey, 32)
 
 	// New key should also work.
-	agentID, err = svc.KeyLookup(ctx, newKey.Plaintext)
+	newResult, err := svc.KeyLookup(ctx, newKey.Plaintext)
 	require.NoError(t, err)
-	assert.Equal(t, pairing.AgentID, agentID)
+	assert.Equal(t, pairing.AgentID, newResult.AgentID)
+	assert.Len(t, newResult.SigningKey, 32)
 }
 
 func TestRotateKey_GraceExpiryExpiresOldKey(t *testing.T) {
@@ -245,9 +253,10 @@ func TestRotateKey_GraceExpiryExpiresOldKey(t *testing.T) {
 		pairing.ID, sql.NullInt64{Int64: 1, Valid: true})
 	require.NoError(t, err)
 
-	agentID, err := svc.KeyLookup(ctx, oldKey.Plaintext)
+	result, err := svc.KeyLookup(ctx, oldKey.Plaintext)
 	require.NoError(t, err)
-	assert.Empty(t, agentID, "expired key must miss KeyLookup")
+	assert.Empty(t, result.AgentID, "expired key must miss KeyLookup")
+	assert.Nil(t, result.SigningKey)
 }
 
 func TestRevokePairing_TerminatesAllKeys(t *testing.T) {
@@ -263,9 +272,10 @@ func TestRevokePairing_TerminatesAllKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, plaintext := range []string{k1.Plaintext, k2.Plaintext} {
-		agentID, err := svc.KeyLookup(ctx, plaintext)
+		result, err := svc.KeyLookup(ctx, plaintext)
 		require.NoError(t, err)
-		assert.Empty(t, agentID, "revoked pairing's keys must not authenticate")
+		assert.Empty(t, result.AgentID, "revoked pairing's keys must not authenticate")
+		assert.Nil(t, result.SigningKey)
 	}
 }
 
@@ -373,14 +383,14 @@ func TestDeletePairing_KeysNotLookupableAfterDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	// Keys should already fail lookup after revoke
-	agentID, err := svc.KeyLookup(ctx, key.Plaintext)
+	result, err := svc.KeyLookup(ctx, key.Plaintext)
 	require.NoError(t, err)
-	assert.Empty(t, agentID)
+	assert.Empty(t, result.AgentID)
 
 	// After delete, still fails (no regression)
 	err = svc.DeletePairing(ctx, pairing.ID, "user:tester")
 	require.NoError(t, err)
-	agentID, err = svc.KeyLookup(ctx, key.Plaintext)
+	result, err = svc.KeyLookup(ctx, key.Plaintext)
 	require.NoError(t, err)
-	assert.Empty(t, agentID)
+	assert.Empty(t, result.AgentID)
 }

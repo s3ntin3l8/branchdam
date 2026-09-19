@@ -137,12 +137,12 @@ The env-var key can be rotated separately from any paired device.
 Rotating it forces every device or workstation agent that authenticates
 with it to update simultaneously — useful when a workstation is
 decommissioned but the operator hasn't yet deployed paired devices.
-Rotating it also re-keys HMAC signing for every agent, paired devices
-included, because `agent.signedRequests` verifies against this same
-shared secret. With `signedRequests: false` (the default) only agents
-still presenting the old key as `X-API-Key` are affected; with it
-enabled, every agent must pick up the new value before its next signed
-request.
+Rotating it also re-keys HMAC signing for env-bootstrap clients
+(paired devices sign with their own per-device key, not the env-var;
+see issue #453 PR C). With `signedRequests: false` (the default) only
+agents still presenting the old key as `X-API-Key` are affected;
+with it enabled, env-bootstrap agents must pick up the new value
+before their next signed request; paired devices are unaffected.
 
 ### 4.5. QR payload format
 

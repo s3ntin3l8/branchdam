@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/qr"
@@ -249,21 +250,47 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 }
 
 // KeyLookup resolves an X-API-Key header value to the agent_id of the
-// device it authenticates. Returns ("", nil) when no active key matches.
-func (s *Service) KeyLookup(ctx context.Context, presented string) (string, error) {
+// device it authenticates AND the per-device HMAC signing key (issue
+// #453 PR C), or (auth.KeyLookupResult{}, nil) when no active key
+// matches. A non-nil error is a genuine DB failure and propagates as
+// 500.
+//
+// Returns auth.KeyLookupResult (defined in the consumer package) to
+// keep the import graph acyclic: internal/pairing imports
+// internal/audit and internal/audit imports internal/auth, so
+// internal/auth cannot import internal/pairing.
+func (s *Service) KeyLookup(ctx context.Context, presented string) (auth.KeyLookupResult, error) {
 	hash := s.hashKey(presented)
 	row, err := s.db.Reader.GetDevicePairingKeyByHash(ctx, hash)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return auth.KeyLookupResult{}, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("lookup key: %w", err)
+		return auth.KeyLookupResult{}, fmt.Errorf("lookup key: %w", err)
 	}
 	pairing, err := s.db.Reader.GetDevicePairingByID(ctx, row.PairingID)
 	if err != nil {
-		return "", fmt.Errorf("lookup pairing: %w", err)
+		return auth.KeyLookupResult{}, fmt.Errorf("lookup pairing: %w", err)
 	}
-	return pairing.AgentID, nil
+	return auth.KeyLookupResult{
+		AgentID:    pairing.AgentID,
+		SigningKey: s.signingKeyFor(presented),
+	}, nil
+}
+
+// signingKeyFor derives the per-device HMAC signing key from the
+// presented plaintext. Distinct from hashKey's HMAC by the "sign:"
+// label prefix -- two distinct HMAC outputs from the same plaintext +
+// pepper, so the database-stored key_lookup_hash can't be inverted to
+// recover the signing key (and vice versa) without the pepper.
+//
+// Plaintext is held only for the lifetime of this function call: the
+// Service does not retain it, so a future request that needs to verify
+// a signature re-derives the key on the spot.
+func (s *Service) signingKeyFor(plaintext string) []byte {
+	mac := hmac.New(sha256.New, s.pepper)
+	mac.Write([]byte("sign:" + plaintext))
+	return mac.Sum(nil)
 }
 
 // RotateKey mints a new API key, sets expires_at on the pairing's
