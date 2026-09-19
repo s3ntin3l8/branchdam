@@ -15,48 +15,52 @@
 # Required variables:
 #
 #   vault_branchdam_pair_url: "branchdam://?server=https%3A%2F%2Fdam.example.com&key=<plaintext>&agent=dev-xxxxxxxx"
-#       The full pairing URL as emitted by branchDAM's Companion Pairing
-#       modal. The plaintext key is the only secret here; keep the vault
-#       file mode 0600.
+#     The full pairing URL as emitted by branchDAM's Companion Pairing
+#     modal. The plaintext key is the only secret here; keep the vault
+#     file mode 0600.
 #
 #   branchdam_pair_agent_user: <linux-username>
-#       REQUIRED. The Linux user that owns branchdam-agent's config
-#       directory. Explicit on purpose -- ansible_user_id is a fact that
-#       requires gather_facts: true (and the gather is otherwise unused
-#       by this playbook), and silently defaulting to root would write
-#       credentials to /root/.config/... -- the wrong account for any
-#       workstation agent running under a non-root user.
+#     REQUIRED. The Linux user that owns branchdam-agent's config
+#     directory. Explicit on purpose -- ansible_user_id is a fact that
+#     requires gather_facts: true (and the gather is otherwise unused
+#     by this playbook), and silently defaulting to root would write
+#     credentials to /root/.config/... -- the wrong account for any
+#     workstation agent running under a non-root user.
 #
 # Optional variables:
 #
-  #   branchdam_pair_agent_config_dir: "~/.config/branchdam-agent"
-  #       (default) Where to write config.yaml. The pair CLI does NOT
-  #       create this directory -- it calls config.Patch which reads the
-  #       file before writing. The init step (above) does create it via
-  #       os.MkdirAll (init.go:75), so on a fresh workstation init must
-  #       run first; the args.creates guard makes the task idempotent.
+#   branchdam_pair_agent_config_dir: "~/.config/branchdam-agent"
+#     (default) Where to write config.yaml. The pair CLI does NOT
+#     create this directory -- it calls config.Patch which reads the
+#     file before writing. The init step (above) does create it via
+#     os.MkdirAll (init.go:75), so on a fresh workstation init must
+#     run first; the args.creates guard makes the task idempotent.
 #
 #   branchdam_pair_agent_service: "branchdam-agent.service"
-#       (default) The systemd unit the workstation agent runs under,
-#       when installed as a system service. Set to "" to skip the
-#       restart -- e.g. when running the agent interactively, or when
-#       systemd isn't managing the agent on this host.
+#     (default) The systemd unit the workstation agent runs under,
+#     when installed as a system service. Set to "" to skip the
+#     restart -- e.g. when running the agent interactively, or when
+#     systemd isn't managing the agent on this host.
 #
-  # branchdam_pair_skip_init: false
-      #       (default) Set true to skip the `branchdam-agent init` step on
-      #       workstations where the agent is already partially configured
-      #       (init overwrites an existing config unless -force is passed,
-      #       so the default is conservative).
-  #
-  #   branchdam_pair_service_become: true
-  #       (default) Whether the restart task should escalate to root
-  #       (required for the default system unit `branchdam-agent.service`).
-  #       Set to false for a user-level unit (e.g.
-  #       `systemctl --user enable branchdam-agent.service`) and pair it
-  #       with `scope: user` via Ansible's `vars:` override on the task if
-  #       you need a user-level manager; the playbook doesn't carry that
-  #       knob in the default vars because the overwhelming case is a
-  #       system unit.
+#   branchdam_pair_skip_init: false
+#     (default) Set true to skip the `branchdam-agent init` step on
+#     workstations where the agent is already partially configured
+#     (init overwrites an existing config unless -force is passed,
+#     so the default is conservative).
+#
+#   branchdam_pair_service_become: true
+#     (default) Whether the restart task should escalate. Required
+#     true for the default system unit `branchdam-agent.service`
+#     (which lives under /etc/systemd/system/); set false for a
+#     user-level unit (e.g. `systemctl --user enable`). When false,
+#     also set `branchdam_pair_service_scope: user` so the systemd
+#     module talks to the user's manager rather than the system one.
+#
+#   branchdam_pair_service_scope: "system"
+#     (default) Which systemd manager the restart task targets.
+#     Passes through to the systemd module's `scope:` argument.
+#     "system" (default) for the standard install; "user" for a
+#     user-level unit when `branchdam_pair_service_become: false`.
 #
 - name: Pair branchDAM workstation agent
   hosts: "{{ target_host | default('localhost') }}"
@@ -72,6 +76,7 @@
     branchdam_pair_agent_config_path: "{{ branchdam_pair_agent_config_dir }}/config.yaml"
     branchdam_pair_agent_service: "branchdam-agent.service"
     branchdam_pair_service_become: true
+    branchdam_pair_service_scope: "system"
     branchdam_pair_skip_init: false
 
   tasks:
@@ -91,7 +96,11 @@
         that:
           - vault_branchdam_pair_url is defined
           - vault_branchdam_pair_url | length > 0
-          - vault_branchdam_pair_url is regex_search('^branchdam://')
+          # startswith is a Jinja test, not a filter -- the reviewer's
+          # verified-working alternatives are 'is search(...)' or
+          # '.startswith(...)'; the latter is the simpler shape and
+          # avoids the search-test's regex syntax for a literal prefix.
+          - vault_branchdam_pair_url.startswith('branchdam://')
         fail_msg: >-
           vault_branchdam_pair_url must be set to a non-empty
           branchdam://... URL. Get one from the SPA's Companion
@@ -158,14 +167,20 @@
         name: "{{ branchdam_pair_agent_service }}"
         state: restarted
         daemon_reload: true
-      # become is required for the default system unit
-      # (`branchdam-agent.service` is installed under /etc/systemd/system/).
-      # Operators with a user-level unit (e.g. `systemctl --user enable`)
-      # can set branchdam_pair_service_become: false and pair the
-      # restart task with `scope: user` via vars override; see the
-      # playbook header comment.
+        # scope is a module argument on ansible.builtin.systemd; the
+        # var defaults to "system" (the standard install) and operators
+        # with a user-level unit override to "user" alongside
+        # branchdam_pair_service_become: false.
+        scope: "{{ branchdam_pair_service_scope }}"
+      # Default system unit needs root. We deliberately don't pass an
+      # explicit become_user so Ansible's default (root) applies; the
+      # previous round's `become_user: '{{ branchdam_pair_agent_user }}'`
+      # escalated to the *agent* user (non-root by design), which is
+      # exactly the wrong target for a system-unit restart. Operators
+      # with a user-level unit set service_become: false (no escalation)
+      # and service_scope: user (manager choice) -- the agent user is
+      # already the right actor in that case.
       become: "{{ branchdam_pair_service_become }}"
-      become_user: "{{ branchdam_pair_agent_user if branchdam_pair_service_become else omit }}"
       when:
         - branchdam_pair_agent_service | length > 0
         - branchdam_pair_run.rc == 0
