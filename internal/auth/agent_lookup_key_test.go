@@ -486,3 +486,52 @@ func TestAgentChainSignedRequestsEnvBootstrapStillUsesAPIKey(t *testing.T) {
 		t.Error("handler was not called -- env-bootstrap signature must have validated")
 	}
 }
+
+// TestAgentChainPairedLookupNilSigningKeyFailsClosed locks in the
+// fail-closed contract called out in the LookupKey doc comment:
+// a paired-path LookupKey hit that returns KeyLookupResult{AgentID: <x>,
+// SigningKey: nil} must be rejected, NOT silently fall back to
+// cfg.APIKey (which would re-open the env-key/paired-device cross-
+// signing authority issue #453 PR C removes). The wired
+// internal/pairing.Service.KeyLookup satisfies this contract, so
+// this test exercises the contract by stubbing a LookupKey that
+// violates it.
+func TestAgentChainPairedLookupNilSigningKeyFailsClosed(t *testing.T) {
+	const plaintext = "paired-device-plaintext-key-with-nil-signing"
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{
+		APIKey:         testKey, // present (the bug would fall back to it)
+		SignedRequests: true,
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			if presented == plaintext {
+				// Contract violation: hit returned but SigningKey is nil.
+				return KeyLookupResult{AgentID: "dev-broken-impl", SigningKey: nil}, nil
+			}
+			return KeyLookupResult{}, nil
+		},
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	}))
+
+	body := []byte(`{"agentId":"dev-broken-impl"}`)
+	ts := strconv.FormatInt(time.Now().UnixNano(), 10)
+	nonce := "0123456789abcdef0123456789abcdef"
+	// Sign with cfg.APIKey -- exactly what a regression that silently
+	// fell back to it would accept. The fail-closed branch must reject.
+	sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
+	req.Header.Set(apiKeyHeader, plaintext)
+	req.Header.Set(timestampHeader, ts)
+	req.Header.Set(nonceHeader, nonce)
+	req.Header.Set(signatureHeader, sig)
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (paired-path nil SigningKey must fail closed, not fall back to cfg.APIKey)", rr.Code)
+	}
+	if handlerCalled {
+		t.Error("handler was called -- the paired-path nil-SigningKey request must have been rejected")
+	}
+}
