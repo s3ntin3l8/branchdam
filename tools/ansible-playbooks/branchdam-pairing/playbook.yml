@@ -96,10 +96,11 @@
         that:
           - vault_branchdam_pair_url is defined
           - vault_branchdam_pair_url | length > 0
-          # startswith is a Jinja test, not a filter -- the reviewer's
-          # verified-working alternatives are 'is search(...)' or
-          # '.startswith(...)'; the latter is the simpler shape and
-          # avoids the search-test's regex syntax for a literal prefix.
+          # .startswith() is a Python string method -- Jinja forwards it
+          # to the string value, returns a boolean. The alternative
+          # Jinja test is 'is search("^branchdam://")'; .startswith is
+          # the simpler shape for a literal prefix because it avoids
+          # the search-test's regex syntax.
           - vault_branchdam_pair_url.startswith('branchdam://')
         fail_msg: >-
           vault_branchdam_pair_url must be set to a non-empty
@@ -172,14 +173,14 @@
         # with a user-level unit override to "user" alongside
         # branchdam_pair_service_become: false.
         scope: "{{ branchdam_pair_service_scope }}"
-      # Default system unit needs root. We deliberately don't pass an
-      # explicit become_user so Ansible's default (root) applies; the
-      # previous round's `become_user: '{{ branchdam_pair_agent_user }}'`
-      # escalated to the *agent* user (non-root by design), which is
-      # exactly the wrong target for a system-unit restart. Operators
-      # with a user-level unit set service_become: false (no escalation)
-      # and service_scope: user (manager choice) -- the agent user is
-      # already the right actor in that case.
+      # Default system unit needs root; we don't pass an explicit
+      # become_user so Ansible's default (root) applies. The agent
+      # user is the wrong target for a system-unit restart -- it's
+      # non-root by design and doesn't own the unit's policy.
+      # Operators with a user-level unit set service_become: false
+      # (no escalation -- the agent user is already the right actor
+      # for `systemctl --user`) and service_scope: user (manager
+      # choice).
       become: "{{ branchdam_pair_service_become }}"
       when:
         - branchdam_pair_agent_service | length > 0
