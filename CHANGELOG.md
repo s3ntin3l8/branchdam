@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.0](https://github.com/s3ntin3l8/branchdam/compare/v0.23.0...v0.24.0) (2026-09-19)
+
+
+### Features
+
+* **auth:** let agent routes run with only Companion Pairing wired ([7a5d11c](https://github.com/s3ntin3l8/branchdam/commit/7a5d11c50783608277074ecfe71a0e25a9d473b2))
+* **auth:** per-device HMAC signing via pairing.KeyLookupResult ([#466](https://github.com/s3ntin3l8/branchdam/issues/466)) ([7254665](https://github.com/s3ntin3l8/branchdam/commit/72546657a899e51ed5770cdc63397820501fe061))
+
 ## [0.23.0](https://github.com/s3ntin3l8/branchdam/compare/v0.22.0...v0.23.0) (2026-09-18)
 
 
