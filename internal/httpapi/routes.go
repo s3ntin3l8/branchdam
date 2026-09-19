@@ -1867,10 +1867,10 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 	// to mismatch against, and operator convenience lets one
 	// env-var key drive any body agent_id. Issue #453 PR C
 	// narrowed the cross-talk: paired clients sign with their
-	// per-device key (issue #453 PR C), so a paired device
-	// can't forge env-bootstrap's signature even if it sets
-	// body.agentId to "env-bootstrap". PR F will retire this
-	// carve-out entirely when the env-var field is removed.
+	// per-device key, so a paired device can't forge env-bootstrap's
+	// signature even if it sets body.agentId to "env-bootstrap".
+	// PR F will retire this carve-out entirely when the env-var
+	// field is removed.
 	if p.Name != "env-bootstrap" && in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}

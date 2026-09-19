@@ -17,15 +17,17 @@ from the same key (issue #453 PR C). Replacing the previous
 server-wide `BRANCHDAM_AGENT_API_KEY` shared-secret path.
 
 This playbook does NOT touch the env-var shared-secret path. The
-workstation agent (`branchdam-agent` v1.12+) pairs via a
-`branchdam://?server=...&key=...&agent=...` URL emitted by the
-server's Companion Pairing modal (see also
-`branchdam-agent pair <url>` -- the agent-side CLI for the same flow,
-added in `s3ntin3l8/branchdam-agent#243`).
+workstation agent's `pair <url>` subcommand (`s3ntin3l8/branchdam-agent`
+PR #243, landed on `main` after v1.12.1) does the heavy lifting:
+parses the URL, refuses a group/world-readable existing config,
+validates the credentials server-side via `POST /api/v1/agent/hello`,
+and atomically writes `~/.config/branchdam-agent/config.yaml` at mode
+0600. The Ansible layer is glue: vault -> pair CLI -> restart systemd
+service.
 
 ## Operator one-shot setup
 
-Three steps the operator runs by hand, exactly once per deployment:
+Three steps the operator runs by hand, exactly once per workstation:
 
 1. **Pair via the SPA**: Settings -> Companion Pairing -> "Pair new
    device". The modal exposes three things:
@@ -35,16 +37,21 @@ Three steps the operator runs by hand, exactly once per deployment:
    - A `branchdam://` URL containing the URL-encoded
      `<server>`, `<key>`, and `<agent_id>` fields. **Copy this.**
 
-2. **Pick one workstation per pair**: identify the workstation you
-   want to register. A given pair is bound to one workstation's
-   `agentId` config (the agent uses that id as `body.AgentID` on every
-   request).
+   The latest released `branchdam-agent` with the `pair` subcommand
+   is `main` after the v1.12.1 tag; build from source or wait for
+   v1.13 if you're on a released version.
+
+2. **Pick the workstation this pair belongs to**. A given pair is
+   bound to one workstation's Linux user account (the agent reads
+   `~/.config/branchdam-agent/config.yaml` from the user that runs
+   it, not from root).
 
 3. **Store the URL in Ansible Vault**: `ansible-vault edit
    host_vars/<workstation>/vault.yml` and add:
 
    ```yaml
    vault_branchdam_pair_url: "branchdam://?server=https%3A%2F%2Fdam.example.com&key=<plaintext>&agent=dev-xxxxxxxx"
+   branchdam_pair_agent_user: <the-linux-username-that-runs-the-agent>
    ```
 
    The plaintext key is the only secret in the URL -- keep the vault
@@ -57,18 +64,20 @@ Three steps the operator runs by hand, exactly once per deployment:
 
 The playbook runs on each workstation and:
 
-1. Validates the `vault_branchdam_pair_url` by parsing the URL into
-   its three required fields (`server`, `key`, `agent_id`); fails
-   closed on a malformed or missing key.
-2. Reaches the server with a one-shot `Hello()` to confirm the key is
-   still active (revoked, rotated, or wiped server-side since the last
-   pair would surface as a 401).
-3. Drops the three fields into `~/.config/branchdam-agent/config.yaml`
-   via `branchdam-agent pair <url>` (the agent-side CLI), which writes
-   the file atomically at mode 0600 and refuses a pre-existing
-   group/world-readable config.
-4. Restarts any running `branchdam-agent` tray/ingest service so the
-   new credentials are picked up (the agent reads config at startup).
+1. Asserts `branchdam_pair_agent_user` is set explicitly -- silently
+   defaulting to root would write the credentials to `/root/.config/...`,
+   which the workstation agent (running under a non-root user) never
+   reads.
+2. Validates the `vault_branchdam_pair_url` is set.
+3. Confirms `branchdam-agent` is installed and reports a version.
+4. Writes a starter config via `branchdam-agent init` (idempotent --
+   skips if `config.yaml` already exists).
+5. Runs `branchdam-agent pair -config <path> -timeout 10s <url>` to
+   parse the URL, validate the credentials server-side, and atomically
+   patch the config at mode 0600.
+6. Restarts `branchdam-agent.service` if systemd is managing the
+   agent on the host (configurable; set `branchdam_pair_agent_service: ""`
+   to skip on hosts where the agent runs interactively).
 
 After step 1, the operator never touches the workstation again --
 key rotation on the server is handled by the SPA: rotate the
@@ -85,21 +94,23 @@ pairing, get a new URL, paste into the vault, re-run the playbook.
   the standard server-deployment playbook (out of scope here).
 - **PathMappings / archiveRoot / localEditRoot** -- those are
   workstation-side settings the operator configures separately,
-  not part of the pairing flow.
+  either via the agent's tray Settings UI or by hand-editing the
+  config after `pair` has written its three fields. Templating the
+  full config here would conflict with the pair CLI's own writes
+  (and would force every secret into Ansible-managed YAML);
+  leaving that to the operator matches the kubeadm-init model too
+  (the bootstrap-token only carries the join secret; everything
+  else is rendered by site-specific playbooks).
 
 ## Files
 
 ```
 tools/ansible-playbooks/branchdam-pairing/
-  playbook.yml                          # the entry point
-  templates/
-    agent-config.yaml.j2                 # rendered into ~/.config/branchdam-agent/config.yaml
-    branchdam-server.hints.yaml.j2       # optional operator-side hints file
-  README.md                             # this file
+  playbook.yml   # the entry point (init -> pair -> restart)
+  README.md      # this file
 ```
 
 The playbook is reference material, not a vendored dependency --
 copy it into your own Ansible repo's `playbooks/` tree and customize
 the variable names / vault paths / service-restart handler for your
-site. The shape (vault URL -> pair CLI -> service restart) is the
-load-bearing part.
+site. The shape (init -> pair CLI -> restart) is the load-bearing part.
