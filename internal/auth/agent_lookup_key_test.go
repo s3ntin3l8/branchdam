@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // TestAgentChainLookupKeyHit verifies the device-pairing authentication
@@ -16,8 +19,10 @@ func TestAgentChainLookupKeyHit(t *testing.T) {
 	var got Principal
 	var ignoredAuthHeader string
 	chain := AgentChainWithConfig(AgentConfig{
-		APIKey:    testKey,
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "iphone-a3f9c2e1", nil },
+		APIKey: testKey,
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			return KeyLookupResult{AgentID: "iphone-a3f9c2e1"}, nil
+		},
 	}, nil)(principalCapturingHandler(t, &got, &ignoredAuthHeader))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
@@ -44,7 +49,7 @@ func TestAgentChainLookupKeyMiss(t *testing.T) {
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
 		APIKey:    testKey,
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
 	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 	}))
@@ -70,8 +75,8 @@ func TestAgentChainLookupKeyDBError(t *testing.T) {
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
 		APIKey: testKey,
-		LookupKey: func(ctx context.Context, presented string) (string, error) {
-			return "", errors.New("simulated DB failure")
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			return KeyLookupResult{}, errors.New("simulated DB failure")
 		},
 	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
@@ -97,11 +102,11 @@ func TestAgentChainLookupKeyDBError(t *testing.T) {
 func TestAgentChainEnvVarAndLookupKeyBothConfigured(t *testing.T) {
 	chain := AgentChainWithConfig(AgentConfig{
 		APIKey: testKey,
-		LookupKey: func(ctx context.Context, presented string) (string, error) {
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
 			if presented == "device-key-1" {
-				return "iphone-a3f9c2e1", nil
+				return KeyLookupResult{AgentID: "iphone-a3f9c2e1"}, nil
 			}
-			return "", nil
+			return KeyLookupResult{}, nil
 		},
 	}, nil)(principalCapturingHandler(t, nil, nil))
 
@@ -121,11 +126,11 @@ func TestAgentChainEnvVarAndLookupKeyBothConfigured(t *testing.T) {
 			var ignoredAuthHeader string
 			subChain := AgentChainWithConfig(AgentConfig{
 				APIKey: testKey,
-				LookupKey: func(ctx context.Context, presented string) (string, error) {
+				LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
 					if presented == "device-key-1" {
-						return "iphone-a3f9c2e1", nil
+						return KeyLookupResult{AgentID: "iphone-a3f9c2e1"}, nil
 					}
-					return "", nil
+					return KeyLookupResult{}, nil
 				},
 			}, nil)(principalCapturingHandler(t, &got, &ignoredAuthHeader))
 
@@ -158,7 +163,9 @@ func TestAgentChainLookupKeyOnlyNoAPIKey(t *testing.T) {
 	var got Principal
 	var authHeader string
 	chain := AgentChainWithConfig(AgentConfig{
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "dev-abc12345", nil },
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			return KeyLookupResult{AgentID: "dev-abc12345"}, nil
+		},
 	}, nil)(principalCapturingHandler(t, &got, &authHeader))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
@@ -187,8 +194,10 @@ func TestAgentChainLookupKeyOnlyShortAPIKey(t *testing.T) {
 	var got Principal
 	var authHeader string
 	chain := AgentChainWithConfig(AgentConfig{
-		APIKey:    "short12", // 7 chars, well below MinAgentKeyLength
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "dev-abc12345", nil },
+		APIKey: "short12", // 7 chars, well below MinAgentKeyLength
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			return KeyLookupResult{AgentID: "dev-abc12345"}, nil
+		},
 	}, nil)(principalCapturingHandler(t, &got, &authHeader))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
@@ -212,7 +221,7 @@ func TestAgentChainLookupKeyOnlyShortAPIKey(t *testing.T) {
 func TestAgentChainLookupKeyOnlyMissNoAPIKey(t *testing.T) {
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
 	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 	}))
@@ -241,7 +250,7 @@ func TestAgentChainLookupKeyOnlyMissShortAPIKey(t *testing.T) {
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
 		APIKey:    "short12",
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
 	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 	}))
@@ -306,7 +315,7 @@ func TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap(t *testing.T) {
 		// could authenticate the presented weak key. A LookupKey that
 		// returned hit would mask the regression by authenticating via the
 		// pairing path instead.
-		LookupKey: func(ctx context.Context, presented string) (string, error) { return "", nil },
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
 	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		p, ok := From(r.Context())
@@ -328,5 +337,152 @@ func TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap(t *testing.T) {
 	}
 	if got.Name == "env-bootstrap" {
 		t.Errorf("Principal.Name = %q -- weak env-var leaked through as env-bootstrap (the regression this test guards)", got.Name)
+	}
+}
+
+// TestAgentChainLookupKeyHMACUsesPerDeviceKey verifies that a paired
+// device's signed request validates against the per-device HMAC key
+// (returned by LookupKey in result.SigningKey), NOT against the
+// configured env-var (which the device has no access to). Without this
+// wiring, signedRequests=true in a pairing-only deployment would either
+// fail every paired request or -- if the env-var is also set -- leak
+// signing authority to the env-var holder (a separate device or a
+// forgotten legacy key).
+func TestAgentChainLookupKeyHMACUsesPerDeviceKey(t *testing.T) {
+	// Per-device HMAC key returned by LookupKey for this plaintext.
+	// 32 bytes (SHA-256 output) -- the server doesn't care about the
+	// actual value, only that the HMAC over canonical+body matches when
+	// signed with this exact key.
+	perDeviceKey := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	const plaintext = "paired-device-plaintext-key-A"
+	handlerCalled := false
+
+	chain := AgentChainWithConfig(AgentConfig{
+		SignedRequests: true,
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			if presented == plaintext {
+				return KeyLookupResult{AgentID: "dev-A", SigningKey: perDeviceKey}, nil
+			}
+			return KeyLookupResult{}, nil
+		},
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	body := []byte(`{"agentId":"dev-A"}`)
+	ts := strconv.FormatInt(time.Now().UnixNano(), 10)
+	nonce := "0123456789abcdef0123456789abcdef" // 32 hex chars
+	// Sign with the per-device key. If the server fell back to env-var
+	// (which is unset here), HMAC would compute a different value and
+	// the signature would not match.
+	sig := computeSignature(string(perDeviceKey), http.MethodPost, "/api/v1/agent/events", nonce, ts, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
+	req.Header.Set(apiKeyHeader, plaintext)
+	req.Header.Set(timestampHeader, ts)
+	req.Header.Set(nonceHeader, nonce)
+	req.Header.Set(signatureHeader, sig)
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (paired-device signature must validate against the per-device key returned by LookupKey)", rr.Code)
+	}
+	if !handlerCalled {
+		t.Error("handler was not called -- signature must have validated to reach it")
+	}
+}
+
+// TestAgentChainLookupKeyHMACAcrossDevicesNoCrossSign locks in the
+// per-device isolation invariant: device A's signing key must NOT
+// validate a request presented as device B. Without this isolation,
+// any compromised paired key would let an attacker sign requests that
+// the server attributes to any other paired device -- bypassing the
+// per-device attribution that pairing was designed to provide.
+func TestAgentChainLookupKeyHMACAcrossDevicesNoCrossSign(t *testing.T) {
+	keyForA := []byte("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0") // 32 bytes, distinct
+	keyForB := []byte("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB0") // 32 bytes, distinct
+	const plaintextA = "paired-device-plaintext-key-A"
+	const plaintextB = "paired-device-plaintext-key-B"
+
+	chain := AgentChainWithConfig(AgentConfig{
+		SignedRequests: true,
+		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
+			switch presented {
+			case plaintextA:
+				return KeyLookupResult{AgentID: "dev-A", SigningKey: keyForA}, nil
+			case plaintextB:
+				return KeyLookupResult{AgentID: "dev-B", SigningKey: keyForB}, nil
+			}
+			return KeyLookupResult{}, nil
+		},
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be called -- device A's key cannot sign for device B")
+	}))
+
+	body := []byte(`{"agentId":"dev-B"}`)
+	ts := strconv.FormatInt(time.Now().UnixNano(), 10)
+	nonce := "fedcba9876543210fedcba9876543210" // 32 hex chars
+
+	// Request presents device B's plaintext (so LookupKey returns keyForB
+	// and authenticates as dev-B), but the signature was computed with
+	// device A's key. The server must reject.
+	sig := computeSignature(string(keyForA), http.MethodPost, "/api/v1/agent/events", nonce, ts, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
+	req.Header.Set(apiKeyHeader, plaintextB)
+	req.Header.Set(timestampHeader, ts)
+	req.Header.Set(nonceHeader, nonce)
+	req.Header.Set(signatureHeader, sig)
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (cross-device signature must be rejected)", rr.Code)
+	}
+}
+
+// TestAgentChainSignedRequestsEnvBootstrapStillUsesAPIKey verifies that
+// the env-bootstrap path -- which still exists for legacy
+// installations that haven't migrated to pairing -- continues to HMAC
+// with cfg.APIKey as it did before PR C. Without this preservation,
+// rotating cfg.APIKey (to invalidate env-bootstrap for everyone) would
+// stop authenticating env-bootstrap requests, but it would NOT be the
+// security regression -- the regression would be the opposite: paired
+// devices would suddenly need to know the env-var to sign requests.
+func TestAgentChainSignedRequestsEnvBootstrapStillUsesAPIKey(t *testing.T) {
+	handlerCalled := false
+	chain := AgentChainWithConfig(AgentConfig{
+		APIKey:         testKey,
+		SignedRequests: true,
+		// No LookupKey -- env-bootstrap-only deployment.
+	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	body := []byte(`{"agentId":"env-bootstrap-handler"}`)
+	ts := strconv.FormatInt(time.Now().UnixNano(), 10)
+	nonce := "deadbeefcafef00ddeadbeefcafef00d"
+	// Sign with cfg.APIKey (the env-var path's HMAC key). If the server
+	// fell through to the per-device lookup path, it would have no
+	// SigningKey and would either fail to validate or fall back to the
+	// empty []byte(cfg.APIKey) which wouldn't match this signature.
+	sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
+	req.Header.Set(apiKeyHeader, testKey)
+	req.Header.Set(timestampHeader, ts)
+	req.Header.Set(nonceHeader, nonce)
+	req.Header.Set(signatureHeader, sig)
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (env-bootstrap signature must validate against cfg.APIKey)", rr.Code)
+	}
+	if !handlerCalled {
+		t.Error("handler was not called -- env-bootstrap signature must have validated")
 	}
 }
