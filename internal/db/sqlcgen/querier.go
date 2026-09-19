@@ -752,17 +752,21 @@ type Querier interface {
 	// Returns no rows (sql.ErrNoRows) when the caller is already on the
 	// newest active key.
 	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
-	// Set users.is_admin = 1 for the supplied user id AND clear
-	// disabled_at. Used by the bootstrap mechanism to ensure the
-	// service-account user can mint pairings and write settings via the
-	// PAT it carries; clearing disabled_at matters because the PAT lookup
-	// query (GetUserPATByHash) requires disabled_at IS NULL -- promoting
-	// without reactivating would mint a wildcard token that 401s on
-	// every request while the boot logs success (round-3 review). For
-	// the bootstrap service account reactivation-on-boot is the desired
-	// semantics: the operator re-running bootstrap intends the token to
-	// work. Idempotent -- promoting an already-admin, enabled row is a
-	// no-op at the SQLite level.
+	// Bootstrap-specific variant of PromoteUserToAdmin: sets is_admin = 1
+	// AND clears disabled_at for the ansible-bootstrap service account.
+	// Reactivation is correct HERE and only here: the operator re-running
+	// the bootstrap sequence intends the minted PAT to work, and the PAT
+	// lookup query (GetUserPATByHash) requires disabled_at IS NULL --
+	// promoting without reactivating would mint a wildcard token that
+	// 401s on every request while the boot logs success (round-3 review).
+	// Named distinctly so a future admin-UI promote action can't pick it
+	// up and inherit the reactivation side effect. Idempotent.
+	PromoteBootstrapUserToAdmin(ctx context.Context, id int64) error
+	// Set users.is_admin = 1 for the supplied user id. Does NOT touch
+	// disabled_at: a promote action must never silently re-enable a
+	// disabled account (round-5 review) -- reactivation is a separate,
+	// explicit decision (see PromoteBootstrapUserToAdmin for the one
+	// caller whose semantics include it). Idempotent.
 	PromoteUserToAdmin(ctx context.Context, id int64) error
 	// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
 	// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate
@@ -870,6 +874,16 @@ type Querier interface {
 	// Sets revoked_at on the pairing (does NOT touch keys -- the HTTP layer
 	// also revokes every key for the pairing in the same tx).
 	RevokeDevicePairing(ctx context.Context, arg RevokeDevicePairingParams) error
+	// Crash-recovery hygiene, run inside the bootstrap mint transaction:
+	// a previous boot killed between the commit and the file write leaves
+	// a live name='bootstrap' wildcard row whose plaintext never reached
+	// disk; the next boot's re-mint would otherwise accumulate live
+	// bootstrap tokens forever (round-5 review). Revoking prior live
+	// bootstrap rows for this user in the same tx keeps exactly one
+	// live bootstrap token at any time. Scoped to the bootstrap user +
+	// the reserved name so an admin's own 'bootstrap'-named token on a
+	// different account is untouched.
+	RevokeLiveBootstrapPATs(ctx context.Context, userID int64) (int64, error)
 	// Admin "delete" / revoke. Idempotent: revoking an already-used or
 	// already-expired token matches the row but is a no-op.
 	RevokePasswordResetToken(ctx context.Context, arg RevokePasswordResetTokenParams) error

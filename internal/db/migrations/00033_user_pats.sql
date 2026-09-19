@@ -15,14 +15,16 @@
 -- (defense-in-depth: a DB-only compromise cannot forge a token without
 -- the pepper).
 --
--- Scope model: scopes_json is a JSON array of strings, e.g.
---   ["pairings:write", "settings:write"]
+-- Scope model: scopes_json is a JSON array of strings drawn from the
+-- grantable allowlist (see PATGrantableScopes), e.g.
+--   ["pairings:write", "admin"]
 -- The bootstrap PAT uses ["*"] (admin wildcard); subsequent tokens
 -- minted by admins via POST /api/v1/users/me/pats are scoped to the
--- scopes the calling admin grants. RequirePAT enforces scope on
--- every request: an admin route that requires "settings:write" with
--- a token that only carries "pairings:write" gets a 403, NOT a
--- silent downgrade.
+-- scopes the calling admin grants (a PAT can only grant scopes it
+-- itself carries). RequirePAT enforces scope on every request: an
+-- admin route that requires "admin" with a token that only carries
+-- "pairings:write" gets a 403, NOT a silent downgrade. Mint rejects
+-- scopes outside the allowlist (and an empty list) with 400.
 --
 -- Lifecycle: last_used_at is bumped async on every authenticated
 -- request (so the write is non-blocking on the auth path; a flush

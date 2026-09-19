@@ -425,8 +425,10 @@ var PATGrantableScopes = []string{"admin", "pats:write", "pairings:write", "*"}
 // response; the row carries the hashed_key. ExpiresAt is unix-seconds
 // for expiry timestamps; pass 0 for a non-expiring token.
 //
-// Scopes is a JSON-encoded string of the form `["pairings:write",
-// "settings:write"]`. Pass `["*"]` for the bootstrap PAT.
+// Scopes is a list drawn from PATGrantableScopes, e.g.
+// `["pairings:write", "admin"]`. Pass `["*"]` for the bootstrap PAT.
+// An empty list is rejected: the token would authenticate but pass
+// no route group's scope gate (a silent dead credential).
 //
 // The owner must be a live admin: the lookup query authenticates
 // tokens only when the owner's users row has is_admin = 1 AND
@@ -448,7 +450,11 @@ func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes
 	// Scope allowlist: patScopeFor only ever consults
 	// PATGrantableScopes, so a token carrying anything else would
 	// authenticate but pass no scope gate -- a silent dead
-	// credential. Reject at mint time instead.
+	// credential. Reject at mint time instead. An empty list is
+	// equally dead (it satisfies no scope), so reject it too.
+	if len(scopes) == 0 {
+		return "", nil, fmt.Errorf("%w: at least one scope is required", ErrPATInvalidScope)
+	}
 	for _, s := range scopes {
 		if !slices.Contains(PATGrantableScopes, s) {
 			return "", nil, fmt.Errorf("%w: %q", ErrPATInvalidScope, s)
@@ -605,6 +611,36 @@ func mintPATPlaintext() (string, error) {
 // it without hardcoding the string in two places.
 const BootstrapMintsPAT = "ADMIN_BOOTSTRAP_PAT"
 
+// bootstrapLockTimeout bounds how long RunBootstrapPAT waits for a
+// concurrent boot to release the bootstrap lock before failing with
+// a clear error. A crashed peer releases the kernel lock with its fd,
+// so exceeding this means a genuinely wedged peer -- parking startup
+// forever would be worse. A var (not a const) so tests can shrink it.
+var bootstrapLockTimeout = 10 * time.Second
+
+const bootstrapLockRetryInterval = 100 * time.Millisecond
+
+// flockExclusive acquires an exclusive flock on f, retrying for up to
+// timeout. LOCK_NB keeps a wedged peer from parking the caller
+// indefinitely: the acquire either succeeds or fails loud with a
+// descriptive error within the bound.
+func flockExclusive(f *os.File, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("acquire bootstrap lock: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("acquire bootstrap lock: timed out after %s waiting for a concurrent boot to finish (the peer is wedged, not dead -- investigate before retrying)", timeout)
+		}
+		time.Sleep(bootstrapLockRetryInterval)
+	}
+}
+
 // BootstrapPATFileName is the filename (within the data directory)
 // the bootstrap plaintext is written to. Mode 0600 on creation; the
 // file's existence is the "already minted" sentinel -- a second boot
@@ -667,18 +703,21 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// then lands on an unlinked inode (probe-verified in the round-4
 	// review) while BOTH mint wildcard PATs, one unrecoverable. An
 	// exclusive flock on a stable sibling lock file held for the whole
-	// sequence closes the race: B blocks until A finishes, then sees
+	// sequence closes the race: B waits until A finishes, then sees
 	// the completed sentinel and takes the consume-once path. The
 	// kernel releases the lock when a crashed boot's fd dies, so a
-	// dead process can't wedge the next boot.
+	// dead process can't wedge the next boot; and the acquire is
+	// bounded (LOCK_NB + retry, bootstrapLockTimeout) so a peer boot
+	// wedged mid-sequence fails this boot with a clear error instead
+	// of parking startup forever.
 	lockPath := filepath.Join(dataDir, ".bootstrap-pat.lock")
 	lockF, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("open bootstrap lock: %w", err)
 	}
 	defer func() { _ = lockF.Close() }()
-	if err := syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX); err != nil {
-		return "", fmt.Errorf("acquire bootstrap lock: %w", err)
+	if err := flockExclusive(lockF, bootstrapLockTimeout); err != nil {
+		return "", err
 	}
 	defer func() { _ = syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN) }()
 
@@ -758,8 +797,16 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 		if err != nil {
 			return fmt.Errorf("ensure bootstrap user: %w", err)
 		}
-		if err := q.PromoteUserToAdmin(ctx, uid); err != nil {
+		if err := q.PromoteBootstrapUserToAdmin(ctx, uid); err != nil {
 			return fmt.Errorf("promote bootstrap user to admin: %w", err)
+		}
+		// Crash-recovery hygiene: a previous boot killed between the
+		// commit and the file write left a live name='bootstrap'
+		// wildcard row whose plaintext never reached disk. Revoke any
+		// such prior rows in the same tx so re-minting after a crash
+		// keeps exactly one live bootstrap token.
+		if _, err := q.RevokeLiveBootstrapPATs(ctx, uid); err != nil {
+			return fmt.Errorf("revoke prior live bootstrap PATs: %w", err)
 		}
 		userID = uid
 		plain, h, err := mintBootstrapToken(pepper)

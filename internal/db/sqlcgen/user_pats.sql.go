@@ -161,6 +161,29 @@ func (q *Queries) ListUserPATs(ctx context.Context, arg ListUserPATsParams) ([]U
 	return items, nil
 }
 
+const revokeLiveBootstrapPATs = `-- name: RevokeLiveBootstrapPATs :execrows
+UPDATE user_pats
+SET revoked_at = COALESCE(revoked_at, unixepoch())
+WHERE user_id = ?1 AND name = 'bootstrap' AND revoked_at IS NULL
+`
+
+// Crash-recovery hygiene, run inside the bootstrap mint transaction:
+// a previous boot killed between the commit and the file write leaves
+// a live name='bootstrap' wildcard row whose plaintext never reached
+// disk; the next boot's re-mint would otherwise accumulate live
+// bootstrap tokens forever (round-5 review). Revoking prior live
+// bootstrap rows for this user in the same tx keeps exactly one
+// live bootstrap token at any time. Scoped to the bootstrap user +
+// the reserved name so an admin's own 'bootstrap'-named token on a
+// different account is untouched.
+func (q *Queries) RevokeLiveBootstrapPATs(ctx context.Context, userID int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeLiveBootstrapPATs, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeUserPAT = `-- name: RevokeUserPAT :execrows
 UPDATE user_pats
 SET revoked_at = COALESCE(revoked_at, unixepoch())

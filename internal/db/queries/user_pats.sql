@@ -72,6 +72,20 @@ UPDATE user_pats
 SET revoked_at = COALESCE(revoked_at, unixepoch())
 WHERE hashed_key = ?1 AND revoked_at IS NULL;
 
+-- name: RevokeLiveBootstrapPATs :execrows
+-- Crash-recovery hygiene, run inside the bootstrap mint transaction:
+-- a previous boot killed between the commit and the file write leaves
+-- a live name='bootstrap' wildcard row whose plaintext never reached
+-- disk; the next boot's re-mint would otherwise accumulate live
+-- bootstrap tokens forever (round-5 review). Revoking prior live
+-- bootstrap rows for this user in the same tx keeps exactly one
+-- live bootstrap token at any time. Scoped to the bootstrap user +
+-- the reserved name so an admin's own 'bootstrap'-named token on a
+-- different account is untouched.
+UPDATE user_pats
+SET revoked_at = COALESCE(revoked_at, unixepoch())
+WHERE user_id = ?1 AND name = 'bootstrap' AND revoked_at IS NULL;
+
 -- name: TouchUserPAT :exec
 -- Best-effort last_used_at bump on every authenticated request. The
 -- auth path calls this async (go func() + background write); a flush

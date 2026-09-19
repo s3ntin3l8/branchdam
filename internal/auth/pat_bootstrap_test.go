@@ -305,6 +305,11 @@ func TestPATService_MintRejectsUnknownScope(t *testing.T) {
 	if _, _, err := svc.Mint(ctx, uid, "dead", []string{"settings:write"}, 0); !errors.Is(err, ErrPATInvalidScope) {
 		t.Fatalf("mint with unknown scope err = %v, want ErrPATInvalidScope", err)
 	}
+	// An empty scope list mints a token that 403s on every route
+	// group -- the silent-dead-credential shape. Reject it too.
+	if _, _, err := svc.Mint(ctx, uid, "empty", nil, 0); !errors.Is(err, ErrPATInvalidScope) {
+		t.Fatalf("mint with empty scopes err = %v, want ErrPATInvalidScope", err)
+	}
 	// Every allowlisted scope mints fine.
 	for _, scope := range PATGrantableScopes {
 		if _, _, err := svc.Mint(ctx, uid, "ok-"+scope, []string{scope}, 0); err != nil {
@@ -356,5 +361,81 @@ func TestRunBootstrapPAT_BlocksWhileAnotherBootHoldsLock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunBootstrapPAT did not proceed after the lock was released")
+	}
+}
+
+// TestRunBootstrapPAT_LockTimeoutBoundsStartup: a peer boot wedged
+// mid-sequence must fail this boot with a clear error after the
+// bounded retry instead of parking startup forever.
+func TestRunBootstrapPAT_LockTimeoutBoundsStartup(t *testing.T) {
+	database, root := newBootstrapTestDB(t)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	lockPath := filepath.Join(root, ".bootstrap-pat.lock")
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	defer func() { _ = lf.Close() }()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+
+	prev := bootstrapLockTimeout
+	bootstrapLockTimeout = 300 * time.Millisecond
+	defer func() { bootstrapLockTimeout = prev }()
+
+	start := time.Now()
+	_, err = RunBootstrapPAT(context.Background(), database, patTestPepper, "1", root, log)
+	if err == nil {
+		t.Fatal("RunBootstrapPAT must fail when the lock cannot be acquired in time")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("lock wait was not bounded: %v", elapsed)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a lock-timeout message", err)
+	}
+}
+
+// TestRunBootstrapPAT_CrashRecoveryRevokesPriorRow: a boot killed
+// between the commit and the file write leaves a live 'bootstrap'
+// wildcard row whose plaintext never reached disk. The recovery boot's
+// re-mint must revoke that prior row so live bootstrap tokens never
+// accumulate.
+func TestRunBootstrapPAT_CrashRecoveryRevokesPriorRow(t *testing.T) {
+	database, root := newBootstrapTestDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	svc := NewPATService(database, patTestPepper)
+
+	// First boot mints token A.
+	tokenA, err := RunBootstrapPAT(ctx, database, patTestPepper, "1", root, log)
+	if err != nil {
+		t.Fatalf("first bootstrap: %v", err)
+	}
+	// Simulate the crash-loss scenario: the sentinel disappears
+	// (disk loss, operator deletion) while token A's row is still
+	// live. (The revoked-vs-live state is what matters; deleting the
+	// file here just lets the second boot run the mint path.)
+	if err := os.Remove(filepath.Join(root, BootstrapPATFileName)); err != nil {
+		t.Fatalf("remove sentinel: %v", err)
+	}
+
+	// Second boot re-mints (token B).
+	tokenB, err := RunBootstrapPAT(ctx, database, patTestPepper, "1", root, log)
+	if err != nil {
+		t.Fatalf("second bootstrap: %v", err)
+	}
+	if tokenA == tokenB {
+		t.Fatal("tokens must differ across re-mints")
+	}
+	// Token A (crashed boot) must have been revoked by the recovery
+	// path; token B must authenticate.
+	if _, err := svc.Lookup(ctx, tokenA); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Lookup(tokenA) err = %v, want sql.ErrNoRows (revoked by recovery)", err)
+	}
+	if _, err := svc.Lookup(ctx, tokenB); err != nil {
+		t.Fatalf("Lookup(tokenB): %v", err)
 	}
 }

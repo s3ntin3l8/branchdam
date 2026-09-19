@@ -305,21 +305,33 @@ func (q *Queries) ListAttributionUsers(ctx context.Context, arg ListAttributionU
 	return items, nil
 }
 
-const promoteUserToAdmin = `-- name: PromoteUserToAdmin :exec
+const promoteBootstrapUserToAdmin = `-- name: PromoteBootstrapUserToAdmin :exec
 UPDATE users SET is_admin = 1, disabled_at = NULL WHERE id = ?1
 `
 
-// Set users.is_admin = 1 for the supplied user id AND clear
-// disabled_at. Used by the bootstrap mechanism to ensure the
-// service-account user can mint pairings and write settings via the
-// PAT it carries; clearing disabled_at matters because the PAT lookup
-// query (GetUserPATByHash) requires disabled_at IS NULL -- promoting
-// without reactivating would mint a wildcard token that 401s on
-// every request while the boot logs success (round-3 review). For
-// the bootstrap service account reactivation-on-boot is the desired
-// semantics: the operator re-running bootstrap intends the token to
-// work. Idempotent -- promoting an already-admin, enabled row is a
-// no-op at the SQLite level.
+// Bootstrap-specific variant of PromoteUserToAdmin: sets is_admin = 1
+// AND clears disabled_at for the ansible-bootstrap service account.
+// Reactivation is correct HERE and only here: the operator re-running
+// the bootstrap sequence intends the minted PAT to work, and the PAT
+// lookup query (GetUserPATByHash) requires disabled_at IS NULL --
+// promoting without reactivating would mint a wildcard token that
+// 401s on every request while the boot logs success (round-3 review).
+// Named distinctly so a future admin-UI promote action can't pick it
+// up and inherit the reactivation side effect. Idempotent.
+func (q *Queries) PromoteBootstrapUserToAdmin(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, promoteBootstrapUserToAdmin, id)
+	return err
+}
+
+const promoteUserToAdmin = `-- name: PromoteUserToAdmin :exec
+UPDATE users SET is_admin = 1 WHERE id = ?1
+`
+
+// Set users.is_admin = 1 for the supplied user id. Does NOT touch
+// disabled_at: a promote action must never silently re-enable a
+// disabled account (round-5 review) -- reactivation is a separate,
+// explicit decision (see PromoteBootstrapUserToAdmin for the one
+// caller whose semantics include it). Idempotent.
 func (q *Queries) PromoteUserToAdmin(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, promoteUserToAdmin, id)
 	return err

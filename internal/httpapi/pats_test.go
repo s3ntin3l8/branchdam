@@ -341,3 +341,22 @@ func TestPAT_MintUnknownScope400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code,
 		"unknown scope must 400, body: %s", rr.Body.String())
 }
+
+// TestPAT_MintEmptyScopes400: an empty scope list mints a token that
+// 403s on every route group -- the silent-dead-credential shape.
+// 400 at the boundary.
+func TestPAT_MintEmptyScopes400(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	token, _, err := patSvc.Mint(context.Background(), userID, "bootstrap", []string{"*"}, 0)
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	mintBody := `{"name":"no-scopes","scopes":[]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats", strings.NewReader(mintBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"empty scope list must 400, body: %s", rr.Body.String())
+}
