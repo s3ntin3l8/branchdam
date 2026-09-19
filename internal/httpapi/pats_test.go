@@ -259,3 +259,66 @@ func TestPAT_DemotedOwnerFailsClosed(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rr.Code,
 		"demoted owner's token must fail closed (authority is live-checked, not frozen at mint)")
 }
+
+// TestPAT_MintScopeCap pins the round-3 finding that scopes acted as
+// route gates but not as a blast-radius cap: without this, a
+// ["pats:write"] token could mint itself a ["*"] token, making every
+// scoped grant a full-admin credential in disguise. A PAT caller may
+// only mint scopes it itself carries (unless it is the wildcard).
+func TestPAT_MintScopeCap(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	ctx := context.Background()
+	handler := srv.Handler()
+
+	patsToken, _, err := patSvc.Mint(ctx, userID, "pats-only", []string{"pats:write"}, 0)
+	require.NoError(t, err)
+
+	// Minting a wildcard with a pats:write token -> 403.
+	mintBody := `{"name":"escalation","scopes":["*"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats", strings.NewReader(mintBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+patsToken)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code,
+		"pats:write token must not mint a wildcard token, body: %s", rr.Body.String())
+
+	// Minting within its own scope -> 200.
+	mintBody = `{"name":"sibling","scopes":["pats:write"]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats", strings.NewReader(mintBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+patsToken)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusOK, rr.Code,
+		"pats:write token may mint another pats:write token, body: %s", rr.Body.String())
+
+	// A foreign scope (not the wildcard, not one it carries) -> 403.
+	mintBody = `{"name":"escalation-2","scopes":["pairings:write"]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats", strings.NewReader(mintBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+patsToken)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code,
+		"pats:write token must not mint a foreign scope, body: %s", rr.Body.String())
+}
+
+// TestPAT_MintExpiresAtPast: an expiry in the past mints a token that
+// 401s on first use -- the silent-dead-credential shape. Reject with
+// 400 at the boundary.
+func TestPAT_MintExpiresAtPast(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	token, _, err := patSvc.Mint(context.Background(), userID, "bootstrap", []string{"*"}, 0)
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	mintBody := `{"name":"dead-on-arrival","scopes":["*"],"expiresAt":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats", strings.NewReader(mintBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"expiresAt in the past must 400, body: %s", rr.Body.String())
+}

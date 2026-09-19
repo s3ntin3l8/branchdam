@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -90,6 +92,29 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 	uid, err := s.resolveCallerUserID(ctx)
 	if err != nil {
 		return nil, huma.Error403Forbidden("could not resolve user id", err)
+	}
+
+	// An expiry in the past mints a well-formed token that 401s on
+	// first use -- the silent-dead-credential shape the owner-liveness
+	// check exists to prevent. Reject it at the boundary.
+	if in.Body.ExpiresAt != 0 && in.Body.ExpiresAt <= time.Now().Unix() {
+		return nil, huma.Error400BadRequest("expiresAt is in the past", nil)
+	}
+
+	// Scope cap: a PAT-authenticated caller can only mint tokens
+	// within its own scope set, unless it carries the "*" wildcard.
+	// Session/forward-auth admins (no PAT scopes in context) are
+	// unrestricted -- their authority is RequireAdmin's model, not a
+	// token grant. Without this, a "pats:write" token could mint
+	// itself a "*" token and every scoped grant would be a full-admin
+	// credential in disguise.
+	if callerScopes, ok := auth.PATScopesFrom(ctx); ok && !slices.Contains(callerScopes, "*") {
+		for _, s := range in.Body.Scopes {
+			if !slices.Contains(callerScopes, s) {
+				return nil, huma.Error403Forbidden(
+					fmt.Sprintf("cannot grant scope %q beyond the caller token's own scopes", s), nil)
+			}
+		}
 	}
 
 	plaintext, row, err := s.patService.Mint(ctx, uid, in.Body.Name, in.Body.Scopes, in.Body.ExpiresAt)

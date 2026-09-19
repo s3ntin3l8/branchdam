@@ -54,13 +54,13 @@ CREATE TABLE user_pats (
     expires_at      INTEGER,
     revoked_at      INTEGER
 );
--- The UNIQUE constraint on hashed_key already creates the lookup
--- index this table needs (an equality probe on a UNIQUE column is an
--- indexed lookup in SQLite), so no separate ix_user_pats_hash index
--- is created -- that would double the per-insert index-write cost
--- for zero lookup benefit.
-CREATE INDEX ix_user_pats_user_id ON user_pats(user_id) WHERE revoked_at IS NULL;
+-- No secondary indexes: UNIQUE on hashed_key covers the lookup
+-- query, the PK covers revoke-by-id, and no query in this PR
+-- predicates revoked_at or scans by user_id with a selective filter
+-- (ListUserPATs/CountUserPATs include revoked rows on purpose, so a
+-- partial index on user_id would never be picked -- round-3 review's
+-- EXPLAIN QUERY PLAN check). Per-user token volume is tens of rows;
+-- a sequential scan there is the right plan.
 
 -- +goose Down
-DROP INDEX IF EXISTS ix_user_pats_user_id;
 DROP TABLE IF EXISTS user_pats;

@@ -249,6 +249,14 @@ type Querier interface {
 	// columns above (admin is set by the local-auth migration, and the
 	// existing forward-link rows use NULL password_hash which the local-
 	// auth schema accepts).
+	//
+	// email is NULL, NOT '': 00018's partial unique index
+	// users_email_source_uniq ON (email, source) WHERE email IS NOT NULL
+	// treats '' as a value, and EnsureSystemUser already owns the
+	// ('', 'forward-link') pair -- a second forward-link row with '' would
+	// fail the boot with UNIQUE constraint violated (round-3 review).
+	// NULL is excluded from the index predicate, so any number of
+	// forward-link service rows can carry it.
 	EnsureBootstrapUser(ctx context.Context) (int64, error)
 	// Lazy-provisions the "system" attribution sentinel: background workers
 	// (SweeperSupervisor's INCREMENTAL passes, prune, anything that has no
@@ -744,10 +752,17 @@ type Querier interface {
 	// Returns no rows (sql.ErrNoRows) when the caller is already on the
 	// newest active key.
 	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
-	// Set users.is_admin = 1 for the supplied user id. Used by
-	// the bootstrap mechanism to ensure the service-account user can mint
-	// pairings and write settings via the PAT it carries. Idempotent --
-	// setting an already-admin row is a no-op at the SQLite level.
+	// Set users.is_admin = 1 for the supplied user id AND clear
+	// disabled_at. Used by the bootstrap mechanism to ensure the
+	// service-account user can mint pairings and write settings via the
+	// PAT it carries; clearing disabled_at matters because the PAT lookup
+	// query (GetUserPATByHash) requires disabled_at IS NULL -- promoting
+	// without reactivating would mint a wildcard token that 401s on
+	// every request while the boot logs success (round-3 review). For
+	// the bootstrap service account reactivation-on-boot is the desired
+	// semantics: the operator re-running bootstrap intends the token to
+	// work. Idempotent -- promoting an already-admin, enabled row is a
+	// no-op at the SQLite level.
 	PromoteUserToAdmin(ctx context.Context, id int64) error
 	// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
 	// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate

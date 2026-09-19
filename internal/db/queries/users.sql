@@ -102,17 +102,32 @@ WHERE auth_provider = 'system' AND external_uid = 'system';
 -- columns above (admin is set by the local-auth migration, and the
 -- existing forward-link rows use NULL password_hash which the local-
 -- auth schema accepts).
+--
+-- email is NULL, NOT '': 00018's partial unique index
+-- users_email_source_uniq ON (email, source) WHERE email IS NOT NULL
+-- treats '' as a value, and EnsureSystemUser already owns the
+-- ('', 'forward-link') pair -- a second forward-link row with '' would
+-- fail the boot with UNIQUE constraint violated (round-3 review).
+-- NULL is excluded from the index predicate, so any number of
+-- forward-link service rows can carry it.
 INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
-VALUES ('system', 'ansible-bootstrap', 'ansible-bootstrap', '', 'forward-link', NULL, unixepoch(), unixepoch(), 'admin-bootstrap')
+VALUES ('system', 'ansible-bootstrap', 'ansible-bootstrap', NULL, 'forward-link', NULL, unixepoch(), unixepoch(), 'admin-bootstrap')
 ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.external_uid
 RETURNING id;
 
 -- name: PromoteUserToAdmin :exec
--- Set users.is_admin = 1 for the supplied user id. Used by
--- the bootstrap mechanism to ensure the service-account user can mint
--- pairings and write settings via the PAT it carries. Idempotent --
--- setting an already-admin row is a no-op at the SQLite level.
-UPDATE users SET is_admin = 1 WHERE id = ?1;
+-- Set users.is_admin = 1 for the supplied user id AND clear
+-- disabled_at. Used by the bootstrap mechanism to ensure the
+-- service-account user can mint pairings and write settings via the
+-- PAT it carries; clearing disabled_at matters because the PAT lookup
+-- query (GetUserPATByHash) requires disabled_at IS NULL -- promoting
+-- without reactivating would mint a wildcard token that 401s on
+-- every request while the boot logs success (round-3 review). For
+-- the bootstrap service account reactivation-on-boot is the desired
+-- semantics: the operator re-running bootstrap intends the token to
+-- work. Idempotent -- promoting an already-admin, enabled row is a
+-- no-op at the SQLite level.
+UPDATE users SET is_admin = 1, disabled_at = NULL WHERE id = ?1;
 
 -- name: DemoteUserFromAdmin :exec
 -- Set users.is_admin = 0 for the supplied user id. The mirror of

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -153,6 +155,74 @@ func TestRunBootstrapPAT_ZeroByteSentinelRecovered(t *testing.T) {
 	}
 	if strings.TrimSpace(string(content)) != plaintext {
 		t.Fatalf("file content = %q, want the minted plaintext", strings.TrimSpace(string(content)))
+	}
+}
+
+// TestRunBootstrapPAT_AfterSystemSentinel is the round-3 regression:
+// main.go runs EnsureSystemUser (email=”, source='forward-link')
+// BEFORE the bootstrap block, and 00018's partial unique index
+// users_email_source_uniq covers ” (only NULL is excluded). The
+// bootstrap user must not collide with the sentinel pair or the boot
+// dies with UNIQUE constraint violated.
+func TestRunBootstrapPAT_AfterSystemSentinel(t *testing.T) {
+	database, root := newBootstrapTestDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.EnsureSystemUser(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("ensure system user: %v", err)
+	}
+
+	plaintext, err := RunBootstrapPAT(ctx, database, patTestPepper, "1", root, log)
+	if err != nil {
+		t.Fatalf("bootstrap after system sentinel must succeed, got: %v", err)
+	}
+	if !strings.HasPrefix(plaintext, PATPrefix) {
+		t.Fatalf("plaintext %q missing prefix %q", plaintext, PATPrefix)
+	}
+}
+
+// TestRunBootstrapPAT_ReactivatesDisabledOwner: the bootstrap block
+// must leave its service account LIVE, not merely is_admin=1 -- the
+// PAT lookup requires disabled_at IS NULL. Re-bootstrap after an
+// operator disabled the account must produce a working token.
+func TestRunBootstrapPAT_ReactivatesDisabledOwner(t *testing.T) {
+	database, root := newBootstrapTestDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Pre-existing, disabled bootstrap user (operator disabled the
+	// service account; the sentinel file was deleted to re-bootstrap).
+	var uid int64
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		id, err := q.EnsureBootstrapUser(ctx)
+		if err != nil {
+			return err
+		}
+		uid = id
+		return q.PromoteUserToAdmin(ctx, id)
+	}); err != nil {
+		t.Fatalf("seed bootstrap user: %v", err)
+	}
+	// Simulate the round-3 probe: disable the account directly.
+	now := sql.NullInt64{Int64: time.Now().Unix(), Valid: true}
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.DisableUser(ctx, sqlcgen.DisableUserParams{ID: uid, DisabledAt: now})
+	}); err != nil {
+		t.Fatalf("disable bootstrap user: %v", err)
+	}
+
+	plaintext, err := RunBootstrapPAT(ctx, database, patTestPepper, "1", root, log)
+	if err != nil {
+		t.Fatalf("bootstrap with disabled owner must reactivate, got: %v", err)
+	}
+	// The minted token must actually authenticate: Lookup joins the
+	// owner row and requires disabled_at IS NULL.
+	if _, err := NewPATService(database, patTestPepper).Lookup(ctx, plaintext); err != nil {
+		t.Fatalf("bootstrap token must authenticate after reactivation, Lookup: %v", err)
 	}
 }
 

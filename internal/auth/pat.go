@@ -237,6 +237,7 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 		//     users.id, letting /api/v1/users/me/pats resolve the
 		//     owner without a second lookup.
 		ctx := withPrincipal(r.Context(), principal)
+		ctx = withPATScopes(ctx, result.Scopes)
 		ctx = WithLocalUserView(ctx, LocalUserView{
 			UserID:      result.UserID,
 			IsAdmin:     true,
@@ -253,6 +254,28 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 // forward/local identity extraction -- BrowserChain would otherwise
 // overwrite the PAT principal with an unauthenticated empty one.
 func PATPresented(r *http.Request) bool { return extractBearerPAT(r) != "" }
+
+// patScopesKey is the context key under which RequirePAT stores the
+// scopes the presented token carries. It lets scope-gated handlers
+// (e.g. POST /api/v1/users/me/pats) cap what a narrower token may
+// mint -- without it a "pats:write" token could mint itself a "*"
+// token, making every scoped token a full-admin credential.
+type patScopesKey struct{}
+
+func withPATScopes(ctx context.Context, scopes []string) context.Context {
+	return context.WithValue(ctx, patScopesKey{}, scopes)
+}
+
+// PATScopesFrom returns the scope list of the PAT that authenticated
+// this request. The second return is false when the request was not
+// PAT-authenticated (session cookie or forward-auth) -- those callers
+// carry their authority in the Principal/LocalUserView instead, and
+// handlers should treat them as unrestricted for scope-capping
+// purposes.
+func PATScopesFrom(ctx context.Context) ([]string, bool) {
+	scopes, ok := ctx.Value(patScopesKey{}).([]string)
+	return scopes, ok
+}
 
 // extractBearerPAT pulls the bdam_pat_ token out of the Authorization
 // header (if present). Returns empty string for any other auth scheme

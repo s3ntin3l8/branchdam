@@ -101,6 +101,12 @@ the PAT-management endpoints, and the bootstrap PAT's `["*"]` passes
 everywhere. A new route group gains its own scope by adding a prefix
 to `patScopeFor` and an entry in the handler map.
 
+Minting is scope-capped: a PAT-authenticated caller can only mint a
+token whose scopes are a subset of its own, unless it carries `"*"` —
+a `pats:write` token can't mint itself a wildcard. Session and
+forward-auth admins are unrestricted at mint time (their authority is
+`RequireAdmin`'s model, not a token grant).
+
 `is_admin` on a PAT principal is not frozen at mint time: the lookup
 query joins the owner's `users` row and filters on `is_admin = 1 AND
 disabled_at IS NULL`. Demoting or disabling the owner invalidates all
