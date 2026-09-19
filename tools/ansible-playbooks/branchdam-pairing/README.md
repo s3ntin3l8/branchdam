@@ -37,9 +37,10 @@ Three steps the operator runs by hand, exactly once per workstation:
    - A `branchdam://` URL containing the URL-encoded
      `<server>`, `<key>`, and `<agent_id>` fields. **Copy this.**
 
-   The latest released `branchdam-agent` with the `pair` subcommand
-   is `main` after the v1.12.1 tag; build from source or wait for
-   v1.13 if you're on a released version.
+   The `pair` subcommand is not in any released version yet -- it
+   landed on `s3ntin3l8/branchdam-agent`'s `main` after the v1.12.1
+   tag. Build from source or wait for v1.13 if you're on a released
+   version.
 
 2. **Pick the workstation this pair belongs to**. A given pair is
    bound to one workstation's Linux user account (the agent reads
