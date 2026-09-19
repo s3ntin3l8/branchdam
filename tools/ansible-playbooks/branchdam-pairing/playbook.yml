@@ -1,0 +1,119 @@
+---
+# branchDAM Companion-Pairing Ansible playbook (reference).
+#
+# Mirrors kubeadm init's bootstrap-token pattern: a one-shot operator
+# step (pasting the branchdam:// URL into Ansible Vault) mints the
+# credentials the playbook needs; every subsequent run is unattended.
+# See ./README.md for the full operator walkthrough.
+#
+# The playbook is reference material -- copy it into your own Ansible
+# repo's playbooks/ tree and customize variable names, vault paths, and
+# the service-restart handler for your site. The shape below
+# (vault URL -> branchdam-agent pair CLI -> service restart) is the
+# load-bearing part.
+#
+# Variables (typically in group_vars/all/vault.yml or host_vars/<host>/vault.yml):
+#
+#   vault_branchdam_pair_url: "branchdam://?server=https%3A%2F%2Fdam.example.com&key=<plaintext>&agent=dev-xxxxxxxx"
+#       The full pairing URL as emitted by branchDAM's Companion Pairing
+#       modal. The plaintext key is the only secret here; keep the vault
+#       file mode 0600.
+#
+#   branchdam_pair_validate_server_tls: true   # default; cleartext-http is
+#       refused by branchdam-agent's URL parser (#243 in s3ntin3l8/branchdam-agent).
+#
+#   branchdam_pair_agent_user: "{{ ansible_user_id | default('root') }}"
+#       The Linux user that owns branchdam-agent's config. Defaults to
+#       the ansible connection user, which is the right answer for a
+#       workstation agent installed under that account.
+#
+#   branchdam_pair_agent_config_dir: "~/.config/branchdam-agent"
+#   branchdam_pair_agent_config_path: "{{ branchdam_pair_agent_config_dir }}/config.yaml"
+#
+#   branchdam_pair_agent_service: "branchdam-agent.service"
+#       The systemd unit the workstation agent runs under, when
+#       installed as a system service. Set to "" (the default) to
+#       skip the restart -- e.g. when running interactively, or when
+#       systemd isn't managing the agent on this host.
+#
+# Tags:
+#   --check  --diff   Ansible dry-run support is wired through the
+#                     branchdam-agent pair CLI -- it does no work
+#                     beyond parsing/validation unless the credentials
+#                     check via Hello() passes. (Dry-run still
+#                     reaches the server, by design: a misconfigured
+#                     vault value must surface as a task failure, not
+#                     a silent config write.)
+- name: Pair branchDAM workstation agent
+  hosts: "{{ target_host | default('localhost') }}"
+  connection: local   # the pairing URL is pasted into a vault on the
+                      # operator's workstation; we run branchdam-agent
+                      # pair locally to that host before the agent is
+                      # started. For a remote target, override:
+                      #   ansible-playbook --extra-vars "target_host=ws01.example.com"
+                      # and the connection: ssh block below takes over.
+  gather_facts: false   # no system facts needed; the CLI is the source of truth.
+  vars:
+    branchdam_pair_bin: "branchdam-agent"
+    branchdam_pair_validate_server_tls: true
+    branchdam_pair_agent_user: "{{ ansible_user_id | default(omit) }}"
+    branchdam_pair_agent_config_dir: "~/.config/branchdam-agent"
+    branchdam_pair_agent_config_path: "{{ branchdam_pair_agent_config_dir }}/config.yaml"
+    branchdam_pair_agent_service: ""
+
+  tasks:
+    - name: Parse the pairing URL into server / key / agent_id
+      ansible.builtin.set_fact:
+        # branchdam-agent pair parses the URL itself and refuses on
+        # malformed input. We don't duplicate the parse here -- the
+        # vault value is passed through verbatim so a key in the URL
+        # never appears in ansible's stdout (--check, -v, etc.) except
+        # as a single string. ansible.builtin.debug's no_log: true on
+        # this task prevents the URL from leaking through.
+        branchdam_pair_url: "{{ vault_branchdam_pair_url }}"
+      no_log: true
+
+    - name: Confirm branchdam-agent is installed
+      ansible.builtin.command:
+        cmd: "{{ branchdam_pair_bin }} --version"
+      register: branchdam_pair_version
+      changed_when: false
+      failed_when: branchdam_pair_version.rc != 0
+
+    - name: Run branchdam-agent pair to validate + persist the credentials
+      ansible.builtin.command:
+        cmd: >-
+          {{ branchdam_pair_bin }} pair
+          -config {{ branchdam_pair_agent_config_path }}
+          -timeout 10s
+          {{ branchdam_pair_url }}
+      become: "{{ branchdam_pair_agent_user is defined }}"
+      become_user: "{{ branchdam_pair_agent_user | default(omit) }}"
+      register: branchdam_pair_run
+      changed_when: >-
+        branchdam_pair_run.rc == 0
+        and ('paired with' in branchdam_pair_run.stdout)
+      # The CLI does the heavy lifting (URL parse, refuse leaky config,
+      # Hello() validation, atomic 0600 patch). Anything it surfaces on
+      # stdout is operator-actionable (e.g. "run preflight next"); we
+      # don't need to parse it.
+      # no_log is set so the plaintext key doesn't echo even when
+      # branchdam-agent prints it for a successful Hello() round-trip.
+      no_log: true
+
+    - name: Restart branchdam-agent service if managed by systemd
+      ansible.builtin.systemd:
+        name: "{{ branchdam_pair_agent_service }}"
+        state: restarted
+        daemon_reload: true
+      when: branchdam_pair_agent_service != "" and branchdam_pair_run.rc == 0
+      failed_when: false
+      # no_log on the restart is unnecessary -- the restart task never
+      # sees the URL or key.
+
+    - name: Show operator next steps
+      ansible.builtin.debug:
+        msg: >-
+          Paired with {{ branchdam_pair_url | regex_search('agent=([^&]+)', '\\1') | first | default('unknown') }}.
+          Next: run `branchdam-agent preflight -config {{ branchdam_pair_agent_config_path }}` on the target host
+          to confirm server reachability and round-trip the new credentials.

@@ -311,3 +311,18 @@ network.
 
 From here, [`operations.md`](operations.md) covers what changes once you're running for real:
 upgrades, backups, pruning, and a troubleshooting table.
+
+## 11. Provisioning many workstations
+
+For fleets (homelab with several machines, a studio with one workstation per editor, etc.),
+the per-workstation Companion Pairing flow above is awkward to do by hand. See
+[`tools/ansible-playbooks/branchdam-pairing/`](../tools/ansible-playbooks/branchdam-pairing/) --
+a reference playbook that takes a `branchdam://` URL from Ansible Vault, validates it server-side
+via the workstation agent's `pair` CLI, and persists the credentials into the workstation's
+config atomically at mode 0600. Mirrors the kubeadm-init bootstrap-token pattern: a single
+operator step at install time mints the credentials, every subsequent workstation provisioning
+run is unattended.
+
+Note that the playbook covers the *workstation* side only. The branchDAM server itself installs
+via the `docker compose` flow above; provisioning many branchDAM servers is a different
+problem (multi-host orchestration, certificate management, etc.) and is out of scope.

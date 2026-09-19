@@ -1,0 +1,38 @@
+{# branchDAM workstation agent config -- rendered by the pairing
+   Ansible playbook into ~/.config/branchdam-agent/config.yaml.
+
+   Fields written by `branchdam-agent pair` (the agent-side CLI):
+     - server.baseUrl
+     - server.apiKey     (plaintext, exactly once via the pairing URL)
+     - agentId
+
+   Fields below are not touched by `pair` -- they're operator-supplied
+   site configuration (path mappings, ingest roots, prune policy,
+   update channel, etc.) that the playbook can render alongside.
+   Override via Ansible group_vars / host_vars to match your site's
+   path layout.
+#}
+server:
+  baseUrl: "{{ branchdam_pair_server_base_url | default('') }}"
+  # apiKey is set by `branchdam-agent pair`; never template it here --
+  # the pairing URL is the only legitimate carrier of the plaintext,
+  # and templating secrets into config is the exact pattern this
+  # playbook is designed to avoid.
+
+agentId: "{{ branchdam_pair_url_agent_id | default('') }}"
+
+ingest:
+  archiveRoot: "{{ branchdam_pair_archive_root | default('') }}"
+  localEditRoot: "{{ branchdam_pair_local_edit_root | default('') }}"
+
+pathMappings:
+{% for mapping in branchdam_pair_path_mappings | default([]) %}
+  - workstationPath: "{{ mapping.workstation }}"
+    containerPath: "{{ mapping.container }}"
+{% endfor %}
+
+prune:
+  enabled: {{ branchdam_pair_prune_enabled | default(true) | string | lower }}
+
+selfUpdate:
+  enabled: {{ branchdam_pair_self_update_enabled | default(false) | string | lower }}

@@ -1,0 +1,14 @@
+{# Optional operator-side hints file rendered by the pairing
+   playbook. NOT consumed by branchdam-agent itself -- this exists
+   so an operator running the playbook on a host that has no other
+   record of which branchDAM server / agent_id this workstation is
+   paired with can recover the answer from the filesystem.
+
+   If you don't want this file written, set
+   `branchdam_pair_write_hints_file: false` in the playbook vars.
+#}
+server:
+  baseUrl: "{{ branchdam_pair_server_base_url | default('') }}"
+agentId: "{{ branchdam_pair_url_agent_id | default('') }}"
+pairedAt: "{{ ansible_date_time.iso8601 }}"
+pairedBy: "ansible-playbook branchdam-pairing"

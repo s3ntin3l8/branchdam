@@ -1862,8 +1862,15 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 	}
 	// Cross-check body.agentId against the Principal, same as
 	// handleAgentHandshake -- stops a paired device from attributing
-	// events to another device. The env-bootstrap path skips this
-	// check (no per-device claim to mismatch).
+	// events to another device. The env-bootstrap path (the legacy
+	// shared-secret holder) is exempt: there's no per-device claim
+	// to mismatch against, and operator convenience lets one
+	// env-var key drive any body agent_id. Issue #453 PR C
+	// narrowed the cross-talk: paired clients sign with their
+	// per-device key (issue #453 PR C), so a paired device
+	// can't forge env-bootstrap's signature even if it sets
+	// body.agentId to "env-bootstrap". PR F will retire this
+	// carve-out entirely when the env-var field is removed.
 	if p.Name != "env-bootstrap" && in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
@@ -1981,8 +1988,13 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	// A mismatch means a device is either spoofing another's identity in
 	// the body, or the env-bootstrap path is being asked to impersonate a
 	// specific paired device -- both forbidden. The env-bootstrap path
-	// (Principal.Name == "env-bootstrap") is allowed to send any body
-	// agent_id since there's no per-device claim to mismatch against.
+	// (the legacy shared-secret holder) is allowed to send any body
+	// agent_id since there's no per-device claim to mismatch against;
+	// issue #453 PR C narrowed the cross-talk by routing HMAC signing
+	// through per-device keys for paired clients, so a paired device
+	// can't forge env-bootstrap's signature even if it spoofs
+	// body.agentId. PR F will retire this carve-out entirely when the
+	// env-var field is removed.
 	if p.Name != "env-bootstrap" && in.Body.AgentID != "" && in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
