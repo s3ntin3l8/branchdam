@@ -54,10 +54,13 @@ CREATE TABLE user_pats (
     expires_at      INTEGER,
     revoked_at      INTEGER
 );
+-- The UNIQUE constraint on hashed_key already creates the lookup
+-- index this table needs (an equality probe on a UNIQUE column is an
+-- indexed lookup in SQLite), so no separate ix_user_pats_hash index
+-- is created -- that would double the per-insert index-write cost
+-- for zero lookup benefit.
 CREATE INDEX ix_user_pats_user_id ON user_pats(user_id) WHERE revoked_at IS NULL;
-CREATE INDEX ix_user_pats_hash    ON user_pats(hashed_key);
 
 -- +goose Down
-DROP INDEX IF EXISTS ix_user_pats_hash;
 DROP INDEX IF EXISTS ix_user_pats_user_id;
 DROP TABLE IF EXISTS user_pats;

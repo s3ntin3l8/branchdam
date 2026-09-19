@@ -59,6 +59,20 @@ func (q *Queries) CreateAttributionUser(ctx context.Context, arg CreateAttributi
 	return id, err
 }
 
+const demoteUserFromAdmin = `-- name: DemoteUserFromAdmin :exec
+UPDATE users SET is_admin = 0 WHERE id = ?1
+`
+
+// Set users.is_admin = 0 for the supplied user id. The mirror of
+// PromoteUserToAdmin: today it backs the PAT fail-closed test (a
+// demoted owner's token must stop authenticating) and gives a future
+// admin-UI demote action its query. Idempotent -- demoting a
+// non-admin row is a no-op.
+func (q *Queries) DemoteUserFromAdmin(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, demoteUserFromAdmin, id)
+	return err
+}
+
 const ensureBootstrapUser = `-- name: EnsureBootstrapUser :one
 INSERT INTO users (auth_provider, external_uid, username, email, source, password_hash, last_seen_at, created_at, created_by)
 VALUES ('system', 'ansible-bootstrap', 'ansible-bootstrap', '', 'forward-link', NULL, unixepoch(), unixepoch(), 'admin-bootstrap')
@@ -263,8 +277,8 @@ const promoteUserToAdmin = `-- name: PromoteUserToAdmin :exec
 UPDATE users SET is_admin = 1 WHERE id = ?1
 `
 
-// Set users.is_admin = 1 for the supplied user id. Used by the
-// bootstrap mechanism to ensure the service-account user can mint
+// Set users.is_admin = 1 for the supplied user id. Used by
+// the bootstrap mechanism to ensure the service-account user can mint
 // pairings and write settings via the PAT it carries. Idempotent --
 // setting an already-admin row is a no-op at the SQLite level.
 func (q *Queries) PromoteUserToAdmin(ctx context.Context, id int64) error {

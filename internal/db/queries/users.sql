@@ -108,11 +108,19 @@ ON CONFLICT (auth_provider, external_uid) DO UPDATE SET external_uid = excluded.
 RETURNING id;
 
 -- name: PromoteUserToAdmin :exec
--- Set users.is_admin = 1 for the supplied user id. Used by the
--- bootstrap mechanism to ensure the service-account user can mint
+-- Set users.is_admin = 1 for the supplied user id. Used by
+-- the bootstrap mechanism to ensure the service-account user can mint
 -- pairings and write settings via the PAT it carries. Idempotent --
 -- setting an already-admin row is a no-op at the SQLite level.
 UPDATE users SET is_admin = 1 WHERE id = ?1;
+
+-- name: DemoteUserFromAdmin :exec
+-- Set users.is_admin = 0 for the supplied user id. The mirror of
+-- PromoteUserToAdmin: today it backs the PAT fail-closed test (a
+-- demoted owner's token must stop authenticating) and gives a future
+-- admin-UI demote action its query. Idempotent -- demoting a
+-- non-admin row is a no-op.
+UPDATE users SET is_admin = 0 WHERE id = ?1;
 
 -- name: ListAttributionUsers :many
 -- Backs GET /api/v1/users (admin-only). Used by the pairing UI's

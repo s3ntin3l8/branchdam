@@ -42,10 +42,15 @@ ADMIN_BOOTSTRAP_PAT=1 branchdam
 Semantics:
 
 - On boot, if the env var is non-empty **and**
-  `<dataDir>/bootstrap-pat.txt` does not exist, the server creates a
-  dedicated bootstrap user (promoted to admin), mints a PAT with
-  scopes `["*"]`, and writes the plaintext to
-  `<dataDir>/bootstrap-pat.txt` (mode 0600).
+  `<dataDir>/bootstrap-pat.txt` does not exist, the server claims the
+  file path first (`O_CREATE|O_EXCL|O_NOFOLLOW`, mode 0600), then
+  creates a dedicated bootstrap user (promoted to admin) and mints a
+  PAT with scopes `["*"]` in a single transaction, and finally writes
+  the plaintext to the already-claimed handle. The exclusive create
+  closes both races: a symlink planted at the sentinel path is refused
+  rather than followed, and two concurrent boots can't both mint.
+  If the DB half fails after the claim, the empty file is removed so
+  the failure can't block re-bootstrap.
 - If the file already exists, the boot logs a skip and continues —
   the env var is consumed once. Delete the file (and the
   `user_pats` row, if you also want the token dead) to re-bootstrap.
@@ -66,7 +71,7 @@ authenticated the request.
 |---|---|---|
 | `POST` | `/api/v1/users/me/pats` | Mint. Body: `{"name": "...", "scopes": ["..."], "expiresAt": 0}`. Returns the **plaintext once** plus metadata. |
 | `GET` | `/api/v1/users/me/pats` | List (limit/offset query params). Never includes plaintext — only the first 8 hex chars of the stored hash (`hashedKeyPrefix`). |
-| `POST` | `/api/v1/users/me/pats/{id}/revoke` | Soft-delete (sets `revoked_at`). Revoked tokens fail closed with 401. |
+| `POST` | `/api/v1/users/me/pats/{id}/revoke` | Soft-delete (sets `revoked_at`). Revoked tokens fail closed with 401. Returns **404** when the id matches no live PAT owned by the caller — revoking an unknown, foreign, or already-revoked id is never a silent success. |
 
 Mint and revoke are written to `actor_audit` (`pat.minted` /
 `pat.revoked`) with the hash prefix, never the plaintext or full hash.
@@ -76,13 +81,32 @@ Mint and revoke are written to `actor_audit` (`pat.minted` /
 A token's `scopes` is a JSON array of strings. The wildcard `"*"`
 satisfies every scope; otherwise the requested scope must appear as an
 exact match. An empty scope list satisfies nothing (fail-closed
-default). Route-level granularity comes from the middleware `Scope`;
-the `is_admin` flag on a PAT principal is always true in this PR
-(PATs are admin-only), so `RequireAdmin` passes for any authenticated
-PAT even when `authz.groups` is non-empty.
+default).
+
+Scopes are enforced **per admin route group** by the request-routing
+wrapper (`patScopeFor` in `internal/httpapi/server.go`):
+
+| Route group | Required scope |
+|---|---|
+| `/api/v1/users/me/pats*` | `pats:write` |
+| `/api/v1/companion/pairings*` | `pairings:write` |
+| everything else (non-agent) | `admin` |
+
+So a `["pairings:write"]` token drives the pairing API but gets 403 at
+the PAT-management endpoints, and the bootstrap PAT's `["*"]` passes
+everywhere. A new route group gains its own scope by adding a prefix
+to `patScopeFor` and an entry in the handler map.
+
+`is_admin` on a PAT principal is not frozen at mint time: the lookup
+query joins the owner's `users` row and filters on `is_admin = 1 AND
+disabled_at IS NULL`. Demoting or disabling the owner invalidates all
+of their live tokens on the next request (401, identical to a revoked
+token) — the same live-authority posture the session middleware takes.
 
 `last_used_at` is bumped asynchronously, throttled to one write per
-60 seconds per token, so a request flood doesn't become a write flood.
+60 seconds per token: an in-process per-token gate (`shouldTouch`)
+collapses a request burst before any goroutine is spawned, and the SQL
+`WHERE` in `TouchUserPAT` is the backstop for the same window.
 
 ## Request routing
 

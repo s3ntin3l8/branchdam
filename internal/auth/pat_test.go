@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -363,6 +364,81 @@ func TestMintPATPlaintextFormat(t *testing.T) {
 			t.Errorf("body contains non-alphabet char %q in %q", r, body)
 		}
 	}
+}
+
+// TestRequirePAT_TouchThrottledInProcess pins the per-request
+// goroutine finding: within touchThrottleWindow only the first request
+// spawns the async touch; after the window passes, the next request
+// touches again. The SQL throttle remains as a backstop, but the
+// goroutine + writer-pool tx must not be paid per request.
+func TestRequirePAT_TouchThrottledInProcess(t *testing.T) {
+	plaintext := mintTestToken(t)
+
+	var mu sync.Mutex
+	var touches []time.Time
+	touched := make(chan struct{}, 8)
+	now := time.Unix(1_700_000_000, 0)
+	mw := &PATMiddleware{
+		Lookup: func(ctx context.Context, presented string) (PATLookupResult, error) {
+			return PATLookupResult{UserID: 1, Scopes: []string{"*"}}, nil
+		},
+		TouchLastUsed: func(ctx context.Context, patHash string, at time.Time) {
+			mu.Lock()
+			touches = append(touches, at)
+			mu.Unlock()
+			touched <- struct{}{}
+		},
+		Pepper: patTestPepper,
+		Scope:  "admin",
+		Now:    func() time.Time { return now },
+	}
+
+	chain := mw.RequirePAT(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	doRequest := func() {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+plaintext)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+	}
+	// waitForTouches blocks until exactly n async touches have landed
+	// (or fails the test after a generous window).
+	waitForTouches := func(n int) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			mu.Lock()
+			got := len(touches)
+			mu.Unlock()
+			if got >= n {
+				return
+			}
+			select {
+			case <-touched:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %d touches (have %d)", n, got)
+			}
+		}
+	}
+
+	doRequest()
+	waitForTouches(1)
+	doRequest() // same window: must not touch
+	mu.Lock()
+	if got := len(touches); got != 1 {
+		mu.Unlock()
+		t.Fatalf("touches = %d, want 1 (second request in window must be throttled)", got)
+	}
+	mu.Unlock()
+
+	now = now.Add(touchThrottleWindow + time.Second)
+	doRequest()
+	waitForTouches(2)
 }
 
 // TestScopeSatisfied covers the scope-matching helper directly so the

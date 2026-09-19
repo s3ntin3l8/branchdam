@@ -18,13 +18,36 @@ import (
 // operator tooling. Routes:
 //   POST   /api/v1/users/me/pats      -- mint (returns plaintext once)
 //   GET    /api/v1/users/me/pats      -- list (no plaintext)
-//   POST   /api/v1/users/me/pats/{id}/revoke -- soft-delete
+//   POST   /api/v1/users/me/pats/{id}/revoke -- soft-delete (404 when
+//                                         the id matches no live PAT
+//                                         owned by the caller)
 //
 // All three require RequireAdmin (only admins mint/revoke/list admin
-// PATs -- regular users don't have PATs). The PAT middleware
-// (auth.PATMiddleware.RequirePAT) is wired into these routes so an
-// admin's PAT can hit them too; a non-admin PAT gets 403 from the
-// RequireAdmin check that runs after RequirePAT attaches its Principal.
+// PATs -- regular users don't have PATs) plus the "pats:write" scope
+// when the caller is a PAT (see patScopeFor in server.go). The PAT
+// middleware (auth.PATMiddleware.RequirePAT) is wired into these
+// routes so an admin's PAT can hit them too; a non-admin PAT gets
+// 403 from the RequireAdmin check that runs after RequirePAT
+// attaches its Principal.
+
+// --- registration ---
+
+// registerPats wires the admin PAT endpoints (issue #453 PR E).
+// Per-user admin PATs for unattended operator tooling -- the
+// kubeadm-init bootstrap pattern lives in cmd/branchdam's startup
+// hook; these endpoints let admins mint/revoke/list scoped tokens
+// via the API itself. Lives in its own registrar (not
+// registerCompanionPairings) so each route family's registration
+// matches its file, mirroring the Pairing wiring shape. Nil-safe:
+// the routes only exist when the PAT service is configured.
+func (s *Server) registerPats(api huma.API) {
+	if s.patService == nil {
+		return
+	}
+	huma.Post(api, "/api/v1/users/me/pats", s.handleCreatePAT)
+	huma.Get(api, "/api/v1/users/me/pats", s.handleListPATs)
+	huma.Post(api, "/api/v1/users/me/pats/{id}/revoke", s.handleRevokePAT)
+}
 
 type CreatePATInput struct {
 	Body struct {
@@ -194,8 +217,17 @@ func (s *Server) handleRevokePAT(ctx context.Context, in *RevokePATInput) (*Revo
 		return nil, huma.Error403Forbidden("could not resolve user id", err)
 	}
 
-	if _, err := s.patService.Revoke(ctx, in.ID, uid); err != nil {
+	revoked, err := s.patService.Revoke(ctx, in.ID, uid)
+	if err != nil {
 		return nil, huma.Error500InternalServerError("revoke PAT", err)
+	}
+	if !revoked {
+		// No live row matched (id, user_id): the id doesn't exist,
+		// was already revoked, or belongs to another admin. Report
+		// 404 rather than a silent false success -- an operator
+		// pointing at the wrong id must not walk away believing the
+		// token is dead.
+		return nil, huma.Error404NotFound("no live PAT with that id", nil)
 	}
 
 	if s.audit != nil {

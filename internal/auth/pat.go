@@ -11,11 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -44,11 +47,6 @@ const (
 	patRandomBytes     = 32
 	patB64URLNoPadding = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
-
-// ErrPATInvalid is the typed error returned when a presented token is
-// malformed, revoked, expired, or doesn't match a live row. The HTTP
-// handler maps this to 401.
-var ErrPATInvalid = errors.New("personal access token invalid")
 
 // PATLookupResult is what the Lookup callback returns for an
 // authenticated token -- parallel shape to pairing.KeyLookupResult
@@ -80,18 +78,53 @@ type PATMiddleware struct {
 	// TouchLastUsed is the optional callback for bumping
 	// user_pats.last_used_at on every authenticated request. The
 	// middleware calls this async (go func()) so the auth path is
-	// never blocked on a write. A flush error is logged but never
-	// propagated to the request. Nil = no-op.
+	// never blocked on a write, but only after an in-process
+	// per-token throttle (touchThrottleWindow) so a request burst
+	// doesn't spawn a goroutine per request -- the SQL throttle in
+	// TouchUserPAT remains as the backstop. A flush error is logged
+	// but never propagated to the request. Nil = no-op.
 	TouchLastUsed func(ctx context.Context, patHash string, at time.Time)
 	// Pepper is used to HMAC-SHA256 hash the presented plaintext for
-	// lookup. Same pepper as pairing uses for device-pairing key
-	// hashes -- shared pepper means a DB-only compromise can't
-	// reconstruct either kind of key. Required.
+	// lookup and for the last_used_at touch key. Must be the same
+	// pepper the db-backed Lookup uses, or the touch would key on a
+	// hash that matches no row. Required.
 	Pepper []byte
 	// Scope is the scope the protected route requires. A token whose
 	// scopes_json contains "*" satisfies every scope; otherwise the
 	// requested scope must appear in the token's list (string-equal).
+	// Empty requested scope ("any authenticated PAT") is always
+	// satisfied -- the caller is opting out of scope enforcement.
 	Scope string
+
+	// touchMu/lastTouch back the in-process last_used_at throttle:
+	// a per-hashed-key timestamp of the most recent async touch, so
+	// the 60s SQL throttle doesn't cost a goroutine + writer-pool tx
+	// per request. Only mutated when TouchLastUsed is non-nil.
+	touchMu   sync.Mutex
+	lastTouch map[string]time.Time
+}
+
+// touchThrottleWindow is the in-process minimum interval between
+// async last_used_at touches for one token. Matches the SQL-level
+// throttle in TouchUserPAT so the two never disagree about when a
+// write is due.
+const touchThrottleWindow = 60 * time.Second
+
+// shouldTouch reports whether enough time has passed since the last
+// async touch for this token to bother spawning the goroutine. Records
+// "now" as the new last-touch when it returns true, so concurrent
+// requests within the same window collapse to one touch.
+func (m *PATMiddleware) shouldTouch(hash string, now time.Time) bool {
+	m.touchMu.Lock()
+	defer m.touchMu.Unlock()
+	if m.lastTouch == nil {
+		m.lastTouch = make(map[string]time.Time)
+	}
+	if last, ok := m.lastTouch[hash]; ok && now.Sub(last) < touchThrottleWindow {
+		return false
+	}
+	m.lastTouch[hash] = now
+	return true
 }
 
 // RequirePAT returns an http.Handler middleware that authenticates a
@@ -124,12 +157,14 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 				return
 			}
 			// Real DB failure -- log and 500. Same posture as AgentChain
-			// when LookupKey returns a non-NoRows error.
-			slogDefault().Error("auth: PAT lookup failed", "method", r.Method, "path", r.URL.Path, "err", err.Error())
+			// when LookupKey returns a non-NoRows error. Deliberately
+			// no request-derived fields (method/path): CodeQL flags
+			// log entries built from user input, and the lookup error
+			// already carries the diagnostic value.
+			slogDefault().Error("auth: PAT lookup failed", "err", err.Error())
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		_ = hash // hash is computed but only used if Lookup is db-backed; kept here for symmetry with pairing.
 
 		// Build a Principal from the token's user. We don't have the
 		// user row here (Lookup returns UserID + scopes), so the
@@ -150,14 +185,20 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 		}
 
 		// Best-effort last_used_at bump -- never blocks the request
-		// and never propagates a write failure.
+		// and never propagates a write failure. The in-process
+		// throttle (touchThrottleWindow) runs before the goroutine so
+		// a request burst doesn't spawn one goroutine + writer-pool tx
+		// per request; the SQL throttle in TouchUserPAT remains as a
+		// backstop for the same window.
 		if m.TouchLastUsed != nil {
 			at := m.Now()
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				m.TouchLastUsed(ctx, hash, at)
-			}()
+			if m.shouldTouch(hash, at) {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					m.TouchLastUsed(ctx, hash, at)
+				}()
+			}
 		}
 
 		// Attach a LocalUserView alongside the Principal. Three
@@ -166,10 +207,14 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 		//   - RequireAdmin/IsAdmin: the PAT principal carries no
 		//     forward-auth Groups, so without the local-`is_admin`
 		//     override every write route would 403 the moment
-		//     authz.groups is non-empty. PATs minted by this PR are
-		//     admin-only by design, so IsAdmin=true; route-level
-		//     granularity comes from the middleware Scope, not from
-		//     the admin flag.
+		//     authz.groups is non-empty. Lookup has already verified
+		//     the token's owner is a live admin (is_admin=1,
+		//     disabled_at IS NULL -- see GetUserPATByHash), so
+		//     IsAdmin=true here reflects the owner's current
+		//     authority, not authority frozen at mint time; a
+		//     demoted or disabled owner's token fails Lookup instead.
+		//     Route-level granularity comes from the middleware
+		//     Scope, not from the admin flag.
 		//   - MFAGate: MFAVerified=true so a PAT-authenticated
 		//     request isn't mistaken for a half-authed password-only
 		//     session -- the token itself is the second factor.
@@ -354,30 +399,41 @@ func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes
 	return plaintext, &row, nil
 }
 
-// Revoke soft-deletes the token by setting revoked_at. Idempotent --
-// revoking an already-revoked token is a no-op. The PAT row is
-// matched on (id, user_id) so one admin can't revoke another's token.
+// Revoke soft-deletes the token by setting revoked_at. Returns
+// revoked=false (nil error) when no live row matched (id, user_id) --
+// the caller maps that to a 404 so a nonexistent or foreign token id
+// can't present as a silent success. The (id, user_id) scoping means
+// one admin can't revoke another's token.
 func (s *PATService) Revoke(ctx context.Context, patID, userID int64) (bool, error) {
+	var rows int64
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.RevokeUserPAT(ctx, sqlcgen.RevokeUserPATParams{
+		n, err := q.RevokeUserPAT(ctx, sqlcgen.RevokeUserPATParams{
 			ID:     patID,
 			UserID: userID,
 		})
+		if err != nil {
+			return err
+		}
+		rows = n
+		return nil
 	})
 	if err != nil {
 		return false, fmt.Errorf("revoke token: %w", err)
 	}
-	// sqlc doesn't surface affected-row count for exec queries; the
-	// caller distinguishes by re-fetching the row if it cares. For
-	// the httpapi handler we just call Revoke and trust it -- a
-	// duplicate revoke is fine.
-	return true, nil
+	return rows > 0, nil
 }
 
 // Lookup is the lookup callback the middleware uses. Returns the
 // user_id + scopes for the token's plaintext (after HMAC lookup);
 // sql.ErrNoRows when no live row matches. Reads go through the
 // reader pool -- the hot auth path never touches the writer.
+//
+// Authority is checked here, not frozen at mint: the query joins the
+// owner row and filters on users.is_admin = 1 AND disabled_at IS
+// NULL, so demoting or disabling the owner invalidates every live
+// token of theirs on their next request (the same posture the session
+// middleware takes). A demoted owner's token surfaces as
+// sql.ErrNoRows -> 401, matching a revoked token.
 func (s *PATService) Lookup(ctx context.Context, presented string) (PATLookupResult, error) {
 	hashed := hashToken(s.pepper, presented)
 	row, err := s.db.Reader.GetUserPATByHash(ctx, hashed)
@@ -403,16 +459,20 @@ func (s *PATService) Lookup(ctx context.Context, presented string) (PATLookupRes
 
 // TouchLastUsed bumps the last_used_at column. Used as the
 // PATMiddleware.TouchLastUsed callback. Throttled to once per 60s per
-// token (the SQL query itself enforces this) so a flood of requests
-// doesn't generate a flood of writes. Runs on the writer pool inside
-// a one-shot tx; errors are discarded (best-effort bookkeeping).
+// token (the middleware's in-process shouldTouch gate runs first; the
+// SQL WHERE below is the backstop) so a flood of requests doesn't
+// generate a flood of writes. Runs on the writer pool inside a
+// one-shot tx. Errors are logged but never propagated -- best-effort
+// bookkeeping, per the middleware contract.
 func (s *PATService) TouchLastUsed(ctx context.Context, hashedKey string, at time.Time) {
-	_ = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.TouchUserPAT(ctx, sqlcgen.TouchUserPATParams{
 			HashedKey:  hashedKey,
 			LastUsedAt: sql.NullInt64{Int64: at.Unix(), Valid: true},
 		})
-	})
+	}); err != nil {
+		slogDefault().Error("auth: touch user_pats.last_used_at failed", "err", err.Error())
+	}
 }
 
 // decodeScopes parses the JSON-encoded scopes array. Empty array is
@@ -489,8 +549,9 @@ var ErrBootstrapAlreadyMinted = errors.New("bootstrap PAT already minted (file e
 // TestNoWriteCapableQueriesAccessorOutsideInTx invariant. The whole
 // "ensure user + promote to admin + mint PAT" sequence is one
 // transaction; if any step fails the row work is rolled back and the
-// file isn't written -- so a partial-failure scenario can't leave a
-// half-minted PAT behind.
+// claimed (still empty) sentinel file is removed, so a
+// partial-failure scenario can't leave a half-minted PAT behind or
+// block re-bootstrap with an empty sentinel.
 func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envValue, dataDir string, log *slog.Logger) (string, error) {
 	if envValue == "" {
 		return "", nil
@@ -506,12 +567,38 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	}
 
 	path := filepath.Join(dataDir, BootstrapPATFileName)
-	if _, err := os.Stat(path); err == nil {
-		// File exists -- consume-once: refuse.
-		return "", ErrBootstrapAlreadyMinted
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("stat bootstrap file: %w", err)
+	// Claim the path BEFORE touching the DB: O_CREATE|O_EXCL atomically
+	// fails with fs.ErrExist when anything (file, symlink -- dangling
+	// or not) already sits at the path, and O_NOFOLLOW refuses to
+	// traverse one, so a symlink planted at <dataDir>/bootstrap-pat.txt
+	// can't redirect the (non-expiring, wildcard) plaintext elsewhere.
+	// Two concurrent boots therefore can't both mint: exactly one open
+	// succeeds, the other sees ErrBootstrapAlreadyMinted. The Lstat
+	// below only distinguishes "regular sentinel file" from "something
+	// else (symlink) planted here" for an accurate error message; the
+	// O_EXCL|O_NOFOLLOW open remains the actual enforcement, so the
+	// Lstat/open gap can't be raced into a followed symlink.
+	if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return "", fmt.Errorf("bootstrap file %s is a symlink; refusing to write the plaintext through it", path)
 	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			// File exists -- consume-once: refuse.
+			return "", ErrBootstrapAlreadyMinted
+		}
+		return "", fmt.Errorf("open bootstrap file: %w", err)
+	}
+	// From here on, a failure must not leave the empty claim file
+	// behind: its existence is the consume-once sentinel, so a
+	// half-failed boot would otherwise block re-bootstrap forever.
+	committed := false
+	defer func() {
+		_ = f.Close()
+		if !committed {
+			_ = os.Remove(path)
+		}
+	}()
 
 	// One transaction wraps all three writes (ensure user, promote
 	// to admin, insert PAT). If anything fails the work is rolled
@@ -519,7 +606,7 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 	// can't leave a half-minted PAT behind.
 	var plaintext string
 	var userID int64
-	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		uid, err := q.EnsureBootstrapUser(ctx)
 		if err != nil {
 			return fmt.Errorf("ensure bootstrap user: %w", err)
@@ -554,18 +641,18 @@ func RunBootstrapPAT(ctx context.Context, database *db.DB, pepper []byte, envVal
 		return "", err
 	}
 
-	// File write is OUTSIDE the transaction. If it fails after a
-	// successful commit, the PAT exists in the db but the operator
-	// has no plaintext -- the next boot will refuse to re-mint
-	// (file existence) and the operator must manually delete the
-	// user_pats row OR set the file path writable. That's a worse
-	// outcome than a clean DB write -- but the alternative (writing
-	// the file first, then the DB) is worse still, because a failed
-	// DB write after a successful file write leaves a plaintext
-	// lying around with no corresponding server-side token.
-	if err := os.WriteFile(path, []byte(plaintext+"\n"), 0o600); err != nil {
+	// The plaintext is written to the already-claimed handle, so the
+	// sentinel and the secret appear atomically from the operator's
+	// point of view: no window where the file exists but is empty.
+	// (The DB commit above is the other half of the ordering problem
+	// -- see the comment before the tx.)
+	if _, err := f.WriteString(plaintext + "\n"); err != nil {
 		return "", fmt.Errorf("write bootstrap file: %w", err)
 	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close bootstrap file: %w", err)
+	}
+	committed = true
 
 	log.Info("bootstrap PAT minted", "path", path, "user_id", userID, "scopes", []string{"*"})
 	return plaintext, nil

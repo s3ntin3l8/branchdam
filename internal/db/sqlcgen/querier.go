@@ -211,6 +211,12 @@ type Querier interface {
 	DeleteRecoveryCodes(ctx context.Context, userID int64) error
 	// Deletes remote_sync_state records when an asset is deleted / unlinked.
 	DeleteRemoteSyncStateForNode(ctx context.Context, nodeID int64) error
+	// Set users.is_admin = 0 for the supplied user id. The mirror of
+	// PromoteUserToAdmin: today it backs the PAT fail-closed test (a
+	// demoted owner's token must stop authenticating) and gives a future
+	// admin-UI demote action its query. Idempotent -- demoting a
+	// non-admin row is a no-op.
+	DemoteUserFromAdmin(ctx context.Context, id int64) error
 	// Same recursive walk as WouldCreateCycle, but returns the whole descendant
 	// set of root_node_id in one query instead of one CTE per candidate parent.
 	// Reconciling a Resolve timeline snapshot (issue #448) tests many candidate
@@ -365,6 +371,13 @@ type Querier interface {
 	// hashed_key makes this an indexed lookup. Returns NULL when no row
 	// matches (caller distinguishes miss from error via the sql.ErrNoRows
 	// sentinel).
+	//
+	// The JOIN on users is authority enforcement, not display: the WHERE
+	// requires the owner to be a live admin (is_admin = 1, disabled_at
+	// NULL), so demoting or disabling the owner invalidates every one of
+	// their tokens on the next request instead of freezing admin
+	// authority at mint time. A token whose owner fails the check
+	// surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
 	GetUserPATByHash(ctx context.Context, hashedKey string) (UserPat, error)
 	InactivateResolveEdge(ctx context.Context, id int64) error
 	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
@@ -722,8 +735,8 @@ type Querier interface {
 	// Returns no rows (sql.ErrNoRows) when the caller is already on the
 	// newest active key.
 	NewestActiveKeyForPairing(ctx context.Context, arg NewestActiveKeyForPairingParams) (DevicePairingKey, error)
-	// Set users.is_admin = 1 for the supplied user id. Used by the
-	// bootstrap mechanism to ensure the service-account user can mint
+	// Set users.is_admin = 1 for the supplied user id. Used by
+	// the bootstrap mechanism to ensure the service-account user can mint
 	// pairings and write settings via the PAT it carries. Idempotent --
 	// setting an already-admin row is a no-op at the SQLite level.
 	PromoteUserToAdmin(ctx context.Context, id int64) error
@@ -838,11 +851,12 @@ type Querier interface {
 	RevokePasswordResetToken(ctx context.Context, arg RevokePasswordResetTokenParams) error
 	// Sets revoked_at on a single session (used by DELETE /api/v1/session).
 	RevokeSession(ctx context.Context, arg RevokeSessionParams) error
-	// Soft-delete by setting revoked_at. Idempotent: revoking an
-	// already-revoked token is a no-op (revoked_at stays at the first
-	// revocation time). The caller checks affected rows == 1 to
-	// distinguish "revoked" from "never existed / wrong owner".
-	RevokeUserPAT(ctx context.Context, arg RevokeUserPATParams) error
+	// Soft-delete by setting revoked_at. The WHERE keeps it to live rows
+	// owned by the calling user, so the affected-row count is
+	// meaningful: 1 = revoked, 0 = the id doesn't exist, isn't live, or
+	// belongs to another user -- the caller maps 0 to a 404 instead of
+	// reporting a silent false success.
+	RevokeUserPAT(ctx context.Context, arg RevokeUserPATParams) (int64, error)
 	// Rotation: set expires_at on every currently-active key for this pairing
 	// that doesn't already have one. Idempotent -- re-running after the same
 	// clock has no effect.

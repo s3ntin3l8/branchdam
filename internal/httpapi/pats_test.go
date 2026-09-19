@@ -36,12 +36,18 @@ func newPATTestServer(t *testing.T) (*Server, *db.DB, *auth.PATService, int64) {
 	t.Cleanup(func() { _ = database.Close() })
 
 	// A users row must exist before Mint: user_pats.user_id is a
-	// RESTRICT FK. EnsureBootstrapUser is the same query the boot
-	// sequence uses.
+	// RESTRICT FK. EnsureBootstrapUser + PromoteUserToAdmin is the same
+	// sequence the boot sequence runs -- the promotion matters: the
+	// PAT lookup query joins users and filters on is_admin=1, so an
+	// un-promoted owner's token 401s (authority is live-checked, not
+	// frozen at mint).
 	var userID int64
 	require.NoError(t, database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		uid, err := q.EnsureBootstrapUser(context.Background())
 		if err != nil {
+			return err
+		}
+		if err := q.PromoteUserToAdmin(context.Background(), uid); err != nil {
 			return err
 		}
 		userID = uid
@@ -155,4 +161,101 @@ func TestPAT_NoTokenFallsThroughToExistingChains(t *testing.T) {
 	// required" (403), NOT 401-from-PAT -- the PAT chain only speaks
 	// when a token was presented.
 	assert.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+// TestPAT_ScopeEnforcementPerRouteGroup pins the review finding that
+// the PAT middleware was wired with an empty scope (scopes_json
+// restricted nothing). A narrowly-scoped token must pass only its own
+// route group: "pairings:write" gets through the pairings group but
+// is 403'd at the PAT-management group, and vice versa for a
+// "pats:write" token.
+func TestPAT_ScopeEnforcementPerRouteGroup(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	ctx := context.Background()
+	handler := srv.Handler()
+
+	pairingsToken, _, err := patSvc.Mint(ctx, userID, "pairings-only", []string{"pairings:write"}, 0)
+	require.NoError(t, err)
+	patsToken, _, err := patSvc.Mint(ctx, userID, "pats-only", []string{"pats:write"}, 0)
+	require.NoError(t, err)
+
+	// pairings-scoped token on the PAT-management group -> 403.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/pats", nil)
+	req.Header.Set("Authorization", "Bearer "+pairingsToken)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code, "pairings:write token must not reach the PAT group")
+
+	// pats-scoped token on the PAT-management group -> passes the
+	// scope gate and the RequireAdmin gate (200).
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/users/me/pats", nil)
+	req.Header.Set("Authorization", "Bearer "+patsToken)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusOK, rr.Code, "pats:write token must pass its own group")
+
+	// pats-scoped token on the pairings group -> 403. (The pairing
+	// service is nil in this test server, so a scope-passing request
+	// would 503 from pairingSvc(), not 403 -- 403 proves the scope
+	// gate rejected it.)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/companion/pairings", nil)
+	req.Header.Set("Authorization", "Bearer "+patsToken)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code, "pats:write token must not reach the pairings group")
+
+	// pairings-scoped token on the pairings group -> passes the scope
+	// gate (503 = pairing service not configured, i.e. past auth).
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/companion/pairings", nil)
+	req.Header.Set("Authorization", "Bearer "+pairingsToken)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "pairings:write token must pass its own group")
+}
+
+// TestPAT_RevokeUnknownID404 pins the review finding that Revoke
+// reported ok:true for ids that matched no live row of the caller --
+// a silent false success that would leave an operator believing a
+// token was dead. Today the handler must 404.
+func TestPAT_RevokeUnknownID404(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	token, _, err := patSvc.Mint(context.Background(), userID, "bootstrap", []string{"*"}, 0)
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats/999999/revoke", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code, "revoking an unknown id must 404, body: %s", rr.Body.String())
+}
+
+// TestPAT_DemotedOwnerFailsClosed pins the live authority check: the
+// lookup query joins users and filters on is_admin=1, so demoting the
+// owner invalidates every live token of theirs -- the token minted
+// while admin must 401 after the demotion, exactly like a revoked
+// token.
+func TestPAT_DemotedOwnerFailsClosed(t *testing.T) {
+	srv, database, patSvc, userID := newPATTestServer(t)
+	ctx := context.Background()
+	token, _, err := patSvc.Mint(ctx, userID, "bootstrap", []string{"*"}, 0)
+	require.NoError(t, err)
+
+	handler := srv.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/pats", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "token must authenticate while the owner is admin")
+
+	require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.DemoteUserFromAdmin(ctx, userID)
+	}))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/users/me/pats", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code,
+		"demoted owner's token must fail closed (authority is live-checked, not frozen at mint)")
 }

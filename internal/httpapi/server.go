@@ -446,12 +446,36 @@ func (s *Server) Handler() http.Handler {
 	// without a PAT header (and every agent-path request, where a PAT
 	// must never short-circuit AgentChain's key validation) continue
 	// through auth.Route unchanged.
+	//
+	// Scope is enforced per admin route group, not globally: the
+	// wrapper resolves the route group from the path prefix and hands
+	// the request to that group's PAT middleware. The bootstrap PAT
+	// (scopes ["*"]) satisfies every group; a narrowly-scoped token
+	// like ["pairings:write"] only passes the pairings group. Groups
+	// not listed here fall through to the "admin" scope -- the
+	// catch-all for admin routes that don't have a dedicated scope
+	// yet. Add a new prefix here when a route group grows its own
+	// scope.
 	if s.patService != nil {
-		patHandler := s.patService.Middleware("").RequirePAT(authzHandler)
+		patHandlers := map[string]http.Handler{
+			"admin":          s.patService.Middleware("admin").RequirePAT(authzHandler),
+			"pats:write":     s.patService.Middleware("pats:write").RequirePAT(authzHandler),
+			"pairings:write": s.patService.Middleware("pairings:write").RequirePAT(authzHandler),
+		}
+		patScopeFor := func(path string) string {
+			switch {
+			case strings.HasPrefix(path, "/api/v1/users/me/pats"):
+				return "pats:write"
+			case strings.HasPrefix(path, "/api/v1/companion/pairings"):
+				return "pairings:write"
+			default:
+				return "admin"
+			}
+		}
 		inner := routed
 		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if auth.PATPresented(r) && !strings.HasPrefix(r.URL.Path, auth.AgentPathPrefix) {
-				patHandler.ServeHTTP(w, r)
+				patHandlers[patScopeFor(r.URL.Path)].ServeHTTP(w, r)
 				return
 			}
 			inner.ServeHTTP(w, r)
