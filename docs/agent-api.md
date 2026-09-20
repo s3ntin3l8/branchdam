@@ -123,6 +123,13 @@ overwrite the synchronous snapshot slot.
 Human-reviewed `CONFIRMED`/`REJECTED` edges are never changed; the response's
 `reviewedConflicts` count prompts manual resolution. `legacyTimelineNodeUuids`
 claims processed virtual-node events from the same agent during migration.
+
+A successful snapshot may contain no timelines or memberships. This is
+authoritative for the agent scope: prior automatic Resolve edges are
+deactivated while virtual timeline nodes and human-reviewed edges are retained.
+Failures while reading or transporting the snapshot happen before this
+reconciliation and must not be represented as an empty snapshot.
+
 They are deliberately reconciled with an empty desired set: current timelines
 are already present in `timelines`, while obsolete or old-identity nodes are
 retired atomically after their replacement edges are established.

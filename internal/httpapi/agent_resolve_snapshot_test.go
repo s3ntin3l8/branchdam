@@ -165,6 +165,7 @@ func TestResolveSnapshotUnresolvedAndReviewedSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 	body["memberships"] = []map[string]any{}
+	body["timelines"] = []map[string]any{}
 	rr = postResolveSnapshot(t, srv, body)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"reviewedConflicts":1`) {
 		t.Fatalf("reviewed removal: %d %s", rr.Code, rr.Body.String())
@@ -294,9 +295,21 @@ func TestResolveSnapshotEmptyDatabaseRetiresPriorTimelineEdges(t *testing.T) {
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"removed":1`) {
 		t.Fatalf("empty database snapshot: %d %s", rr.Code, rr.Body.String())
 	}
-	target, _ := database.Reader.GetMediaNodeByUUID(context.Background(), targetUUID)
+	target, err := database.Reader.GetMediaNodeByUUID(context.Background(), targetUUID)
+	if err != nil {
+		t.Fatalf("empty snapshot removed the virtual timeline node: %v", err)
+	}
 	edges, err := database.Reader.ListEdgesByTarget(context.Background(), target.ID)
 	if err != nil || len(edges) != 0 {
 		t.Fatalf("old timeline active edges = %d, err = %v", len(edges), err)
+	}
+	body = resolveSnapshotBody(targetUUID, sourceUUID, "D:\\a.mov", "original")
+	rr = postResolveSnapshot(t, srv, body)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"refreshed":1`) {
+		t.Fatalf("media return snapshot: %d %s", rr.Code, rr.Body.String())
+	}
+	edges, err = database.Reader.ListEdgesByTarget(context.Background(), target.ID)
+	if err != nil || len(edges) != 1 || edges[0].IsActive != 1 {
+		t.Fatalf("recovered timeline edges = %+v, err = %v", edges, err)
 	}
 }
