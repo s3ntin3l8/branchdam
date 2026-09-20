@@ -304,11 +304,9 @@ describe("SettingsPage", () => {
     vi.mocked(api.getSettings).mockResolvedValue(
       settingsResponse({
         fields: [
-          ...settingsResponse().fields,
           field({
             key: "immich.apiKey",
             label: "Immich API Key",
-            group: "Agent",
             value: undefined,
             source: "config",
             secret: true,

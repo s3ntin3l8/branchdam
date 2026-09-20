@@ -126,13 +126,11 @@ removing edges.
 
 The response fields are `created`, `refreshed`, `removed`, `unchanged`,
 `unresolved`, and `reviewedConflicts`. The request's `agentId` must match the
-machine principal (except the legacy env-bootstrap machine-key path -- the
-shared-secret holder can drive any agent_id since it has no per-device claim
-to mismatch against; issue #453 PR C narrowed the cross-talk via per-device
-HMAC signing so a paired device cannot forge env-bootstrap's signature
-even when spoofing body.agentId. PR F will retire the carve-out entirely
-when the env-var field is removed), and timeline paths must resolve through
-a virtual `storage.Guard` location.
+machine principal attached to the paired device that authenticated the
+request -- issue #453 PR F removed the legacy env-bootstrap carve-out, so
+there is no remaining path where a single credential can drive an arbitrary
+`agent_id`. Timeline paths must resolve through a virtual `storage.Guard`
+location.
 
 Migration 26 retains inactive edges for audit. Its down migration refuses to
 run while any inactive edge exists because the older schema cannot represent

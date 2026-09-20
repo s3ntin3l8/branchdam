@@ -89,12 +89,10 @@ only authentication path for agent routes as of
 `agent.apiKey` field and its `BRANCHDAM_AGENT_API_KEY` env var were
 removed in PR F — every agent request must present a per-device key
 obtained via `POST /api/v1/agent/handshake/pair` (see
-[`agent-api.md`](agent-api.md)). Unauthenticated requests fail closed
-with `401`; a `503` means no pairing service is wired or the key has no
-matching paired device.
+[`agent-api.md`](agent-api.md)). A `503` means no pairing service is wired
+(nil `LookupKey`); a `401` means the presented key matches no paired device.
 
 Authentication as a paired device attaches `Principal{Name: <agent_id>, Kind: KindMachine}`.
-The env-var bootstrap path attaches `Principal{Name: "env-bootstrap", Kind: KindMachine}`.
 Cross-checks against body.agent_id in `/agent/handshake` and `/agent/events`
 block a paired device from impersonating another device's identity in
 either direction.
@@ -124,16 +122,8 @@ This means rotation is non-disruptive: a rotating phone never sees an outage as 
 The mobile app's next request returns 401; the keychain entry is
 cleared on the device, the operator re-pairs via QR.
 
-The env-var key can be rotated separately from any paired device.
-Rotating it forces every device or workstation agent that authenticates
-with it to update simultaneously — useful when a workstation is
-decommissioned but the operator hasn't yet deployed paired devices.
-Rotating it also re-keys HMAC signing for env-bootstrap clients
-(paired devices sign with their own per-device key, not the env-var;
-see issue #453 PR C). With `signedRequests: false` (the default) only
-agents still presenting the old key as `X-API-Key` are affected;
-with it enabled, env-bootstrap agents must pick up the new value
-before their next signed request; paired devices are unaffected.
+There is no server-wide key to rotate — each pairing is independent, so
+revoking or rotating one device never affects another.
 
 ### 4.5. QR payload format
 
