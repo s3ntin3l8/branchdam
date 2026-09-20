@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,7 +14,42 @@ import (
 	"time"
 )
 
-const testKey = "01234567890123456789012345678901" // 33 chars, >= MinAgentKeyLength
+const testKey = "01234567890123456789012345678901" // 33 chars
+const testAgentID = "test-device"
+
+// chainWithTestKey mimics the legacy chainWithTestKey() factory
+// that issue #453 PR F removed. Returns an AgentChainWithConfig whose
+// LookupKey stub accepts the canonical testKey and reports the supplied
+// agent_id and signing key, so the post-PR-F chain still authenticates
+// the same X-API-Key tests have always used. The signing key is
+// []byte(testKey) so HMAC verification continues to compute against the
+// same secret the pre-PR-F env-bootstrap path did, preserving every
+// signature-mismatch assertion in TestAgentChainSignedRequests.
+func chainWithTestKey() func(http.Handler) http.Handler {
+	return AgentChainWithConfig(AgentConfig{
+		LookupKey: func(_ context.Context, presented string) (KeyLookupResult, error) {
+			if presented == testKey {
+				return KeyLookupResult{AgentID: testAgentID, SigningKey: []byte(testKey)}, nil
+			}
+			return KeyLookupResult{}, nil
+		},
+	}, nil)
+}
+
+// chainWithTestKeyAndSigning wires the same LookupKey stub but allows
+// the caller to override SignedRequests / ReplayWindow / Now / Cache
+// for the signed-request test suite. The LookupKey stub still uses
+// []byte(testKey) so the HMAC inputs match exactly what the production
+// signing path sees.
+func chainWithTestKeyAndSigning(extra AgentConfig) func(http.Handler) http.Handler {
+	extra.LookupKey = func(_ context.Context, presented string) (KeyLookupResult, error) {
+		if presented == testKey {
+			return KeyLookupResult{AgentID: testAgentID, SigningKey: []byte(testKey)}, nil
+		}
+		return KeyLookupResult{}, nil
+	}
+	return AgentChainWithConfig(extra, nil)
+}
 
 func principalCapturingHandler(t *testing.T, got *Principal, gotAuthentikHeader *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +68,7 @@ func principalCapturingHandler(t *testing.T, got *Principal, gotAuthentikHeader 
 func TestAgentChainValidKey(t *testing.T) {
 	var got Principal
 	var authHeader string
-	chain := AgentChain(testKey, nil)(principalCapturingHandler(t, &got, &authHeader))
+	chain := chainWithTestKey()(principalCapturingHandler(t, &got, &authHeader))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
 	req.Header.Set(apiKeyHeader, testKey)
@@ -45,13 +81,13 @@ func TestAgentChainValidKey(t *testing.T) {
 	if got.Kind != KindMachine {
 		t.Errorf("Kind = %q, want %q", got.Kind, KindMachine)
 	}
-	// The env-var bootstrap path attaches Principal.Name = "env-bootstrap"
+	// The env-var bootstrap path attaches Principal.Name = testAgentID
 	// (#companion-pairing): machine principals do carry Name now, set to
-	// either the agent_id (device-paired path) or "env-bootstrap" (legacy
+	// either the agent_id (device-paired path) or testAgentID (legacy
 	// path). Email/Groups remain empty for machine principals -- the
 	// BrowserChain-attached human Principal is the only one with identity.
-	if got.Name != "env-bootstrap" {
-		t.Errorf("Principal.Name = %q, want %q", got.Name, "env-bootstrap")
+	if got.Name != testAgentID {
+		t.Errorf("Principal.Name = %q, want %q", got.Name, testAgentID)
 	}
 	if got.Email != "" || len(got.Groups) != 0 {
 		t.Errorf("Principal = %+v, want empty Email/Groups", got)
@@ -73,7 +109,7 @@ func TestAgentChainMissingOrWrongKey(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			handlerCalled := false
-			chain := AgentChain(testKey, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			chain := chainWithTestKey()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handlerCalled = true
 			}))
 
@@ -106,7 +142,9 @@ func TestAgentChainFailsClosedOnMisconfiguredKey(t *testing.T) {
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {
 			handlerCalled := false
-			chain := AgentChain(key, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Misconfigured deployment (no LookupKey, no APIKey after
+			// issue #453 PR F): every agent route fails closed with 503.
+			chain := AgentChainWithConfig(AgentConfig{}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handlerCalled = true
 			}))
 
@@ -132,7 +170,7 @@ func TestAgentChainFailsClosedOnMisconfiguredKey(t *testing.T) {
 func TestAgentChainStripsForgedIdentityHeaders(t *testing.T) {
 	var got Principal
 	var authHeaderSeenByHandler string
-	chain := AgentChain(testKey, nil)(principalCapturingHandler(t, &got, &authHeaderSeenByHandler))
+	chain := chainWithTestKey()(principalCapturingHandler(t, &got, &authHeaderSeenByHandler))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
 	req.Header.Set(apiKeyHeader, testKey)
@@ -148,14 +186,14 @@ func TestAgentChainStripsForgedIdentityHeaders(t *testing.T) {
 	if got.Kind != KindMachine {
 		t.Errorf("Kind = %q, want %q", got.Kind, KindMachine)
 	}
-	// Env-var bootstrap path: Principal.Name is "env-bootstrap", the
+	// Env-var bootstrap path: Principal.Name is testAgentID, the
 	// X-Authentik-Username header (forged to "admin") must NOT have leaked
 	// through. The strip-X-Authentik-* step runs before the key check, so
 	// even the Authentik headers set on this request are gone by the time
 	// the principal is constructed -- this assertion is the negative
 	// control that proves it.
-	if got.Name != "env-bootstrap" {
-		t.Errorf("Principal.Name = %q, want %q (forged X-Authentik-Username must not reach the Principal)", got.Name, "env-bootstrap")
+	if got.Name != testAgentID {
+		t.Errorf("Principal.Name = %q, want %q (forged X-Authentik-Username must not reach the Principal)", got.Name, testAgentID)
 	}
 	if len(got.Groups) != 0 {
 		t.Errorf("Principal.Groups = %v, want empty", got.Groups)
@@ -175,7 +213,7 @@ func TestAgentChainStripsHeadersEvenOnRejection(t *testing.T) {
 	// the request object's headers after ServeHTTP returns -- httptest
 	// gives us the same *http.Request we constructed, and AgentChain
 	// mutates it in place via r.Header.Del.
-	chain := AgentChain(testKey, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	chain := chainWithTestKey()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler must not be called for a rejected request")
 	}))
 
@@ -236,13 +274,11 @@ func TestAgentChainSignedRequests(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(handler)
+		})(handler)
 
 		body := []byte(`{"agentId":"test-agent"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
@@ -277,13 +313,11 @@ func TestAgentChainSignedRequests(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(handler)
+		})(handler)
 
 		path := "/api/v1/agent/check-content?fastHash=abcdef1234567890"
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -319,13 +353,11 @@ func TestAgentChainSignedRequests(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				cfg := AgentConfig{
-					APIKey:         testKey,
+				chain := chainWithTestKeyAndSigning(AgentConfig{
 					SignedRequests: true,
 					ReplayWindow:   5 * time.Minute,
 					Now:            nowFn,
-				}
-				chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
 				}))
 
@@ -355,13 +387,11 @@ func TestAgentChainSignedRequests(t *testing.T) {
 	})
 
 	t.Run("tampered body rejected", func(t *testing.T) {
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -387,14 +417,12 @@ func TestAgentChainSignedRequests(t *testing.T) {
 
 	t.Run("replayed nonce within window rejected", func(t *testing.T) {
 		cache := NewReplayCache()
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
 			Cache:          cache,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -430,13 +458,11 @@ func TestAgentChainSignedRequests(t *testing.T) {
 	})
 
 	t.Run("clock skew tolerance", func(t *testing.T) {
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -510,11 +536,9 @@ func TestAgentChainSignedRequests(t *testing.T) {
 	})
 
 	t.Run("signedRequests=false ignores missing or present signature", func(t *testing.T) {
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: false,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -542,13 +566,11 @@ func TestAgentChainSignedRequests(t *testing.T) {
 	})
 
 	t.Run("clock skew at exact window boundary is accepted", func(t *testing.T) {
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
@@ -587,14 +609,12 @@ func TestAgentChainSignedRequests(t *testing.T) {
 		// /api/v1/agent/upload streams up to 50 GiB; the agent client cannot
 		// sign over a body that large, so the route is in the default skip
 		// list. Signature headers must not be required.
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		handlerCalled := false
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
 			Now:            nowFn,
-		}
-		handlerCalled := false
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handlerCalled = true
 			w.WriteHeader(http.StatusOK)
 		}))
@@ -622,12 +642,10 @@ func TestAgentChainSignedRequests(t *testing.T) {
 		// the upload route still needs a valid key, otherwise anyone who
 		// can reach /api/v1/agent/upload (Traefik strips ForwardAuth for
 		// this prefix) could push 50 GiB to disk.
-		cfg := AgentConfig{
-			APIKey:         testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests: true,
 			ReplayWindow:   5 * time.Minute,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Fatal("handler must not be called without a valid API key")
 		}))
 
@@ -642,14 +660,12 @@ func TestAgentChainSignedRequests(t *testing.T) {
 
 	t.Run("body exceeding SignedMaxBodyBytes is rejected with 413", func(t *testing.T) {
 		const cap = 1024
-		cfg := AgentConfig{
-			APIKey:             testKey,
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests:     true,
 			ReplayWindow:       5 * time.Minute,
 			Now:                nowFn,
 			SignedMaxBodyBytes: cap,
-		}
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Fatal("handler must not be called for an oversize body")
 		}))
 
@@ -677,15 +693,13 @@ func TestAgentChainSignedRequests(t *testing.T) {
 	t.Run("prefix-match skip path bypasses signature validation", func(t *testing.T) {
 		// Operators may add a path ending in '/' to skip a whole subtree;
 		// exact-match and prefix-match must both work.
-		cfg := AgentConfig{
-			APIKey:             testKey,
+		handlerCalled := false
+		chain := chainWithTestKeyAndSigning(AgentConfig{
 			SignedRequests:     true,
 			ReplayWindow:       5 * time.Minute,
 			Now:                nowFn,
 			SkipSignaturePaths: []string{"/api/v1/agent/internal/"},
-		}
-		handlerCalled := false
-		chain := AgentChainWithConfig(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handlerCalled = true
 			w.WriteHeader(http.StatusOK)
 		}))

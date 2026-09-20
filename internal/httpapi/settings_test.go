@@ -63,7 +63,8 @@ func settingsTestServer(t *testing.T, box *secrets.Box, adminGroups []string) *S
 		DB:       database,
 		Hub:      sse.New(),
 		Version:  "test",
-	})
+
+		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func settingsGetJSON(body map[string]any) []byte {

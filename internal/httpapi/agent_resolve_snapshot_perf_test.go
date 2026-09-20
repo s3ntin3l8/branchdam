@@ -61,13 +61,14 @@ func bulkResolveSnapshotServer(t testing.TB, n int) (srv *Server, database *db.D
 		t.Fatal(err)
 	}
 	srv = New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database,
 		Guard: storage.NewGuard([]storage.Location{
 			{ID: virtualID, Name: "resolve-virtual-bulk", RootPath: "/virtual/resolve-bulk", Tier: "PROJECTS", IsVirtual: true},
 			{ID: mediaID, Name: "media-bulk", RootPath: "/storage/media-bulk", Tier: "TIER2_EXPORTS"},
 		}),
-	})
+
+		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, uuid.New().String(), sourceUUIDs
 }
 
@@ -101,7 +102,7 @@ func TestResolveSnapshotBatchedSourceResolutionRejectsUnknownSourceAmongMany(t *
 	const n = 500
 	srv, database, targetUUID, sourceUUIDs := bulkResolveSnapshotServer(t, n)
 	scopeID := strings.Repeat("b", 64)
-	body := bulkResolveSnapshotBody("agent-bulk", scopeID, targetUUID, sourceUUIDs)
+	body := bulkResolveSnapshotBody("test-device", scopeID, targetUUID, sourceUUIDs)
 	memberships := body["memberships"].([]map[string]any)
 	memberships[n/2]["sourceNodeUuid"] = uuid.New().String()
 
@@ -123,7 +124,7 @@ func TestResolveSnapshotBatchedCyclePreventionAcrossManyCandidates(t *testing.T)
 	srv, database, targetUUID, sourceUUIDs := bulkResolveSnapshotServer(t, n)
 	scopeID := strings.Repeat("c", 64)
 
-	empty := bulkResolveSnapshotBody("agent-bulk", scopeID, targetUUID, nil)
+	empty := bulkResolveSnapshotBody("test-device", scopeID, targetUUID, nil)
 	if rr := postResolveSnapshot(t, srv, empty); rr.Code != http.StatusOK {
 		t.Fatalf("initial empty snapshot: %d %s", rr.Code, rr.Body.String())
 	}
@@ -167,7 +168,7 @@ func TestResolveSnapshotBatchedCyclePreventionAcrossManyCandidates(t *testing.T)
 		t.Fatal(err)
 	}
 
-	body := bulkResolveSnapshotBody("agent-bulk", scopeID, targetUUID, sourceUUIDs)
+	body := bulkResolveSnapshotBody("test-device", scopeID, targetUUID, sourceUUIDs)
 	rr := postResolveSnapshot(t, srv, body)
 	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "lineage cycle") {
 		t.Fatalf("cycle among %d candidates: status = %d, body = %s", n, rr.Code, rr.Body.String())
@@ -192,7 +193,7 @@ func benchmarkResolveSnapshot(b *testing.B, n int) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		srv, _, targetUUID, sourceUUIDs := bulkResolveSnapshotServer(b, n)
-		body := bulkResolveSnapshotBody("agent-bulk", scopeID, targetUUID, sourceUUIDs)
+		body := bulkResolveSnapshotBody("test-device", scopeID, targetUUID, sourceUUIDs)
 		b.StartTimer()
 		rr := postResolveSnapshot(b, srv, body)
 		if rr.Code != http.StatusOK {

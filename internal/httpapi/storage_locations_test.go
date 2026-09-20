@@ -88,13 +88,13 @@ func TestPutStorageLocationRejectsMachinePrincipal(t *testing.T) {
 
 	base := config.Config{
 		Authz: config.Authz{Groups: []string{"dam-admins"}},
-		Agent: config.Agent{APIKey: "01234567890123456789012345678901"}, // 33 chars, >= minAgentKeyLength
+		Agent: config.Agent{}, // 33 chars, >= minAgentKeyLength
 	}
 	store, err := settings.NewStore(context.Background(), database, base, settingsTestKey(t), nil)
 	if err != nil {
 		t.Fatalf("settings.NewStore: %v", err)
 	}
-	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test"})
+	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	id := seedTestStorageLocation(t, srv, "Tier 1", "/data/tier1", "TIER1_LOCAL_SCRATCH", false)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/storage-locations/"+itoa(id), bytes.NewReader(settingsGetJSON(map[string]any{
@@ -227,7 +227,7 @@ func settingsTestServerWithLocations(t *testing.T, adminGroups []string, locs []
 	if err != nil {
 		t.Fatalf("settings.NewStore: %v", err)
 	}
-	return New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test"})
+	return New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestPutStorageLocationRejectsDisablingLastEnabledLocation(t *testing.T) {
@@ -395,7 +395,7 @@ func TestStorageHealthReflectsStorageLocationOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settings.NewStore: %v", err)
 	}
-	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test"})
+	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	seedTestStorageLocation(t, srv, "Tier 1", "/data/tier1", "TIER1_LOCAL_SCRATCH", false)
 	seedTestStorageLocation(t, srv, "Tier 2", "/data/tier2", "TIER1_LOCAL_SCRATCH", false)
@@ -524,7 +524,7 @@ func TestReloadGuardLocationsPicksUpOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settings.NewStore: %v", err)
 	}
-	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Guard: guard, Version: "test"})
+	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Guard: guard, Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	// Initial reload: Guard has the base location.
 	if err := srv.reloadGuardLocations(context.Background()); err != nil {
@@ -577,7 +577,7 @@ func TestStorageHealthCacheTtlHoursFallsBackWhenOverrideBecomesInvalid(t *testin
 	if err != nil {
 		t.Fatalf("settings.NewStore: %v", err)
 	}
-	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test"})
+	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	seedTestStorageLocation(t, srv, "Tier 1", "/data/tier1", "TIER1_LOCAL_SCRATCH", false)
 
 	if err := settings.ApplyStorageLocationOverride(context.Background(), database, "/data/tier1",

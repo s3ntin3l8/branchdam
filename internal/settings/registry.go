@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 )
 
@@ -430,31 +429,6 @@ var httpFields = []Field{
 }
 
 var agentFields = []Field{
-	{
-		Key:         "agent.apiKey",
-		Type:        KindString,
-		Label:       "Shared Agent Secret",
-		Group:       "Agent",
-		Secret:      true,
-		Generatable: true,
-		Apply:       ApplyRestart,
-		Get:         func(cfg *config.Config) any { return cfg.Agent.APIKey },
-		Set: func(cfg *config.Config, v any) error {
-			cfg.Agent.APIKey = v.(string)
-			return nil
-		},
-		Validate: minLenString(auth.MinAgentKeyLength),
-		Editable: true,
-		Doc: "Optional when Companion Pairing is wired. Single secret shared by every " +
-			"agent that is not individually paired. Two roles: (1) accepted as X-API-Key, " +
-			"granting a machine principal that can act for any device (the " +
-			"'env-bootstrap' principal); (2) the HMAC key for signed requests -- rotating " +
-			"it re-keys signing for ALL agents, paired ones included. Leave unset when " +
-			"every agent authenticates via Companion Pairing (issue #453). The runtime " +
-			"503 fail-closed gate is satisfied by either a long-enough value here OR a " +
-			"wired LookupKey (the pairing service's KeyLookup callback). Prefer Companion " +
-			"Pairing for new devices; removal of this field is planned.",
-	},
 	{
 		Key:   "agent.signedRequests",
 		Type:  KindBool,

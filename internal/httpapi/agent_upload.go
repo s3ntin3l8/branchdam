@@ -27,8 +27,7 @@ func (s *Server) writeJSONError(w http.ResponseWriter, statusCode int, message s
 // an agent upload from agentID's device_pairings row. Returns 0 (NULL
 // attribution) for every case other than "an active pairing with a set
 // owner" -- no pairing row, a revoked pairing, or a pairing with no owner --
-// logging a Warn for anything other than the documented env-bootstrap-has-
-// no-pairing case.
+// logging a Warn for lookup failures.
 //
 // The RevokedAt.Valid case is normally unreachable through the HTTP auth
 // path: GetDevicePairingKeyByHash (the query behind AgentConfig.LookupKey)
@@ -40,13 +39,7 @@ func (s *Server) resolveAgentUploadUserID(ctx context.Context, agentID string) i
 	pairing, err := s.db.Reader.GetDevicePairingByAgentID(ctx, agentID)
 	switch {
 	case err != nil:
-		// "env-bootstrap" (the shared BRANCHDAM_AGENT_API_KEY) has no
-		// pairing row by design -- that's the documented "agent without
-		// pairing = NULL" case, not worth a warning. Anything else here
-		// (a paired agent_id the lookup can't find) is worth knowing about.
-		if agentID != "env-bootstrap" {
-			s.log.Warn("agent upload: device pairing lookup failed, attribution NULL", "agentId", agentID, "err", err.Error())
-		}
+		s.log.Warn("agent upload: device pairing lookup failed, attribution NULL", "agentId", agentID, "err", err.Error())
 		return 0
 	case pairing.RevokedAt.Valid:
 		s.log.Warn("agent upload: pairing revoked, attribution NULL", "agentId", agentID)

@@ -43,7 +43,6 @@ func TestAgentServer_ReplayProtectionEndToEnd(t *testing.T) {
 
 	cfg := &config.Config{
 		Agent: config.Agent{
-			APIKey:           routeTestAgentKey,
 			SignedRequests:   true,
 			ReplayWindowSecs: 300, // 5 minutes
 		},
@@ -57,7 +56,8 @@ func TestAgentServer_ReplayProtectionEndToEnd(t *testing.T) {
 		Engine:  graph.NewEngine(database, nil),
 		Hub:     sse.New(),
 		Version: "test",
-	})
+
+		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	handler := srv.Handler()
 
 	t.Run("server rejects request without signature headers", func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestAgentServer_ReplayProtectionEndToEnd(t *testing.T) {
 	})
 
 	t.Run("server accepts fresh signed request", func(t *testing.T) {
-		body := []byte(`{"agentId":"test-macbook","clientVersion":"1.0.0"}`)
+		body := []byte(`{"agentId":"test-device","clientVersion":"1.0.0"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-API-Key", routeTestAgentKey)
@@ -92,7 +92,7 @@ func TestAgentServer_ReplayProtectionEndToEnd(t *testing.T) {
 	})
 
 	t.Run("server rejects replayed request with same nonce", func(t *testing.T) {
-		body := []byte(`{"agentId":"test-macbook","clientVersion":"1.0.0"}`)
+		body := []byte(`{"agentId":"test-device","clientVersion":"1.0.0"}`)
 		ts := strconv.FormatInt(time.Now().UnixNano(), 10)
 		nonce := "replay-unique-nonce-abc"
 		sig := signRequestForTest(routeTestAgentKey, http.MethodPost, "/api/v1/agent/handshake", nonce, ts, body)

@@ -73,7 +73,7 @@ func TestHandleThumbnailServesReadyNode(t *testing.T) {
 		t.Fatalf("cache.Write: %v", err)
 	}
 
-	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache, AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
@@ -104,7 +104,7 @@ func TestHandleThumbnailNotFoundWhenNotReady(t *testing.T) {
 			cache := thumbs.New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
 			node := thumbnailTestNode(t, database, state)
 
-			srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+			srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache, AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
 			srv.Handler().ServeHTTP(rr, req)
@@ -126,7 +126,7 @@ func TestHandleThumbnailReadMissSelfHeals(t *testing.T) {
 	cache := thumbs.New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
 	node := thumbnailTestNode(t, database, "READY")
 
-	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache, AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
@@ -163,7 +163,7 @@ func TestHandleThumbnailReadMissLeavesArchivedOrMissingNodeAlone(t *testing.T) {
 			cache := thumbs.New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
 			node := thumbnailTestNodeWithLifecycle(t, database, "READY", lifecycle)
 
-			srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+			srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache, AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
@@ -247,7 +247,7 @@ func TestHandleThumbnailNotFoundWhenCacheNil(t *testing.T) {
 	node := thumbnailTestNode(t, database, "READY")
 
 	// No ThumbCache in Deps -- must 404, not panic on a nil dereference.
-	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test"})
+	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/"+fmt.Sprint(node.ID)+"/thumbnail", nil)
 	srv.Handler().ServeHTTP(rr, req)
@@ -261,7 +261,7 @@ func TestHandleThumbnailNotFoundWhenUnknownID(t *testing.T) {
 	database := openThumbnailTestDB(t)
 
 	cache := thumbs.New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
-	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache})
+	srv := New(Deps{DB: database, Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test", ThumbCache: cache, AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/assets/999999/thumbnail", nil)
 	srv.Handler().ServeHTTP(rr, req)

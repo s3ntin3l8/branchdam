@@ -52,20 +52,6 @@ func TestAgentHandshake_PairedDeviceCrossCheck(t *testing.T) {
 // bootstrap path (the legacy workstation agent) doesn't get its body
 // agentId rejected -- it has no per-device claim, so any agent_id in
 // the body is fine. This is the migration path: existing operators
-// don't break when they upgrade.
-func TestAgentHandshake_EnvBootstrapAllowsAnyAgentId(t *testing.T) {
-	srv, _, _ := newPairingTestServer(t)
-	// routeTestAgentKey is the env-var key configured on newPairingTestServer's
-	// Config (it's the same constant serverWithGuard uses).
-	body := bytes.NewBufferString(`{"agentId":"anything-here"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", routeTestAgentKey)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
-}
-
 // TestAgentHandshake_PendingRotationHintAbsentWhenOnNewest verifies a
 // paired device already on the newest key gets no pendingRotation in
 // the response (sql.ErrNoRows from LatestActiveKey surfaces as nil DTO).

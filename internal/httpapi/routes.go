@@ -1863,16 +1863,10 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 	}
 	// Cross-check body.agentId against the Principal, same as
 	// handleAgentHandshake -- stops a paired device from attributing
-	// events to another device. The env-bootstrap path (the legacy
-	// shared-secret holder) is exempt: there's no per-device claim
-	// to mismatch against, and operator convenience lets one
-	// env-var key drive any body agent_id. Issue #453 PR C
-	// narrowed the cross-talk: paired clients sign with their
-	// per-device key, so a paired device can't forge env-bootstrap's
-	// signature even if it sets body.agentId to "env-bootstrap".
-	// PR F will retire this carve-out entirely when the env-var
-	// field is removed.
-	if p.Name != "env-bootstrap" && in.Body.AgentID != p.Name {
+	// events to another device. Issue #453 PR F removed the legacy
+	// env-bootstrap carve-out: all agent authentication now goes
+	// through per-device LookupKey.
+	if in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
 
@@ -1988,15 +1982,10 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	// attached to its Principal (set by AgentChain via pairing.KeyLookup).
 	// A mismatch means a device is either spoofing another's identity in
 	// the body, or the env-bootstrap path is being asked to impersonate a
-	// specific paired device -- both forbidden. The env-bootstrap path
-	// (the legacy shared-secret holder) is allowed to send any body
-	// agent_id since there's no per-device claim to mismatch against;
-	// issue #453 PR C narrowed the cross-talk by routing HMAC signing
-	// through per-device keys for paired clients, so a paired device
-	// can't forge env-bootstrap's signature even if it spoofs
-	// body.agentId. PR F will retire this carve-out entirely when the
-	// env-var field is removed.
-	if p.Name != "env-bootstrap" && in.Body.AgentID != "" && in.Body.AgentID != p.Name {
+	// specific paired device -- both forbidden. Issue #453 PR F
+	// removed the legacy env-bootstrap carve-out: all agent
+	// authentication now goes through per-device LookupKey.
+	if in.Body.AgentID != "" && in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
 
@@ -2041,7 +2030,7 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	// result into the DTO. The plaintext of the new key is included
 	// -- this is the only mechanism for the device to learn it
 	// without re-scanning a QR.
-	if s.pairingService != nil && p.Name != "env-bootstrap" && in.Body.CurrentKeyID != nil {
+	if s.pairingService != nil && in.Body.CurrentKeyID != nil {
 		// LatestActiveKey looks up the active key for this agent_id
 		// that's strictly newer than the supplied currentKeyID. If the
 		// caller is already on the newest, it returns sql.ErrNoRows --

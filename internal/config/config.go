@@ -36,7 +36,6 @@ func validateSecretExpansion(cfg Config) error {
 		path string
 		val  string
 	}{
-		{"agent.apiKey", cfg.Agent.APIKey},
 		{"immich.apiKey", cfg.Immich.APIKey},
 		{"immich.apiUrl", cfg.Immich.APIURL},
 	}
@@ -306,15 +305,19 @@ type Workers struct {
 }
 
 // Agent configures the machine-principal auth chain (internal/auth, PR 8).
-// The key itself is never set directly in config.yaml -- it is meant to be
-// injected via ${BRANCHDAM_AGENT_API_KEY} from a gitignored .env, per
-// docs/forward-auth.md. signedRequests and replayWindowSecs live under
-// `agent:` (not `server:`) because they are agent-route-specific; issue
-// #376's spec used `server.signedRequests`/`server.replayWindow` and
-// the keys were deliberately renamed during implementation so the config
-// mirrors the code path (internal/auth.AgentConfig) that consumes them.
+// The historical shared-secret `apiKey` field (env-var
+// BRANCHDAM_AGENT_API_KEY, env-bootstrap principal) was retired in
+// issue #453 PR F once Companion Pairing (PRs B/C) and admin PATs
+// (PR E) covered every operator-flow that the shared secret used to
+// serve. Agent routes now authenticate strictly via the pairing
+// service's LookupKey callback wired at server startup -- there is
+// no server-wide fallback. signedRequests and replayWindowSecs live
+// under `agent:` (not `server:`) because they are agent-route-
+// specific; issue #376's spec used `server.signedRequests`/
+// `server.replayWindow` and the keys were deliberately renamed during
+// implementation so the config mirrors the code path
+// (internal/auth.AgentConfig) that consumes them.
 type Agent struct {
-	APIKey             string   `yaml:"apiKey"`
 	SignedRequests     bool     `yaml:"signedRequests"`
 	ReplayWindowSecs   int      `yaml:"replayWindowSecs"`
 	SignedMaxBodyBytes int64    `yaml:"signedMaxBodyBytes"`

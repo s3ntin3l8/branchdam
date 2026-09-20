@@ -39,7 +39,7 @@ func newPairingTestServer(t *testing.T) (*Server, *db.DB, *pairing.Service) {
 
 	pairSvc := pairing.NewService(database, nil, nil)
 	srv := New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,
 		Guard:   storage.NewGuard(nil),
 		Prober:  probe.New(),

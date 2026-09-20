@@ -63,7 +63,7 @@ func newPairingUploadTestServer(t *testing.T) (*Server, *db.DB, *pairing.Service
 
 	pairSvc := pairing.NewService(database, nil, nil)
 	srv := New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,
 		Guard:   guard,
 		Prober:  probe.New(),
@@ -190,11 +190,15 @@ func TestAgentUpload_DedupBackfillsMissingAttribution(t *testing.T) {
 	data := []byte("dedup backfill attribution test bytes")
 	hash := blake3Hex(t, data)
 
-	// First upload: unauthenticated-for-attribution-purposes env-bootstrap
-	// key (no pairing row), so the node lands with uploaded_by_user_id
-	// NULL -- simulating a scanner/watcher-indexed or pre-pairing upload.
+	// First upload: paired device WITHOUT an owner, so the node lands
+	// with uploaded_by_user_id NULL -- simulating a scanner/watcher-
+	// indexed or pre-owner-attribution upload.
+	pNoOwner, keyNoOwner, err := pairSvc.CreatePairing(ctx, "Dedup Scanner", "test-admin", 0, stubQRPayloadForAttrTest)
+	require.NoError(t, err)
+	_ = pNoOwner
+
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
-	req1.Header.Set("X-API-Key", routeTestAgentKey)
+	req1.Header.Set("X-API-Key", keyNoOwner.Plaintext)
 	req1.Header.Set("X-Filename", "first.jpg")
 	req1.Header.Set("X-Blake3-Hash", hash)
 	rec1 := httptest.NewRecorder()

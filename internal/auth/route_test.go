@@ -103,7 +103,7 @@ func TestRouteWithConfig_ForwardMode_FallsBackToForwardWhenLocalIsNil(t *testing
 		}
 	})
 
-	h := RouteWithConfig(AgentConfig{APIKey: ""}, AuthModeForward, nil, testLogger(), rec)
+	h := RouteWithConfig(AgentConfig{}, AuthModeForward, nil, testLogger(), rec)
 	h.ServeHTTP(w, r)
 
 	assert.NotNil(t, observed)
@@ -133,7 +133,7 @@ func TestRouteWithConfig_BothMode_LocalOverridesForward(t *testing.T) {
 		Authenticated: true,
 	})
 
-	h := RouteWithConfig(AgentConfig{APIKey: ""}, AuthModeBoth, localChain, testLogger(), rec)
+	h := RouteWithConfig(AgentConfig{}, AuthModeBoth, localChain, testLogger(), rec)
 	h.ServeHTTP(w, r)
 
 	assert.NotNil(t, observed)
@@ -159,7 +159,7 @@ func TestRouteWithConfig_AgentPathSkipsBothChains(t *testing.T) {
 	})
 
 	localChain := fakeChain(Principal{Kind: KindUser, Name: "alice", Authenticated: true})
-	h := RouteWithConfig(AgentConfig{APIKey: ""}, AuthModeBoth, localChain, testLogger(), rec)
+	h := RouteWithConfig(AgentConfig{}, AuthModeBoth, localChain, testLogger(), rec)
 	h.ServeHTTP(w, r)
 
 	// AgentChain didn't authenticate (no API key), so no Principal -- but
@@ -205,7 +205,7 @@ func TestRouteWithConfig_BothMode_LocalViewPropagated(t *testing.T) {
 		LocalUserView{UserID: 42, IsAdmin: true},
 	)
 
-	h := RouteWithConfig(AgentConfig{APIKey: ""}, AuthModeBoth, localChain, testLogger(), rec)
+	h := RouteWithConfig(AgentConfig{}, AuthModeBoth, localChain, testLogger(), rec)
 	h.ServeHTTP(w, r)
 
 	if observedLocalView == nil {
@@ -250,7 +250,7 @@ func TestRouteWithConfig_BothMode_JITDoesNotOverwriteLocalView(t *testing.T) {
 	}
 
 	h := RouteWithConfigAndJIT(
-		AgentConfig{APIKey: ""}, AuthModeBoth, localChain,
+		AgentConfig{}, AuthModeBoth, localChain,
 		jit, nil, false, testLogger(), rec,
 	)
 	h.ServeHTTP(w, r)

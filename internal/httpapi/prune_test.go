@@ -133,7 +133,7 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	})
 
 	cfg := &config.Config{
-		Agent:   config.Agent{APIKey: routeTestAgentKey},
+		Agent:   config.Agent{},
 		Pruning: config.Pruning{Enabled: true},
 		StorageLocations: []config.StorageLocation{
 			{Name: "t1", RootPath: resolvedTier1, Tier: "TIER1_LOCAL_SCRATCH", Prunable: true, CacheTTLHours: cacheTTLHours},
@@ -144,7 +144,8 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 	srv := New(Deps{
 		Config: cfg, DB: database, Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, tier1ID, candidate
 }
 
@@ -377,7 +378,7 @@ func TestHandlePruneNodeIDsFiltersCandidates(t *testing.T) {
 func TestHandlePrune_DisabledByConfig(t *testing.T) {
 	srv, _, tier1ID, _ := pruneTestServer(t, 1)
 	srv.cfgProvider = staticConfigProvider{cfg: &config.Config{
-		Agent:   config.Agent{APIKey: routeTestAgentKey},
+		Agent:   config.Agent{},
 		Pruning: config.Pruning{Enabled: false},
 	}}
 

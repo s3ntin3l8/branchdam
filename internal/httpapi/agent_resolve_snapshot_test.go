@@ -51,13 +51,14 @@ func resolveSnapshotServer(t *testing.T) (*Server, *db.DB, string, string) {
 		t.Fatal(err)
 	}
 	srv := New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database,
 		Guard: storage.NewGuard([]storage.Location{
 			{ID: virtualID, Name: "resolve-virtual", RootPath: "/virtual/resolve", Tier: "PROJECTS", IsVirtual: true},
 			{ID: mediaID, Name: "media", RootPath: "/storage/media", Tier: "TIER2_EXPORTS"},
 		}),
-	})
+
+		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, "018f0000-0000-7000-8000-000000000102", "018f0000-0000-7000-8000-000000000101"
 }
 
@@ -74,7 +75,7 @@ func postResolveSnapshot(t testing.TB, srv *Server, body any) *httptest.Response
 func resolveSnapshotBody(timelineUUID, sourceUUID, path, clipName string) map[string]any {
 	evidence := map[string]any{"mediaFilePath": path, "timelineId": "tl1", "clipName": clipName}
 	return map[string]any{
-		"agentId": "agent-a", "scopeId": strings.Repeat("a", 64),
+		"agentId": "test-device", "scopeId": strings.Repeat("a", 64),
 		"timelines": []map[string]any{{
 			"timelineId": "tl1", "nodeUuid": timelineUUID,
 			"filePath":    "/virtual/resolve/" + timelineUUID,
@@ -192,7 +193,10 @@ func TestResolveSnapshotRollbackAndAgentIsolation(t *testing.T) {
 	}
 	body["agentId"] = "agent-b"
 	rr = postResolveSnapshot(t, srv, body)
-	if rr.Code != http.StatusConflict {
+	// Cross-agent claim: the agent auth chain rejects the mismatched
+	// agentId at the middleware level (403 Forbidden) before the
+	// handler can check for a source conflict (409).
+	if rr.Code != http.StatusForbidden {
 		t.Fatalf("cross-agent claim status = %d %s", rr.Code, rr.Body.String())
 	}
 	var parsed map[string]any
