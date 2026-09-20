@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.24.0](https://github.com/s3ntin3l8/branchdam/compare/v0.23.0...v0.24.0) (2026-09-20)
+
+
+### Features
+
+* **auth:** admin PATs + bootstrap mechanism ([#468](https://github.com/s3ntin3l8/branchdam/issues/468)) ([fa041ac](https://github.com/s3ntin3l8/branchdam/commit/fa041ac4c546e2a6d999a6f38197d9b43cf5d74d))
+* **auth:** let agent routes run with only Companion Pairing wired ([7a5d11c](https://github.com/s3ntin3l8/branchdam/commit/7a5d11c50783608277074ecfe71a0e25a9d473b2))
+* **auth:** per-device HMAC signing via pairing.KeyLookupResult ([#466](https://github.com/s3ntin3l8/branchdam/issues/466)) ([7254665](https://github.com/s3ntin3l8/branchdam/commit/72546657a899e51ed5770cdc63397820501fe061))
+* remove agent.apiKey and env-bootstrap shared-secret (PR F, [#453](https://github.com/s3ntin3l8/branchdam/issues/453)) ([#469](https://github.com/s3ntin3l8/branchdam/issues/469)) ([2add58a](https://github.com/s3ntin3l8/branchdam/commit/2add58a59dc4967e4b167d48a666c227a29b757b))
+
+
+### Bug Fixes
+
+* **resolve:** protect aliased unresolved edges ([#470](https://github.com/s3ntin3l8/branchdam/issues/470)) ([c45fd3e](https://github.com/s3ntin3l8/branchdam/commit/c45fd3e516c9e10a1e70afd16a9b661c02b03203))
+
 ## [0.23.0](https://github.com/s3ntin3l8/branchdam/compare/v0.22.0...v0.23.0) (2026-09-18)
 
 
