@@ -94,6 +94,7 @@ ordinary JSON (not the double-encoded `/events` envelope):
     "evidenceJson": {
       "timelineId": "<Resolve timeline ID>",
       "mediaFilePath": "D:\\Videos\\clip.mov",
+      "mediaFilePaths": ["D:\\Videos\\clip.mov", "D:\\Videos\\CLIP.mov"],
       "placements": [{"itemId": "<Resolve item ID>", "clipName": "clip.mov"}]
     }
   }],
@@ -104,6 +105,12 @@ ordinary JSON (not the double-encoded `/events` envelope):
 
 An unresolved membership omits `sourceNodeUuid` and `evidenceJson`; it remains
 present in the database snapshot and protects its existing edge from removal.
+For a previously resolved membership, `evidenceJson.mediaFilePaths` records
+all original Resolve path aliases that were merged into the edge. An unresolved
+membership protects the edge when its path matches either the primary
+`mediaFilePath` or one of those recorded aliases. A path that has never been
+recorded in the edge's evidence cannot be associated with that edge while it
+is unresolved, so it does not suppress reconciliation of an unrelated removal.
 Resolved memberships must be unique by `(timelineId, sourceNodeUuid)`; agents
 merge path aliases and repeated placements into one membership. Duplicate
 source memberships are rejected before the transaction begins.
