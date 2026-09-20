@@ -194,34 +194,3 @@ func TestTrustedProxiesFieldSetRejectsWrongType(t *testing.T) {
 		t.Fatal("Set with wrong type = nil, want error")
 	}
 }
-
-// TestAgentAPIKeyFieldValidation guards against a too-short agent.apiKey
-// silently persisting through the settings UI and only 503'ing every agent
-// route (paired devices included -- see internal/auth.AgentChainWithConfig's
-// keyConfigured gate, which runs before the pairing LookupKey branch) after
-// the next restart.
-func TestAgentAPIKeyFieldValidation(t *testing.T) {
-	field, ok := Lookup("agent.apiKey")
-	if !ok {
-		t.Fatal("agent.apiKey not registered")
-	}
-	if !field.Generatable {
-		t.Error("agent.apiKey Generatable = false, want true")
-	}
-
-	tooShort := strings.Repeat("a", 31)
-	if err := field.Validate(tooShort); err == nil {
-		t.Error("Validate(31 chars) = nil, want error")
-	} else if !strings.Contains(err.Error(), "at least") {
-		t.Errorf("Validate error = %q, want it to mention the minimum length", err.Error())
-	}
-
-	longEnough := strings.Repeat("a", 43)
-	if err := field.Validate(longEnough); err != nil {
-		t.Errorf("Validate(43 chars) = %v, want nil", err)
-	}
-
-	if err := field.Validate(123); err == nil {
-		t.Error("Validate(int) = nil, want error")
-	}
-}

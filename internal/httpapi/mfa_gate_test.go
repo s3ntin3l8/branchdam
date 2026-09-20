@@ -57,7 +57,7 @@ func mfaGateTestServer(t *testing.T) (*Server, *db.DB, *users.Service, *mfa.Serv
 	pool.Run(ctx)
 
 	srv := New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: localAuthTestAgentKey}, Auth: config.Auth{Mode: string(auth.AuthModeLocal)}},
+		Config:  &config.Config{Agent: config.Agent{}, Auth: config.Auth{Mode: string(auth.AuthModeLocal)}},
 		DB:      database,
 		Prober:  probe.New(),
 		Pool:    pool,
@@ -75,7 +75,8 @@ func mfaGateTestServer(t *testing.T) (*Server, *db.DB, *users.Service, *mfa.Serv
 			MFADisableLimiter:   mfaDisableLimiter,
 			AuthMode:            auth.AuthModeLocal,
 		},
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, svc, mfaSvc
 }
 

@@ -36,13 +36,10 @@ const (
 // satisfy this; tests use it to inject fakes.
 type ChainBuilder func(next http.Handler) http.Handler
 
-// Route is the only place that decides which auth chain applies to a
-// request: AgentChain for AgentPathPrefix, then forward-auth and/or
-// local-cookie on the browser path. next is the shared handler both
-// chains eventually call.
-func Route(apiKey string, log *slog.Logger, next http.Handler) http.Handler {
-	return RouteWithConfig(AgentConfig{APIKey: apiKey}, AuthModeForward, nil, log, next)
-}
+// RouteWithConfig is the only place that decides which auth chain
+// applies to a request: AgentChain for AgentPathPrefix, then
+// forward-auth and/or local-cookie on the browser path. next is the
+// shared handler both chains eventually call.
 
 // JITProvisioner is the function-shape hook RouteWithConfig calls
 // after merging the forward + local Principals but before the real

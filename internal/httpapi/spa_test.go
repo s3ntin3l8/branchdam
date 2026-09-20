@@ -49,7 +49,8 @@ func testServerWithSPA(t *testing.T, spa fs.FS) *Server {
 		Prober: probe.New(), Pool: pool,
 		Engine: graph.NewEngine(database, log), Hub: sse.New(),
 		Version: "test", SPA: spa,
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestServeIndexHTMLSubstitutesOriginFromDirectRequest(t *testing.T) {
@@ -92,7 +93,8 @@ func TestServeIndexHTMLHonorsForwardedHeaders(t *testing.T) {
 		Prober: probe.New(), Pool: pool,
 		Engine: graph.NewEngine(database, log), Hub: sse.New(),
 		Version: "test", SPA: spa,
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	req := httptest.NewRequest(http.MethodGet, "http://internal-backend:8080/", nil)
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -196,7 +198,8 @@ func TestServeIndexHTMLRejectsForwardedHeadersFromUntrustedProxy(t *testing.T) {
 		Prober: probe.New(), Pool: pool,
 		Engine: graph.NewEngine(database, log), Hub: sse.New(),
 		Version: "test", SPA: spa,
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	req := httptest.NewRequest(http.MethodGet, "http://internal-backend:8080/", nil)
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -230,7 +233,8 @@ func TestServeIndexHTMLHonorsForwardedHeadersFromTrustedProxy(t *testing.T) {
 		Prober: probe.New(), Pool: pool,
 		Engine: graph.NewEngine(database, log), Hub: sse.New(),
 		Version: "test", SPA: spa,
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	req := httptest.NewRequest(http.MethodGet, "http://10.0.0.5:8080/", nil)
 	req.RemoteAddr = "10.0.0.99:54321"

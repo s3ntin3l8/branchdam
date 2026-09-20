@@ -83,7 +83,8 @@ func TestHandleListAssets_UploadedByUserIdFilter(t *testing.T) {
 		Settings: store, DB: database, Hub: sse.New(), Version: "test",
 		Attribution: usersSvc,
 		Audit:       audit.NewService(database, usersSvc),
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	// Provision alice + bob via ResolveOrCreate (real attribution rows).
 	alice, err := usersSvc.ResolveOrCreate(context.Background(), auth.Principal{

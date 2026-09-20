@@ -100,14 +100,10 @@ string and fails the build if anything else references it.
 
 ## 3. branchDAM: agent key and trust configuration
 
-```bash
-# .env (gitignored) -- see .env.example
-BRANCHDAM_AGENT_API_KEY=<32+ random characters, e.g. `openssl rand -hex 32`>
-```
-
-If this key is unset or under 32 characters, every `/api/v1/agent/*` request fails closed with
-`503` -- logged once at startup, not silently treated as "no auth required"
-(`internal/auth.AgentChain`).
+Agent routes authenticate via per-device pairing only — each paired device
+gets its own key via `POST /api/v1/agent/handshake/pair` (see
+[`agent-api.md`](agent-api.md)). There is no shared server-wide key to
+configure or rotate.
 
 The browser side needs no configuration of its own: `BrowserChain` trusts whatever
 `X-Authentik-*` headers arrive, because Traefik's `strip-identity@file → authentik@file` chain
@@ -156,10 +152,9 @@ dispatch to it happens in `internal/auth.Route` ("the only place that decides wh
 applies to a request", per its own doc comment) and in Traefik's `branchdam-agent` router rule
 (§2), not in `AgentChain`. Neither `Route` nor `AgentChain` reads source IP or cares which
 network the request arrived over, and (per §3) branchDAM has no `TRUSTED_PROXY_IPS`-style
-allowlist to reconfigure per network either way. The security boundary is the key, not the
-network: the same `BRANCHDAM_AGENT_API_KEY` that authenticates a request from the LAN
-authenticates one arriving over the tailnet, with the same 503-on-unset-or-short-key behavior
-described in §3 and the same 401-on-missing-key behavior demonstrated in §5's curl example.
+allowlist to reconfigure per network either way. The security boundary is the per-device key, not the
+network: the same paired-device key that authenticates a request from the LAN
+authenticates one arriving over the tailnet, with the same 401-on-wrong-or-missing-key behavior demonstrated in §5's curl example.
 
 The overlay is what makes the *sync* land promptly, not what makes ingest work at all -- per
 Pillar 3 the (not-yet-built) workstation agent queues ingest events locally regardless of
@@ -177,11 +172,11 @@ determines whether "reconnect" means "back on the LAN" or "the tailnet came up."
 curl -s https://dam.example.com/api/v1/me | jq
 # → {"kind": "user", "name": "your-username", "groups": [...]}
 
-# Agent path, with the shared key:
-curl -s -X POST -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.example.com/api/v1/agent/hello | jq
+# Agent path, with a paired device's key:
+curl -s -X POST -H "X-API-Key: <paired-device-key>" https://dam.example.com/api/v1/agent/hello | jq
 # → {"ok": true, "version": "..."}
 
-# Agent path WITHOUT the key -- must be 401, not silently authenticated:
+# Agent path WITHOUT a key -- must be 401, not silently authenticated:
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dam.example.com/api/v1/agent/hello
 # → 401
 ```

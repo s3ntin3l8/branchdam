@@ -101,7 +101,7 @@ func passwordResetEmailTestServer(t *testing.T, provider, baseURL string, notifi
 
 	srv := New(Deps{
 		Config: &config.Config{
-			Agent: config.Agent{APIKey: localAuthTestAgentKey},
+			Agent: config.Agent{},
 			Auth: config.Auth{
 				Mode:  string(auth.AuthModeLocal),
 				Email: config.AuthEmail{Provider: provider, BaseURL: baseURL},
@@ -122,7 +122,8 @@ func passwordResetEmailTestServer(t *testing.T, provider, baseURL string, notifi
 			AuthMode:     auth.AuthModeLocal,
 			Email:        notifier,
 		},
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, testEmail
 }
 

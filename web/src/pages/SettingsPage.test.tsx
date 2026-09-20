@@ -304,11 +304,9 @@ describe("SettingsPage", () => {
     vi.mocked(api.getSettings).mockResolvedValue(
       settingsResponse({
         fields: [
-          ...settingsResponse().fields,
           field({
-            key: "agent.apiKey",
-            label: "Shared Agent Secret",
-            group: "Agent",
+            key: "immich.apiKey",
+            label: "Immich API Key",
             value: undefined,
             source: "config",
             secret: true,
@@ -321,7 +319,7 @@ describe("SettingsPage", () => {
 
     renderWithClient(<SettingsPage />);
 
-    const row = await screen.findByTestId("field-row-agent.apiKey");
+    const row = await screen.findByTestId("field-row-immich.apiKey");
     const generateButton = within(row).getByRole("button", { name: "Generate" });
     await user.click(generateButton);
 

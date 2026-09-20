@@ -54,14 +54,14 @@ func TestLoadMissingFile(t *testing.T) {
 }
 
 func TestExpandEnvSet(t *testing.T) {
-	t.Setenv("BRANCHDAM_TEST_KEY", "supersecret")
-	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_TEST_KEY}\"\n")
+	t.Setenv("BRANCHDAM_TEST_ADDR", ":9999")
+	path := writeConfig(t, "listenAddr: \"${BRANCHDAM_TEST_ADDR}\"\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Agent.APIKey != "supersecret" {
-		t.Errorf("Agent.APIKey = %q, want supersecret", cfg.Agent.APIKey)
+	if cfg.ListenAddr != ":9999" {
+		t.Errorf("ListenAddr = %q, want :9999", cfg.ListenAddr)
 	}
 }
 
@@ -84,7 +84,7 @@ func TestExpandEnvUnsetInSensitiveFieldRejected(t *testing.T) {
 	// would silently authenticate with a broken credential.
 	t.Setenv("BRANCHDAM_TEST_UNSET_VAR_XYZ", "")
 	os.Unsetenv("BRANCHDAM_TEST_UNSET_VAR_XYZ") //nolint:errcheck // intentional: test needs var unset
-	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_TEST_UNSET_VAR_XYZ}\"\n")
+	path := writeConfig(t, "immich:\n  apiUrl: \"http://test\"\n  apiKey: \"${BRANCHDAM_TEST_UNSET_VAR_XYZ}\"\n")
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("Load with unresolved secret: want error, got nil")
@@ -125,7 +125,6 @@ storageLocations:
 }
 
 func TestLoadExampleConfig(t *testing.T) {
-	t.Setenv("BRANCHDAM_AGENT_API_KEY", "example-agent-key")
 	t.Setenv("IMMICH_API_KEY", "example-immich-key")
 	t.Setenv("IMMICH_API_URL", "http://immich.example.com")
 	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"))
@@ -222,26 +221,26 @@ func TestLoadNoWarningOnRestrictedConfig(t *testing.T) {
 func TestLoadRejectsUnresolvedSecretEnvVars(t *testing.T) {
 	t.Setenv("BRANCHDAM_UNDEFINED_TEST_VAR", "")
 	os.Unsetenv("BRANCHDAM_UNDEFINED_TEST_VAR") //nolint:errcheck // intentional: test needs var unset
-	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_UNDEFINED_TEST_VAR}\"\n")
+	path := writeConfig(t, "immich:\n  apiUrl: \"http://test\"\n  apiKey: \"${BRANCHDAM_UNDEFINED_TEST_VAR}\"\n")
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("Load with unresolved secret: want error, got nil")
 	}
-	if !strings.Contains(err.Error(), "agent.apiKey") {
-		t.Errorf("error = %q, want it to mention agent.apiKey", err.Error())
+	if !strings.Contains(err.Error(), "immich.apiKey") {
+		t.Errorf("error = %q, want it to mention immich.apiKey", err.Error())
 	}
 }
 
 func TestLoadRejectsMultipleUnresolvedSecrets(t *testing.T) {
 	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_A") //nolint:errcheck // intentional: test needs var unset
 	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_B") //nolint:errcheck // intentional: test needs var unset
-	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_A}\"\nimmich:\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_B}\"\n")
+	path := writeConfig(t, "immich:\n  apiUrl: \"${BRANCHDAM_UNDEFINED_VAR_A}\"\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_B}\"\n")
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("Load with multiple unresolved secrets: want error, got nil")
 	}
-	if !strings.Contains(err.Error(), "agent.apiKey") {
-		t.Errorf("error = %q, want it to mention agent.apiKey", err.Error())
+	if !strings.Contains(err.Error(), "immich.apiUrl") {
+		t.Errorf("error = %q, want it to mention immich.apiUrl", err.Error())
 	}
 	if !strings.Contains(err.Error(), "immich.apiKey") {
 		t.Errorf("error = %q, want it to mention immich.apiKey", err.Error())
@@ -249,19 +248,19 @@ func TestLoadRejectsMultipleUnresolvedSecrets(t *testing.T) {
 }
 
 func TestLoadAcceptsResolvedSecretEnvVars(t *testing.T) {
-	t.Setenv("BRANCHDAM_TEST_SECRET", "my-api-key")
-	path := writeConfig(t, "agent:\n  apiKey: \"${BRANCHDAM_TEST_SECRET}\"\n")
+	t.Setenv("BRANCHDAM_TEST_IMMICH_KEY", "my-immich-key")
+	path := writeConfig(t, "immich:\n  apiUrl: \"http://test\"\n  apiKey: \"${BRANCHDAM_TEST_IMMICH_KEY}\"\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Agent.APIKey != "my-api-key" {
-		t.Errorf("Agent.APIKey = %q, want my-api-key", cfg.Agent.APIKey)
+	if cfg.Immich.APIKey != "my-immich-key" {
+		t.Errorf("Immich.APIKey = %q, want my-immich-key", cfg.Immich.APIKey)
 	}
 }
 
 func TestLoadAllowsEmptySecretFields(t *testing.T) {
-	path := writeConfig(t, "agent:\n  apiKey: \"\"\nimmich:\n  apiUrl: \"\"\n  apiKey: \"\"\n")
+	path := writeConfig(t, "immich:\n  apiUrl: \"\"\n  apiKey: \"\"\n")
 	_, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load with empty secrets: %v, want nil", err)

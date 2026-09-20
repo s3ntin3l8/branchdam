@@ -317,26 +317,6 @@ func TestStoreApplyRejectsInvalidValue(t *testing.T) {
 	}
 }
 
-// TestStoreApplyRejectsShortAgentAPIKey verifies a too-short agent.apiKey is
-// rejected at save time (via Field.Validate, wired in registry.go) rather
-// than persisting and only 503'ing every agent route -- paired devices
-// included -- after the next restart (see internal/auth's keyConfigured
-// gate, which runs before the pairing LookupKey branch).
-func TestStoreApplyRejectsShortAgentAPIKey(t *testing.T) {
-	ctx := context.Background()
-	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	err = store.Apply(ctx, map[string]any{"agent.apiKey": "too-short"}, nil, "tester")
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("Apply(agent.apiKey=too-short) = %v, want ErrInvalidInput", err)
-	}
-	if store.IsOverridden("agent.apiKey") {
-		t.Error("IsOverridden after rejected Apply = true, want false (no row should be written)")
-	}
-}
-
 func TestStoreIsOverridden(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)

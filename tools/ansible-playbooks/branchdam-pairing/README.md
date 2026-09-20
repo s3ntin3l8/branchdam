@@ -14,9 +14,9 @@ paired workstation gets a unique `agent_id` (`dev-xxxxxxxx`) and a
 plaintext key minted server-side. The agent signs requests with the
 key directly; the server validates against a per-device HMAC derived
 from the same key (issue #453 PR C). Replacing the previous
-server-wide `BRANCHDAM_AGENT_API_KEY` shared-secret path.
+server-wide shared-secret path (removed in PR F).
 
-This playbook does NOT touch the env-var shared-secret path. The
+This playbook does NOT touch the server-side auth configuration. The
 workstation agent's `pair <url>` subcommand (`s3ntin3l8/branchdam-agent`
 PR #243, landed on `main` after v1.12.1) does the heavy lifting:
 parses the URL, refuses a group/world-readable existing config,

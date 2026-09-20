@@ -19,7 +19,6 @@ func TestAgentChainLookupKeyHit(t *testing.T) {
 	var got Principal
 	var ignoredAuthHeader string
 	chain := AgentChainWithConfig(AgentConfig{
-		APIKey: testKey,
 		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
 			return KeyLookupResult{AgentID: "iphone-a3f9c2e1"}, nil
 		},
@@ -48,7 +47,6 @@ func TestAgentChainLookupKeyHit(t *testing.T) {
 func TestAgentChainLookupKeyMiss(t *testing.T) {
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
-		APIKey:    testKey,
 		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
 	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
@@ -74,7 +72,6 @@ func TestAgentChainLookupKeyMiss(t *testing.T) {
 func TestAgentChainLookupKeyDBError(t *testing.T) {
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
-		APIKey: testKey,
 		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
 			return KeyLookupResult{}, errors.New("simulated DB failure")
 		},
@@ -93,64 +90,6 @@ func TestAgentChainLookupKeyDBError(t *testing.T) {
 	if handlerCalled {
 		t.Error("handler was called despite a LookupKey DB error")
 	}
-}
-
-// TestAgentChainEnvVarAndLookupKeyBothConfigured verifies the two paths
-// coexist: presenting the env-var key authenticates as env-bootstrap,
-// presenting a different (paired) key authenticates as that device's
-// agent_id. A request that matches neither returns 401.
-func TestAgentChainEnvVarAndLookupKeyBothConfigured(t *testing.T) {
-	chain := AgentChainWithConfig(AgentConfig{
-		APIKey: testKey,
-		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
-			if presented == "device-key-1" {
-				return KeyLookupResult{AgentID: "iphone-a3f9c2e1"}, nil
-			}
-			return KeyLookupResult{}, nil
-		},
-	}, nil)(principalCapturingHandler(t, nil, nil))
-
-	cases := []struct {
-		name       string
-		key        string
-		wantStatus int
-		wantName   string
-	}{
-		{"env-var key authenticates as env-bootstrap", testKey, http.StatusOK, "env-bootstrap"},
-		{"device key authenticates as agent_id", "device-key-1", http.StatusOK, "iphone-a3f9c2e1"},
-		{"unknown key is 401", "no-such-key", http.StatusUnauthorized, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			var got Principal
-			var ignoredAuthHeader string
-			subChain := AgentChainWithConfig(AgentConfig{
-				APIKey: testKey,
-				LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
-					if presented == "device-key-1" {
-						return KeyLookupResult{AgentID: "iphone-a3f9c2e1"}, nil
-					}
-					return KeyLookupResult{}, nil
-				},
-			}, nil)(principalCapturingHandler(t, &got, &ignoredAuthHeader))
-
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
-			req.Header.Set(apiKeyHeader, c.key)
-			rr := httptest.NewRecorder()
-			subChain.ServeHTTP(rr, req)
-
-			if rr.Code != c.wantStatus {
-				t.Errorf("status = %d, want %d", rr.Code, c.wantStatus)
-			}
-			if c.wantName != "" && got.Name != c.wantName {
-				t.Errorf("Principal.Name = %q, want %q", got.Name, c.wantName)
-			}
-		})
-	}
-
-	// Reference chain so the outer `chain` declaration isn't flagged
-	// unused -- the per-case subChain above is what actually runs.
-	_ = chain
 }
 
 // TestAgentChainLookupKeyOnlyNoAPIKey covers the post-#453 pairing-only
@@ -184,35 +123,6 @@ func TestAgentChainLookupKeyOnlyNoAPIKey(t *testing.T) {
 	}
 }
 
-// TestAgentChainLookupKeyOnlyShortAPIKey verifies the relaxed gate does
-// not brick paired traffic when an operator sets a too-short env-var key
-// alongside a wired LookupKey. The settings-validator catches this at
-// save time (internal/settings/registry.go's minLenString on agent.apiKey,
-// PR #454), but the runtime gate must also tolerate it -- a misconfigured
-// env-var that nothing is actually using must not 503 paired devices.
-func TestAgentChainLookupKeyOnlyShortAPIKey(t *testing.T) {
-	var got Principal
-	var authHeader string
-	chain := AgentChainWithConfig(AgentConfig{
-		APIKey: "short12", // 7 chars, well below MinAgentKeyLength
-		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
-			return KeyLookupResult{AgentID: "dev-abc12345"}, nil
-		},
-	}, nil)(principalCapturingHandler(t, &got, &authHeader))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
-	req.Header.Set(apiKeyHeader, "paired-device-plaintext-key")
-	rr := httptest.NewRecorder()
-	chain.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (paired device must authenticate even when env-var is misconfigured short)", rr.Code)
-	}
-	if got.Name != "dev-abc12345" {
-		t.Errorf("Principal.Name = %q, want %q", got.Name, "dev-abc12345")
-	}
-}
-
 // TestAgentChainLookupKeyOnlyMissNoAPIKey: pairing-only deployment (env-var
 // unset), presented key doesn't match any active pairing -> 401 (not 503,
 // not 500). Operator monitoring should be able to distinguish "your key
@@ -239,35 +149,6 @@ func TestAgentChainLookupKeyOnlyMissNoAPIKey(t *testing.T) {
 	}
 }
 
-// TestAgentChainLookupKeyOnlyMissShortAPIKey covers the corner where both
-// the env-var is misconfigured-short AND the pairing lookup misses: the
-// relaxed gate lets the request through to the switch, the env-var branch
-// is unreachable (constantTimeEqual fails on the too-short key), and the
-// LookupKey miss returns 401 -- NOT 503. A 503 here would have meant the
-// operator can't distinguish "your pairing flow isn't returning the key
-// you think it is" from "your env-var is too short".
-func TestAgentChainLookupKeyOnlyMissShortAPIKey(t *testing.T) {
-	handlerCalled := false
-	chain := AgentChainWithConfig(AgentConfig{
-		APIKey:    "short12",
-		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
-	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlerCalled = true
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
-	req.Header.Set(apiKeyHeader, "no-such-paired-key")
-	rr := httptest.NewRecorder()
-	chain.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rr.Code)
-	}
-	if handlerCalled {
-		t.Error("handler was called despite a LookupKey miss")
-	}
-}
-
 // TestAgentChainNothingConfiguredStillFails503 verifies the relaxed gate
 // doesn't open the floodgates when neither path is configured: no env-var
 // AND no LookupKey means a true misconfiguration, and the historical
@@ -289,54 +170,6 @@ func TestAgentChainNothingConfiguredStillFails503(t *testing.T) {
 	}
 	if handlerCalled {
 		t.Error("handler was called despite no auth path configured")
-	}
-}
-
-// TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap locks in the
-// invariant called out in the agent.go MinAgentKeyLength doc comment
-// ("A shorter (or unset) key fails every agent request closed rather
-// than accepting a weak or empty secret"). The relaxed gate lets a
-// short env-var through when pairing is wired (paired traffic must
-// still work, see TestAgentChainLookupKeyOnlyShortAPIKey), but the
-// env-bootstrap branch must length-gate too -- otherwise a
-// misconfigured-short env-var becomes a live Principal{env-bootstrap,
-// KindMachine} (a principal that can act for any device) the moment
-// pairing is wired. Presented with the short env-var itself, the
-// request must 401, not authenticate as env-bootstrap.
-func TestAgentChainWeakEnvKeyNeverAuthenticatesAsBootstrap(t *testing.T) {
-	const weakKey = "short12" // 7 chars, well below MinAgentKeyLength
-
-	var got Principal
-	handlerCalled := false
-	chain := AgentChainWithConfig(AgentConfig{
-		APIKey: weakKey,
-		// LookupKey intentionally misses for everything presented here --
-		// we want the env-bootstrap branch to be the only candidate that
-		// could authenticate the presented weak key. A LookupKey that
-		// returned hit would mask the regression by authenticating via the
-		// pairing path instead.
-		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) { return KeyLookupResult{}, nil },
-	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlerCalled = true
-		p, ok := From(r.Context())
-		if ok {
-			got = p
-		}
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
-	req.Header.Set(apiKeyHeader, weakKey) // present the weak env-var itself
-	rr := httptest.NewRecorder()
-	chain.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (weak env-var must not authenticate as env-bootstrap)", rr.Code)
-	}
-	if handlerCalled {
-		t.Errorf("handler was called; weak env-var should have been rejected before reaching it. Principal.Name = %q, Kind = %q", got.Name, got.Kind)
-	}
-	if got.Name == "env-bootstrap" {
-		t.Errorf("Principal.Name = %q -- weak env-var leaked through as env-bootstrap (the regression this test guards)", got.Name)
 	}
 }
 
@@ -443,50 +276,6 @@ func TestAgentChainLookupKeyHMACAcrossDevicesNoCrossSign(t *testing.T) {
 	}
 }
 
-// TestAgentChainSignedRequestsEnvBootstrapStillUsesAPIKey verifies that
-// the env-bootstrap path -- which still exists for legacy
-// installations that haven't migrated to pairing -- continues to HMAC
-// with cfg.APIKey as it did before PR C. Without this preservation,
-// rotating cfg.APIKey (to invalidate env-bootstrap for everyone) would
-// stop authenticating env-bootstrap requests, but it would NOT be the
-// security regression -- the regression would be the opposite: paired
-// devices would suddenly need to know the env-var to sign requests.
-func TestAgentChainSignedRequestsEnvBootstrapStillUsesAPIKey(t *testing.T) {
-	handlerCalled := false
-	chain := AgentChainWithConfig(AgentConfig{
-		APIKey:         testKey,
-		SignedRequests: true,
-		// No LookupKey -- env-bootstrap-only deployment.
-	}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlerCalled = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	body := []byte(`{"agentId":"env-bootstrap-handler"}`)
-	ts := strconv.FormatInt(time.Now().UnixNano(), 10)
-	nonce := "deadbeefcafef00ddeadbeefcafef00d"
-	// Sign with cfg.APIKey (the env-var path's HMAC key). If the server
-	// fell through to the per-device lookup path, it would have no
-	// SigningKey and would either fail to validate or fall back to the
-	// empty []byte(cfg.APIKey) which wouldn't match this signature.
-	sig := computeSignature(testKey, http.MethodPost, "/api/v1/agent/events", nonce, ts, body)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/events", bytes.NewReader(body))
-	req.Header.Set(apiKeyHeader, testKey)
-	req.Header.Set(timestampHeader, ts)
-	req.Header.Set(nonceHeader, nonce)
-	req.Header.Set(signatureHeader, sig)
-	rr := httptest.NewRecorder()
-	chain.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (env-bootstrap signature must validate against cfg.APIKey)", rr.Code)
-	}
-	if !handlerCalled {
-		t.Error("handler was not called -- env-bootstrap signature must have validated")
-	}
-}
-
 // TestAgentChainPairedLookupNilSigningKeyFailsClosed locks in the
 // fail-closed contract called out in the LookupKey doc comment:
 // a paired-path LookupKey hit that returns KeyLookupResult{AgentID: <x>,
@@ -500,7 +289,6 @@ func TestAgentChainPairedLookupNilSigningKeyFailsClosed(t *testing.T) {
 	const plaintext = "paired-device-plaintext-key-with-nil-signing"
 	handlerCalled := false
 	chain := AgentChainWithConfig(AgentConfig{
-		APIKey:         testKey, // present (the bug would fall back to it)
 		SignedRequests: true,
 		LookupKey: func(ctx context.Context, presented string) (KeyLookupResult, error) {
 			if presented == plaintext {

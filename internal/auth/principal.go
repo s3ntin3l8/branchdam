@@ -40,9 +40,8 @@ const AuthProviderLocal = "local"
 
 // Principal is what a request is authenticated as. A machine Principal
 // after #companion-pairing carries Name = agent_id (the device that owns
-// the API key) for device-paired sessions, OR Name = "env-bootstrap"
-// for legacy env-var-key sessions. Email and Groups are always empty
-// for KindMachine -- they describe a human identity (from Authentik
+// the API key) for device-paired sessions. Email and Groups are always
+// empty for KindMachine -- they describe a human identity (from Authentik
 // ForwardAuth) which is meaningless for a machine. Callers that render
 // Principal must gate display on p.Kind == KindUser to avoid printing
 // a string like "iphone-a3f9c2e1" in a place that expects a human name.

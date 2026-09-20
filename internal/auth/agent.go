@@ -43,13 +43,6 @@ type KeyLookupResult struct {
 	SigningKey []byte
 }
 
-// MinAgentKeyLength matches config.example.yaml's documented requirement.
-// A shorter (or unset) key fails every agent request closed rather than
-// accepting a weak or empty secret. Exported so internal/settings can
-// validate agent.apiKey at save time instead of letting a too-short value
-// brick every agent route (including paired devices) at the next restart.
-const MinAgentKeyLength = 32
-
 // defaultSignedMaxBodyBytes caps the request body the signature validator is
 // willing to buffer in memory. Every signed agent endpoint other than the
 // upload stream is JSON; 16 MiB is comfortably above any realistic JSON
@@ -83,7 +76,6 @@ const (
 
 // AgentConfig bundles the configuration options for the agent authentication chain.
 type AgentConfig struct {
-	APIKey             string
 	SignedRequests     bool
 	ReplayWindow       time.Duration
 	SignedMaxBodyBytes int64            // max body bytes the signature validator buffers (0 = defaultSignedMaxBodyBytes)
@@ -97,61 +89,39 @@ type AgentConfig struct {
 	// (issue #453 PR C). Returns an empty KeyLookupResult + nil error
 	// when no active key matches. Wired at server startup from
 	// internal/pairing.Service's KeyLookup method -- see
-	// cmd/branchdam/main.go. When LookupKey is nil, ONLY the env-var
-	// APIKey authenticates agent routes (legacy behavior before
-	// #companion-pairing). When LookupKey is non-nil, both paths
-	// authenticate independently: env-var authenticates as
-	// Principal{Name: "env-bootstrap"}; LookupKey hit authenticates as
-	// Principal{Name: <agent_id>} and the returned SigningKey is the
-	// HMAC key for that device's signed requests. Both attach
-	// KindMachine.
+	// cmd/branchdam/main.go. LookupKey is the ONLY authentication path
+	// for agent routes as of issue #453 PR F: the historical shared-
+	// secret `BRANCHDAM_AGENT_API_KEY` (env-bootstrap principal) was
+	// retired once Companion Pairing (PRs B/C) and admin PATs
+	// (PR E) covered every operator-flow it used to serve.
 	//
 	// Contract: every LookupKey hit MUST return a non-nil SigningKey.
 	// A nil SigningKey on a hit causes AgentChain to fail closed
-	// (reject the request with 401) rather than silently fall back to
-	// cfg.APIKey -- the fallback would re-open the env-key/paired-
-	// device cross-signing authority issue #453 PR C removes. The
-	// wired internal/pairing.Service.KeyLookup satisfies this contract
+	// (reject the request with 401) -- silently downgrading to a
+	// shared secret would re-open the env-key/paired-device cross-
+	// signing authority issue #453 PR C removes. The wired
+	// internal/pairing.Service.KeyLookup satisfies this contract
 	// (always returns 32 bytes on a hit, nil on a miss).
 	LookupKey func(ctx context.Context, presented string) (result KeyLookupResult, err error)
-}
-
-// AgentChain authenticates /api/v1/agent/* requests against a static
-// shared secret (spec §5) and attaches a machine Principal.
-func AgentChain(apiKey string, log *slog.Logger) func(http.Handler) http.Handler {
-	return AgentChainWithConfig(AgentConfig{APIKey: apiKey}, log)
 }
 
 // AgentChainWithConfig builds the agent auth middleware using the supplied AgentConfig.
 // When SignedRequests is true, it verifies X-Timestamp, X-Nonce, and X-Signature
 // (HMAC-SHA256 over method\npath\nnonce\ntimestamp\nbody) within the replay window.
 //
-// The 503 fail-closed gate is satisfied by EITHER a long-enough env-var key OR
-// a wired LookupKey (Companion Pairing). Pairing-only deployments can leave
-// agent.apiKey unset without bricking agent routes -- the runtime no longer
-// requires the shared secret when an active per-device pairing service is
-// wired through cfg.LookupKey (see internal/httpapi/server.go). The shared
-// secret is still load-bearing for the env-bootstrap machine principal and
-// for HMAC signing when paired clients don't have their own per-device key
-// material; tracking the deprecation/removal of that role is issue #453.
+// Issue #453 PR F removed the historical env-bootstrap / shared-secret
+// fallback (`cfg.Agent.APIKey`, env var BRANCHDAM_AGENT_API_KEY): with
+// Companion Pairing (PRs B/C) and admin PATs (PR E) covering every
+// operator-flow it used to serve, the server-wide key had become
+// dead-weight with a real cross-signing risk. Agent routes now
+// authenticate strictly through cfg.LookupKey; if no pairing service
+// is wired at startup, every agent route fails closed with 503.
 func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) http.Handler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	envKeyConfigured := len(cfg.APIKey) >= MinAgentKeyLength
-	pairingConfigured := cfg.LookupKey != nil
-	keyConfigured := envKeyConfigured || pairingConfigured
-	if !keyConfigured {
-		log.Warn("auth: no agent authentication configured -- set BRANCHDAM_AGENT_API_KEY or wire Companion Pairing (LookupKey); agent routes will fail closed with 503 until then", "minLength", MinAgentKeyLength)
-	}
-	// Defensive: signedRequests=true with an empty env-var key would HMAC
-	// over []byte("") -- trivially satisfiable by any holder of a valid
-	// paired key, so signing gives no defense for a pairing-only
-	// deployment. Per-device signing (issue #453 PR C) is the real fix;
-	// this warn ensures operators aren't told signing is active when the
-	// shared key is empty.
-	if cfg.SignedRequests && cfg.APIKey == "" {
-		log.Warn("auth: signedRequests=true but agent.apiKey is empty -- signature validation will HMAC over an empty key, which is not a meaningful defense. Pairing-only deployments should leave SignedRequests=false until per-device signing (issue #453 PR C) lands.")
+	if cfg.LookupKey == nil {
+		log.Warn("auth: no Companion Pairing LookupKey configured -- agent routes will fail closed with 503 until then")
 	}
 
 	window := cfg.ReplayWindow
@@ -179,69 +149,33 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			stripAuthentikHeaders(r)
 
-			if !keyConfigured {
+			if cfg.LookupKey == nil {
 				http.Error(w, "agent authentication is not configured", http.StatusServiceUnavailable)
 				return
 			}
 
 			provided := r.Header.Get(apiKeyHeader)
-			// signingKey holds the HMAC key the signature validator uses
-			// below. Populated in the lookup case from result.SigningKey
-			// (per-device, derived in internal/pairing.Service.signingKeyFor);
-			// in the env-bootstrap case it stays nil and the validator falls
-			// back to cfg.APIKey, preserving the historical behavior for
-			// any deployment that still uses the shared secret.
-			//
-			// isPaired distinguishes the two paths so the signature
-			// validator can fail closed when a paired LookupKey impl
-			// violates its non-nil-on-hit contract (issue #453 PR C
-			// follow-up). Silently falling back to cfg.APIKey there would
-			// re-open the env-key/paired-device cross-signing authority
-			// this PR removes for any future LookupKey wiring.
-			var principal Principal
-			var signingKey []byte
-			var isPaired bool
-			switch {
-			case provided == "":
-				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
-				return
-			case len(cfg.APIKey) >= MinAgentKeyLength && constantTimeEqual(provided, cfg.APIKey):
-				// Env-var bootstrap path (legacy and current operator-migrating
-				// install). Authenticates as "env-bootstrap" so audit trails can
-				// distinguish a key that was server-wide rotated from a
-				// device-scoped key (the env-var key rotates every device at
-				// once, by definition).
-				//
-				// Length-gated on MinAgentKeyLength (not just != "") so a
-				// misconfigured-too-short env-var -- which the relaxed gate
-				// now lets through when pairing is wired -- never becomes a
-				// live machine principal. The settings validator (PR #454)
-				// catches this at save time, but the runtime gate cannot
-				// rely on the validator having run (config.yaml/env can be
-				// edited around it).
-				principal = Principal{Kind: KindMachine, Name: "env-bootstrap"}
-			case cfg.LookupKey != nil:
-				// Device-pairing path. The callback returns the agent_id
-				// AND a per-device HMAC signing key derived from the
-				// presented plaintext (issue #453 PR C). A non-nil error
-				// is a genuine DB failure and propagates as 500.
-				result, lookupErr := cfg.LookupKey(r.Context(), provided)
-				if lookupErr != nil {
-					log.Error("auth: agent key lookup failed", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", lookupErr.Error())
-					http.Error(w, "internal error", http.StatusInternalServerError)
-					return
-				}
-				if result.AgentID == "" {
-					http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
-					return
-				}
-				principal = Principal{Kind: KindMachine, Name: result.AgentID}
-				signingKey = result.SigningKey
-				isPaired = true
-			default:
+			if provided == "" {
 				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
 				return
 			}
+			// Companion Pairing is the only authentication path.
+			// The callback returns the agent_id AND a per-device HMAC
+			// signing key derived from the presented plaintext
+			// (issue #453 PR C). A non-nil error is a genuine DB
+			// failure and propagates as 500.
+			result, lookupErr := cfg.LookupKey(r.Context(), provided)
+			if lookupErr != nil {
+				log.Error("auth: agent key lookup failed", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", lookupErr.Error())
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if result.AgentID == "" {
+				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+				return
+			}
+			principal := Principal{Kind: KindMachine, Name: result.AgentID}
+			signingKey := result.SigningKey
 
 			// The API key check above always runs. Signature validation is
 			// skipped only for endpoints the agent client cannot satisfy the
@@ -307,30 +241,18 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				// signed-query endpoints (e.g. /agent/check-content?fastHash=...)
 				// without any error.
 				//
-				// HMAC key selection (issue #453 PR C): paired clients sign
-				// with their per-device key (signingKey, populated above);
-				// env-bootstrap clients continue to sign with cfg.APIKey.
-				// A paired-only deployment with cfg.APIKey == "" would have
-				// signingKey != nil and the env-bootstrap fallback never
-				// runs -- which is what makes signedRequests=true safe in
-				// pairing-only deployments.
-				//
-				// Fail closed on a paired-path nil SigningKey: the
-				// LookupKey contract requires a non-nil signing key on
-				// every hit, and silently downgrading to cfg.APIKey here
-				// would re-open the env-key/paired-device cross-signing
-				// this PR removes for any future LookupKey wiring that
-				// breaks the contract.
-				hmacKey := signingKey
-				if hmacKey == nil {
-					if isPaired {
-						log.Error("auth: agent signature rejected (paired-path lookup returned nil signing key)", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
-						http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
-						return
-					}
-					hmacKey = []byte(cfg.APIKey)
+				// HMAC key selection (issue #453 PR C): every paired
+				// client signs with its per-device key (signingKey,
+				// populated above). Fail closed if the LookupKey
+				// implementation violates its non-nil-on-hit contract --
+				// silently signing with a shared secret would re-open
+				// the cross-device authority issue.
+				if signingKey == nil {
+					log.Error("auth: agent signature rejected (paired-path lookup returned nil signing key)", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
+					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					return
 				}
-				mac := hmac.New(sha256.New, hmacKey)
+				mac := hmac.New(sha256.New, signingKey)
 				mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + nonce + "\n" + tsStr + "\n"))
 				mac.Write(bodyBytes)
 				expectedSig := hex.EncodeToString(mac.Sum(nil))

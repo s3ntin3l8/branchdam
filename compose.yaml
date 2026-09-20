@@ -3,7 +3,7 @@
 #
 # Edit this file for your deployment: set your real Host rule in the labels
 # below (replace dam.example.com), point the volumes at your real storage
-# tiers, and put secrets (BRANCHDAM_AGENT_API_KEY, BRANCHDAM_SECRET_KEY, etc.)
+# tiers, and put secrets (BRANCHDAM_SECRET_KEY, etc.)
 # in a gitignored .env. For local development with live reload, use
 # compose-dev.yaml instead. For real per-host overrides (real hostnames,
 # ports, image tags) without editing this file directly, create a gitignored

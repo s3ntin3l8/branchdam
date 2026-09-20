@@ -43,7 +43,8 @@ func testServer(t *testing.T) *Server {
 		Prober: probe.New(), Pool: pool,
 		Engine: graph.NewEngine(database, log), Hub: sse.New(),
 		Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestHealthHandler(t *testing.T) {

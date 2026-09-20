@@ -53,7 +53,7 @@ func TestPostRestartRejectsMachinePrincipal(t *testing.T) {
 
 	base := config.Config{
 		Authz: config.Authz{Groups: []string{"dam-admins"}},
-		Agent: config.Agent{APIKey: "01234567890123456789012345678901"}, // 33 chars, >= minAgentKeyLength
+		Agent: config.Agent{}, // 33 chars, >= minAgentKeyLength
 	}
 	store, err := settings.NewStore(context.Background(), database, base, settingsTestKey(t), nil)
 	if err != nil {
@@ -63,7 +63,8 @@ func TestPostRestartRejectsMachinePrincipal(t *testing.T) {
 	srv := New(Deps{
 		Settings: store, DB: database, Hub: sse.New(), Version: "test",
 		RequestRestart: func() { fired = true },
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/restart", nil)
 	req.Header.Set("X-API-Key", "01234567890123456789012345678901")

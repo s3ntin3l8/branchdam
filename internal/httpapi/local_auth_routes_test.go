@@ -35,8 +35,6 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
-const localAuthTestAgentKey = "01234567890123456789012345678901" // 33 chars
-
 // localAuthTestServer builds a Server with local-auth enabled and
 // BRANCHDAM_SECRET_KEY-derived cookie HMAC. The DB is the same fresh
 // per-test file the other routes tests use; the only difference is the
@@ -66,7 +64,7 @@ func localAuthTestServer(t *testing.T) *Server {
 	pool.Run(ctx)
 
 	return New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: localAuthTestAgentKey}, Auth: config.Auth{Mode: string(auth.AuthModeLocal)}},
+		Config:  &config.Config{Agent: config.Agent{}, Auth: config.Auth{Mode: string(auth.AuthModeLocal)}},
 		DB:      database,
 		Prober:  probe.New(),
 		Pool:    pool,
@@ -81,7 +79,8 @@ func localAuthTestServer(t *testing.T) *Server {
 			Reset:        users.NewPasswordResetService(svc, users.PasswordResetServiceOptions{TokenTTL: time.Hour}),
 			AuthMode:     auth.AuthModeLocal,
 		},
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 const usersCookieTestBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -297,7 +296,7 @@ func localAuthTestServerWithGroups(t *testing.T, groups []string) *Server {
 
 	return New(Deps{
 		Config: &config.Config{
-			Agent: config.Agent{APIKey: localAuthTestAgentKey},
+			Agent: config.Agent{},
 			Auth:  config.Auth{Mode: string(auth.AuthModeLocal)},
 			Authz: config.Authz{Groups: groups},
 		},
@@ -315,7 +314,8 @@ func localAuthTestServerWithGroups(t *testing.T, groups []string) *Server {
 			Reset:        users.NewPasswordResetService(svc, users.PasswordResetServiceOptions{TokenTTL: time.Hour}),
 			AuthMode:     auth.AuthModeLocal,
 		},
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestLocalAuthAdminRoutes_RejectsNonAdminPrincipal(t *testing.T) {

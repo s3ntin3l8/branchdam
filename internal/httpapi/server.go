@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"html"
 	"io/fs"
 	"log/slog"
@@ -120,6 +121,12 @@ type Deps struct {
 	// in server.go when this is non-nil.
 	PAT *auth.PATService
 
+	// agentKeyLookup, when non-nil, overrides Pairing.KeyLookup for
+	// the agent auth chain. Unexported so only tests in this package
+	// can inject a stub; production wiring (cmd/branchdam) never sets it
+	// and always relies on Pairing.KeyLookup.
+	agentKeyLookup func(ctx context.Context, presented string) (auth.KeyLookupResult, error)
+
 	// LocalAuth bundles the user service + login rate limiter +
 	// session middleware + auth mode. Nil in forward-only mode.
 	LocalAuth *LocalAuthDeps
@@ -213,6 +220,9 @@ type Server struct {
 	thumbs         *thumbs.Cache
 	requestRestart func()
 	pairingService *pairing.Service
+	// agentKeyLookup, when non-nil, overrides Pairing.KeyLookup for
+	// the agent auth chain. Test-only escape hatch (see Deps.agentKeyLookup).
+	agentKeyLookup func(ctx context.Context, presented string) (auth.KeyLookupResult, error)
 	// patService wires admin Personal Access Tokens (issue #453 PR E).
 	// Nil-safe: the HTTP layer skips PAT middleware wiring when nil.
 	patService *auth.PATService
@@ -285,6 +295,7 @@ func New(d Deps) *Server {
 		thumbs:         d.ThumbCache,
 		requestRestart: d.RequestRestart,
 		pairingService: d.Pairing,
+		agentKeyLookup: d.agentKeyLookup,
 		patService:     d.PAT,
 		attribution:    d.Attribution,
 		audit:          d.Audit,
@@ -376,7 +387,6 @@ func (s *Server) Handler() http.Handler {
 	var agentCfg auth.AgentConfig
 	if cfg := s.cfg(); cfg != nil {
 		agentCfg = auth.AgentConfig{
-			APIKey:             cfg.Agent.APIKey,
 			SignedRequests:     cfg.Agent.SignedRequests,
 			ReplayWindow:       cfg.Agent.ReplayWindow(),
 			SignedMaxBodyBytes: cfg.Agent.SignedMaxBodyBytes,
@@ -388,7 +398,9 @@ func (s *Server) Handler() http.Handler {
 	// keys live in device_pairing_keys) get 401'd as "unknown key" --
 	// every existing test that doesn't construct a pairing service
 	// still passes because AgentConfig.LookupKey defaults to nil.
-	if s.pairingService != nil {
+	if s.agentKeyLookup != nil {
+		agentCfg.LookupKey = s.agentKeyLookup
+	} else if s.pairingService != nil {
 		agentCfg.LookupKey = s.pairingService.KeyLookup
 	}
 

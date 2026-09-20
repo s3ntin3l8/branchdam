@@ -56,11 +56,12 @@ func newPATTestServer(t *testing.T) (*Server, *db.DB, *auth.PATService, int64) {
 
 	patSvc := auth.NewPATService(database, patTestPepper)
 	srv := New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,
 		Version: "test",
 		PAT:     patSvc,
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, patSvc, userID
 }
 

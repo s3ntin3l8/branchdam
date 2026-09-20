@@ -58,11 +58,12 @@ func fullTestServer(t *testing.T) (*Server, *db.DB) {
 	pool.Run(ctx)
 
 	srv := New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database, Prober: probe.New(), Pool: pool,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(),
 		Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database
 }
 
@@ -125,10 +126,11 @@ func inheritTestServer(t *testing.T, rootPath string) (*Server, *db.DB, sqlcgen.
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 
 	srv := New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	parent := seedInheritNode(t, database, locID, filepath.Join(resolved, "parent.jpg"), "uuid-parent")
 	child := seedInheritNode(t, database, locID, filepath.Join(resolved, "child.jpg"), "uuid-child")
@@ -556,10 +558,11 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-refresh", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 	if rr.Code != http.StatusOK {
@@ -711,10 +714,11 @@ func TestInheritMetadataPrefersValidParentOverHigherConfidenceTier3(t *testing.T
 
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-tier3-shadow", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 	if rr.Code != http.StatusOK {
@@ -951,10 +955,11 @@ func TestInheritMetadataWritesConsistentUTCTimestampFromCapturedAtUnixFallback(t
 
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "inherit-utc-fallback", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
-		Config: &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config: &config.Config{Agent: config.Agent{}},
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 	if rr.Code != http.StatusOK {
@@ -1043,7 +1048,8 @@ func meTestServer(t *testing.T, adminGroups []string) *Server {
 	return New(Deps{
 		Config: &config.Config{Authz: config.Authz{Groups: adminGroups}},
 		DB:     database, Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestMeReportsIsAdminFalseWhenUserGroupExcluded(t *testing.T) {
@@ -1930,7 +1936,7 @@ func TestListStorageLocations(t *testing.T) {
 func TestAgentEventEnqueues(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	body := map[string]string{
-		"agentId":   "workstation-1",
+		"agentId":   "test-device",
 		"eventType": "EVENT_NODE_CREATED",
 		"payload":   `{"path":"/tmp/example.jpg"}`,
 	}
@@ -1957,7 +1963,7 @@ func TestAgentEventEnqueues(t *testing.T) {
 func TestAgentEventVirtualNodeCreatedEnqueues(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	body := map[string]string{
-		"agentId":   "workstation-1",
+		"agentId":   "test-device",
 		"eventType": "EVENT_VIRTUAL_NODE_CREATED",
 		"payload":   `{"nodeUuid":"018f3a9b-8d76-7890-a123-456789abcdef","filePath":"/virtual/resolve/workstation-1/test","displayName":"Test","projectType":"resolve_project"}`,
 	}
@@ -1986,7 +1992,7 @@ func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
 	eventUUID := "018f3a9b-8d76-7890-a123-456789abcdef"
 	body := map[string]string{
 		"eventUuid": eventUUID,
-		"agentId":   "workstation-1",
+		"agentId":   "test-device",
 		"eventType": "EVENT_NODE_CREATED",
 		"payload":   `{"path":"/tmp/idempotent.jpg"}`,
 	}
@@ -2050,7 +2056,7 @@ func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
 	// 4. Submission with same eventUuid but differing eventType returns 409 Conflict.
 	conflictBody := map[string]string{
 		"eventUuid": eventUUID,
-		"agentId":   "workstation-1",
+		"agentId":   "test-device",
 		"eventType": "EVENT_NODE_MOVED",
 		"payload":   `{"path":"/tmp/conflict.jpg"}`,
 	}
@@ -2067,7 +2073,7 @@ func TestAgentEventIdempotentWithClientUUID(t *testing.T) {
 	// 5. Invalid UUID format returns 400 Bad Request.
 	badBody := map[string]string{
 		"eventUuid": "not-a-valid-uuid",
-		"agentId":   "workstation-1",
+		"agentId":   "test-device",
 		"eventType": "EVENT_NODE_CREATED",
 		"payload":   `{"path":"/tmp/bad.jpg"}`,
 	}
@@ -3616,12 +3622,13 @@ func TestConfirmEdgeTriggersAutoInherit(t *testing.T) {
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
 		Config: &config.Config{
-			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Agent:    config.Agent{},
 			Metadata: config.Metadata{AutoInherit: true},
 		},
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -3715,12 +3722,13 @@ func TestConfirmEdgeTier3DoesNotInherit(t *testing.T) {
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-t3-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
 		Config: &config.Config{
-			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Agent:    config.Agent{},
 			Metadata: config.Metadata{AutoInherit: true},
 		},
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -3830,12 +3838,13 @@ func TestConfirmTier3EdgeDoesNotTriggerAutoInheritEvenWithEligibleTier1Parent(t 
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-t3-gate-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
 		Config: &config.Config{
-			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Agent:    config.Agent{},
 			Metadata: config.Metadata{AutoInherit: true},
 		},
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", t3Edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -3925,12 +3934,13 @@ func TestConfirmEdgeAutoInheritDisabled(t *testing.T) {
 	guard := storage.NewGuard([]storage.Location{{ID: locID, Name: "confirm-disabled-loc", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false}})
 	srv := New(Deps{
 		Config: &config.Config{
-			Agent:    config.Agent{APIKey: routeTestAgentKey},
+			Agent:    config.Agent{},
 			Metadata: config.Metadata{AutoInherit: false},
 		},
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -4171,7 +4181,7 @@ func TestStorageHealth(t *testing.T) {
 	}
 
 	// Verify server with nil pool handles request cleanly
-	nilPoolServer := New(Deps{DB: database})
+	nilPoolServer := New(Deps{DB: database, agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	rrNil := doJSON(t, nilPoolServer.Handler(), http.MethodGet, "/api/v1/storage-health", nil)
 	if rrNil.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/storage-health nil pool status = %d, want 200", rrNil.Code)
@@ -4508,14 +4518,15 @@ func serverWithGuard(t *testing.T) (*Server, *db.DB, *storage.Guard, string, str
 	})
 
 	srv := New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,
 		Guard:   guard,
 		Prober:  probe.New(),
 		Engine:  graph.NewEngine(database, nil),
 		Hub:     sse.New(),
 		Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	return srv, database, guard, resStaging, resExports, resArchive
 }
@@ -4528,7 +4539,7 @@ func TestAgentHandshake_Success_And_Auth(t *testing.T) {
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		ev, err := q.EnqueueAgentEvent(ctx, sqlcgen.EnqueueAgentEventParams{
 			EventUuid:   "018f0000-0000-7000-8000-000000000001",
-			AgentID:     "agent-alpha",
+			AgentID:     "test-device",
 			EventType:   "EVENT_NODE_CREATED",
 			PayloadJson: `{"filePath":"/test.raw"}`,
 		})
@@ -4543,7 +4554,7 @@ func TestAgentHandshake_Success_And_Auth(t *testing.T) {
 
 	// 1. Missing auth header -> 401
 	reqNoAuth := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", bytesOfJSON(t, map[string]string{
-		"agentId": "agent-alpha",
+		"agentId": "test-device",
 	}))
 	reqNoAuth.Header.Set("Content-Type", "application/json")
 	rrNoAuth := httptest.NewRecorder()
@@ -4554,7 +4565,7 @@ func TestAgentHandshake_Success_And_Auth(t *testing.T) {
 
 	// 2. Valid handshake request -> 200 OK with server version and acknowledged event
 	reqAuth := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", bytesOfJSON(t, map[string]string{
-		"agentId":       "agent-alpha",
+		"agentId":       "test-device",
 		"clientVersion": "0.1.0",
 	}))
 	reqAuth.Header.Set("Content-Type", "application/json")
@@ -5423,14 +5434,15 @@ func TestAgentRebase_NonTier3ReadOnlyRefusedEvenWithFile(t *testing.T) {
 		{ID: roLoc.ID, Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: true},
 	})
 	srv := New(Deps{
-		Config:  &config.Config{Agent: config.Agent{APIKey: routeTestAgentKey}},
+		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,
 		Guard:   guard,
 		Prober:  probe.New(),
 		Engine:  graph.NewEngine(database, nil),
 		Hub:     sse.New(),
 		Version: "test",
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	nodeUUID := "018f0000-0000-7000-8000-0000000000cc"
 	originalPath := filepath.Join(resStaging, "orig.raw")

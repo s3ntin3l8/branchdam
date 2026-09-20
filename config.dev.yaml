@@ -37,11 +37,9 @@ thumbnails:
   cacheDir: __REPO_ROOT__/data/thumbs
 
 agent:
-  # Left unresolved on purpose: unset means agent routes fail closed with
-  # 503 rather than silently accepting an empty key. Not fatal to startup --
-  # export BRANCHDAM_AGENT_API_KEY yourself (32+ chars) if you need
-  # /api/v1/agent/* routes locally.
-  apiKey: ${BRANCHDAM_AGENT_API_KEY}
+  # Per-device pairing is the only auth path for /api/v1/agent/* routes.
+  # Pair a device via POST /api/v1/agent/handshake/pair (see docs/agent-api.md)
+  # if you need agent routes locally.
 
 authz:
   groups:

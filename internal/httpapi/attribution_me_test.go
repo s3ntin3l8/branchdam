@@ -35,7 +35,8 @@ func newAttributionServerForMeTest(t *testing.T) *Server {
 		Version:     "test",
 		Attribution: usersSvc,
 		Audit:       auditSvc,
-	})
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv
 }
 
