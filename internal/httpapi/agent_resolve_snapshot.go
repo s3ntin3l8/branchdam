@@ -407,12 +407,22 @@ func reconcileResolveTimeline(ctx context.Context, q *sqlcgen.Queries, targetID 
 			continue
 		}
 		var ev struct {
-			MediaFilePath string `json:"mediaFilePath"`
+			MediaFilePath  string   `json:"mediaFilePath"`
+			MediaFilePaths []string `json:"mediaFilePaths"`
 		}
 		if json.Unmarshal([]byte(edge.EvidenceJson), &ev) != nil {
 			return resolveSnapshotConflict{message: "existing Resolve edge has malformed evidence; refusing to remove it"}
 		}
-		if timelineID != "" && protected[ev.MediaFilePath] {
+		protectedByAlias := protected[ev.MediaFilePath]
+		if !protectedByAlias {
+			for _, alias := range ev.MediaFilePaths {
+				if protected[alias] {
+					protectedByAlias = true
+					break
+				}
+			}
+		}
+		if timelineID != "" && protectedByAlias {
 			continue
 		}
 		if edge.ReviewState == "CONFIRMED" || edge.ReviewState == "REJECTED" {

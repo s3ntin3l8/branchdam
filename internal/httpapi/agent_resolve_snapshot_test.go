@@ -174,6 +174,50 @@ func TestResolveSnapshotUnresolvedAndReviewedSafety(t *testing.T) {
 	}
 }
 
+func TestResolveSnapshotUnresolvedAliasProtectsExistingEdge(t *testing.T) {
+	srv, database, targetUUID, sourceUUID := resolveSnapshotServer(t)
+	body := resolveSnapshotBody(targetUUID, sourceUUID, "D:\\a.mov", "original")
+	member := body["memberships"].([]map[string]any)[0]
+	member["evidenceJson"].(map[string]any)["mediaFilePaths"] = []string{"D:\\a.mov", "D:\\alias.mov"}
+	if rr := postResolveSnapshot(t, srv, body); rr.Code != http.StatusOK {
+		t.Fatalf("initial alias snapshot: %d %s", rr.Code, rr.Body.String())
+	}
+
+	target, err := database.Reader.GetMediaNodeByUUID(context.Background(), targetUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, err := database.Reader.ListEdgesByTarget(context.Background(), target.ID)
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("initial alias edges = %d, %v", len(edges), err)
+	}
+	edgeID := edges[0].ID
+
+	body["memberships"] = []map[string]any{{
+		"timelineId": "tl1", "mediaFilePath": "D:\\alias.mov",
+	}}
+	rr := postResolveSnapshot(t, srv, body)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"unresolved":1`) {
+		t.Fatalf("unresolved alias snapshot: %d %s", rr.Code, rr.Body.String())
+	}
+	protected, err := database.Reader.GetMediaEdge(context.Background(), edgeID)
+	if err != nil || protected.IsActive != 1 {
+		t.Fatalf("unresolved alias detached edge = %+v, %v", protected, err)
+	}
+
+	body["memberships"] = []map[string]any{{
+		"timelineId": "tl1", "mediaFilePath": "D:\\unrelated.mov",
+	}}
+	rr = postResolveSnapshot(t, srv, body)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"removed":1`) {
+		t.Fatalf("unrelated unresolved snapshot: %d %s", rr.Code, rr.Body.String())
+	}
+	removed, err := database.Reader.GetMediaEdge(context.Background(), edgeID)
+	if err != nil || removed.IsActive != 0 {
+		t.Fatalf("unrelated unresolved path retained edge = %+v, %v", removed, err)
+	}
+}
+
 func TestResolveSnapshotRollbackAndAgentIsolation(t *testing.T) {
 	srv, database, targetUUID, sourceUUID := resolveSnapshotServer(t)
 	body := resolveSnapshotBody(targetUUID, sourceUUID, "D:\\a.mov", "original")
