@@ -1,5 +1,5 @@
 // Package secrets encrypts settings values that must not be stored in
-// plaintext in app_settings (immich.apiKey, agent.apiKey). The key comes
+// plaintext in app_settings (immich.apiKey). The key comes
 // from BRANCHDAM_SECRET_KEY (base64, 32 bytes), never from config.yaml or
 // the database -- a secret encrypted with a key that itself lived next to
 // the ciphertext would protect nothing.

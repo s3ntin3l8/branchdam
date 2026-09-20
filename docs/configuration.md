@@ -81,7 +81,11 @@ implications and what happens if that key is absent or lost.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `apiKey` | string | — | The machine-principal key for `/api/v1/agent/*`, which bypasses Authentik ForwardAuth by design (see [`forward-auth.md`](forward-auth.md)). Set via `${BRANCHDAM_AGENT_API_KEY}` from a gitignored `.env`, never inline. **Under 32 characters and every agent route fails closed with `503`**, logged once at startup — this is deliberate fail-closed behavior, not a bug to work around. |
+| `signedRequests` | bool | `false` | Require HMAC-SHA256 signatures and replay protection on agent endpoints. |
+| `replayWindowSecs` | int | `300` | Maximum allowed clock drift / nonce replay window in seconds. |
+| `maxSignedBodyBytes` | int | `1048576` | Body cap for signed JSON agent endpoints. The upload endpoint streams binary and is exempt. |
+
+Agent authentication is per-device pairing only — no shared `apiKey` field exists. Each paired device gets its own key via `POST /api/v1/agent/handshake/pair` (see [`agent-api.md`](agent-api.md)).
 
 ## `authz`
 

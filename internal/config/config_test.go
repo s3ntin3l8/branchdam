@@ -125,7 +125,6 @@ storageLocations:
 }
 
 func TestLoadExampleConfig(t *testing.T) {
-	t.Setenv("BRANCHDAM_AGENT_API_KEY", "example-agent-key")
 	t.Setenv("IMMICH_API_KEY", "example-immich-key")
 	t.Setenv("IMMICH_API_URL", "http://immich.example.com")
 	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"))

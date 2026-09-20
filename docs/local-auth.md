@@ -50,8 +50,8 @@ Set a 32-byte base64 key in BRANCHDAM_SECRET_KEY before enabling local auth.
 The 32-byte key is the HMAC-SHA-256 secret that signs the session cookie.
 A missing or guessable secret would mean any attacker who knows the
 cookie format (which is in the repo) can forge a session. The hard-fail
-is the same posture as the agent API key (`BRANCHDAM_AGENT_API_KEY`):
-fail closed rather than silently accept an insecure default.
+is the same posture as agent authentication: fail closed rather
+than silently accept an insecure default.
 
 Generate a key with:
 
@@ -59,7 +59,7 @@ Generate a key with:
 openssl rand -base64 32
 ```
 
-Store it in a gitignored `.env` (alongside `BRANCHDAM_AGENT_API_KEY`).
+Store it in a gitignored `.env`.
 Treat it with the same care as a database password — see section 9 for
 backup implications.
 

@@ -109,16 +109,6 @@ the **Storage Health** page after first boot.
 cp .env.example .env
 ```
 
-Generate the agent key:
-
-```sh
-openssl rand -hex 32
-```
-
-and set `BRANCHDAM_AGENT_API_KEY` to the result. Under 32 characters and every `/api/v1/agent/*`
-route fails closed with `503` (logged once at startup) — not silently open, but also not what you
-want if you're trying to test the agent handshake/rebase endpoints.
-
 Generate the secret encryption key (for UI-configured secrets such as Immich API keys):
 
 ```sh
@@ -166,7 +156,8 @@ curl -s https://dam.yourdomain.example/api/v1/me | jq
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dam.yourdomain.example/api/v1/agent/hello
 # → 401 (no key presented)
 
-curl -s -X POST -H "X-API-Key: $BRANCHDAM_AGENT_API_KEY" https://dam.yourdomain.example/api/v1/agent/hello | jq
+# Pair a device first, then use its per-device key:
+curl -s -X POST -H "X-API-Key: <paired-device-key>" https://dam.yourdomain.example/api/v1/agent/hello | jq
 # → {"ok":true,"version":"..."}
 ```
 

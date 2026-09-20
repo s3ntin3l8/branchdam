@@ -306,8 +306,8 @@ describe("SettingsPage", () => {
         fields: [
           ...settingsResponse().fields,
           field({
-            key: "agent.apiKey",
-            label: "Shared Agent Secret",
+            key: "immich.apiKey",
+            label: "Immich API Key",
             group: "Agent",
             value: undefined,
             source: "config",
@@ -321,7 +321,7 @@ describe("SettingsPage", () => {
 
     renderWithClient(<SettingsPage />);
 
-    const row = await screen.findByTestId("field-row-agent.apiKey");
+    const row = await screen.findByTestId("field-row-immich.apiKey");
     const generateButton = within(row).getByRole("button", { name: "Generate" });
     await user.click(generateButton);
 

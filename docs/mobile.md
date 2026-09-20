@@ -83,24 +83,15 @@ When a user deletes a photo or video:
 
 ### 4.1. Overview
 
-Per-device pairing keys (`device_pairings` / `device_pairing_keys`) replaced the
-single shared `BRANCHDAM_AGENT_API_KEY` as of #companion-pairing. The
-env-var key remains valid indefinitely as a bootstrap path so legacy
-workstation agents and previously-paired mobile apps continue to work
-without re-pairing. Operators can migrate at their own pace. As of
-[#453](https://github.com/s3ntin3l8/branchdam/issues/453), the runtime
-503 fail-closed gate is satisfied by either a long-enough env-var value
-OR a wired Companion Pairing service (LookupKey callback), so a
-pairing-only deployment may leave the field unset via
-`BRANCHDAM_AGENT_API_KEY=""` or by omitting `agent.apiKey` from
-`config.yaml`. The settings UI/PUT validator still rejects a sub-32-char
-value at save time as a defense-in-depth prompt -- to clear the field
-entirely, operators must edit config or unset the env var directly.
-Removal of the field itself is planned as a follow-up to #453 once
-per-device signing (#453 follow-up) and the workstation agent's pairing
-flow are in place; until then the env-bootstrap machine principal and
-shared-secret HMAC role are still load-bearing for any deployment that
-relies on either.
+Per-device pairing keys (`device_pairings` / `device_pairing_keys`) are the
+only authentication path for agent routes as of
+[#453](https://github.com/s3ntin3l8/branchdam/issues/453). The shared
+`agent.apiKey` field and its `BRANCHDAM_AGENT_API_KEY` env var were
+removed in PR F — every agent request must present a per-device key
+obtained via `POST /api/v1/agent/handshake/pair` (see
+[`agent-api.md`](agent-api.md)). Unauthenticated requests fail closed
+with `401`; a `503` means no pairing service is wired or the key has no
+matching paired device.
 
 Authentication as a paired device attaches `Principal{Name: <agent_id>, Kind: KindMachine}`.
 The env-var bootstrap path attaches `Principal{Name: "env-bootstrap", Kind: KindMachine}`.

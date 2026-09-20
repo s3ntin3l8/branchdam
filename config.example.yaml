@@ -1,7 +1,7 @@
 # branchDAM configuration — example.
 #
 # Copy to config.yaml and edit. Values may reference the environment with
-# ${VAR}; keep real secrets (BRANCHDAM_AGENT_API_KEY, etc.) in a gitignored
+# ${VAR}; keep real secrets (BRANCHDAM_SECRET_KEY, etc.) in a gitignored
 # .env, never in this file. An unset ${VAR} is left as literal text rather
 # than silently emptied, so a typo'd variable name fails loudly.
 
@@ -57,10 +57,9 @@ ingest:
   namingTemplate: "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}"
 
 agent:
-  # Machine-principal key for /api/v1/agent/* routes, which bypass Authentik
-  # ForwardAuth at the Traefik layer (see docs/forward-auth.md). Must be at
-  # least 32 characters or agent routes fail closed with 503.
-  apiKey: ${BRANCHDAM_AGENT_API_KEY}
+  # Per-device pairing is the only auth path for /api/v1/agent/* routes.
+  # Paired devices bypass Authentik ForwardAuth at the Traefik layer
+  # (see docs/forward-auth.md). No shared key — each device gets its own.
   signedRequests: false           # require HMAC-SHA256 signature and replay protection (default false)
   replayWindowSecs: 300           # maximum allowed clock drift / nonce replay window in seconds (default 300)
   # Body cap for signed JSON endpoints. /api/v1/agent/upload streams up to

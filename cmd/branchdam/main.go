@@ -84,7 +84,7 @@ func main() {
 	}
 
 	// BRANCHDAM_SECRET_KEY encrypts settings values that must not sit in
-	// app_settings as plaintext (immich.apiKey, agent.apiKey). Unset is a
+	// app_settings as plaintext (immich.apiKey). Unset is a
 	// normal, supported state -- internal/settings falls back to the
 	// config/env base value for any secret field rather than failing to
 	// boot (see internal/secrets' package doc). A *set but invalid* key is
