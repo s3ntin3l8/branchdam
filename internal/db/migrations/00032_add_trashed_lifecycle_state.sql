@@ -1,3 +1,4 @@
+-- +goose NO TRANSACTION
 -- +goose Up
 --
 -- Add TRASHED lifecycle state for deliberate user-initiated deletes.
@@ -25,6 +26,9 @@
 -- sync state, and storage health counts. Same predicate change applies
 -- to 00013_dedup_existing_hashes's archival CTE -- recreated here so the
 -- data invariant survives the rebuild.
+
+PRAGMA foreign_keys = OFF;
+BEGIN TRANSACTION;
 
 CREATE TABLE media_nodes_new (
     id                INTEGER PRIMARY KEY,
@@ -167,6 +171,10 @@ JOIN media_nodes p ON p.id = e.source_node_id
 JOIN media_nodes c ON c.id = e.target_node_id
 WHERE e.is_active = 1;
 
+COMMIT;
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys = ON;
+
 -- +goose Down
 --
 -- Reverting this migration is a no-op for TRASHED rows: a downgrade sees
@@ -179,6 +187,9 @@ CREATE TEMP TABLE trashed_downgrade_guard (
 INSERT INTO trashed_downgrade_guard (ok)
 SELECT 0 WHERE EXISTS (SELECT 1 FROM media_nodes WHERE lifecycle_state = 'TRASHED');
 DROP TABLE trashed_downgrade_guard;
+
+PRAGMA foreign_keys = OFF;
+BEGIN TRANSACTION;
 
 CREATE TABLE media_nodes_old (
     id                INTEGER PRIMARY KEY,
@@ -306,3 +317,7 @@ FROM media_edges e
 JOIN media_nodes p ON p.id = e.source_node_id
 JOIN media_nodes c ON c.id = e.target_node_id
 WHERE e.is_active = 1;
+
+COMMIT;
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys = ON;
