@@ -27,8 +27,17 @@
 -- to 00013_dedup_existing_hashes's archival CTE -- recreated here so the
 -- data invariant survives the rebuild.
 
+-- Goose executes NO TRANSACTION statements one at a time through the writer
+-- pool. internal/db pins that pool to one connection, so these statements
+-- share one SQLite session and the PRAGMA applies to the explicit transaction.
 PRAGMA foreign_keys = OFF;
 BEGIN TRANSACTION;
+
+-- This transaction is owned by the migration because Goose is in NO
+-- TRANSACTION mode. If a statement fails before COMMIT, Goose does not roll
+-- it back or restore the connection-scoped PRAGMA; the caller must discard
+-- the connection rather than reuse it.
+DROP TABLE IF EXISTS media_nodes_new;
 
 CREATE TABLE media_nodes_new (
     id                INTEGER PRIMARY KEY,
@@ -171,8 +180,16 @@ JOIN media_nodes p ON p.id = e.source_node_id
 JOIN media_nodes c ON c.id = e.target_node_id
 WHERE e.is_active = 1;
 
+CREATE TEMP TABLE migration_00032_fk_guard (
+    ok INTEGER NOT NULL CHECK (ok = 1)
+);
+-- Use the table-valued PRAGMA form so a violation becomes a CHECK failure;
+-- Goose discards rows returned by a bare PRAGMA in NO TRANSACTION mode.
+INSERT INTO migration_00032_fk_guard (ok)
+SELECT 0 FROM pragma_foreign_key_check LIMIT 1;
+DROP TABLE migration_00032_fk_guard;
+
 COMMIT;
-PRAGMA foreign_key_check;
 PRAGMA foreign_keys = ON;
 
 -- +goose Down
@@ -181,6 +198,7 @@ PRAGMA foreign_keys = ON;
 -- 'TRASHED' as not in the old CHECK and will reject the INSERT. Refuse a
 -- downgrade when any TRASHED rows exist; otherwise the rebuild below would
 -- silently drop them.
+DROP TABLE IF EXISTS trashed_downgrade_guard;
 CREATE TEMP TABLE trashed_downgrade_guard (
     ok INTEGER NOT NULL CHECK (ok = 1)
 );
@@ -190,6 +208,8 @@ DROP TABLE trashed_downgrade_guard;
 
 PRAGMA foreign_keys = OFF;
 BEGIN TRANSACTION;
+
+DROP TABLE IF EXISTS media_nodes_old;
 
 CREATE TABLE media_nodes_old (
     id                INTEGER PRIMARY KEY,
@@ -239,9 +259,8 @@ CREATE TABLE media_nodes_old (
     CHECK (superseded_by IS NULL OR lifecycle_state = 'ARCHIVED')
 );
 
--- 00013-style archival of TRASHED rows: a downgrade cannot keep TRASHED,
--- so the closest equivalent is ARCHIVED -- file is still in .trash/, the
--- row survives, and the user can manually restore + un-archive post-downgrade.
+-- The guard above rejects TRASHED rows before this rebuild, so every row
+-- copied here is valid under the pre-00032 lifecycle CHECK constraint.
 INSERT INTO media_nodes_old (
     id, node_uuid, storage_location_id, file_path, file_name, file_ext,
     size_bytes, mtime_unix, fast_hash, full_hash, phash,
@@ -257,7 +276,7 @@ SELECT
     size_bytes, mtime_unix, fast_hash, full_hash, phash,
     indexing_status,
     CASE WHEN graph_status = 'ROOT' THEN 'ROOT' ELSE 'UNLINKED' END,
-    CASE WHEN lifecycle_state = 'TRASHED' THEN 'ARCHIVED' ELSE lifecycle_state END,
+    lifecycle_state,
     superseded_by,
     original_document_id, document_id, derived_from_id,
     captured_at_unix, camera_model, filename_stem,
@@ -318,6 +337,14 @@ JOIN media_nodes p ON p.id = e.source_node_id
 JOIN media_nodes c ON c.id = e.target_node_id
 WHERE e.is_active = 1;
 
+CREATE TEMP TABLE migration_00032_fk_guard (
+    ok INTEGER NOT NULL CHECK (ok = 1)
+);
+-- Keep this check inside the rebuild transaction so a violation can roll it
+-- back before the migration commits.
+INSERT INTO migration_00032_fk_guard (ok)
+SELECT 0 FROM pragma_foreign_key_check LIMIT 1;
+DROP TABLE migration_00032_fk_guard;
+
 COMMIT;
-PRAGMA foreign_key_check;
 PRAGMA foreign_keys = ON;

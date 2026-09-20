@@ -249,15 +249,48 @@ func TestMigration00032WithReferencingRows(t *testing.T) {
 	if _, err := writerDB.Exec(`UPDATE media_nodes SET lifecycle_state = 'TRASHED' WHERE id = 1`); err != nil {
 		t.Fatalf("set TRASHED lifecycle state: %v", err)
 	}
+	if err := goose.Down(writerDB, migrationsDir); err == nil {
+		t.Fatal("downgrade with TRASHED row unexpectedly succeeded")
+	}
+
+	var version int64
+	if err := writerDB.QueryRow(`
+		SELECT version_id
+		FROM goose_db_version
+		WHERE is_applied = 1
+		ORDER BY version_id DESC
+		LIMIT 1
+	`).Scan(&version); err != nil {
+		t.Fatalf("query migration version after refused downgrade: %v", err)
+	}
+	if version != 32 {
+		t.Fatalf("migration version after refused downgrade = %d, want 32", version)
+	}
+
 	if _, err := writerDB.Exec(`UPDATE media_nodes SET lifecycle_state = 'ACTIVE' WHERE id = 1`); err != nil {
-		t.Fatalf("reset lifecycle state for downgrade: %v", err)
+		t.Fatalf("clear TRASHED lifecycle state: %v", err)
 	}
 
 	if err := goose.Down(writerDB, migrationsDir); err != nil {
 		t.Fatalf("goose Down 32: %v", err)
 	}
+	if err := writerDB.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied = 1 ORDER BY version_id DESC LIMIT 1`).Scan(&version); err != nil {
+		t.Fatalf("query migration version after successful downgrade: %v", err)
+	}
+	if version != 31 {
+		t.Fatalf("migration version after successful downgrade = %d, want 31", version)
+	}
 	if err := goose.UpTo(writerDB, migrationsDir, 32); err != nil {
 		t.Fatalf("goose Up 32 after Down: %v", err)
+	}
+
+	if _, err := writerDB.Exec(`
+		INSERT INTO media_edges (source_node_id, target_node_id, relationship_type, confidence, tier, resolver)
+		VALUES (1, 999, 'PROJECT_SIDECAR', 1, 1, 'foreign-key-test')
+	`); err == nil {
+		t.Fatal("insert with dangling media_edges target succeeded, want FOREIGN KEY constraint failure")
+	} else if !strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+		t.Errorf("dangling media_edges insert error = %q, want FOREIGN KEY constraint failure", err)
 	}
 }
 
