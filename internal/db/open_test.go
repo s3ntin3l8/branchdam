@@ -185,6 +185,170 @@ func TestResolveSnapshotMigrationRefusesDowngradeWithInactiveEdges(t *testing.T)
 	}
 }
 
+// TestMigration00032WithReferencingRows verifies that the media_nodes table
+// rebuild works when foreign-key child tables contain data. SQLite cannot
+// drop a referenced table while foreign_keys is enabled, so this is the
+// production-shaped regression case for issue #472.
+func TestMigration00032WithReferencingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trashed-lifecycle.db")
+	writerDB := openRawWriter(t, path)
+
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 31); err != nil {
+		t.Fatalf("goose UpTo 31: %v", err)
+	}
+
+	statements := []string{
+		`INSERT INTO storage_locations (id, name, root_path, tier) VALUES (1, 'media', '/media', 'TIER2_EXPORTS')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (1, '018f0000-0000-7000-8000-000000000101', 1, '/media/a.mov', 'a.mov')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (2, '018f0000-0000-7000-8000-000000000102', 1, '/media/timeline', 'timeline')`,
+		`INSERT INTO media_edges (source_node_id, target_node_id, relationship_type, confidence, tier, resolver) VALUES (1, 2, 'PROJECT_SIDECAR', 1, 1, 'migration-test')`,
+		`INSERT INTO node_metadata (node_id, source, key, value) VALUES (1, 'internal', 'migration-test', 'present')`,
+	}
+	for _, statement := range statements {
+		if _, err := writerDB.Exec(statement); err != nil {
+			t.Fatalf("seed migration fixture: %v", err)
+		}
+	}
+
+	if err := goose.UpTo(writerDB, migrationsDir, 32); err != nil {
+		t.Fatalf("goose UpTo 32 with referencing rows: %v", err)
+	}
+
+	var foreignKeys int
+	if err := writerDB.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatalf("query foreign_keys after Up: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("foreign_keys after Up = %d, want 1", foreignKeys)
+	}
+
+	var violations int
+	if err := writerDB.QueryRow("SELECT count(*) FROM pragma_foreign_key_check").Scan(&violations); err != nil {
+		t.Fatalf("foreign_key_check after Up: %v", err)
+	}
+	if violations != 0 {
+		t.Fatalf("foreign_key_check after Up returned %d violations", violations)
+	}
+
+	var edgeCount, metadataCount int
+	if err := writerDB.QueryRow("SELECT count(*) FROM media_edges WHERE source_node_id = 1 AND target_node_id = 2").Scan(&edgeCount); err != nil {
+		t.Fatalf("count preserved media edge: %v", err)
+	}
+	if err := writerDB.QueryRow("SELECT count(*) FROM node_metadata WHERE node_id = 1 AND key = 'migration-test'").Scan(&metadataCount); err != nil {
+		t.Fatalf("count preserved node metadata: %v", err)
+	}
+	if edgeCount != 1 || metadataCount != 1 {
+		t.Fatalf("preserved child rows = media_edges:%d node_metadata:%d, want 1:1", edgeCount, metadataCount)
+	}
+
+	if _, err := writerDB.Exec(`UPDATE media_nodes SET lifecycle_state = 'TRASHED' WHERE id = 1`); err != nil {
+		t.Fatalf("set TRASHED lifecycle state: %v", err)
+	}
+	if err := goose.Down(writerDB, migrationsDir); err == nil {
+		t.Fatal("downgrade with TRASHED row unexpectedly succeeded")
+	}
+
+	var version int64
+	if err := writerDB.QueryRow(`
+		SELECT version_id
+		FROM goose_db_version
+		WHERE is_applied = 1
+		ORDER BY version_id DESC
+		LIMIT 1
+	`).Scan(&version); err != nil {
+		t.Fatalf("query migration version after refused downgrade: %v", err)
+	}
+	if version != 32 {
+		t.Fatalf("migration version after refused downgrade = %d, want 32", version)
+	}
+
+	if _, err := writerDB.Exec(`UPDATE media_nodes SET lifecycle_state = 'ACTIVE' WHERE id = 1`); err != nil {
+		t.Fatalf("clear TRASHED lifecycle state: %v", err)
+	}
+
+	if err := goose.Down(writerDB, migrationsDir); err != nil {
+		t.Fatalf("goose Down 32: %v", err)
+	}
+	if err := writerDB.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied = 1 ORDER BY version_id DESC LIMIT 1`).Scan(&version); err != nil {
+		t.Fatalf("query migration version after successful downgrade: %v", err)
+	}
+	if version != 31 {
+		t.Fatalf("migration version after successful downgrade = %d, want 31", version)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 32); err != nil {
+		t.Fatalf("goose Up 32 after Down: %v", err)
+	}
+
+	if _, err := writerDB.Exec(`
+		INSERT INTO media_edges (source_node_id, target_node_id, relationship_type, confidence, tier, resolver)
+		VALUES (1, 999, 'PROJECT_SIDECAR', 1, 1, 'foreign-key-test')
+	`); err == nil {
+		t.Fatal("insert with dangling media_edges target succeeded, want FOREIGN KEY constraint failure")
+	} else if !strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+		t.Errorf("dangling media_edges insert error = %q, want FOREIGN KEY constraint failure", err)
+	}
+}
+
+// TestMigration00032ForeignKeyGuardRejectsDanglingRows verifies that the
+// pre-commit foreign-key guard fails the migration before Goose records
+// version 32 when existing child data is invalid.
+func TestMigration00032ForeignKeyGuardRejectsDanglingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trashed-lifecycle-invalid-fk.db")
+	writerDB := openRawWriter(t, path)
+
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 31); err != nil {
+		t.Fatalf("goose UpTo 31: %v", err)
+	}
+
+	statements := []string{
+		`INSERT INTO storage_locations (id, name, root_path, tier) VALUES (1, 'media', '/media', 'TIER2_EXPORTS')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (1, '018f0000-0000-7000-8000-000000000201', 1, '/media/a.mov', 'a.mov')`,
+	}
+	for _, statement := range statements {
+		if _, err := writerDB.Exec(statement); err != nil {
+			t.Fatalf("seed migration fixture: %v", err)
+		}
+	}
+	if _, err := writerDB.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys for invalid fixture: %v", err)
+	}
+	if _, err := writerDB.Exec(`
+		INSERT INTO media_edges (source_node_id, target_node_id, relationship_type, confidence, tier, resolver)
+		VALUES (1, 999, 'PROJECT_SIDECAR', 1, 1, 'invalid-fk-test')
+	`); err != nil {
+		t.Fatalf("seed dangling media edge: %v", err)
+	}
+	if _, err := writerDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("restore foreign keys before migration: %v", err)
+	}
+
+	err := goose.UpTo(writerDB, migrationsDir, 32)
+	if err == nil {
+		t.Fatal("goose UpTo 32 with dangling child row unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "CHECK constraint failed: ok = 1") {
+		t.Errorf("goose UpTo 32 error = %q, want FK guard CHECK failure", err)
+	}
+
+	var version int64
+	if err := writerDB.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied = 1 ORDER BY version_id DESC LIMIT 1`).Scan(&version); err != nil {
+		t.Fatalf("query migration version after rejected migration: %v", err)
+	}
+	if version != 31 {
+		t.Fatalf("migration version after rejected migration = %d, want 31", version)
+	}
+}
+
 // TestOpenIsIdempotent proves Open (which runs migrations at startup) can be
 // called against an already-migrated database without error -- the normal
 // case of restarting the server against an existing data volume.
