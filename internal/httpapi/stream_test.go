@@ -46,7 +46,7 @@ func streamTestServer(t *testing.T, dir string) (*Server, *db.DB, int64) {
 		Version: "test",
 		Guard:   guard,
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, locID
 }
 

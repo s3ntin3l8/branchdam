@@ -80,7 +80,7 @@ func localAuthTestServer(t *testing.T) *Server {
 			AuthMode:     auth.AuthModeLocal,
 		},
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 const usersCookieTestBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -315,7 +315,7 @@ func localAuthTestServerWithGroups(t *testing.T, groups []string) *Server {
 			AuthMode:     auth.AuthModeLocal,
 		},
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestLocalAuthAdminRoutes_RejectsNonAdminPrincipal(t *testing.T) {

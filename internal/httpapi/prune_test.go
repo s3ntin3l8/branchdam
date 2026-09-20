@@ -145,7 +145,7 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 		Config: cfg, DB: database, Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, tier1ID, candidate
 }
 

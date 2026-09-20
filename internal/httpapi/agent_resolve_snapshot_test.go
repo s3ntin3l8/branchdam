@@ -58,7 +58,7 @@ func resolveSnapshotServer(t *testing.T) (*Server, *db.DB, string, string) {
 			{ID: mediaID, Name: "media", RootPath: "/storage/media", Tier: "TIER2_EXPORTS"},
 		}),
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, "018f0000-0000-7000-8000-000000000102", "018f0000-0000-7000-8000-000000000101"
 }
 

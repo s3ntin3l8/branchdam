@@ -76,7 +76,7 @@ func mfaGateTestServer(t *testing.T) (*Server, *db.DB, *users.Service, *mfa.Serv
 			AuthMode:            auth.AuthModeLocal,
 		},
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, svc, mfaSvc
 }
 

@@ -131,35 +131,26 @@ func TestAgentChainMissingOrWrongKey(t *testing.T) {
 }
 
 // TestAgentChainFailsClosedOnMisconfiguredKey is T2's third case: an unset
-// or too-short configured key means 503 for every request, valid-looking
-// key or not -- never silently falls back to "no auth required."
+// LookupKey means 503 for every request, valid-looking key or not --
+// never silently falls back to "no auth required."
 func TestAgentChainFailsClosedOnMisconfiguredKey(t *testing.T) {
-	cases := map[string]string{
-		"unset":    "",
-		"7 chars":  "short12",
-		"31 chars": "0123456789012345678901234567890", // one short of MinAgentKeyLength
+	handlerCalled := false
+	// Misconfigured deployment (no LookupKey): every agent route
+	// fails closed with 503.
+	chain := AgentChainWithConfig(AgentConfig{}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
+	req.Header.Set(apiKeyHeader, "any-key")
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rr.Code)
 	}
-	for name, key := range cases {
-		t.Run(name, func(t *testing.T) {
-			handlerCalled := false
-			// Misconfigured deployment (no LookupKey, no APIKey after
-			// issue #453 PR F): every agent route fails closed with 503.
-			chain := AgentChainWithConfig(AgentConfig{}, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handlerCalled = true
-			}))
-
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/hello", nil)
-			req.Header.Set(apiKeyHeader, key) // even if the (misconfigured) key happens to be sent back
-			rr := httptest.NewRecorder()
-			chain.ServeHTTP(rr, req)
-
-			if rr.Code != http.StatusServiceUnavailable {
-				t.Errorf("status = %d, want 503", rr.Code)
-			}
-			if handlerCalled {
-				t.Error("handler was called despite a misconfigured agent key")
-			}
-		})
+	if handlerCalled {
+		t.Error("handler was called despite a misconfigured agent key")
 	}
 }
 

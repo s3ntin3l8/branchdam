@@ -121,12 +121,11 @@ type Deps struct {
 	// in server.go when this is non-nil.
 	PAT *auth.PATService
 
-	// AgentKeyLookup, when non-nil, overrides Pairing.KeyLookup for
-	// the agent auth chain. Test-only escape hatch so tests can inject
-	// a stub without setting up a full pairing service + paired-device
-	// row. Production wiring should leave this nil and let the pairing
-	// service's KeyLookup handle it.
-	AgentKeyLookup func(ctx context.Context, presented string) (auth.KeyLookupResult, error)
+	// agentKeyLookup, when non-nil, overrides Pairing.KeyLookup for
+	// the agent auth chain. Unexported so only tests in this package
+	// can inject a stub; production wiring (cmd/branchdam) never sets it
+	// and always relies on Pairing.KeyLookup.
+	agentKeyLookup func(ctx context.Context, presented string) (auth.KeyLookupResult, error)
 
 	// LocalAuth bundles the user service + login rate limiter +
 	// session middleware + auth mode. Nil in forward-only mode.
@@ -222,7 +221,7 @@ type Server struct {
 	requestRestart func()
 	pairingService *pairing.Service
 	// agentKeyLookup, when non-nil, overrides Pairing.KeyLookup for
-	// the agent auth chain. Test-only escape hatch (see Deps.AgentKeyLookup).
+	// the agent auth chain. Test-only escape hatch (see Deps.agentKeyLookup).
 	agentKeyLookup func(ctx context.Context, presented string) (auth.KeyLookupResult, error)
 	// patService wires admin Personal Access Tokens (issue #453 PR E).
 	// Nil-safe: the HTTP layer skips PAT middleware wiring when nil.
@@ -296,7 +295,7 @@ func New(d Deps) *Server {
 		thumbs:         d.ThumbCache,
 		requestRestart: d.RequestRestart,
 		pairingService: d.Pairing,
-		agentKeyLookup: d.AgentKeyLookup,
+		agentKeyLookup: d.agentKeyLookup,
 		patService:     d.PAT,
 		attribution:    d.Attribution,
 		audit:          d.Audit,

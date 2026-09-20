@@ -61,7 +61,7 @@ func newPATTestServer(t *testing.T) (*Server, *db.DB, *auth.PATService, int64) {
 		Version: "test",
 		PAT:     patSvc,
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, patSvc, userID
 }
 

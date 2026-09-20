@@ -1863,9 +1863,7 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 	}
 	// Cross-check body.agentId against the Principal, same as
 	// handleAgentHandshake -- stops a paired device from attributing
-	// events to another device. Issue #453 PR F removed the legacy
-	// env-bootstrap carve-out: all agent authentication now goes
-	// through per-device LookupKey.
+	// events to another device.
 	if in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
@@ -1980,11 +1978,7 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 
 	// Cross-check: a paired device's body.agentId must match the agent_id
 	// attached to its Principal (set by AgentChain via pairing.KeyLookup).
-	// A mismatch means a device is either spoofing another's identity in
-	// the body, or the env-bootstrap path is being asked to impersonate a
-	// specific paired device -- both forbidden. Issue #453 PR F
-	// removed the legacy env-bootstrap carve-out: all agent
-	// authentication now goes through per-device LookupKey.
+	// A mismatch means a device is spoofing another's identity in the body.
 	if in.Body.AgentID != "" && in.Body.AgentID != p.Name {
 		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
@@ -2024,9 +2018,8 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	out.Body.PendingEventsCount = pendingCount
 	out.Body.NamingTemplate = namingTpl
 
-	// pendingRotation hint: only when the caller is paired (not the
-	// env-bootstrap legacy path) and supplied currentKeyID. The
-	// service layer handles the SQL lookup; we just translate its
+	// pendingRotation hint: only when the caller supplied currentKeyID.
+	// The service layer handles the SQL lookup; we just translate its
 	// result into the DTO. The plaintext of the new key is included
 	// -- this is the only mechanism for the device to learn it
 	// without re-scanning a QR.

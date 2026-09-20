@@ -123,7 +123,7 @@ func passwordResetEmailTestServer(t *testing.T, provider, baseURL string, notifi
 			Email:        notifier,
 		},
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, testEmail
 }
 

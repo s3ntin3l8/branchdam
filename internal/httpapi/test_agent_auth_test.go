@@ -14,7 +14,7 @@ import (
 // secret apiKey fallback: pre-PR-F, tests authenticated agent routes
 // by setting `cfg.Agent.APIKey = routeTestAgentKey`; post-PR-F the
 // agent auth chain authenticates strictly via LookupKey, so tests
-// inject this stub via Deps.AgentKeyLookup to keep the same plaintext
+// inject this stub via Deps.agentKeyLookup to keep the same plaintext
 // working without setting up a full pairing service + paired-device
 // row.
 //

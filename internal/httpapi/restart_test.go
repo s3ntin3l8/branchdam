@@ -64,7 +64,7 @@ func TestPostRestartRejectsMachinePrincipal(t *testing.T) {
 		Settings: store, DB: database, Hub: sse.New(), Version: "test",
 		RequestRestart: func() { fired = true },
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/restart", nil)
 	req.Header.Set("X-API-Key", "01234567890123456789012345678901")

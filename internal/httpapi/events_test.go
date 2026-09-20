@@ -45,7 +45,7 @@ func TestHandleEventsReturnsPromptlyOnShutdown(t *testing.T) {
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(),
 		Version: "test", Shutdown: shutdown,
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -119,7 +119,7 @@ func TestHandleEventsIgnoresServerWriteTimeout(t *testing.T) {
 		Engine: graph.NewEngine(database, nil), Hub: hub,
 		Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	ts := httptest.NewUnstartedServer(srv.Handler())
 	ts.Config.WriteTimeout = 200 * time.Millisecond
@@ -212,7 +212,7 @@ func TestHandleEventsCachesQueryAcrossClientsAndInvalidatesOnBroadcast(t *testin
 		Engine: graph.NewEngine(database, nil), Hub: hub,
 		Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

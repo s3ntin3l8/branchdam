@@ -63,7 +63,7 @@ func fullTestServer(t *testing.T) (*Server, *db.DB) {
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(),
 		Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database
 }
 
@@ -130,7 +130,7 @@ func inheritTestServer(t *testing.T, rootPath string) (*Server, *db.DB, sqlcgen.
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	parent := seedInheritNode(t, database, locID, filepath.Join(resolved, "parent.jpg"), "uuid-parent")
 	child := seedInheritNode(t, database, locID, filepath.Join(resolved, "child.jpg"), "uuid-child")
@@ -562,7 +562,7 @@ func TestInheritMetadataRefreshesNodeStateAfterWrite(t *testing.T) {
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 	if rr.Code != http.StatusOK {
@@ -718,7 +718,7 @@ func TestInheritMetadataPrefersValidParentOverHigherConfidenceTier3(t *testing.T
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 	if rr.Code != http.StatusOK {
@@ -959,7 +959,7 @@ func TestInheritMetadataWritesConsistentUTCTimestampFromCapturedAtUnixFallback(t
 		DB:     database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata", nil)
 	if rr.Code != http.StatusOK {
@@ -1049,7 +1049,7 @@ func meTestServer(t *testing.T, adminGroups []string) *Server {
 		Config: &config.Config{Authz: config.Authz{Groups: adminGroups}},
 		DB:     database, Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 }
 
 func TestMeReportsIsAdminFalseWhenUserGroupExcluded(t *testing.T) {
@@ -3628,7 +3628,7 @@ func TestConfirmEdgeTriggersAutoInherit(t *testing.T) {
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -3728,7 +3728,7 @@ func TestConfirmEdgeTier3DoesNotInherit(t *testing.T) {
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -3844,7 +3844,7 @@ func TestConfirmTier3EdgeDoesNotTriggerAutoInheritEvenWithEligibleTier1Parent(t 
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", t3Edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -3940,7 +3940,7 @@ func TestConfirmEdgeAutoInheritDisabled(t *testing.T) {
 		DB: database, Prober: probe.New(), Guard: guard,
 		Engine: graph.NewEngine(database, nil), Hub: sse.New(), Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	rr := doJSON(t, srv.Handler(), http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edge.ID), nil)
 	if rr.Code != http.StatusOK {
@@ -4181,7 +4181,7 @@ func TestStorageHealth(t *testing.T) {
 	}
 
 	// Verify server with nil pool handles request cleanly
-	nilPoolServer := New(Deps{DB: database, AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	nilPoolServer := New(Deps{DB: database, agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	rrNil := doJSON(t, nilPoolServer.Handler(), http.MethodGet, "/api/v1/storage-health", nil)
 	if rrNil.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/storage-health nil pool status = %d, want 200", rrNil.Code)
@@ -4526,7 +4526,7 @@ func serverWithGuard(t *testing.T) (*Server, *db.DB, *storage.Guard, string, str
 		Hub:     sse.New(),
 		Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	return srv, database, guard, resStaging, resExports, resArchive
 }
@@ -5442,7 +5442,7 @@ func TestAgentRebase_NonTier3ReadOnlyRefusedEvenWithFile(t *testing.T) {
 		Hub:     sse.New(),
 		Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	nodeUUID := "018f0000-0000-7000-8000-0000000000cc"
 	originalPath := filepath.Join(resStaging, "orig.raw")

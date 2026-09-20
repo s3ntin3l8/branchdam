@@ -57,7 +57,7 @@ func TestAgentServer_ReplayProtectionEndToEnd(t *testing.T) {
 		Hub:     sse.New(),
 		Version: "test",
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	handler := srv.Handler()
 
 	t.Run("server rejects request without signature headers", func(t *testing.T) {

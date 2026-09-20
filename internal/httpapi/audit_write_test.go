@@ -174,7 +174,7 @@ func TestHandlePutStorageLocation_WritesActorAudit(t *testing.T) {
 		Attribution: usersSvc,
 		Audit:       audit.NewService(database, usersSvc),
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	locID := seedTestStorageLocation(t, srv, "test-loc", "/tmp/test-loc", "TIER1_LOCAL_SCRATCH", false)
 
 	rr := httptest.NewRecorder()

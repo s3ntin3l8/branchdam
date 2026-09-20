@@ -61,7 +61,7 @@ func newAuditHandlerServer(t *testing.T) (*Server, *audit.Service, *attributionu
 		Attribution: usersSvc,
 		Audit:       auditSvc,
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, auditSvc, usersSvc
 }
 
@@ -200,7 +200,7 @@ func TestHandleAudit_503WhenAuditNotWired(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	srv := New(Deps{Log: nil, DB: database, Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	srv := New(Deps{Log: nil, DB: database, Version: "test", agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	_, err = srv.handleAudit(auth.WithPrincipal(context.Background(), adminPrincipal()), &AuditInput{Type: "activity"})
 	if err == nil {
 		t.Fatal("expected 503 when audit not wired")
@@ -286,7 +286,7 @@ func TestHandleAudit_RejectsNonAdminPrincipal(t *testing.T) {
 		Settings: store, DB: database, Hub: sse.New(), Version: "test",
 		Attribution: usersSvc, Audit: auditSvc,
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	nonAdmin := auth.Principal{
 		Kind:          auth.KindUser,
@@ -324,7 +324,7 @@ func TestHandleListUsers_503WhenAttributionNotWired(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	srv := New(Deps{Log: nil, DB: database, Version: "test", AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	srv := New(Deps{Log: nil, DB: database, Version: "test", agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	_, err = srv.handleListUsers(auth.WithPrincipal(context.Background(), adminPrincipal()), &ListUsersInput{})
 	if err == nil {
 		t.Fatal("expected 503 when attribution not wired")

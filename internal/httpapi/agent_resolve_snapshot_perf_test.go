@@ -68,7 +68,7 @@ func bulkResolveSnapshotServer(t testing.TB, n int) (srv *Server, database *db.D
 			{ID: mediaID, Name: "media-bulk", RootPath: "/storage/media-bulk", Tier: "TIER2_EXPORTS"},
 		}),
 
-		AgentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 	return srv, database, uuid.New().String(), sourceUUIDs
 }
 
