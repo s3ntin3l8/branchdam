@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/s3ntin3l8/branchdam/compare/v0.24.0...v0.24.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* **db:** make migration 00032 safe with foreign keys ([d377a1b](https://github.com/s3ntin3l8/branchdam/commit/d377a1b54baf38e633ea2be59ee0055df44b9025))
+
 ## [0.24.0](https://github.com/s3ntin3l8/branchdam/compare/v0.23.0...v0.24.0) (2026-09-20)
 
 
