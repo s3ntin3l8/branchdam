@@ -180,6 +180,7 @@ JOIN media_nodes p ON p.id = e.source_node_id
 JOIN media_nodes c ON c.id = e.target_node_id
 WHERE e.is_active = 1;
 
+DROP TABLE IF EXISTS migration_00032_fk_guard;
 CREATE TEMP TABLE migration_00032_fk_guard (
     ok INTEGER NOT NULL CHECK (ok = 1)
 );
@@ -337,6 +338,7 @@ JOIN media_nodes p ON p.id = e.source_node_id
 JOIN media_nodes c ON c.id = e.target_node_id
 WHERE e.is_active = 1;
 
+DROP TABLE IF EXISTS migration_00032_fk_guard;
 CREATE TEMP TABLE migration_00032_fk_guard (
     ok INTEGER NOT NULL CHECK (ok = 1)
 );

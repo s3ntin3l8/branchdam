@@ -294,6 +294,61 @@ func TestMigration00032WithReferencingRows(t *testing.T) {
 	}
 }
 
+// TestMigration00032ForeignKeyGuardRejectsDanglingRows verifies that the
+// pre-commit foreign-key guard fails the migration before Goose records
+// version 32 when existing child data is invalid.
+func TestMigration00032ForeignKeyGuardRejectsDanglingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trashed-lifecycle-invalid-fk.db")
+	writerDB := openRawWriter(t, path)
+
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 31); err != nil {
+		t.Fatalf("goose UpTo 31: %v", err)
+	}
+
+	statements := []string{
+		`INSERT INTO storage_locations (id, name, root_path, tier) VALUES (1, 'media', '/media', 'TIER2_EXPORTS')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (1, '018f0000-0000-7000-8000-000000000201', 1, '/media/a.mov', 'a.mov')`,
+	}
+	for _, statement := range statements {
+		if _, err := writerDB.Exec(statement); err != nil {
+			t.Fatalf("seed migration fixture: %v", err)
+		}
+	}
+	if _, err := writerDB.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys for invalid fixture: %v", err)
+	}
+	if _, err := writerDB.Exec(`
+		INSERT INTO media_edges (source_node_id, target_node_id, relationship_type, confidence, tier, resolver)
+		VALUES (1, 999, 'PROJECT_SIDECAR', 1, 1, 'invalid-fk-test')
+	`); err != nil {
+		t.Fatalf("seed dangling media edge: %v", err)
+	}
+	if _, err := writerDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("restore foreign keys before migration: %v", err)
+	}
+
+	err := goose.UpTo(writerDB, migrationsDir, 32)
+	if err == nil {
+		t.Fatal("goose UpTo 32 with dangling child row unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "CHECK constraint failed: ok = 1") {
+		t.Errorf("goose UpTo 32 error = %q, want FK guard CHECK failure", err)
+	}
+
+	var version int64
+	if err := writerDB.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied = 1 ORDER BY version_id DESC LIMIT 1`).Scan(&version); err != nil {
+		t.Fatalf("query migration version after rejected migration: %v", err)
+	}
+	if version != 31 {
+		t.Fatalf("migration version after rejected migration = %d, want 31", version)
+	}
+}
+
 // TestOpenIsIdempotent proves Open (which runs migrations at startup) can be
 // called against an already-migrated database without error -- the normal
 // case of restarting the server against an existing data volume.
