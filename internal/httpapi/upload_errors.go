@@ -85,7 +85,7 @@ func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 		userMsg = "no writable storage location configured"
 	default:
 		if s.log != nil {
-			s.log.Error("upload internal processing failure", "err", err)
+			s.log.Error("upload internal processing failure", "err", sanitizeForLog(err.Error()))
 		}
 	}
 

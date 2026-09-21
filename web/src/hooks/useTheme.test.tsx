@@ -220,12 +220,9 @@ describe("useThemeState", () => {
     // listener reads `event.key` only and never touches `storageArea`.
     act(() => {
       localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify("dark"));
-      window.dispatchEvent(
-        new StorageEvent("storage", {
-          key: THEME_STORAGE_KEY,
-          newValue: JSON.stringify("dark"),
-        }),
-      );
+      const event = new StorageEvent("storage");
+      Object.defineProperty(event, "key", { value: THEME_STORAGE_KEY });
+      window.dispatchEvent(event);
     });
 
     expect(result.current.mode).toBe("dark");
@@ -238,9 +235,9 @@ describe("useThemeState", () => {
     expect(result.current.mode).toBe("system");
 
     act(() => {
-      window.dispatchEvent(
-        new StorageEvent("storage", { key: "something-else", newValue: "irrelevant" }),
-      );
+      const event = new StorageEvent("storage");
+      Object.defineProperty(event, "key", { value: "something-else" });
+      window.dispatchEvent(event);
     });
 
     expect(result.current.mode).toBe("system");
