@@ -491,7 +491,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 						// Destination already exists; skip inserting duplicate export node
 					} else if err := linkOrCopyFile(targetPath, exportDest); err != nil {
 						if s.log != nil {
-							s.log.Warn("failed to create Immich export hardlink or copy", "err", err)
+							s.log.Warn("failed to create Immich export hardlink or copy", "err", sanitizeForLog(err.Error()))
 						}
 					} else {
 						exportCreated = true
