@@ -35,6 +35,7 @@ type CreatePairingOutput struct {
 		AgentID       string `json:"agentId"`
 		APIKey        string `json:"apiKey"`
 		KeyPreview    string `json:"keyPreview"`
+		PairingURL    string `json:"pairingUrl"`
 		QRSVG         string `json:"qrSvg"`
 		CreatedAtUnix int64  `json:"createdAtUnix"`
 	}
@@ -102,6 +103,7 @@ type RotatePairingOutput struct {
 		KeyID                int64  `json:"keyId"`
 		APIKey               string `json:"apiKey"`
 		KeyPreview           string `json:"keyPreview"`
+		PairingURL           string `json:"pairingUrl"`
 		QRSVG                string `json:"qrSvg"`
 		PreviousKeyExpiresAt int64  `json:"previousKeyExpiresAtUnix"`
 	}
@@ -185,7 +187,8 @@ func (s *Server) handleCreatePairing(ctx context.Context, in *CreatePairingInput
 	if err != nil {
 		return nil, err
 	}
-	pairing, key, err := svc.CreatePairing(ctx, in.Body.FriendlyLabel, actorFromCtx(ctx), resolveActorUserID(ctx, s.attribution, s.log), s.qrPayloadFor(ctx))
+	payloadFactory := s.qrPayloadFor(ctx)
+	pairing, key, err := svc.CreatePairing(ctx, in.Body.FriendlyLabel, actorFromCtx(ctx), resolveActorUserID(ctx, s.attribution, s.log), payloadFactory)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("create pairing", err)
 	}
@@ -194,6 +197,7 @@ func (s *Server) handleCreatePairing(ctx context.Context, in *CreatePairingInput
 	out.Body.AgentID = pairing.AgentID
 	out.Body.APIKey = key.Plaintext
 	out.Body.KeyPreview = key.Preview
+	out.Body.PairingURL = string(payloadFactory(pairing.AgentID, key.Plaintext))
 	out.Body.QRSVG = string(key.QRSVG)
 	out.Body.CreatedAtUnix = pairing.CreatedAt
 	return out, nil
@@ -306,7 +310,8 @@ func (s *Server) handleRotatePairing(ctx context.Context, in *RotatePairingInput
 	if grace <= 0 {
 		grace = 24 * 60
 	}
-	key, expiresAt, err := svc.RotateKey(ctx, in.ID, actorFromCtx(ctx), grace, s.qrPayloadFor(ctx))
+	payloadFactory := s.qrPayloadFor(ctx)
+	key, expiresAt, err := svc.RotateKey(ctx, in.ID, actorFromCtx(ctx), grace, payloadFactory)
 	if err != nil {
 		if errors.Is(err, pairing.ErrPairingNotFound) {
 			return nil, huma.Error404NotFound("pairing not found")
@@ -317,9 +322,11 @@ func (s *Server) handleRotatePairing(ctx context.Context, in *RotatePairingInput
 	out.Body.KeyID = key.ID
 	out.Body.APIKey = key.Plaintext
 	out.Body.KeyPreview = key.Preview
+	out.Body.PairingURL = string(payloadFactory(key.AgentID, key.Plaintext))
 	out.Body.QRSVG = string(key.QRSVG)
 	out.Body.PreviousKeyExpiresAt = expiresAt
 	return out, nil
+
 }
 
 func (s *Server) handleRevokePairing(ctx context.Context, in *RevokePairingInput) (*RevokePairingOutput, error) {

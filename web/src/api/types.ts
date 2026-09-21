@@ -441,6 +441,7 @@ export interface CreateCompanionPairingResponse {
   agentId: string;
   apiKey: string;
   keyPreview: string;
+  pairingUrl: string;
   qrSvg: string;
   createdAtUnix: number;
 }
@@ -453,9 +454,11 @@ export interface RotateCompanionPairingResponse {
   keyId: number;
   apiKey: string;
   keyPreview: string;
+  pairingUrl: string;
   qrSvg: string;
   previousKeyExpiresAtUnix: number;
 }
+
 
 export interface RevokeCompanionPairingResponse {
   revokedAtUnix: number;

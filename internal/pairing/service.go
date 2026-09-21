@@ -66,6 +66,7 @@ type Pairing struct {
 type Key struct {
 	ID         int64
 	PairingID  int64
+	AgentID    string
 	Plaintext  string
 	LookupHash string
 	Preview    string
@@ -247,6 +248,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		}, &Key{
 			ID:         keyRow.ID,
 			PairingID:  keyRow.PairingID,
+			AgentID:    pRow.AgentID,
 			Plaintext:  plaintext,
 			LookupHash: keyRow.KeyLookupHash,
 			Preview:    keyRow.KeyPreview,
@@ -255,6 +257,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 			RevokedAt:  keyRow.RevokedAt,
 			QRSVG:      svg,
 		}, nil
+
 }
 
 // KeyLookup resolves an X-API-Key header value to the agent_id of the
@@ -398,6 +401,7 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 	return &Key{
 		ID:         keyRow.ID,
 		PairingID:  keyRow.PairingID,
+		AgentID:    agentID,
 		Plaintext:  plaintext,
 		LookupHash: keyRow.KeyLookupHash,
 		Preview:    keyRow.KeyPreview,
@@ -406,6 +410,7 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 		RevokedAt:  keyRow.RevokedAt,
 		QRSVG:      svg,
 	}, expiresAt, nil
+
 }
 
 // RevokePairing terminates pairingID: sets revoked_at on the pairing row

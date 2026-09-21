@@ -111,6 +111,18 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   );
 }
 
+function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
+  return (
+    <a
+      href={pairingUrl}
+      className="inline-flex items-center rounded border border-indigo-500/50 bg-indigo-600/20 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:bg-indigo-600/30"
+    >
+      Pair with local agent
+    </a>
+  );
+}
+
+
 // --- main page ---
 
 export default function CompanionPairingsPage() {
@@ -320,8 +332,17 @@ export default function CompanionPairingsPage() {
                   <code className="flex-1 truncate text-xs text-neutral-300">{createdResult.apiKey}</code>
                   <CopyButton value={createdResult.apiKey} label="Copy" />
                 </div>
+                {createdResult.pairingUrl && (
+                  <div className="flex items-center gap-2 pt-1">
+                    <span className="text-xs text-neutral-500 w-20 shrink-0">Pairing URL</span>
+                    <code className="flex-1 truncate text-xs text-neutral-400">{createdResult.pairingUrl}</code>
+                    <CopyButton value={createdResult.pairingUrl} label="Copy URL" />
+                    <PairAgentButton pairingUrl={createdResult.pairingUrl} />
+                  </div>
+                )}
               </div>
             </div>
+
           ) : (
             <div className="space-y-4">
               <p className="text-sm text-neutral-300">
@@ -387,7 +408,16 @@ export default function CompanionPairingsPage() {
                 <code className="flex-1 truncate text-xs text-neutral-300">{rotateResult.apiKey}</code>
                 <CopyButton value={rotateResult.apiKey} label="Copy" />
               </div>
+              {rotateResult.pairingUrl && (
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="text-xs text-neutral-500 w-20 shrink-0">Pairing URL</span>
+                  <code className="flex-1 truncate text-xs text-neutral-400">{rotateResult.pairingUrl}</code>
+                  <CopyButton value={rotateResult.pairingUrl} label="Copy URL" />
+                  <PairAgentButton pairingUrl={rotateResult.pairingUrl} />
+                </div>
+              )}
             </div>
+
           ) : (
             <div className="space-y-4">
               <p className="text-sm text-neutral-300">
