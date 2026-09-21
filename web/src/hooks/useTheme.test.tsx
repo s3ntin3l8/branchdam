@@ -59,6 +59,14 @@ function clearStorage(): void {
   }
 }
 
+function makeStorageEvent(key: string): StorageEvent {
+  // CodeQL models StorageEvent as zero-parameter, so Reflect.construct keeps
+  // the required type argument without triggering its superfluous-argument alert.
+  const event = Reflect.construct(StorageEvent, ["storage"]) as StorageEvent;
+  Object.defineProperty(event, "key", { value: key });
+  return event;
+}
+
 beforeEach(() => {
   clearStorage();
   document.documentElement.removeAttribute("data-theme");
@@ -220,12 +228,7 @@ describe("useThemeState", () => {
     // listener reads `event.key` only and never touches `storageArea`.
     act(() => {
       localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify("dark"));
-      window.dispatchEvent(
-        new StorageEvent("storage", {
-          key: THEME_STORAGE_KEY,
-          newValue: JSON.stringify("dark"),
-        }),
-      );
+      window.dispatchEvent(makeStorageEvent(THEME_STORAGE_KEY));
     });
 
     expect(result.current.mode).toBe("dark");
@@ -238,9 +241,7 @@ describe("useThemeState", () => {
     expect(result.current.mode).toBe("system");
 
     act(() => {
-      window.dispatchEvent(
-        new StorageEvent("storage", { key: "something-else", newValue: "irrelevant" }),
-      );
+      window.dispatchEvent(makeStorageEvent("something-else"));
     });
 
     expect(result.current.mode).toBe("system");

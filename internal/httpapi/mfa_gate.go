@@ -54,7 +54,7 @@ func MFAGate(m *mfa.Service, log *slog.Logger) func(http.Handler) http.Handler {
 			}
 			log.Info("mfa gate: blocking unverified session",
 				"userID", view.UserID,
-				"path", r.URL.Path,
+				"path", sanitizeForLog(r.URL.Path),
 				"method", r.Method,
 			)
 			writeMFAChallengeRequired(w)

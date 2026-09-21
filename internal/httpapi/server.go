@@ -594,9 +594,10 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// sanitizeForLog replaces CR/LF in a user-controlled value (here, always
-// r.URL.Path) with their visible escape sequences before it's written to a
-// log record. CodeQL's go/log-injection flags both call sites below:
+// sanitizeForLog replaces CR/LF in a user-controlled value (such as
+// r.URL.Path or an error string derived from request input) with their
+// visible escape sequences before it's written to a log record. CodeQL's
+// go/log-injection flags the request-path call sites below:
 // net/http's ServeMux/Huma reject a raw CR/LF in the request line itself,
 // but nothing stops a client from percent-encoding one (%0d%0a), which
 // net/url decodes back into r.URL.Path -- so this is a real
