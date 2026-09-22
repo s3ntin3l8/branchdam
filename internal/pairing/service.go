@@ -66,7 +66,6 @@ type Pairing struct {
 type Key struct {
 	ID         int64
 	PairingID  int64
-	AgentID    string
 	Plaintext  string
 	LookupHash string
 	Preview    string
@@ -250,7 +249,6 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		}, &Key{
 			ID:         keyRow.ID,
 			PairingID:  keyRow.PairingID,
-			AgentID:    pRow.AgentID,
 			Plaintext:  plaintext,
 			LookupHash: keyRow.KeyLookupHash,
 			Preview:    keyRow.KeyPreview,
@@ -405,7 +403,6 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 	return &Key{
 		ID:         keyRow.ID,
 		PairingID:  keyRow.PairingID,
-		AgentID:    agentID,
 		Plaintext:  plaintext,
 		LookupHash: keyRow.KeyLookupHash,
 		Preview:    keyRow.KeyPreview,
