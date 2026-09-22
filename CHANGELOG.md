@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.0](https://github.com/s3ntin3l8/branchdam/compare/v0.24.1...v0.25.0) (2026-09-22)
+
+
+### Features
+
+* **pairing:** expose pairingUrl with copy and deep-link button in companion pairings UI ([10aafcd](https://github.com/s3ntin3l8/branchdam/commit/10aafcd466e96332c73758a4d56e9d6b8aef9beb))
+
+
+### Bug Fixes
+
+* sanitize code-scanning log inputs ([f6358e3](https://github.com/s3ntin3l8/branchdam/commit/f6358e3d640f6cb9b5523add06ae019320db0f89))
+
 ## [0.24.1](https://github.com/s3ntin3l8/branchdam/compare/v0.24.0...v0.24.1) (2026-09-20)
 
 
