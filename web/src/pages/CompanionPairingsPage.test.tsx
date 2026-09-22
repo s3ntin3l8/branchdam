@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,21 +6,32 @@ import CompanionPairingsPage from "./CompanionPairingsPage";
 import type {
   CompanionPairingDetail,
   CompanionPairingListItem,
+  CreateCompanionPairingRequest,
+  CreateCompanionPairingResponse,
   ListPairingsResponse,
+  RotateCompanionPairingRequest,
+  RotateCompanionPairingResponse,
 } from "../api/types";
 
 // Mock the api client at the module level. The pairing service tests
 // (server-side Go) cover the data flow; this just verifies the SPA
 // renders list rows and reacts to API responses correctly.
 const listPairingsMock = vi.fn<() => Promise<ListPairingsResponse>>();
+const createPairingMock = vi.fn<
+  (input: CreateCompanionPairingRequest) => Promise<CreateCompanionPairingResponse>
+>();
+const rotatePairingMock = vi.fn<
+  (id: number, input: RotateCompanionPairingRequest) => Promise<RotateCompanionPairingResponse>
+>();
 
 vi.mock("../api/client", () => ({
   api: {
     listPairings: () => listPairingsMock(),
     pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
     revokePairing: vi.fn(),
-    rotatePairing: vi.fn(),
-    createPairing: vi.fn(),
+    rotatePairing: (id: number, input: RotateCompanionPairingRequest) =>
+      rotatePairingMock(id, input),
+    createPairing: (input: CreateCompanionPairingRequest) => createPairingMock(input),
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -62,6 +73,8 @@ const sampleDetail: CompanionPairingDetail = {
 
 beforeEach(() => {
   listPairingsMock.mockReset();
+  createPairingMock.mockReset();
+  rotatePairingMock.mockReset();
 });
 
 function renderPage() {
@@ -133,6 +146,67 @@ describe("CompanionPairingsPage", () => {
     const revokeButton = screen.getByRole("button", { name: /^Revoke$/ });
     expect(rotateButton).toBeDisabled();
     expect(revokeButton).toBeDisabled();
+  });
+
+  it("displays Pairing URL, Copy URL button, and deep link when a new pairing is created", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [], total: 0 });
+    const pairingUrl = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=testkey123456789012345678901234&agent=dev-abc12345";
+    createPairingMock.mockResolvedValue({
+      pairingId: 10,
+      agentId: "dev-abc12345",
+      apiKey: "testkey123456789012345678901234",
+      keyPreview: "1234",
+      pairingUrl,
+      qrSvg: "<svg></svg>",
+      createdAtUnix: 1700000000,
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByRole("button", { name: /pair new device/i }));
+    screen.getByRole("button", { name: /pair new device/i }).click();
+
+    const input = await screen.findByPlaceholderText(/Björn's iPhone 16 Pro/i);
+    fireEvent.change(input, { target: { value: "My Test Device" } });
+    screen.getByRole("button", { name: /create pairing/i }).click();
+
+    await waitFor(() => {
+      expect(screen.getByText("Pairing URL")).toBeInTheDocument();
+      expect(screen.getByText(pairingUrl)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /copy url/i })).toBeInTheDocument();
+      const deepLink = screen.getByRole("link", { name: /pair with local agent/i });
+      expect(deepLink).toHaveAttribute("href", pairingUrl);
+    });
+  });
+
+  it("displays Pairing URL, Copy URL button, and deep link when a key is rotated", async () => {
+    listPairingsMock.mockResolvedValue({
+      pairings: [samplePairing],
+      total: 1,
+    });
+    const pairingUrl = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=newkey12345678901234567890123456&agent=dev-abc12345";
+    rotatePairingMock.mockResolvedValue({
+      keyId: 99,
+      apiKey: "newkey12345678901234567890123456",
+      keyPreview: "3456",
+      pairingUrl,
+      qrSvg: "<svg></svg>",
+      previousKeyExpiresAtUnix: 1700086400,
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    screen.getByRole("button", { name: /^Rotate$/ }).click();
+
+    await waitFor(() => screen.getByRole("heading", { name: /rotate api key/i }));
+    screen.getByRole("button", { name: /^Rotate key$/ }).click();
+
+    await waitFor(() => {
+      expect(screen.getByText("Pairing URL")).toBeInTheDocument();
+      expect(screen.getByText(pairingUrl)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /copy url/i })).toBeInTheDocument();
+      const deepLink = screen.getByRole("link", { name: /pair with local agent/i });
+      expect(deepLink).toHaveAttribute("href", pairingUrl);
+    });
   });
 });
 

@@ -102,6 +102,7 @@ func TestCompanionPairings_CreateListGetRevoke(t *testing.T) {
 		AgentID       string `json:"agentId"`
 		APIKey        string `json:"apiKey"`
 		KeyPreview    string `json:"keyPreview"`
+		PairingURL    string `json:"pairingUrl"`
 		QRSVG         string `json:"qrSvg"`
 		CreatedAtUnix int64  `json:"createdAtUnix"`
 	}
@@ -110,6 +111,8 @@ func TestCompanionPairings_CreateListGetRevoke(t *testing.T) {
 	assert.NotEmpty(t, created.AgentID)
 	assert.NotEmpty(t, created.APIKey)
 	assert.Contains(t, created.QRSVG, "<svg")
+	assert.True(t, strings.HasPrefix(created.PairingURL, "branchdam://?"))
+	assert.Contains(t, created.PairingURL, created.APIKey)
 
 	// List
 	rec = doAdmin(t, srv, http.MethodGet, "/api/v1/companion/pairings", nil)
@@ -140,11 +143,14 @@ func TestCompanionPairings_CreateListGetRevoke(t *testing.T) {
 	var rotated struct {
 		KeyID                int64  `json:"keyId"`
 		APIKey               string `json:"apiKey"`
+		PairingURL           string `json:"pairingUrl"`
 		QRSVG                string `json:"qrSvg"`
 		PreviousKeyExpiresAt int64  `json:"previousKeyExpiresAtUnix"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rotated))
 	assert.NotEqual(t, created.APIKey, rotated.APIKey)
+	assert.True(t, strings.HasPrefix(rotated.PairingURL, "branchdam://?"))
+	assert.Contains(t, rotated.PairingURL, rotated.APIKey)
 
 	// Revoke
 	rec = doAdmin(t, srv, http.MethodPost,
