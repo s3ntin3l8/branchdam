@@ -290,7 +290,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: created.ID,
 			Actor:     actor,
-			Event:     "PAIR_CREATED",
+			Event:     audit.EventPairCreated,
 			Details:   mustJSON(map[string]any{"agent_id": agentID, "friendly_label": friendlyLabel}),
 			CreatedAt: now,
 		}); err != nil {
@@ -299,7 +299,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: created.ID,
 			Actor:     actor,
-			Event:     "KEY_MINTED",
+			Event:     audit.EventKeyMinted,
 			Details:   mustJSON(map[string]any{"key_id": row.ID, "key_preview": plaintext[len(plaintext)-4:]}),
 			CreatedAt: now,
 		}); err != nil {
@@ -432,7 +432,7 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingID,
 			Actor:     actor,
-			Event:     "KEY_ROTATED",
+			Event:     audit.EventKeyRotated,
 			Details: mustJSON(map[string]any{
 				"new_key_id":          row.ID,
 				"new_key_preview":     plaintext[len(plaintext)-4:],
@@ -515,7 +515,7 @@ func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor stri
 		return q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingID,
 			Actor:     actor,
-			Event:     "PAIR_REVOKED",
+			Event:     audit.EventPairRevoked,
 			Details:   "{}",
 			CreatedAt: now,
 		})

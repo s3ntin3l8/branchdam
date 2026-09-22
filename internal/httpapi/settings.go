@@ -30,7 +30,9 @@ func (s *Server) requireSettingsAdmin(ctx context.Context) error {
 		return huma.Error403Forbidden("authentication required")
 	}
 	if p.Kind == auth.KindMachine {
-		return huma.Error403Forbidden("agent principals may not access settings")
+		// Neutral wording: this gate is shared by settings, companion
+		// credential reveal, restart, etc. — don't name one surface.
+		return huma.Error403Forbidden("agent principals may not access this resource")
 	}
 	var allowedGroups []string
 	if cfg := s.cfg(); cfg != nil {

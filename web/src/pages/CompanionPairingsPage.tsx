@@ -130,26 +130,24 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
   );
 }
 
-// CredentialsBody renders the shared credential display used by both the
-// create-success body and the show-credentials modal for an existing
-// pairing. pairingUrl/apiKey may be empty on keyless servers (QR-only).
-// variant="once" keeps the show-once warning (create/rotate mint a key
-// the operator must copy before closing); variant="redisplays" is the
-// reveal path, where "will not be shown again" would be false by design.
+// CredentialsBody renders the shared credential display used by the
+// create-success modal, the rotate-success modal, and the show-credentials
+// re-display for an existing pairing. pairingUrl/apiKey may be empty on
+// keyless servers (QR-only). Copy is intentionally re-openable: Show
+// credentials re-serves the current key, so a show-once claim would be
+// false on every surface (Hermes round 2).
 function CredentialsBody({
   agentId,
   apiKey,
   keyPreview,
   pairingUrl,
   qrSvg,
-  variant = "once",
 }: {
   agentId: string;
   apiKey: string;
   keyPreview: string;
   pairingUrl: string;
   qrSvg: string;
-  variant?: "once" | "redisplays";
 }) {
   return (
     <div className="space-y-4">
@@ -159,15 +157,10 @@ function CredentialsBody({
       <div className="flex justify-center rounded bg-white p-4">
         <div className="h-64 w-64" dangerouslySetInnerHTML={{ __html: qrSvg }} />
       </div>
-      {variant === "once" ? (
-        <div className="rounded border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-300">
-          <strong>Copy this key now.</strong> It will not be shown again.
-        </div>
-      ) : (
-        <div className="rounded border border-neutral-700/60 bg-neutral-900/40 p-3 text-xs text-neutral-400">
-          Credentials can be re-opened later from this page. Each reveal is recorded in the audit log.
-        </div>
-      )}
+      <div className="rounded border border-neutral-700/60 bg-neutral-900/40 p-3 text-xs text-neutral-400">
+        <strong className="text-neutral-300">Copy this key now.</strong> Credentials can be
+        re-opened later from this page. Each reveal is recorded in the audit log.
+      </div>
       <div className="space-y-1">
         <div className="flex items-center gap-2">
           <span className="text-xs text-neutral-500 w-20 shrink-0">Agent ID</span>
@@ -487,7 +480,6 @@ export default function CompanionPairingsPage() {
               keyPreview={credentials.keyPreview}
               pairingUrl={credentials.pairingUrl}
               qrSvg={credentials.qrSvg}
-              variant="redisplays"
             />
           ) : (
             <p className="text-sm text-neutral-400">No credentials loaded.</p>
@@ -541,8 +533,9 @@ export default function CompanionPairingsPage() {
                 New key minted. The previous key still works until{" "}
                 <strong>{formatUnixTime(rotateResult.previousKeyExpiresAtUnix)}</strong>.
               </p>
-              <div className="rounded border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-300">
-                <strong>Copy this key now.</strong> It will not be shown again.
+              <div className="rounded border border-neutral-700/60 bg-neutral-900/40 p-3 text-xs text-neutral-400">
+                <strong className="text-neutral-300">Copy this key now.</strong> Credentials can be
+                re-opened later from this page. Each reveal is recorded in the audit log.
               </div>
               <div className="flex items-center gap-2">
                 <code className="flex-1 truncate text-xs text-neutral-300">{rotateResult.apiKey}</code>

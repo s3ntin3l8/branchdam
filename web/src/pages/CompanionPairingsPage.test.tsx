@@ -224,6 +224,9 @@ describe("CompanionPairingsPage", () => {
       const deepLink = screen.getByRole("link", { name: /pair with local agent/i });
       expect(deepLink).toHaveAttribute("href", pairingUrl);
     });
+    // Rotate success reuses the same re-openable copy; no show-once claim.
+    expect(screen.queryByText(/will not be shown again/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
   });
 
   it("re-fetches and shows credentials for an existing pairing", async () => {
@@ -257,7 +260,7 @@ describe("CompanionPairingsPage", () => {
     expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
   });
 
-  it("keeps the show-once warning on the create-success credentials body", async () => {
+  it("uses re-openable copy on the create-success credentials body (no show-once claim)", async () => {
     listPairingsMock.mockResolvedValue({ pairings: [], total: 0 });
     createPairingMock.mockResolvedValue({
       pairingId: 10,
@@ -277,8 +280,10 @@ describe("CompanionPairingsPage", () => {
     screen.getByRole("button", { name: /create pairing/i }).click();
 
     await waitFor(() => {
-      expect(screen.getByText(/will not be shown again/i)).toBeInTheDocument();
+      expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
     });
+    // Show credentials re-serves this key, so show-once would be false (Hermes round 2).
+    expect(screen.queryByText(/will not be shown again/i)).not.toBeInTheDocument();
   });
 
   it("ignores a stale credentials response when switching pairings mid-flight", async () => {

@@ -101,7 +101,7 @@ either direction.
 
 1. Open the branchDAM web UI at **Companion Pairing** (sidebar link under "Storage Health" and "Settings"; also reachable from the Settings page's "Companion Pairing" card).
 2. Click **Pair new device**, enter a friendly label (e.g. "Björn's iPhone 16 Pro"), submit.
-3. The server mints a unique `agent_id` (e.g. `dev-abc12345`) and an initial API key. Both are shown exactly once in the modal: a QR code (scannable by the mobile app) and the plaintext key as a copy-to-clipboard widget.
+3. The server mints a unique `agent_id` (e.g. `dev-abc12345`) and an initial API key. The create-success modal shows a QR code (scannable by the mobile app) and the plaintext key as a copy-to-clipboard widget (see below — credentials are not strictly show-once).
 4. In the mobile app, scan the QR or enter the server URL, agent ID, and API key manually. The app stores them in the OS keychain (iOS `AppleKeychain` / Android `EncryptedSharedPreferences`).
 5. The app calls `POST /api/v1/agent/handshake` with the new key. The server authenticates via the device-pairing path, returns the naming template, and (if a rotation is pending) a `pendingRotation` hint the mobile app reads on its next handshake.
 
@@ -171,5 +171,6 @@ Related admin endpoints for an existing pairing:
   `BRANCHDAM_SECRET_KEY` is set; QR-only fallback when keyless; each read
   is fail-closed audited `CREDENTIALS_REVEALED` and the response is
   `Cache-Control: private, no-store`.
-- `GET /api/v1/companion/pairings/{id}/qr.svg` — raw SVG; also records a
+- `GET /api/v1/companion/pairings/{id}/qr.svg` — raw SVG (admin session
+  required, same `requireSettingsAdmin` gate as credentials); also records a
   `CREDENTIALS_REVEALED` audit row (channel `qr_svg`).

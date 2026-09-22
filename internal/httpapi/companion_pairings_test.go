@@ -354,23 +354,23 @@ func TestCompanionPairings_AuditLogsEveryLifecycleEvent(t *testing.T) {
 	rec = doAdmin(t, srv, http.MethodGet,
 		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/audit", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	var audit struct {
+	var pairingAudit struct {
 		Events []struct {
 			Actor string `json:"actor"`
 			Event string `json:"event"`
 		} `json:"events"`
 		Total int64 `json:"total"`
 	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &audit))
-	assert.Equal(t, int64(4), audit.Total, "PAIR_CREATED, KEY_MINTED, KEY_ROTATED, PAIR_REVOKED")
-	gotEvents := make(map[string]bool, len(audit.Events))
-	for _, e := range audit.Events {
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pairingAudit))
+	assert.Equal(t, int64(4), pairingAudit.Total, "PAIR_CREATED, KEY_MINTED, KEY_ROTATED, PAIR_REVOKED")
+	gotEvents := make(map[string]bool, len(pairingAudit.Events))
+	for _, e := range pairingAudit.Events {
 		gotEvents[e.Event] = true
 	}
-	assert.True(t, gotEvents["PAIR_CREATED"])
-	assert.True(t, gotEvents["KEY_MINTED"])
-	assert.True(t, gotEvents["KEY_ROTATED"])
-	assert.True(t, gotEvents["PAIR_REVOKED"])
+	assert.True(t, gotEvents[audit.EventPairCreated])
+	assert.True(t, gotEvents[audit.EventKeyMinted])
+	assert.True(t, gotEvents[audit.EventKeyRotated])
+	assert.True(t, gotEvents[audit.EventPairRevoked])
 }
 
 func TestCompanionPairings_QRPayloadEncodedCorrectly(t *testing.T) {
