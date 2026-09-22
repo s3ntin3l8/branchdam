@@ -54,6 +54,12 @@ const (
 	EventPairingRotated     = "pairing.rotated"
 	EventPairingRevoked     = "pairing.revoked"
 	EventPairingDeleted     = "pairing.deleted"
+	// Pairing-scoped audit vocabulary (device_pairings_audit rows, not
+	// the global actor_audit stream). SCREAMING names are part of the
+	// operator-facing contract (docs/agent-api.md, SPA audit modal) --
+	// do not rename to the dotted style used by the Event* constants above.
+	EventLabelRenamed        = "LABEL_RENAMED"
+	EventCredentialsRevealed = "CREDENTIALS_REVEALED"
 	// Admin Personal Access Tokens (issue #453 PR E).
 	EventPATMinted           = "pat.minted"
 	EventPATRevoked          = "pat.revoked"

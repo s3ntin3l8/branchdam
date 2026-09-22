@@ -515,7 +515,7 @@ func TestRenamePairing_UpdatesLabelAndAudits(t *testing.T) {
 	require.NoError(t, err)
 	var found bool
 	for _, e := range events {
-		if e.Event == "LABEL_RENAMED" {
+		if e.Event == audit.EventLabelRenamed {
 			found = true
 			assert.Contains(t, e.Details, `"old":"Old name"`)
 			assert.Contains(t, e.Details, `"new":"New name"`)
@@ -568,7 +568,7 @@ func TestRecordCredentialReveal_WritesAudit(t *testing.T) {
 	require.NoError(t, err)
 	var found bool
 	for _, e := range events {
-		if e.Event == "CREDENTIALS_REVEALED" {
+		if e.Event == audit.EventCredentialsRevealed {
 			found = true
 			assert.Contains(t, e.Details, `"channel":"qr_svg"`)
 		}

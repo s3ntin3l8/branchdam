@@ -16,11 +16,13 @@ import (
 
 // Companion pairing API: /api/v1/companion/pairings/*.
 //
-// Every route is admin-only via the existing auth.RequireAdmin middleware
-// (Huma passes the principal through context, and RequireAdmin refuses
-// anything but a real authenticated browser principal in an admin group).
-// Agent (KindMachine) principals get 403 here, same as on every other
-// admin route -- a device can never enumerate or revoke other devices.
+// Mutating routes rely on the global auth.RequireAdmin middleware. The
+// credential reveal surface (GET /{id}/credentials and GET
+// /{id}/qr.svg) cannot: RequireAdmin passes GET/HEAD/OPTIONS before its
+// Authenticated check, and those responses carry the plaintext API key.
+// Both reveal handlers therefore call requireSettingsAdmin themselves --
+// real authenticated browser admin only, same policy as GET/PUT
+// /api/v1/settings (which also rejects KindMachine).
 
 // --- request / response DTOs ---
 
@@ -425,12 +427,17 @@ func (s *Server) handleRenamePairing(ctx context.Context, in *RenamePairingInput
 
 // handlePairingCredentials re-serves the full credential set for an
 // existing pairing's current key (QR SVG, pairing URL, parsed API key).
-// Each successful read is recorded as a CREDENTIALS_REVEALED audit row
-// (fail-closed: an audit failure returns 500 rather than leaking
+// requireSettingsAdmin gates GET too -- RequireAdmin's global GET bypass
+// would otherwise serve the plaintext key to any caller that reaches the
+// port. Each successful read is recorded as a CREDENTIALS_REVEALED audit
+// row (fail-closed: an audit failure returns 500 rather than leaking
 // unaudited) and the response is no-store. Huma headers apply here
 // because the response is JSON -- unlike GET qr.svg, which stays on the
 // mux for image/svg+xml.
 func (s *Server) handlePairingCredentials(ctx context.Context, in *GetPairingInput) (*PairingCredentialsOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
 	svc, err := s.pairingSvc()
 	if err != nil {
 		return nil, err
@@ -542,11 +549,21 @@ func (s *Server) handlePairingAudit(ctx context.Context, in *PairingAuditInput) 
 // of a pairing. Registered directly on the mux because Huma's response
 // model expects JSON; emitting image/svg+xml via Huma requires more
 // indirection than this single endpoint warrants. Serving the SVG is a
-// credential reveal (the QR encodes the API key), so it writes a
-// CREDENTIALS_REVEALED audit row with channel "qr_svg" after a
-// successful read and before the response -- same fail-closed contract
-// as GET /credentials.
+// credential reveal (the QR encodes the API key): requireSettingsAdmin
+// gates GET (RequireAdmin's global bypass would leave this open), and a
+// successful read writes a CREDENTIALS_REVEALED audit row with channel
+// "qr_svg" before the response -- same fail-closed contract as GET
+// /credentials.
 func (s *Server) handlePairingQRSVG(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireSettingsAdmin(r.Context()); err != nil {
+		var statusErr huma.StatusError
+		if errors.As(err, &statusErr) {
+			writeJSONError(w, statusErr.GetStatus(), statusErr.Error())
+		} else {
+			writeJSONError(w, http.StatusForbidden, err.Error())
+		}
+		return
+	}
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {

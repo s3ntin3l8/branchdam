@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError } from "../api/client";
 import { api } from "../api/client";
 import {
@@ -21,8 +21,10 @@ import type {
 // system documented in docs/mobile.md §4. Operators pair new devices via
 // QR (or manual entry of the URL+key), rotate keys with a configurable
 // grace window, rename labels, re-show credentials, and revoke individual
-// devices. The page is admin-only at the API layer; auth.RequireAdmin
-// refuses non-admin users with 403.
+// devices. Mutating routes rely on auth.RequireAdmin; the credential
+// reveal endpoints additionally require an authenticated admin session
+// (requireSettingsAdmin — RequireAdmin's global GET bypass would leave
+// GET /credentials and GET qr.svg open).
 //
 // Layout (top-to-bottom):
 //  1. "Pair new device" CTA -> modal with QR + reveal-once plaintext key
@@ -131,18 +133,23 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
 // CredentialsBody renders the shared credential display used by both the
 // create-success body and the show-credentials modal for an existing
 // pairing. pairingUrl/apiKey may be empty on keyless servers (QR-only).
+// variant="once" keeps the show-once warning (create/rotate mint a key
+// the operator must copy before closing); variant="redisplays" is the
+// reveal path, where "will not be shown again" would be false by design.
 function CredentialsBody({
   agentId,
   apiKey,
   keyPreview,
   pairingUrl,
   qrSvg,
+  variant = "once",
 }: {
   agentId: string;
   apiKey: string;
   keyPreview: string;
   pairingUrl: string;
   qrSvg: string;
+  variant?: "once" | "redisplays";
 }) {
   return (
     <div className="space-y-4">
@@ -152,9 +159,15 @@ function CredentialsBody({
       <div className="flex justify-center rounded bg-white p-4">
         <div className="h-64 w-64" dangerouslySetInnerHTML={{ __html: qrSvg }} />
       </div>
-      <div className="rounded border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-300">
-        <strong>Copy this key now.</strong> It will not be shown again.
-      </div>
+      {variant === "once" ? (
+        <div className="rounded border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-300">
+          <strong>Copy this key now.</strong> It will not be shown again.
+        </div>
+      ) : (
+        <div className="rounded border border-neutral-700/60 bg-neutral-900/40 p-3 text-xs text-neutral-400">
+          Credentials can be re-opened later from this page. Each reveal is recorded in the audit log.
+        </div>
+      )}
       <div className="space-y-1">
         <div className="flex items-center gap-2">
           <span className="text-xs text-neutral-500 w-20 shrink-0">Agent ID</span>
@@ -198,10 +211,13 @@ export default function CompanionPairingsPage() {
   // Show-credentials for an existing pairing: imperative api fetch (each
   // open is a fresh CREDENTIALS_REVEALED audit row), not React Query, so
   // state is always cleared on close rather than served from a cache.
+  // credsSeqRef invalidates in-flight responses when the modal switches
+  // pairings or closes, so a slow response for A never lands under B.
   const [credsForPairing, setCredsForPairing] = useState<CompanionPairingListItem | null>(null);
   const [credentials, setCredentials] = useState<PairingCredentialsResponse | null>(null);
   const [credsError, setCredsError] = useState<string | null>(null);
   const [credsLoading, setCredsLoading] = useState(false);
+  const credsSeqRef = useRef(0);
 
   // Rename modal (pencil by label cell). Allowed on revoked pairings.
   const [renameForPairing, setRenameForPairing] = useState<CompanionPairingListItem | null>(null);
@@ -230,6 +246,7 @@ export default function CompanionPairingsPage() {
   };
 
   const closeCredentials = () => {
+    credsSeqRef.current += 1; // invalidate any in-flight fetch
     setCredsForPairing(null);
     setCredentials(null);
     setCredsError(null);
@@ -237,19 +254,22 @@ export default function CompanionPairingsPage() {
   };
 
   const handleShowCredentials = async (p: CompanionPairingListItem) => {
+    const seq = ++credsSeqRef.current;
     setCredsForPairing(p);
     setCredentials(null);
     setCredsError(null);
     setCredsLoading(true);
     try {
       const res = await api.pairingCredentials(p.id);
+      if (seq !== credsSeqRef.current) return; // stale: modal switched or closed
       setCredentials(res);
     } catch (e) {
+      if (seq !== credsSeqRef.current) return;
       setCredsError(
         e instanceof ApiError ? e.message : "Failed to load credentials for this pairing."
       );
     } finally {
-      setCredsLoading(false);
+      if (seq === credsSeqRef.current) setCredsLoading(false);
     }
   };
 
@@ -467,6 +487,7 @@ export default function CompanionPairingsPage() {
               keyPreview={credentials.keyPreview}
               pairingUrl={credentials.pairingUrl}
               qrSvg={credentials.qrSvg}
+              variant="redisplays"
             />
           ) : (
             <p className="text-sm text-neutral-400">No credentials loaded.</p>

@@ -752,7 +752,7 @@ func (s *Service) RenamePairing(ctx context.Context, pairingID int64, label, act
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingID,
 			Actor:     actor,
-			Event:     "LABEL_RENAMED",
+			Event:     audit.EventLabelRenamed,
 			Details: mustJSON(map[string]any{
 				"old": existing.FriendlyLabel,
 				"new": label,
@@ -790,7 +790,7 @@ func (s *Service) RecordCredentialReveal(ctx context.Context, pairingID int64, a
 		return q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingID,
 			Actor:     actor,
-			Event:     "CREDENTIALS_REVEALED",
+			Event:     audit.EventCredentialsRevealed,
 			Details:   mustJSON(map[string]any{"channel": channel}),
 			CreatedAt: now,
 		})

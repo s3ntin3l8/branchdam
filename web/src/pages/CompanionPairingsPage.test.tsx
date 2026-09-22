@@ -252,6 +252,91 @@ describe("CompanionPairingsPage", () => {
         pairingUrl
       );
     });
+    // Reveal path must not claim show-once (Hermes: false on re-display).
+    expect(screen.queryByText(/will not be shown again/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
+  });
+
+  it("keeps the show-once warning on the create-success credentials body", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [], total: 0 });
+    createPairingMock.mockResolvedValue({
+      pairingId: 10,
+      agentId: "dev-abc12345",
+      apiKey: "testkey123456789012345678901234",
+      keyPreview: "1234",
+      pairingUrl: "branchdam://?server=https%3A%2F%2Fdam.example.com&key=testkey123456789012345678901234&agent=dev-abc12345",
+      qrSvg: "<svg></svg>",
+      createdAtUnix: 1700000000,
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByRole("button", { name: /pair new device/i }));
+    screen.getByRole("button", { name: /pair new device/i }).click();
+    const input = await screen.findByPlaceholderText(/Björn's iPhone 16 Pro/i);
+    fireEvent.change(input, { target: { value: "My Test Device" } });
+    screen.getByRole("button", { name: /create pairing/i }).click();
+
+    await waitFor(() => {
+      expect(screen.getByText(/will not be shown again/i)).toBeInTheDocument();
+    });
+  });
+
+  it("ignores a stale credentials response when switching pairings mid-flight", async () => {
+    const second: CompanionPairingListItem = {
+      id: 2,
+      agentId: "dev-second99",
+      friendlyLabel: "Second phone",
+      createdAtUnix: 1700000000,
+      createdBy: "user:admin",
+      activeKeyCount: 1,
+    };
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing, second], total: 2 });
+
+    let resolveFirst!: (v: PairingCredentialsResponse) => void;
+    const firstPending = new Promise<PairingCredentialsResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    pairingCredentialsMock.mockImplementation((id: number) => {
+      if (id === 1) return firstPending;
+      return Promise.resolve({
+        pairingId: 2,
+        agentId: "dev-second99",
+        friendlyLabel: "Second phone",
+        apiKey: "second-key-aaaaaaaaaaaaaaaaaaaa",
+        keyPreview: "aaaa",
+        pairingUrl: "branchdam://?key=second-key-aaaaaaaaaaaaaaaaaaaa&agent=dev-second99",
+        qrSvg: "<svg></svg>",
+      });
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+
+    // Open A (pending), then B before A resolves.
+    fireEvent.click(screen.getAllByRole("button", { name: /show credentials/i })[0]);
+    await waitFor(() => expect(pairingCredentialsMock).toHaveBeenCalledWith(1));
+    fireEvent.click(screen.getAllByRole("button", { name: /show credentials/i })[1]);
+    await waitFor(() => expect(pairingCredentialsMock).toHaveBeenCalledWith(2));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Second phone/i })).toBeInTheDocument();
+      expect(screen.getByText("second-key-aaaaaaaaaaaaaaaaaaaa")).toBeInTheDocument();
+    });
+
+    // Late A response must not overwrite B's modal.
+    resolveFirst({
+      pairingId: 1,
+      agentId: "dev-abc12345",
+      friendlyLabel: "Björn's iPhone",
+      apiKey: "first-key-zzzzzzzzzzzzzzzzzzzzzz",
+      keyPreview: "zzzz",
+      pairingUrl: "branchdam://?key=first-key-zzzzzzzzzzzzzzzzzzzzzz&agent=dev-abc12345",
+      qrSvg: "<svg></svg>",
+    });
+    // Give the microtask queue a turn to flush the stale resolve.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText("first-key-zzzzzzzzzzzzzzzzzzzzzz")).not.toBeInTheDocument();
+    expect(screen.getByText("second-key-aaaaaaaaaaaaaaaaaaaa")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Second phone/i })).toBeInTheDocument();
   });
 
   it("renames a pairing via the pencil next to the label", async () => {

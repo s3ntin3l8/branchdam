@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +13,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -294,9 +297,12 @@ func TestCompanionPairings_QRSVGReturnsCachedSVG(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 
-	// GET the qr.svg directly via the mux route
+	// GET the qr.svg directly via the mux route. requireSettingsAdmin
+	// gates this reveal surface, so the request needs the admin identity
+	// headers doAdmin injects.
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/qr.svg", nil)
+	req.Header.Set("X-Authentik-Username", "test-admin")
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -318,6 +324,7 @@ func TestCompanionPairings_QRSVGReturns410WhenNoActiveKey(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/companion/pairings/"+pairingIDStr(p.ID)+"/qr.svg", nil)
+	req.Header.Set("X-Authentik-Username", "test-admin")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	// Revoked pairings get the no-active-key branch (ErrNoActiveKey → 410).
@@ -609,4 +616,103 @@ func TestCompanionPairings_QRSVGRecordsRevealAudit(t *testing.T) {
 	require.NoError(t, err)
 	// PAIR_CREATED + KEY_MINTED + CREDENTIALS_REVEALED
 	assert.Equal(t, int64(3), count)
+}
+
+// TestCompanionPairings_CredentialsRequiresAdmin pins requireSettingsAdmin
+// on both credential-reveal routes. RequireAdmin's global GET bypass used
+// to leave GET /credentials (and GET qr.svg) wide open -- probed 200 with
+// no identity headers while POST /rename correctly 403'd. Hermes review
+// on PR #479.
+func TestCompanionPairings_CredentialsRequiresAdmin(t *testing.T) {
+	srv, _, pairSvc := newPairingTestServer(t)
+	ctx := context.Background()
+	p, _, err := pairSvc.CreatePairing(ctx, "Gated", "test", 0, func(agentID, apiKey string) []byte {
+		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
+	})
+	require.NoError(t, err)
+
+	credsPath := "/api/v1/companion/pairings/" + pairingIDStr(p.ID) + "/credentials"
+	qrPath := "/api/v1/companion/pairings/" + pairingIDStr(p.ID) + "/qr.svg"
+
+	t.Run("credentials no identity headers forbidden", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, credsPath, nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+	})
+
+	t.Run("qr.svg no identity headers forbidden", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, qrPath, nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+	})
+
+	t.Run("credentials unauthenticated browser principal forbidden", func(t *testing.T) {
+		// BrowserChain attaches a principal even with no Authentik
+		// headers; Authenticated stays false, which IsAdmin rejects.
+		req := httptest.NewRequest(http.MethodGet, credsPath, nil)
+		req.Header.Set("X-Authentik-Groups", "dam-users")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+	})
+
+	t.Run("credentials non-admin forbidden", func(t *testing.T) {
+		srv.cfg().Authz.Groups = []string{"dam-admins"}
+		t.Cleanup(func() { srv.cfg().Authz.Groups = nil })
+
+		req := httptest.NewRequest(http.MethodGet, credsPath, nil)
+		req.Header.Set("X-Authentik-Username", "alice")
+		req.Header.Set("X-Authentik-Groups", "dam-users")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+	})
+
+	t.Run("credentials machine principal forbidden", func(t *testing.T) {
+		// Direct handler call: companion routes run BrowserChain, which
+		// never produces KindMachine from X-API-Key alone. This pins
+		// requireSettingsAdmin's KindMachine branch for this surface.
+		machineCtx := auth.WithPrincipal(ctx, auth.Principal{
+			Kind: auth.KindMachine, Name: "agent-1", Authenticated: true,
+		})
+		_, err := srv.handlePairingCredentials(machineCtx, &GetPairingInput{ID: p.ID})
+		var statusErr huma.StatusError
+		require.ErrorAs(t, err, &statusErr)
+		assert.Equal(t, http.StatusForbidden, statusErr.GetStatus())
+	})
+
+	t.Run("credentials admin still allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, credsPath, nil)
+		req.Header.Set("X-Authentik-Username", "test-admin")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	})
+}
+
+// TestPairingCredentialError pins pairingCredentialError's status map
+// (Hermes: docs mis-attributed 409 to revoked/expired; the two secrets.*
+// arms had no coverage at any layer).
+func TestPairingCredentialError(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"not found", pairing.ErrPairingNotFound, http.StatusNotFound},
+		{"no active key", pairing.ErrNoActiveKey, http.StatusGone},
+		{"decrypt failed", secrets.ErrDecryptFailed, http.StatusConflict},
+		{"key unavailable", secrets.ErrUnavailable, http.StatusInternalServerError},
+		{"default", errors.New("boom"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pairingCredentialError(tc.err)
+			var statusErr huma.StatusError
+			require.ErrorAs(t, got, &statusErr)
+			assert.Equal(t, tc.status, statusErr.GetStatus())
+		})
+	}
 }
