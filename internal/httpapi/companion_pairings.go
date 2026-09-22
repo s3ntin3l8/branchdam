@@ -170,20 +170,25 @@ type RenamePairingOutput struct {
 // material for an existing pairing's current key. apiKey is parsed out
 // of the sealed pairing URL (never a separate DB column) so the full
 // credential set the create/rotate flows return once can be re-shown to
-// an admin. pairingUrl and apiKey are empty strings when the server has
-// no BRANCHDAM_SECRET_KEY (keyless/legacy -- QR-only fallback).
-// CacheControl is set to no-store: the response carries the plaintext
-// API key and must not land in any shared cache.
+// an admin. pairingUrl and apiKey are empty strings when the row has no
+// sealed pairing_url (keyless/legacy -- QR-only fallback);
+// secretsConfigured tells the SPA whether BRANCHDAM_SECRET_KEY was set
+// when this row was written so it can label an empty pairingUrl as
+// "legacy row -- rotate to seal" rather than a blanket Unavailable
+// claim (Hermes round 3). keyPreview is always the newest active key's
+// last-4 from the DB. CacheControl is set to no-store: the response
+// carries the plaintext API key and must not land in any shared cache.
 type PairingCredentialsOutput struct {
 	CacheControl string `header:"Cache-Control"`
 	Body         struct {
-		PairingID     int64  `json:"pairingId"`
-		AgentID       string `json:"agentId"`
-		FriendlyLabel string `json:"friendlyLabel"`
-		APIKey        string `json:"apiKey"`
-		KeyPreview    string `json:"keyPreview"`
-		PairingURL    string `json:"pairingUrl"`
-		QRSVG         string `json:"qrSvg"`
+		PairingID         int64  `json:"pairingId"`
+		AgentID           string `json:"agentId"`
+		FriendlyLabel     string `json:"friendlyLabel"`
+		APIKey            string `json:"apiKey"`
+		KeyPreview        string `json:"keyPreview"`
+		PairingURL        string `json:"pairingUrl"`
+		QRSVG             string `json:"qrSvg"`
+		SecretsConfigured bool   `json:"secretsConfigured"`
 	}
 }
 
@@ -446,16 +451,17 @@ func (s *Server) handlePairingCredentials(ctx context.Context, in *GetPairingInp
 	if err != nil {
 		return nil, pairingCredentialError(err)
 	}
-	// Parse the API key out of the sealed pairing URL so the handler
-	// never needs a second DB read. Keyless servers return an empty
-	// PairingURL -- apiKey/keyPreview stay empty (QR-only fallback).
-	apiKey, keyPreview := "", ""
+	// Prefer the last-4 derived from the sealed pairing URL when it
+	// decrypted cleanly; fall back to the DB key_preview (always set
+	// by ActiveCredentials) for keyless/legacy rows with a NULL column
+	// (Hermes round 3 -- never report Unavailable when a key exists).
+	apiKey, keyPreview := "", creds.KeyPreview
 	if creds.PairingURL != "" {
 		if u, err := url.Parse(creds.PairingURL); err == nil {
 			apiKey = u.Query().Get("key")
 			if n := len(apiKey); n > 4 {
 				keyPreview = apiKey[n-4:]
-			} else {
+			} else if apiKey != "" {
 				keyPreview = apiKey
 			}
 		}
@@ -473,6 +479,7 @@ func (s *Server) handlePairingCredentials(ctx context.Context, in *GetPairingInp
 	out.Body.KeyPreview = keyPreview
 	out.Body.PairingURL = creds.PairingURL
 	out.Body.QRSVG = string(creds.QRSVG)
+	out.Body.SecretsConfigured = creds.SecretsConfigured
 	out.CacheControl = "private, no-store, max-age=0"
 	return out, nil
 }
@@ -585,7 +592,9 @@ func (s *Server) handlePairingQRSVG(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, secrets.ErrDecryptFailed):
 			http.Error(w, "credentials sealed under a different BRANCHDAM_SECRET_KEY; rotate to mint a fresh copy", http.StatusConflict)
 		case errors.Is(err, secrets.ErrUnavailable):
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			// Same actionable detail as pairingCredentialError so the QR
+			// endpoint never returns an opaque 500 (Hermes round 3).
+			http.Error(w, "BRANCHDAM_SECRET_KEY is not configured but sealed credentials exist; set it or rotate", http.StatusInternalServerError)
 		default:
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}

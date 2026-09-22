@@ -10,6 +10,10 @@ import (
 )
 
 type Querier interface {
+	// Newest still-active key's key_preview for credential re-display when
+	// pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
+	// only -- never key material. No rows when every key is revoked/expired.
+	ActiveKeyPreviewForPairing(ctx context.Context, pairingID int64) (string, error)
 	AgentCreatedVirtualNode(ctx context.Context, arg AgentCreatedVirtualNodeParams) (bool, error)
 	// Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
 	// row FIRST, before inserting the new one. The partial unique index

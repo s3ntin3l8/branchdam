@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const activeKeyPreviewForPairing = `-- name: ActiveKeyPreviewForPairing :one
+SELECT k.key_preview
+FROM device_pairing_keys k
+WHERE k.pairing_id = ?1
+  AND k.revoked_at IS NULL
+  AND (k.expires_at IS NULL OR k.expires_at > unixepoch())
+ORDER BY k.created_at DESC, k.id DESC
+LIMIT 1
+`
+
+// Newest still-active key's key_preview for credential re-display when
+// pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
+// only -- never key material. No rows when every key is revoked/expired.
+func (q *Queries) ActiveKeyPreviewForPairing(ctx context.Context, pairingID int64) (string, error) {
+	row := q.db.QueryRowContext(ctx, activeKeyPreviewForPairing, pairingID)
+	var key_preview string
+	err := row.Scan(&key_preview)
+	return key_preview, err
+}
+
 const countDevicePairings = `-- name: CountDevicePairings :one
 SELECT COUNT(*) FROM device_pairings
 `

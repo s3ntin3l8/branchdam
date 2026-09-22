@@ -132,23 +132,38 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
 
 // CredentialsBody renders the shared credential display used by the
 // create-success modal, the rotate-success modal, and the show-credentials
-// re-display for an existing pairing. pairingUrl/apiKey may be empty on
-// keyless servers (QR-only). Copy is intentionally re-openable: Show
-// credentials re-serves the current key, so a show-once claim would be
-// false on every surface (Hermes round 2).
+// re-display for an existing pairing. apiKey/pairingUrl may be empty when
+// the row has no sealed pairing_url (keyless server or pre-00034 legacy);
+// secretsConfigured tells the two cases apart so we never claim
+// Unavailable when a key exists (Hermes round 3). Copy is intentionally
+// re-openable: Show credentials re-serves the current key, so a
+// show-once claim would be false on every surface (Hermes round 2).
 function CredentialsBody({
   agentId,
   apiKey,
   keyPreview,
   pairingUrl,
   qrSvg,
+  secretsConfigured,
 }: {
   agentId: string;
   apiKey: string;
   keyPreview: string;
   pairingUrl: string;
   qrSvg: string;
+  secretsConfigured: boolean;
 }) {
+  const apiKeyDisplay = apiKey
+    ? apiKey
+    : keyPreview
+      ? `••••${keyPreview}`
+      : "Unavailable";
+  const apiKeyHint =
+    !apiKey && keyPreview
+      ? secretsConfigured
+        ? "Legacy row — rotate to seal"
+        : "Keyless server — QR only"
+      : null;
   return (
     <div className="space-y-4">
       <p className="text-sm text-emerald-400">
@@ -169,11 +184,12 @@ function CredentialsBody({
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-neutral-500 w-20 shrink-0">API Key</span>
-          <code className="flex-1 truncate text-xs text-neutral-300">
-            {apiKey || (keyPreview ? `••••${keyPreview}` : "Unavailable (keyless server)")}
-          </code>
+          <code className="flex-1 truncate text-xs text-neutral-300">{apiKeyDisplay}</code>
           {apiKey && <CopyButton value={apiKey} label="Copy" />}
         </div>
+        {apiKeyHint && (
+          <p className="text-xs text-neutral-500 pl-20 -mt-0.5">{apiKeyHint}</p>
+        )}
         {pairingUrl && (
           <div className="flex items-center gap-2 pt-1">
             <span className="text-xs text-neutral-500 w-20 shrink-0">Pairing URL</span>
@@ -431,6 +447,7 @@ export default function CompanionPairingsPage() {
               keyPreview={createdResult.keyPreview}
               pairingUrl={createdResult.pairingUrl}
               qrSvg={createdResult.qrSvg}
+              secretsConfigured
             />
           ) : (
             <div className="space-y-4">
@@ -480,6 +497,7 @@ export default function CompanionPairingsPage() {
               keyPreview={credentials.keyPreview}
               pairingUrl={credentials.pairingUrl}
               qrSvg={credentials.qrSvg}
+              secretsConfigured={credentials.secretsConfigured}
             />
           ) : (
             <p className="text-sm text-neutral-400">No credentials loaded.</p>

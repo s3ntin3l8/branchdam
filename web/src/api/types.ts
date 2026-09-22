@@ -484,10 +484,14 @@ export interface RenameCompanionPairingResponse {
 }
 
 // PairingCredentials: GET /{id}/credentials -- re-displayable material
-// for an existing pairing's current key. apiKey/keyPreview/pairingUrl
-// are empty strings on keyless servers (pairing_url is never stored in
-// plaintext; QR SVG remains available). Cache-Control is always
-// private, no-store (set by the server header).
+// for an existing pairing's current key. apiKey/pairingUrl are empty
+// strings when the row has no sealed pairing_url (keyless server or
+// pre-00034 legacy); keyPreview is always the newest active key's
+// last-4. secretsConfigured tells the SPA whether BRANCHDAM_SECRET_KEY
+// was set when the row was written so an empty pairingUrl can be
+// labeled "legacy row -- rotate to seal" vs "keyless server"
+// (Hermes round 3). Cache-Control is always private, no-store (set by
+// the server header).
 export interface PairingCredentialsResponse {
   pairingId: number;
   agentId: string;
@@ -496,6 +500,7 @@ export interface PairingCredentialsResponse {
   keyPreview: string;
   pairingUrl: string;
   qrSvg: string;
+  secretsConfigured: boolean;
 }
 
 export interface ListPairingsResponse {

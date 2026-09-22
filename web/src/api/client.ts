@@ -324,7 +324,6 @@ export const api = {
     if (params.offset) qs.set("offset", String(params.offset));
     return request<PairingAuditResponse>(`/api/v1/companion/pairings/${id}/audit?${qs}`);
   },
-  pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
 
   pruneCache: (input: PruneRequest) =>
     request<PruneResponse>("/api/v1/prune", {

@@ -141,6 +141,18 @@ WHERE k.pairing_id = ?1
 ORDER BY k.created_at DESC, k.id DESC
 LIMIT 1;
 
+-- name: ActiveKeyPreviewForPairing :one
+-- Newest still-active key's key_preview for credential re-display when
+-- pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
+-- only -- never key material. No rows when every key is revoked/expired.
+SELECT k.key_preview
+FROM device_pairing_keys k
+WHERE k.pairing_id = ?1
+  AND k.revoked_at IS NULL
+  AND (k.expires_at IS NULL OR k.expires_at > unixepoch())
+ORDER BY k.created_at DESC, k.id DESC
+LIMIT 1;
+
 -- name: SetActiveKeyExpirations :exec
 -- Rotation: set expires_at on every currently-active key for this pairing
 -- that doesn't already have one. Idempotent -- re-running after the same

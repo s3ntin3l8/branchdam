@@ -36,7 +36,6 @@ const deletePairingMock = vi.fn<(id: number) => Promise<{ ok: boolean }>>();
 vi.mock("../api/client", () => ({
   api: {
     listPairings: () => listPairingsMock(),
-    pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
     revokePairing: (id: number) => revokePairingMock(id),
     deletePairing: (id: number) => deletePairingMock(id),
     rotatePairing: (id: number, input: RotateCompanionPairingRequest) =>
@@ -240,6 +239,7 @@ describe("CompanionPairingsPage", () => {
       keyPreview: "1234",
       pairingUrl,
       qrSvg: "<svg></svg>",
+      secretsConfigured: true,
     });
 
     renderPage();
@@ -258,6 +258,54 @@ describe("CompanionPairingsPage", () => {
     // Reveal path must not claim show-once (Hermes: false on re-display).
     expect(screen.queryByText(/will not be shown again/i)).not.toBeInTheDocument();
     expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
+  });
+
+  it("labels empty apiKey as legacy row when secretsConfigured (Hermes r3)", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    pairingCredentialsMock.mockResolvedValue({
+      pairingId: 1,
+      agentId: "dev-abc12345",
+      friendlyLabel: "Björn's iPhone",
+      apiKey: "",
+      keyPreview: "1234",
+      pairingUrl: "",
+      qrSvg: "<svg></svg>",
+      secretsConfigured: true,
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    fireEvent.click(screen.getByRole("button", { name: /show credentials/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("••••1234")).toBeInTheDocument();
+      expect(screen.getByText(/Legacy row — rotate to seal/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Unavailable \(keyless server\)/i)).not.toBeInTheDocument();
+  });
+
+  it("labels empty apiKey as keyless server when !secretsConfigured (Hermes r3)", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    pairingCredentialsMock.mockResolvedValue({
+      pairingId: 1,
+      agentId: "dev-abc12345",
+      friendlyLabel: "Björn's iPhone",
+      apiKey: "",
+      keyPreview: "abcd",
+      pairingUrl: "",
+      qrSvg: "<svg></svg>",
+      secretsConfigured: false,
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    fireEvent.click(screen.getByRole("button", { name: /show credentials/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("••••abcd")).toBeInTheDocument();
+      expect(screen.getByText(/Keyless server — QR only/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Unavailable \(keyless server\)/i)).not.toBeInTheDocument();
   });
 
   it("uses re-openable copy on the create-success credentials body (no show-once claim)", async () => {
@@ -311,6 +359,7 @@ describe("CompanionPairingsPage", () => {
         keyPreview: "aaaa",
         pairingUrl: "branchdam://?key=second-key-aaaaaaaaaaaaaaaaaaaa&agent=dev-second99",
         qrSvg: "<svg></svg>",
+        secretsConfigured: true,
       });
     });
 
@@ -336,6 +385,7 @@ describe("CompanionPairingsPage", () => {
       keyPreview: "zzzz",
       pairingUrl: "branchdam://?key=first-key-zzzzzzzzzzzzzzzzzzzzzz&agent=dev-abc12345",
       qrSvg: "<svg></svg>",
+      secretsConfigured: true,
     });
     // Give the microtask queue a turn to flush the stale resolve.
     await new Promise((r) => setTimeout(r, 0));
