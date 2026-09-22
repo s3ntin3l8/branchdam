@@ -197,7 +197,7 @@ func (s *Server) handleCreatePairing(ctx context.Context, in *CreatePairingInput
 	out.Body.AgentID = pairing.AgentID
 	out.Body.APIKey = key.Plaintext
 	out.Body.KeyPreview = key.Preview
-	out.Body.PairingURL = string(payloadFactory(pairing.AgentID, key.Plaintext))
+	out.Body.PairingURL = key.PayloadURL
 	out.Body.QRSVG = string(key.QRSVG)
 	out.Body.CreatedAtUnix = pairing.CreatedAt
 	return out, nil
@@ -322,7 +322,7 @@ func (s *Server) handleRotatePairing(ctx context.Context, in *RotatePairingInput
 	out.Body.KeyID = key.ID
 	out.Body.APIKey = key.Plaintext
 	out.Body.KeyPreview = key.Preview
-	out.Body.PairingURL = string(payloadFactory(key.AgentID, key.Plaintext))
+	out.Body.PairingURL = key.PayloadURL
 	out.Body.QRSVG = string(key.QRSVG)
 	out.Body.PreviousKeyExpiresAt = expiresAt
 	return out, nil

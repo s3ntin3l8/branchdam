@@ -74,6 +74,7 @@ type Key struct {
 	ExpiresAt  sql.NullInt64
 	RevokedAt  sql.NullInt64
 	QRSVG      []byte
+	PayloadURL string
 }
 
 // PairingRow is the joined list-row shape returned by ListPairings: it
@@ -175,7 +176,8 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		return nil, nil, fmt.Errorf("mint api key: %w", err)
 	}
 	hash := s.hashKey(plaintext)
-	svg, err := qr.RenderSVG(string(qrPayloadFor(agentID, plaintext)), 0)
+	payloadStr := string(qrPayloadFor(agentID, plaintext))
+	svg, err := qr.RenderSVG(payloadStr, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("render qr: %w", err)
 	}
@@ -256,6 +258,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 			ExpiresAt:  keyRow.ExpiresAt,
 			RevokedAt:  keyRow.RevokedAt,
 			QRSVG:      svg,
+			PayloadURL: payloadStr,
 		}, nil
 
 }
@@ -381,7 +384,8 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 	// The SVG is derived purely from (agent_id, plaintext, server URL)
 	// so a re-render race produces identical bytes -- no harm if the
 	// pairing row already has the previous key's SVG.
-	svg, err := qr.RenderSVG(string(qrPayloadFor(agentID, plaintext)), 0)
+	payloadStr := string(qrPayloadFor(agentID, plaintext))
+	svg, err := qr.RenderSVG(payloadStr, 0)
 	if err != nil {
 		return nil, 0, fmt.Errorf("render qr: %w", err)
 	}
@@ -409,6 +413,7 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 		ExpiresAt:  keyRow.ExpiresAt,
 		RevokedAt:  keyRow.RevokedAt,
 		QRSVG:      svg,
+		PayloadURL: payloadStr,
 	}, expiresAt, nil
 
 }
