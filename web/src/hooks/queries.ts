@@ -523,6 +523,26 @@ export function useDeletePairing() {
   });
 }
 
+// useRenamePairing invalidates the list so the table label updates in
+// place. Credentials are fetched imperatively (not via React Query) so
+// each open/close of the show-credentials modal does a fresh audited
+// reveal -- see CompanionPairingsPage's handleShowCredentials.
+export function useRenamePairing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      input,
+    }: {
+      id: number;
+      input: import("../api/types").RenameCompanionPairingRequest;
+    }) => api.renamePairing(id, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
+    },
+  });
+}
+
 export function usePairingAudit(id: number | undefined, params: { limit?: number; offset?: number } = {}) {
   return useQuery({
     queryKey: ["companion-pairing-audit", id, params],

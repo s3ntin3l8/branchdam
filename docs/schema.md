@@ -175,6 +175,15 @@ Every migration after `00001_init.sql`, in order:
 | `00023_media_nodes_file_path_idx.sql` | `ix_media_nodes_file_path` index | Efficient file path lookups for `Guard.Resolve` and `RebaseNodePathByUUID` |
 | `00024_virtual_node_and_event.sql` | `event_queue` CHECK expansion (+`EVENT_VIRTUAL_NODE_CREATED`) | Agent integration events for virtual project nodes (Resolve timelines, Premiere sequences). Virtual storage location is config-driven (`resolve-virtual`), not migration-seeded |
 | `00025_expand_node_metadata_source.sql` | `node_metadata.source` CHECK expansion (allows `LIKE '%_evidence'`) | Persist per-integration virtual-node evidence (e.g. `resolve_project_evidence`, `premiere_project_evidence`) without enumerating each |
+| `00026_resolve_snapshot.sql` | Resolve timeline/scope tables for agent snapshot reconciliation | See below |
+| `00027_backfill_device_pairing_user_id.sql` | Backfills `device_pairings.user_id` for existing pairings | Attribution for pre-migration rows |
+| `00028_fix_local_auth_provider.sql` | Local-auth provider normalization | See below |
+| `00029_mfa.sql` | MFA tables/columns | See below |
+| `00030_mfa_pending_and_session.sql` | MFA pending-verification session state | See below |
+| `00031_mfa_hardening.sql` | MFA hardening constraints | See below |
+| `00032_add_trashed_lifecycle_state.sql` | `lifecycle_state` CHECK expansion for `TRASHED` | Soft-delete trash buffer |
+| `00033_user_pats.sql` | Personal access tokens for admin tooling | See below |
+| `00034_pairing_url_sealed.sql` | `device_pairings.pairing_url TEXT` | Lets an operator re-open the full pairing credentials dialogue (QR + agent ID + API key + pairing URL + deep link) for an existing pairing without minting a new key. The column NEVER holds plaintext key material: sealed via `secrets.Box` when `BRANCHDAM_SECRET_KEY` is set, otherwise left NULL (never plaintext). `qr_svg` is sealed the same way by `pairing.Service`; boot-time `BackfillSealedCredentials` seals any legacy plaintext SVG rows |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.

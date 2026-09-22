@@ -547,6 +547,8 @@ All management endpoints require an authenticated administrator session (`auth.R
 | `/api/v1/companion/pairings/{id}` | `GET` | Retrieve details for a specific companion pairing. |
 | `/api/v1/companion/pairings/{id}/rotate` | `POST` | Rotate device API key. Invalidates previous key and returns a new plaintext token. |
 | `/api/v1/companion/pairings/{id}/revoke` | `POST` | Revoke device access immediately. Enforces a 401 Unauthorized response on subsequent agent calls. |
+| `/api/v1/companion/pairings/{id}/rename` | `POST` | Update a pairing's operator-facing `friendlyLabel`. Allowed on revoked pairings too (history rename is harmless). Empty labels are rejected (Huma `minLength` → 422). Audited as `LABEL_RENAMED`. |
+| `/api/v1/companion/pairings/{id}/credentials` | `GET` | Re-open the full credential set (QR SVG, pairing URL, parsed API key + preview) for an existing pairing's current key. Each successful read is audited fail-closed as `CREDENTIALS_REVEALED` before the response is served; response is `Cache-Control: private, no-store`. Keyless servers (no `BRANCHDAM_SECRET_KEY`) return an empty `apiKey`/`pairingUrl` (QR-only fallback). Revoked/expired → `409`/`410` as appropriate. |
 | `/api/v1/companion/pairings/{id}` | `DELETE` | Delete device pairing record and its key history. Requires the pairing to be revoked first (`POST /revoke`), returning `409 Conflict` otherwise. |
-| `/api/v1/companion/pairings/{id}/audit` | `GET` | Retrieve audit events (creation, key rotation, revocation, IP changes) for a pairing. |
-| `/api/v1/companion/pairings/{id}/qr.svg` | `GET` | Raw `image/svg+xml` QR code for seamless optical onboarding from mobile companion cameras. |
+| `/api/v1/companion/pairings/{id}/audit` | `GET` | Retrieve audit events (creation, key rotation, revocation, IP changes, label renames, credential reveals) for a pairing. |
+| `/api/v1/companion/pairings/{id}/qr.svg` | `GET` | Raw `image/svg+xml` QR code for seamless optical onboarding from mobile companion cameras. Also records a fail-closed `CREDENTIALS_REVEALED` audit row (channel `qr_svg`). |

@@ -468,6 +468,36 @@ export interface DeleteCompanionPairingResponse {
   ok: boolean;
 }
 
+// RenamePairing: POST /{id}/rename -- action-style POST matching /rotate
+// and /revoke. Allowed on revoked pairings (history rename is harmless).
+export interface RenameCompanionPairingRequest {
+  friendlyLabel: string;
+}
+
+export interface RenameCompanionPairingResponse {
+  id: number;
+  agentId: string;
+  friendlyLabel: string;
+  createdAtUnix: number;
+  createdBy: string;
+  revokedAtUnix?: number;
+}
+
+// PairingCredentials: GET /{id}/credentials -- re-displayable material
+// for an existing pairing's current key. apiKey/keyPreview/pairingUrl
+// are empty strings on keyless servers (pairing_url is never stored in
+// plaintext; QR SVG remains available). Cache-Control is always
+// private, no-store (set by the server header).
+export interface PairingCredentialsResponse {
+  pairingId: number;
+  agentId: string;
+  friendlyLabel: string;
+  apiKey: string;
+  keyPreview: string;
+  pairingUrl: string;
+  qrSvg: string;
+}
+
 export interface ListPairingsResponse {
   pairings: CompanionPairingListItem[];
   total: number;

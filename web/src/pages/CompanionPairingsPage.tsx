@@ -5,26 +5,32 @@ import {
   useCreatePairing,
   useDeletePairing,
   usePairings,
+  useRenamePairing,
   useRevokePairing,
   useRotatePairing,
 } from "../hooks/queries";
+import ConfirmDialog from "../components/ConfirmDialog";
 import type {
   CompanionPairingListItem,
   CreateCompanionPairingResponse,
+  PairingCredentialsResponse,
   RotateCompanionPairingResponse,
 } from "../api/types";
 
 // CompanionPairingsPage is the admin-facing surface for the device-pairing
 // system documented in docs/mobile.md §4. Operators pair new devices via
 // QR (or manual entry of the URL+key), rotate keys with a configurable
-// grace window, and revoke individual devices. The page is admin-only
-// at the API layer; auth.RequireAdmin refuses non-admin users with 403.
+// grace window, rename labels, re-show credentials, and revoke individual
+// devices. The page is admin-only at the API layer; auth.RequireAdmin
+// refuses non-admin users with 403.
 //
 // Layout (top-to-bottom):
 //  1. "Pair new device" CTA -> modal with QR + reveal-once plaintext key
-//  2. Pairings table: agent_id, friendly label, active keys, status, actions
-//  3. Per-pairing row: rotate (grace-minutes input), revoke (confirm),
-//     view QR (modal reuse), view audit (modal)
+//  2. Pairings table: agent_id, friendly label (pencil to rename),
+//     active keys, status, actions
+//  3. Per-pairing row: show credentials (audited re-fetch), rotate
+//     (grace-minutes input), revoke (ConfirmDialog), delete
+//     (ConfirmDialog), view audit (modal)
 
 // --- helpers ---
 
@@ -122,6 +128,58 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
   );
 }
 
+// CredentialsBody renders the shared credential display used by both the
+// create-success body and the show-credentials modal for an existing
+// pairing. pairingUrl/apiKey may be empty on keyless servers (QR-only).
+function CredentialsBody({
+  agentId,
+  apiKey,
+  keyPreview,
+  pairingUrl,
+  qrSvg,
+}: {
+  agentId: string;
+  apiKey: string;
+  keyPreview: string;
+  pairingUrl: string;
+  qrSvg: string;
+}) {
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-emerald-400">
+        Credentials for this pairing. Scan the QR with the branchDAM mobile app, or copy the URL.
+      </p>
+      <div className="flex justify-center rounded bg-white p-4">
+        <div className="h-64 w-64" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+      </div>
+      <div className="rounded border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-300">
+        <strong>Copy this key now.</strong> It will not be shown again.
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-neutral-500 w-20 shrink-0">Agent ID</span>
+          <code className="flex-1 truncate text-xs text-neutral-300">{agentId}</code>
+          <CopyButton value={agentId} label="Copy" />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-neutral-500 w-20 shrink-0">API Key</span>
+          <code className="flex-1 truncate text-xs text-neutral-300">
+            {apiKey || (keyPreview ? `••••${keyPreview}` : "Unavailable (keyless server)")}
+          </code>
+          {apiKey && <CopyButton value={apiKey} label="Copy" />}
+        </div>
+        {pairingUrl && (
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-xs text-neutral-500 w-20 shrink-0">Pairing URL</span>
+            <code className="flex-1 truncate text-xs text-neutral-400">{pairingUrl}</code>
+            <CopyButton value={pairingUrl} label="Copy URL" />
+            <PairAgentButton pairingUrl={pairingUrl} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // --- main page ---
 
@@ -129,6 +187,7 @@ export default function CompanionPairingsPage() {
   const { data, isLoading, error } = usePairings();
   const create = useCreatePairing();
   const rotate = useRotatePairing();
+  const rename = useRenamePairing();
   const revoke = useRevokePairing();
   const deletePairing = useDeletePairing();
 
@@ -136,12 +195,27 @@ export default function CompanionPairingsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createdResult, setCreatedResult] = useState<CreateCompanionPairingResponse | null>(null);
 
-  const [qrForPairing, setQrForPairing] = useState<CompanionPairingListItem | null>(null);
-  const [qrSvg, setQrSvg] = useState<string | null>(null);
+  // Show-credentials for an existing pairing: imperative api fetch (each
+  // open is a fresh CREDENTIALS_REVEALED audit row), not React Query, so
+  // state is always cleared on close rather than served from a cache.
+  const [credsForPairing, setCredsForPairing] = useState<CompanionPairingListItem | null>(null);
+  const [credentials, setCredentials] = useState<PairingCredentialsResponse | null>(null);
+  const [credsError, setCredsError] = useState<string | null>(null);
+  const [credsLoading, setCredsLoading] = useState(false);
+
+  // Rename modal (pencil by label cell). Allowed on revoked pairings.
+  const [renameForPairing, setRenameForPairing] = useState<CompanionPairingListItem | null>(null);
+  const [renameLabel, setRenameLabel] = useState("");
 
   const [rotateForId, setRotateForId] = useState<number | null>(null);
   const [rotateGrace, setRotateGrace] = useState(1440); // 24h default
   const [rotateResult, setRotateResult] = useState<RotateCompanionPairingResponse | null>(null);
+
+  // ConfirmDialog targets: revoke and delete replace the old
+  // window.confirm prompts (pairing page only; UsersPage's three
+  // confirms are tracked separately).
+  const [revokeTarget, setRevokeTarget] = useState<CompanionPairingListItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CompanionPairingListItem | null>(null);
 
   const handleCreate = () => {
     create.mutate(
@@ -155,21 +229,43 @@ export default function CompanionPairingsPage() {
     );
   };
 
-  const handleViewQr = async (p: CompanionPairingListItem) => {
-    setQrForPairing(p);
-    setQrSvg(null);
+  const closeCredentials = () => {
+    setCredsForPairing(null);
+    setCredentials(null);
+    setCredsError(null);
+    setCredsLoading(false);
+  };
+
+  const handleShowCredentials = async (p: CompanionPairingListItem) => {
+    setCredsForPairing(p);
+    setCredentials(null);
+    setCredsError(null);
+    setCredsLoading(true);
     try {
-      // Fetch the SVG as text -- the endpoint returns image/svg+xml, but
-      // request<>() assumes JSON, so use raw fetch here.
-      const res = await fetch(api.pairingQRSVGUrl(p.id));
-      if (!res.ok) {
-        return;
-      }
-      setQrSvg(await res.text());
-    } catch {
-      // Network error -- leave qrSvg null; the modal will show a
-      // "couldn't load QR" message rather than crash.
+      const res = await api.pairingCredentials(p.id);
+      setCredentials(res);
+    } catch (e) {
+      setCredsError(
+        e instanceof ApiError ? e.message : "Failed to load credentials for this pairing."
+      );
+    } finally {
+      setCredsLoading(false);
     }
+  };
+
+  const closeRename = () => {
+    setRenameForPairing(null);
+    setRenameLabel("");
+  };
+
+  const handleRename = () => {
+    if (!renameForPairing) return;
+    rename.mutate(
+      { id: renameForPairing.id, input: { friendlyLabel: renameLabel.trim() } },
+      {
+        onSuccess: () => closeRename(),
+      }
+    );
   };
 
   const handleRotate = (id: number) => {
@@ -181,20 +277,6 @@ export default function CompanionPairingsPage() {
         },
       }
     );
-  };
-
-  const handleRevoke = (id: number, label: string) => {
-    if (!window.confirm(`Revoke pairing "${label}"? All its API keys will stop working immediately.`)) {
-      return;
-    }
-    revoke.mutate(id);
-  };
-
-  const handleDelete = (id: number, label: string) => {
-    if (!window.confirm(`Permanently delete pairing "${label}"? This cannot be undone.`)) {
-      return;
-    }
-    deletePairing.mutate(id);
   };
 
   const errorMessage =
@@ -250,7 +332,23 @@ export default function CompanionPairingsPage() {
               {data?.pairings.map((p) => (
                 <tr key={p.id}>
                   <td className="px-4 py-3 font-mono text-xs">{p.agentId}</td>
-                  <td className="px-4 py-3">{p.friendlyLabel}</td>
+                  <td className="px-4 py-3">
+                    <span className="inline-flex items-center gap-1">
+                      {p.friendlyLabel}
+                      <button
+                        type="button"
+                        aria-label={`Rename ${p.friendlyLabel}`}
+                        onClick={() => {
+                          setRenameForPairing(p);
+                          setRenameLabel(p.friendlyLabel);
+                          rename.reset();
+                        }}
+                        className="rounded border border-neutral-700 px-1 text-xs text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+                      >
+                        ✎
+                      </button>
+                    </span>
+                  </td>
                   <td className="px-4 py-3">{p.activeKeyCount}</td>
                   <td className="px-4 py-3 text-xs text-neutral-400">{formatUnixTime(p.createdAtUnix)}</td>
                   <td className={`px-4 py-3 text-xs font-medium ${pairingStatusColor(p)}`}>
@@ -260,11 +358,11 @@ export default function CompanionPairingsPage() {
                     <div className="flex justify-end gap-1">
                       <button
                         type="button"
-                        onClick={() => handleViewQr(p)}
+                        onClick={() => void handleShowCredentials(p)}
                         disabled={!!p.revokedAtUnix || p.activeKeyCount === 0}
                         className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
                       >
-                        View QR
+                        Show credentials
                       </button>
                       <button
                         type="button"
@@ -279,7 +377,10 @@ export default function CompanionPairingsPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleRevoke(p.id, p.friendlyLabel)}
+                        onClick={() => {
+                          setRevokeTarget(p);
+                          revoke.reset();
+                        }}
                         disabled={!!p.revokedAtUnix}
                         className="rounded border border-red-800/60 px-2 py-1 text-xs text-red-400 hover:border-red-700 disabled:opacity-50"
                       >
@@ -287,7 +388,10 @@ export default function CompanionPairingsPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDelete(p.id, p.friendlyLabel)}
+                        onClick={() => {
+                          setDeleteTarget(p);
+                          deletePairing.reset();
+                        }}
                         disabled={!p.revokedAtUnix}
                         className="rounded border border-red-900 px-2 py-1 text-xs text-red-500 hover:border-red-800 disabled:opacity-50"
                       >
@@ -308,41 +412,13 @@ export default function CompanionPairingsPage() {
         title="Pair new device"
         body={
           createdResult ? (
-            <div className="space-y-4">
-              <p className="text-sm text-emerald-400">
-                Pairing created. Scan the QR with the branchDAM mobile app, or copy the URL.
-              </p>
-              <div className="flex justify-center rounded bg-white p-4">
-                <div
-                  className="h-64 w-64"
-                  dangerouslySetInnerHTML={{ __html: createdResult.qrSvg }}
-                />
-              </div>
-              <div className="rounded border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-300">
-                <strong>Copy this key now.</strong> It will not be shown again.
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-neutral-500 w-20 shrink-0">Agent ID</span>
-                  <code className="flex-1 truncate text-xs text-neutral-300">{createdResult.agentId}</code>
-                  <CopyButton value={createdResult.agentId} label="Copy" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-neutral-500 w-20 shrink-0">API Key</span>
-                  <code className="flex-1 truncate text-xs text-neutral-300">{createdResult.apiKey}</code>
-                  <CopyButton value={createdResult.apiKey} label="Copy" />
-                </div>
-                {createdResult.pairingUrl && (
-                  <div className="flex items-center gap-2 pt-1">
-                    <span className="text-xs text-neutral-500 w-20 shrink-0">Pairing URL</span>
-                    <code className="flex-1 truncate text-xs text-neutral-400">{createdResult.pairingUrl}</code>
-                    <CopyButton value={createdResult.pairingUrl} label="Copy URL" />
-                    <PairAgentButton pairingUrl={createdResult.pairingUrl} />
-                  </div>
-                )}
-              </div>
-            </div>
-
+            <CredentialsBody
+              agentId={createdResult.agentId}
+              apiKey={createdResult.apiKey}
+              keyPreview={createdResult.keyPreview}
+              pairingUrl={createdResult.pairingUrl}
+              qrSvg={createdResult.qrSvg}
+            />
           ) : (
             <div className="space-y-4">
               <p className="text-sm text-neutral-300">
@@ -376,17 +452,60 @@ export default function CompanionPairingsPage() {
       />
 
       <QrModal
-        open={qrForPairing !== null}
-        onClose={() => setQrForPairing(null)}
-        title={qrForPairing ? `Pairing: ${qrForPairing.friendlyLabel}` : ""}
+        open={credsForPairing !== null}
+        onClose={closeCredentials}
+        title={credsForPairing ? `Pairing: ${credsForPairing.friendlyLabel}` : ""}
         body={
-          qrSvg ? (
-            <div className="flex justify-center rounded bg-white p-4">
-              <div className="h-64 w-64" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-            </div>
+          credsLoading ? (
+            <p className="text-sm text-neutral-400">Loading credentials…</p>
+          ) : credsError ? (
+            <p className="text-sm text-red-400">{credsError}</p>
+          ) : credentials ? (
+            <CredentialsBody
+              agentId={credentials.agentId}
+              apiKey={credentials.apiKey}
+              keyPreview={credentials.keyPreview}
+              pairingUrl={credentials.pairingUrl}
+              qrSvg={credentials.qrSvg}
+            />
           ) : (
-            <p className="text-sm text-neutral-400">Loading QR…</p>
+            <p className="text-sm text-neutral-400">No credentials loaded.</p>
           )
+        }
+      />
+
+      <QrModal
+        open={renameForPairing !== null}
+        onClose={closeRename}
+        title="Rename pairing"
+        body={
+          <div className="space-y-4">
+            <p className="text-sm text-neutral-300">
+              Choose a friendly label for this device. The label is display-only and may be changed
+              at any time, including after revoke.
+            </p>
+            <input
+              type="text"
+              value={renameLabel}
+              onChange={(e) => setRenameLabel(e.target.value)}
+              placeholder="e.g. Björn's iPhone 16 Pro"
+              maxLength={120}
+              className="w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-indigo-500 focus:outline-none"
+            />
+            {rename.error && (
+              <p className="text-xs text-red-400">Failed: {rename.error.message}</p>
+            )}
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleRename}
+                disabled={!renameLabel.trim() || rename.isPending}
+                className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {rename.isPending ? "Saving…" : "Save label"}
+              </button>
+            </div>
+          </div>
         }
       />
 
@@ -452,6 +571,56 @@ export default function CompanionPairingsPage() {
           )
         }
       />
+
+      {revokeTarget && (
+        <ConfirmDialog
+          titleId="revoke-pairing-title"
+          title="Revoke pairing"
+          body={
+            <>
+              Revoke pairing{" "}
+              <strong className="text-white">"{revokeTarget.friendlyLabel}"</strong>? All its API
+              keys will stop working immediately.
+            </>
+          }
+          confirmLabel="Confirm Revoke"
+          pendingLabel="Revoking…"
+          isPending={revoke.isPending}
+          error={revoke.isError ? revoke.error : undefined}
+          errorLabel="Failed to revoke"
+          onConfirm={() => {
+            revoke.mutate(revokeTarget.id, {
+              onSuccess: () => setRevokeTarget(null),
+            });
+          }}
+          onCancel={() => setRevokeTarget(null)}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          titleId="delete-pairing-title"
+          title="Delete pairing"
+          body={
+            <>
+              Permanently delete pairing{" "}
+              <strong className="text-white">"{deleteTarget.friendlyLabel}"</strong>? This cannot be
+              undone.
+            </>
+          }
+          confirmLabel="Confirm Delete"
+          pendingLabel="Deleting…"
+          isPending={deletePairing.isPending}
+          error={deletePairing.isError ? deletePairing.error : undefined}
+          errorLabel="Failed to delete"
+          onConfirm={() => {
+            deletePairing.mutate(deleteTarget.id, {
+              onSuccess: () => setDeleteTarget(null),
+            });
+          }}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
   );
 }

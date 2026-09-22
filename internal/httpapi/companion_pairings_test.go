@@ -22,6 +22,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/pairing"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
+	"github.com/s3ntin3l8/branchdam/internal/secrets"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
@@ -31,13 +32,20 @@ import (
 // so tests can seed state directly (faster than driving HTTP for setup).
 func newPairingTestServer(t *testing.T) (*Server, *db.DB, *pairing.Service) {
 	t.Helper()
+	return newPairingTestServerWithBox(t, nil)
+}
+
+// newPairingTestServerWithBox is newPairingTestServer with an explicit
+// secrets.Box (nil = keyless: plaintext qr_svg, NULL pairing_url).
+func newPairingTestServerWithBox(t *testing.T, box *secrets.Box) (*Server, *db.DB, *pairing.Service) {
+	t.Helper()
 	root := t.TempDir()
 	dbPath := root + "/pairing_http.db"
 	database, err := db.Open(context.Background(), dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = database.Close() })
 
-	pairSvc := pairing.NewService(database, nil, nil)
+	pairSvc := pairing.NewService(database, nil, nil, box)
 	srv := New(Deps{
 		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,
@@ -453,3 +461,152 @@ func pairingIDStr(i int64) string {
 
 // ensure sqlcgen is used (some test helpers import it indirectly)
 var _ = sqlcgen.DevicePairing{}
+
+func TestCompanionPairings_CredentialsEndpoint(t *testing.T) {
+	// Keyless server: pairing_url stays NULL (never plaintext), so the
+	// credentials endpoint re-serves only the QR SVG -- apiKey/pairingUrl
+	// stay empty (QR-only fallback, matching PairingCredentialsOutput).
+	srv, _, _ := newPairingTestServer(t)
+
+	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
+		map[string]string{"friendlyLabel": "Credentials iPhone"})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var created struct {
+		PairingID int64  `json:"pairingId"`
+		APIKey    string `json:"apiKey"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	rec = doAdmin(t, srv, http.MethodGet,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/credentials", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	assert.Equal(t, "private, no-store, max-age=0", rec.Header().Get("Cache-Control"))
+
+	var creds struct {
+		APIKey     string `json:"apiKey"`
+		KeyPreview string `json:"keyPreview"`
+		PairingURL string `json:"pairingUrl"`
+		QRSVG      string `json:"qrSvg"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &creds))
+	assert.Empty(t, creds.APIKey, "keyless server must not expose apiKey")
+	assert.Empty(t, creds.KeyPreview)
+	assert.Empty(t, creds.PairingURL)
+	assert.Contains(t, creds.QRSVG, "<svg")
+	assert.NotEqual(t, created.APIKey, creds.APIKey, "create-time apiKey must not be re-served keyless")
+}
+
+func TestCompanionPairings_CredentialsEndpointWithBoxReturnsAPIKey(t *testing.T) {
+	// Sealed box: pairing_url is stored sealed and reopened so apiKey /
+	// keyPreview / pairingUrl round-trip the create-time credential.
+	box, err := secrets.NewBox("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	require.NoError(t, err)
+	srv, _, _ := newPairingTestServerWithBox(t, box)
+
+	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
+		map[string]string{"friendlyLabel": "Sealed credentials"})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var created struct {
+		PairingID int64  `json:"pairingId"`
+		APIKey    string `json:"apiKey"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.APIKey)
+
+	rec = doAdmin(t, srv, http.MethodGet,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/credentials", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	assert.Equal(t, "private, no-store, max-age=0", rec.Header().Get("Cache-Control"))
+
+	var creds struct {
+		APIKey     string `json:"apiKey"`
+		KeyPreview string `json:"keyPreview"`
+		PairingURL string `json:"pairingUrl"`
+		QRSVG      string `json:"qrSvg"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &creds))
+	assert.Equal(t, created.APIKey, creds.APIKey)
+	assert.Equal(t, created.APIKey[len(created.APIKey)-4:], creds.KeyPreview)
+	assert.Contains(t, creds.PairingURL, created.APIKey)
+	assert.Contains(t, creds.QRSVG, "<svg")
+}
+
+func TestCompanionPairings_CredentialsNotFound(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+	rec := doAdmin(t, srv, http.MethodGet, "/api/v1/companion/pairings/99999/credentials", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestCompanionPairings_CredentialsRevokedReturns410(t *testing.T) {
+	srv, _, pairSvc := newPairingTestServer(t)
+	ctx := context.Background()
+	p, _, err := pairSvc.CreatePairing(ctx, "Revoked", "test", 0, func(agentID, apiKey string) []byte {
+		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
+	})
+	require.NoError(t, err)
+	_, err = pairSvc.RevokePairing(ctx, p.ID, "test")
+	require.NoError(t, err)
+
+	rec := doAdmin(t, srv, http.MethodGet,
+		"/api/v1/companion/pairings/"+pairingIDStr(p.ID)+"/credentials", nil)
+	assert.Equal(t, http.StatusGone, rec.Code)
+}
+
+func TestCompanionPairings_RenamePairing(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+
+	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
+		map[string]string{"friendlyLabel": "Before"})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var created struct {
+		PairingID int64 `json:"pairingId"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	rec = doAdmin(t, srv, http.MethodPost,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/rename",
+		map[string]string{"friendlyLabel": "After"})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var renamed struct {
+		FriendlyLabel string `json:"friendlyLabel"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &renamed))
+	assert.Equal(t, "After", renamed.FriendlyLabel)
+
+	// Empty label rejected by Huma minLength (422) before the handler.
+	rec = doAdmin(t, srv, http.MethodPost,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/rename",
+		map[string]string{"friendlyLabel": ""})
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+}
+
+func TestCompanionPairings_RenameNotFound(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings/99999/rename",
+		map[string]string{"friendlyLabel": "x"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestCompanionPairings_QRSVGRecordsRevealAudit(t *testing.T) {
+	srv, database, _ := newPairingTestServer(t)
+
+	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
+		map[string]string{"friendlyLabel": "Reveal audit"})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var created struct {
+		PairingID int64 `json:"pairingId"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/qr.svg", nil)
+	req.Header.Set("X-Authentik-Username", "test-admin")
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	count, err := database.Reader.CountPairingAudit(context.Background(), created.PairingID)
+	require.NoError(t, err)
+	// PAIR_CREATED + KEY_MINTED + CREDENTIALS_REVEALED
+	assert.Equal(t, int64(3), count)
+}

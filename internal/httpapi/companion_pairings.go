@@ -11,6 +11,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/pairing"
+	"github.com/s3ntin3l8/branchdam/internal/secrets"
 )
 
 // Companion pairing API: /api/v1/companion/pairings/*.
@@ -142,6 +143,48 @@ type PairingAuditOutput struct {
 	}
 }
 
+// RenamePairingInput is the POST /{id}/rename body. Action-style POST
+// matches the existing /rotate and /revoke routes (no huma.Patch
+// precedent in this codebase -- see registerCompanionPairings).
+type RenamePairingInput struct {
+	ID   int64 `path:"id"`
+	Body struct {
+		FriendlyLabel string `json:"friendlyLabel" minLength:"1" maxLength:"120"`
+	}
+}
+
+type RenamePairingOutput struct {
+	Body struct {
+		ID            int64  `json:"id"`
+		AgentID       string `json:"agentId"`
+		FriendlyLabel string `json:"friendlyLabel"`
+		CreatedAtUnix int64  `json:"createdAtUnix"`
+		CreatedBy     string `json:"createdBy"`
+		RevokedAtUnix *int64 `json:"revokedAtUnix,omitempty"`
+	}
+}
+
+// PairingCredentialsOutput is GET /{id}/credentials: the re-displayable
+// material for an existing pairing's current key. apiKey is parsed out
+// of the sealed pairing URL (never a separate DB column) so the full
+// credential set the create/rotate flows return once can be re-shown to
+// an admin. pairingUrl and apiKey are empty strings when the server has
+// no BRANCHDAM_SECRET_KEY (keyless/legacy -- QR-only fallback).
+// CacheControl is set to no-store: the response carries the plaintext
+// API key and must not land in any shared cache.
+type PairingCredentialsOutput struct {
+	CacheControl string `header:"Cache-Control"`
+	Body         struct {
+		PairingID     int64  `json:"pairingId"`
+		AgentID       string `json:"agentId"`
+		FriendlyLabel string `json:"friendlyLabel"`
+		APIKey        string `json:"apiKey"`
+		KeyPreview    string `json:"keyPreview"`
+		PairingURL    string `json:"pairingUrl"`
+		QRSVG         string `json:"qrSvg"`
+	}
+}
+
 // --- registration ---
 
 func (s *Server) registerCompanionPairings(api huma.API) {
@@ -150,6 +193,8 @@ func (s *Server) registerCompanionPairings(api huma.API) {
 	huma.Get(api, "/api/v1/companion/pairings/{id}", s.handleGetPairing)
 	huma.Post(api, "/api/v1/companion/pairings/{id}/rotate", s.handleRotatePairing)
 	huma.Post(api, "/api/v1/companion/pairings/{id}/revoke", s.handleRevokePairing)
+	huma.Post(api, "/api/v1/companion/pairings/{id}/rename", s.handleRenamePairing)
+	huma.Get(api, "/api/v1/companion/pairings/{id}/credentials", s.handlePairingCredentials)
 	huma.Delete(api, "/api/v1/companion/pairings/{id}", s.handleDeletePairing)
 	huma.Get(api, "/api/v1/companion/pairings/{id}/audit", s.handlePairingAudit)
 }
@@ -346,6 +391,104 @@ func (s *Server) handleRevokePairing(ctx context.Context, in *RevokePairingInput
 	return out, nil
 }
 
+// handleRenamePairing updates a pairing's operator-facing friendly
+// label. Allowed on revoked pairings too -- renaming history is
+// harmless. Empty labels are rejected by the service (ErrEmptyLabel)
+// as well as by the DTO's minLength, so both layers agree.
+func (s *Server) handleRenamePairing(ctx context.Context, in *RenamePairingInput) (*RenamePairingOutput, error) {
+	svc, err := s.pairingSvc()
+	if err != nil {
+		return nil, err
+	}
+	p, err := svc.RenamePairing(ctx, in.ID, in.Body.FriendlyLabel, actorFromCtx(ctx))
+	if err != nil {
+		if errors.Is(err, pairing.ErrPairingNotFound) {
+			return nil, huma.Error404NotFound("pairing not found")
+		}
+		if errors.Is(err, pairing.ErrEmptyLabel) {
+			return nil, huma.Error400BadRequest("friendlyLabel must not be empty")
+		}
+		return nil, huma.Error500InternalServerError("rename pairing", err)
+	}
+	out := &RenamePairingOutput{}
+	out.Body.ID = p.ID
+	out.Body.AgentID = p.AgentID
+	out.Body.FriendlyLabel = p.FriendlyLabel
+	out.Body.CreatedAtUnix = p.CreatedAt
+	out.Body.CreatedBy = p.CreatedBy
+	if p.RevokedAt.Valid {
+		v := p.RevokedAt.Int64
+		out.Body.RevokedAtUnix = &v
+	}
+	return out, nil
+}
+
+// handlePairingCredentials re-serves the full credential set for an
+// existing pairing's current key (QR SVG, pairing URL, parsed API key).
+// Each successful read is recorded as a CREDENTIALS_REVEALED audit row
+// (fail-closed: an audit failure returns 500 rather than leaking
+// unaudited) and the response is no-store. Huma headers apply here
+// because the response is JSON -- unlike GET qr.svg, which stays on the
+// mux for image/svg+xml.
+func (s *Server) handlePairingCredentials(ctx context.Context, in *GetPairingInput) (*PairingCredentialsOutput, error) {
+	svc, err := s.pairingSvc()
+	if err != nil {
+		return nil, err
+	}
+	creds, err := svc.ActiveCredentials(ctx, in.ID)
+	if err != nil {
+		return nil, pairingCredentialError(err)
+	}
+	// Parse the API key out of the sealed pairing URL so the handler
+	// never needs a second DB read. Keyless servers return an empty
+	// PairingURL -- apiKey/keyPreview stay empty (QR-only fallback).
+	apiKey, keyPreview := "", ""
+	if creds.PairingURL != "" {
+		if u, err := url.Parse(creds.PairingURL); err == nil {
+			apiKey = u.Query().Get("key")
+			if n := len(apiKey); n > 4 {
+				keyPreview = apiKey[n-4:]
+			} else {
+				keyPreview = apiKey
+			}
+		}
+	}
+	// Record the reveal BEFORE responding: fail closed so credentials
+	// are never served without a matching audit row.
+	if err := svc.RecordCredentialReveal(ctx, in.ID, actorFromCtx(ctx), "credentials"); err != nil {
+		return nil, huma.Error500InternalServerError("audit credential reveal", err)
+	}
+	out := &PairingCredentialsOutput{}
+	out.Body.PairingID = in.ID
+	out.Body.AgentID = creds.AgentID
+	out.Body.FriendlyLabel = creds.FriendlyLabel
+	out.Body.APIKey = apiKey
+	out.Body.KeyPreview = keyPreview
+	out.Body.PairingURL = creds.PairingURL
+	out.Body.QRSVG = string(creds.QRSVG)
+	out.CacheControl = "private, no-store, max-age=0"
+	return out, nil
+}
+
+// pairingCredentialError maps the ActiveCredentials/ActiveQRSVG error
+// contract onto Huma statuses: 404 unknown pairing, 410 revoked or
+// uncached key, 409 sealed under a different (or missing)
+// BRANCHDAM_SECRET_KEY, 500 for anything else.
+func pairingCredentialError(err error) error {
+	switch {
+	case errors.Is(err, pairing.ErrPairingNotFound):
+		return huma.Error404NotFound("pairing not found")
+	case errors.Is(err, pairing.ErrNoActiveKey):
+		return huma.Error410Gone("pairing has no active key (revoked or expired)")
+	case errors.Is(err, secrets.ErrDecryptFailed):
+		return huma.Error409Conflict("credentials sealed under a different BRANCHDAM_SECRET_KEY; rotate to mint a fresh copy")
+	case errors.Is(err, secrets.ErrUnavailable):
+		return huma.Error500InternalServerError("BRANCHDAM_SECRET_KEY is not configured but sealed credentials exist; set it or rotate")
+	default:
+		return huma.Error500InternalServerError("read credentials", err)
+	}
+}
+
 func (s *Server) handleDeletePairing(ctx context.Context, in *DeletePairingInput) (*DeletePairingOutput, error) {
 	svc, err := s.pairingSvc()
 	if err != nil {
@@ -398,7 +541,11 @@ func (s *Server) handlePairingAudit(ctx context.Context, in *PairingAuditInput) 
 // handlePairingQRSVG serves the cached SVG for the current active key
 // of a pairing. Registered directly on the mux because Huma's response
 // model expects JSON; emitting image/svg+xml via Huma requires more
-// indirection than this single endpoint warrants.
+// indirection than this single endpoint warrants. Serving the SVG is a
+// credential reveal (the QR encodes the API key), so it writes a
+// CREDENTIALS_REVEALED audit row with channel "qr_svg" after a
+// successful read and before the response -- same fail-closed contract
+// as GET /credentials.
 func (s *Server) handlePairingQRSVG(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -413,14 +560,21 @@ func (s *Server) handlePairingQRSVG(w http.ResponseWriter, r *http.Request) {
 	}
 	svg, err := svc.ActiveQRSVG(r.Context(), id)
 	if err != nil {
-		if errors.Is(err, pairing.ErrPairingNotFound) {
+		switch {
+		case errors.Is(err, pairing.ErrPairingNotFound):
 			http.Error(w, "pairing not found", http.StatusNotFound)
-			return
-		}
-		if errors.Is(err, pairing.ErrNoActiveKey) {
+		case errors.Is(err, pairing.ErrNoActiveKey):
 			http.Error(w, "pairing has no active key (revoked or expired)", http.StatusGone)
-			return
+		case errors.Is(err, secrets.ErrDecryptFailed):
+			http.Error(w, "credentials sealed under a different BRANCHDAM_SECRET_KEY; rotate to mint a fresh copy", http.StatusConflict)
+		case errors.Is(err, secrets.ErrUnavailable):
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		default:
+			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
+		return
+	}
+	if err := svc.RecordCredentialReveal(r.Context(), id, actorFromCtx(r.Context()), "qr_svg"); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

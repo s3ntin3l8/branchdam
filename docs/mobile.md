@@ -105,6 +105,24 @@ either direction.
 4. In the mobile app, scan the QR or enter the server URL, agent ID, and API key manually. The app stores them in the OS keychain (iOS `AppleKeychain` / Android `EncryptedSharedPreferences`).
 5. The app calls `POST /api/v1/agent/handshake` with the new key. The server authenticates via the device-pairing path, returns the naming template, and (if a rotation is pending) a `pendingRotation` hint the mobile app reads on its next handshake.
 
+Credentials are not strictly show-once. Per-pairing **Show credentials** re-opens
+the full dialogue (QR + agent ID + API key + pairing URL + "Pair with local agent"
+deep link) for an existing pairing's current key via
+`GET /api/v1/companion/pairings/{id}/credentials`. When `BRANCHDAM_SECRET_KEY`
+is configured, `pairing_url` and `qr_svg` are sealed at rest with `secrets.Box`
+(AES-256-GCM); each successful reveal is recorded fail-closed as a
+`CREDENTIALS_REVEALED` audit row before the response is served (and again on
+`GET /qr.svg`). On a keyless server the column stays NULL (never plaintext), so
+the endpoint degrades to a QR-only fallback with empty `apiKey`/`pairingUrl`.
+Revoked pairings return `410 Gone`.
+
+The pencil (✎) next to a pairing's label opens a rename modal
+(`POST /api/v1/companion/pairings/{id}/rename`). Labels are display-only, may be
+changed at any time including after revoke, and are deliberately not unique.
+Rename is audited as `LABEL_RENAMED` (old + new in `details`). Revoke and delete
+are gated behind a shared styled confirm dialog (`ConfirmDialog`) rather than
+`window.confirm`.
+
 ### 4.3. Key rotation
 
 Operators rotate keys from the same **Companion Pairing** page, per-pairing:
@@ -121,6 +139,10 @@ This means rotation is non-disruptive: a rotating phone never sees an outage as 
 **Revoke** on a pairing row terminates the pairing and every key for it.
 The mobile app's next request returns 401; the keychain entry is
 cleared on the device, the operator re-pairs via QR.
+
+Revoke and delete both open a shared styled confirm dialog instead of
+`window.confirm`, so the destructive action is gated behind an explicit
+Cancel/Confirm with pending/error states.
 
 There is no server-wide key to rotate — each pairing is independent, so
 revoking or rotating one device never affects another.
@@ -139,3 +161,15 @@ response includes the plaintext API key in `apiKey`, the rendered QR
 SVG in `qrSvg`, and the device's `agentId`. Standard `X-Authentik-*`
 headers (admin via Traefik ForwardAuth) are required, same as the
 SPA.
+
+Related admin endpoints for an existing pairing:
+
+- `POST /api/v1/companion/pairings/{id}/rename` — update `friendlyLabel`
+  (allowed on revoked pairings; audited `LABEL_RENAMED`).
+- `GET /api/v1/companion/pairings/{id}/credentials` — re-serve the full
+  credential set (QR + pairing URL + parsed API key). Sealed at rest when
+  `BRANCHDAM_SECRET_KEY` is set; QR-only fallback when keyless; each read
+  is fail-closed audited `CREDENTIALS_REVEALED` and the response is
+  `Cache-Control: private, no-store`.
+- `GET /api/v1/companion/pairings/{id}/qr.svg` — raw SVG; also records a
+  `CREDENTIALS_REVEALED` audit row (channel `qr_svg`).

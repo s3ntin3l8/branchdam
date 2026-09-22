@@ -117,3 +117,50 @@ func TestNilBoxDegradesGracefully(t *testing.T) {
 		t.Errorf("nil Box.Open = %v, want ErrUnavailable", err)
 	}
 }
+
+func TestIsSealed(t *testing.T) {
+	if IsSealed([]byte("<?xml version='1.0'?><svg/>")) {
+		t.Error("plaintext SVG must not report sealed")
+	}
+	if !IsSealed([]byte("v1:abc")) {
+		t.Error("v1: prefix must report sealed")
+	}
+	if IsSealed(nil) {
+		t.Error("nil must not report sealed")
+	}
+	if IsSealed([]byte("")) {
+		t.Error("empty must not report sealed")
+	}
+}
+
+func TestSealOpenBytesRoundTrip(t *testing.T) {
+	box, err := NewBox(testKey(t))
+	if err != nil {
+		t.Fatalf("NewBox: %v", err)
+	}
+	plain := []byte("<svg>hello</svg>")
+	sealed, err := box.SealBytes(plain)
+	if err != nil {
+		t.Fatalf("SealBytes: %v", err)
+	}
+	if !IsSealed(sealed) {
+		t.Error("SealBytes output must be sealed")
+	}
+	opened, err := box.OpenBytes(sealed)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	if string(opened) != string(plain) {
+		t.Errorf("OpenBytes = %q, want %q", opened, plain)
+	}
+}
+
+func TestNilBoxSealBytesUnavailable(t *testing.T) {
+	var box *Box
+	if _, err := box.SealBytes([]byte("x")); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("nil SealBytes = %v, want ErrUnavailable", err)
+	}
+	if _, err := box.OpenBytes([]byte("v1:x")); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("nil OpenBytes = %v, want ErrUnavailable", err)
+	}
+}

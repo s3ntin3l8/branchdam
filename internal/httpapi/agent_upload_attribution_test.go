@@ -61,7 +61,7 @@ func newPairingUploadTestServer(t *testing.T) (*Server, *db.DB, *pairing.Service
 		{ID: loc.ID, Name: "MasterArchive", RootPath: archiveDir, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: false},
 	})
 
-	pairSvc := pairing.NewService(database, nil, nil)
+	pairSvc := pairing.NewService(database, nil, nil, nil)
 	srv := New(Deps{
 		Config:  &config.Config{Agent: config.Agent{}},
 		DB:      database,

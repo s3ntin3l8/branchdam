@@ -39,6 +39,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/qr"
+	"github.com/s3ntin3l8/branchdam/internal/secrets"
 )
 
 // Pairing is the public-facing device record.
@@ -57,12 +58,18 @@ type Pairing struct {
 	UserID sql.NullInt64
 }
 
-// Key is a device's API key, plaintext included. Plaintext is the ONLY
-// way callers ever see it -- it never enters the database. QRSVG is the
-// rendered SVG QR code, computed once at mint time and cached on the
-// pairing row (device_pairings.qr_svg) so GET /qr.svg can serve it
-// without re-rendering -- but the SVG is regenerated on every RotateKey,
-// so an old SVG never sits in front of a new key.
+// Key is a device's API key, plaintext included. The plaintext shown to
+// the operator is the ONLY copy callers ever see; it is never persisted
+// as such. QRSVG is the rendered SVG QR code (computed once at mint
+// time) and PayloadURL is the branchdam:// payload it encodes -- both
+// are cached on the pairing row so GET /qr.svg and the credentials
+// endpoint can re-serve them without re-rendering, but BOTH embed the
+// key and are therefore sealed with secrets.Box before they reach the
+// database whenever BRANCHDAM_SECRET_KEY is configured (with no key
+// configured the pairing_url column stays NULL -- never plaintext; the
+// SVG falls back to plaintext storage, same as before sealing existed).
+// Both are regenerated on every RotateKey, so an old copy never sits in
+// front of a new key.
 type Key struct {
 	ID         int64
 	PairingID  int64
@@ -74,6 +81,20 @@ type Key struct {
 	RevokedAt  sql.NullInt64
 	QRSVG      []byte
 	PayloadURL string
+}
+
+// Credentials is the re-displayable material behind the SPA's "Show
+// credentials" modal: the decrypted QR SVG for the current active key
+// plus the pairing URL when (and only when) one was stored sealed.
+// PairingURL is empty when the column is NULL -- a keyless server or a
+// legacy row the operator hasn't rotated yet. The API key itself is not
+// carried here: HTTP handlers parse it out of PairingURL so the key
+// never lingers in a second field.
+type Credentials struct {
+	AgentID       string
+	FriendlyLabel string
+	QRSVG         []byte
+	PairingURL    string
 }
 
 // PairingRow is the joined list-row shape returned by ListPairings: it
@@ -104,6 +125,11 @@ var ErrNoActiveKey = errors.New("pairing: no active key")
 // attempts to hard-delete a pairing that hasn't been revoked first.
 var ErrPairingNotRevoked = errors.New("pairing: not revoked")
 
+// ErrEmptyLabel is returned by RenamePairing when the trimmed label is
+// empty. The HTTP layer's Huma validation (minLength 1) catches this
+// first; the service check is defense in depth for non-HTTP callers.
+var ErrEmptyLabel = errors.New("pairing: empty label")
+
 // Service is the pairing package's only externally-constructed type.
 type Service struct {
 	db    *db.DB
@@ -115,6 +141,13 @@ type Service struct {
 	// in depth: a leaked database alone is insufficient to match presented
 	// keys without the server-side pepper.
 	pepper []byte
+
+	// box seals credential material at rest (qr_svg, pairing_url) under
+	// BRANCHDAM_SECRET_KEY. nil means "no key configured": writes skip
+	// sealing (pairing_url stays NULL, qr_svg stored plaintext as
+	// pre-sealing rows were) and reads of a sealed row fail with
+	// secrets.ErrUnavailable instead of serving ciphertext as an SVG.
+	box *secrets.Box
 }
 
 // defaultPepper is used only when no BRANCHDAM_SECRET_KEY is configured.
@@ -133,16 +166,18 @@ func DefaultPepper() []byte { return defaultPepper[:] }
 
 // NewService constructs a Service backed by db. pepper is the raw 32-byte
 // HMAC key derived from BRANCHDAM_SECRET_KEY; pass nil to use a
-// deterministic fallback (not recommended for production). log may be nil
-// for quieter callers (tests).
-func NewService(database *db.DB, log *slog.Logger, pepper []byte) *Service {
+// deterministic fallback (not recommended for production). box seals
+// credential material at rest; pass nil when BRANCHDAM_SECRET_KEY is
+// unset (dev/test -- credential re-display degrades to QR-only). log may
+// be nil for quieter callers (tests).
+func NewService(database *db.DB, log *slog.Logger, pepper []byte, box *secrets.Box) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
 	if len(pepper) == 0 {
 		pepper = defaultPepper[:]
 	}
-	return &Service{db: database, log: log, nowFn: nowUnix, pepper: pepper}
+	return &Service{db: database, log: log, nowFn: nowUnix, pepper: pepper, box: box}
 }
 
 func nowUnix() int64 { return time.Now().Unix() }
@@ -164,6 +199,40 @@ func nowUnix() int64 { return time.Now().Unix() }
 func (s *Service) withTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	return s.db.InTx(ctx, fn)
 }
+
+// sealCredential returns the values to persist for qr_svg and
+// pairing_url. With a box configured both are sealed (pairing_url holds
+// the plaintext-embedding branchdam:// payload, so it is only ever
+// written sealed -- migration 00034's invariant). With no box, qr_svg
+// is stored plaintext (pre-sealing behavior) and pairing_url is NULL:
+// keyless servers never put key material at rest beyond the QR itself.
+func (s *Service) sealCredential(svg []byte, payloadURL string) (storedSVG []byte, storedURL sql.NullString, err error) {
+	if s.box == nil {
+		return svg, sql.NullString{}, nil
+	}
+	sealedSVG, err := s.box.SealBytes(svg)
+	if err != nil {
+		return nil, sql.NullString{}, fmt.Errorf("seal qr svg: %w", err)
+	}
+	sealedURL, err := s.box.Seal(payloadURL)
+	if err != nil {
+		return nil, sql.NullString{}, fmt.Errorf("seal pairing url: %w", err)
+	}
+	return sealedSVG, sql.NullString{String: sealedURL, Valid: true}, nil
+}
+
+// openStored reverses sealCredential on a qr_svg column value: sealed
+// rows are decrypted, legacy plaintext rows (written before sealing
+// existed) pass through. secrets.ErrDecryptFailed / ErrUnavailable
+// propagate so HTTP handlers can distinguish "wrong key" / "key unset"
+// from a genuine storage error.
+func (s *Service) openStored(stored []byte) ([]byte, error) {
+	if !secrets.IsSealed(stored) {
+		return stored, nil
+	}
+	return s.box.OpenBytes(stored) // nil box -> ErrUnavailable
+}
+
 func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string, userID int64, qrPayloadFor func(agentID, apiKey string) []byte) (*Pairing, *Key, error) {
 	now := s.nowFn()
 	agentID, err := mintAgentID()
@@ -179,6 +248,10 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 	svg, err := qr.RenderSVG(payloadStr, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("render qr: %w", err)
+	}
+	storedSVG, storedURL, err := s.sealCredential(svg, payloadStr)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	var userIDArg sql.NullInt64
@@ -196,8 +269,9 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 			FriendlyLabel: friendlyLabel,
 			CreatedAt:     now,
 			CreatedBy:     actor,
-			QrSvg:         svg,
+			QrSvg:         storedSVG,
 			UserID:        userIDArg,
+			PairingUrl:    storedURL,
 		})
 		if err != nil {
 			return fmt.Errorf("insert pairing: %w", err)
@@ -387,10 +461,15 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("render qr: %w", err)
 	}
+	storedSVG, storedURL, err := s.sealCredential(svg, payloadStr)
+	if err != nil {
+		return nil, 0, err
+	}
 	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		return q.UpdateDevicePairingQRSVG(ctx, sqlcgen.UpdateDevicePairingQRSVGParams{
-			ID:    pairingID,
-			QrSvg: svg,
+		return q.UpdateDevicePairingCredentials(ctx, sqlcgen.UpdateDevicePairingCredentialsParams{
+			ID:         pairingID,
+			QrSvg:      storedSVG,
+			PairingUrl: storedURL,
 		})
 	}); err != nil {
 		return nil, 0, fmt.Errorf("persist qr svg: %w", err)
@@ -590,11 +669,26 @@ func (s *Service) CountPairingAudit(ctx context.Context, pairingID int64) (int64
 	return s.db.Reader.CountPairingAudit(ctx, pairingID)
 }
 
-// ActiveQRSVG returns the cached QR SVG for a pairing's current key.
-// Returns ErrNoActiveKey when the pairing exists but has no qr_svg
-// cached (e.g. all keys revoked, or the column was just added by an
-// upgrade and an older key needs rotating to repopulate).
+// ActiveQRSVG returns the cached QR SVG for a pairing's current key,
+// decrypted when the stored copy is sealed. Returns ErrNoActiveKey when
+// the pairing exists but has no qr_svg cached (e.g. all keys revoked),
+// and propagates secrets.ErrDecryptFailed / ErrUnavailable for a sealed
+// row whose key is wrong or unset.
 func (s *Service) ActiveQRSVG(ctx context.Context, pairingID int64) ([]byte, error) {
+	creds, err := s.ActiveCredentials(ctx, pairingID)
+	if err != nil {
+		return nil, err
+	}
+	return creds.QRSVG, nil
+}
+
+// ActiveCredentials returns the re-displayable material for a pairing's
+// current key: decrypted QR SVG plus the pairing URL when one was stored
+// sealed (empty string when the column is NULL -- keyless server or
+// legacy row awaiting rotation). Same error contract as the old
+// ActiveQRSVG body: ErrPairingNotFound, ErrNoActiveKey for revoked /
+// uncached rows, secrets errors for undecryptable material.
+func (s *Service) ActiveCredentials(ctx context.Context, pairingID int64) (*Credentials, error) {
 	row, err := s.db.Reader.GetDevicePairingByID(ctx, pairingID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -608,7 +702,140 @@ func (s *Service) ActiveQRSVG(ctx context.Context, pairingID int64) ([]byte, err
 	if len(row.QrSvg) == 0 {
 		return nil, ErrNoActiveKey
 	}
-	return row.QrSvg, nil
+	svg, err := s.openStored(row.QrSvg)
+	if err != nil {
+		return nil, err
+	}
+	creds := &Credentials{
+		AgentID:       row.AgentID,
+		FriendlyLabel: row.FriendlyLabel,
+		QRSVG:         svg,
+	}
+	if row.PairingUrl.Valid && row.PairingUrl.String != "" {
+		// pairing_url is only ever written sealed (migration 00034), so
+		// a non-NULL value always carries the "v1:" prefix here.
+		url, err := s.box.Open(row.PairingUrl.String) // nil box -> ErrUnavailable
+		if err != nil {
+			return nil, err
+		}
+		creds.PairingURL = url
+	}
+	return creds, nil
+}
+
+// RenamePairing updates a pairing's friendly_label and writes a
+// LABEL_RENAMED audit row carrying old and new. Labels are deliberately
+// not unique (migration 00017), so no collision check applies. Allowed
+// on revoked pairings too -- renaming history is harmless and useful
+// for cleanup.
+func (s *Service) RenamePairing(ctx context.Context, pairingID int64, label, actor string) (*Pairing, error) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return nil, ErrEmptyLabel
+	}
+	now := s.nowFn()
+	var out *Pairing
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		existing, err := q.GetDevicePairingByID(ctx, pairingID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrPairingNotFound
+			}
+			return fmt.Errorf("load pairing: %w", err)
+		}
+		if err := q.UpdateDevicePairingFriendlyLabel(ctx, sqlcgen.UpdateDevicePairingFriendlyLabelParams{
+			ID:            pairingID,
+			FriendlyLabel: label,
+		}); err != nil {
+			return fmt.Errorf("update label: %w", err)
+		}
+		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
+			PairingID: pairingID,
+			Actor:     actor,
+			Event:     "LABEL_RENAMED",
+			Details: mustJSON(map[string]any{
+				"old": existing.FriendlyLabel,
+				"new": label,
+			}),
+			CreatedAt: now,
+		}); err != nil {
+			return fmt.Errorf("audit LABEL_RENAMED: %w", err)
+		}
+		out = &Pairing{
+			ID:            existing.ID,
+			AgentID:       existing.AgentID,
+			FriendlyLabel: label,
+			CreatedAt:     existing.CreatedAt,
+			CreatedBy:     existing.CreatedBy,
+			RevokedAt:     existing.RevokedAt,
+			UserID:        existing.UserID,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RecordCredentialReveal writes a CREDENTIALS_REVEALED audit row for a
+// successful read of re-displayable credential material (the credentials
+// endpoint or GET qr.svg). Both endpoints reveal the same secret, so
+// both are audited with a channel discriminator in details. Callers
+// invoke this AFTER the read succeeds and BEFORE serving -- an audit
+// failure fails the request rather than leaking unaudited.
+func (s *Service) RecordCredentialReveal(ctx context.Context, pairingID int64, actor, channel string) error {
+	now := s.nowFn()
+	return s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
+			PairingID: pairingID,
+			Actor:     actor,
+			Event:     "CREDENTIALS_REVEALED",
+			Details:   mustJSON(map[string]any{"channel": channel}),
+			CreatedAt: now,
+		})
+	})
+}
+
+// BackfillSealedCredentials seals any plaintext qr_svg rows left over
+// from before sealing existed (SQL migrations cannot run the crypto).
+// pairing_url is not backfillable -- the plaintext key for a legacy row
+// isn't recoverable without decoding the QR -- so those stay NULL until
+// the operator rotates, which heals them. No-op when no box is
+// configured (keyless server never seals). Idempotent: sealed rows are
+// skipped. Returns the number of rows sealed.
+func (s *Service) BackfillSealedCredentials(ctx context.Context) (int, error) {
+	if s.box == nil {
+		return 0, nil
+	}
+	rows, err := s.db.Reader.ListPairingSecrets(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list pairing secrets: %w", err)
+	}
+	sealed := 0
+	for _, r := range rows {
+		if secrets.IsSealed(r.QrSvg) {
+			continue
+		}
+		open, err := s.box.SealBytes(r.QrSvg)
+		if err != nil {
+			return sealed, fmt.Errorf("seal pairing %d qr svg: %w", r.ID, err)
+		}
+		if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.UpdateDevicePairingCredentials(ctx, sqlcgen.UpdateDevicePairingCredentialsParams{
+				ID:         r.ID,
+				QrSvg:      open,
+				PairingUrl: r.PairingUrl,
+			})
+		}); err != nil {
+			return sealed, fmt.Errorf("persist sealed pairing %d: %w", r.ID, err)
+		}
+		sealed++
+	}
+	if sealed > 0 {
+		s.log.Info("sealed legacy plaintext pairing QR credentials", "count", sealed)
+	}
+	return sealed, nil
 }
 
 // IsAgentRevoked reports whether the pairing for agentID is revoked.

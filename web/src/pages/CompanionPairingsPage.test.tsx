@@ -9,6 +9,9 @@ import type {
   CreateCompanionPairingRequest,
   CreateCompanionPairingResponse,
   ListPairingsResponse,
+  PairingCredentialsResponse,
+  RenameCompanionPairingRequest,
+  RenameCompanionPairingResponse,
   RotateCompanionPairingRequest,
   RotateCompanionPairingResponse,
 } from "../api/types";
@@ -23,15 +26,25 @@ const createPairingMock = vi.fn<
 const rotatePairingMock = vi.fn<
   (id: number, input: RotateCompanionPairingRequest) => Promise<RotateCompanionPairingResponse>
 >();
+const renamePairingMock = vi.fn<
+  (id: number, input: RenameCompanionPairingRequest) => Promise<RenameCompanionPairingResponse>
+>();
+const pairingCredentialsMock = vi.fn<(id: number) => Promise<PairingCredentialsResponse>>();
+const revokePairingMock = vi.fn<(id: number) => Promise<{ revokedAtUnix: number }>>();
+const deletePairingMock = vi.fn<(id: number) => Promise<{ ok: boolean }>>();
 
 vi.mock("../api/client", () => ({
   api: {
     listPairings: () => listPairingsMock(),
     pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
-    revokePairing: vi.fn(),
+    revokePairing: (id: number) => revokePairingMock(id),
+    deletePairing: (id: number) => deletePairingMock(id),
     rotatePairing: (id: number, input: RotateCompanionPairingRequest) =>
       rotatePairingMock(id, input),
     createPairing: (input: CreateCompanionPairingRequest) => createPairingMock(input),
+    renamePairing: (id: number, input: RenameCompanionPairingRequest) =>
+      renamePairingMock(id, input),
+    pairingCredentials: (id: number) => pairingCredentialsMock(id),
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -75,11 +88,15 @@ beforeEach(() => {
   listPairingsMock.mockReset();
   createPairingMock.mockReset();
   rotatePairingMock.mockReset();
+  renamePairingMock.mockReset();
+  pairingCredentialsMock.mockReset();
+  revokePairingMock.mockReset();
+  deletePairingMock.mockReset();
 });
 
 function renderPage() {
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
@@ -206,6 +223,111 @@ describe("CompanionPairingsPage", () => {
       expect(screen.getByRole("button", { name: /copy url/i })).toBeInTheDocument();
       const deepLink = screen.getByRole("link", { name: /pair with local agent/i });
       expect(deepLink).toHaveAttribute("href", pairingUrl);
+    });
+  });
+
+  it("re-fetches and shows credentials for an existing pairing", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    const pairingUrl = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=existingkey123456789012345678901234&agent=dev-abc12345";
+    pairingCredentialsMock.mockResolvedValue({
+      pairingId: 1,
+      agentId: "dev-abc12345",
+      friendlyLabel: "Björn's iPhone",
+      apiKey: "existingkey123456789012345678901234",
+      keyPreview: "1234",
+      pairingUrl,
+      qrSvg: "<svg></svg>",
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    screen.getByRole("button", { name: /show credentials/i }).click();
+
+    await waitFor(() => {
+      expect(pairingCredentialsMock).toHaveBeenCalledWith(1);
+      expect(screen.getByText("Pairing URL")).toBeInTheDocument();
+      expect(screen.getByText(pairingUrl)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /pair with local agent/i })).toHaveAttribute(
+        "href",
+        pairingUrl
+      );
+    });
+  });
+
+  it("renames a pairing via the pencil next to the label", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    renamePairingMock.mockResolvedValue({
+      id: 1,
+      agentId: "dev-abc12345",
+      friendlyLabel: "Renamed iPhone",
+      createdAtUnix: 1700000000,
+      createdBy: "user:admin",
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    fireEvent.click(screen.getByRole("button", { name: /rename björn's iphone/i }));
+
+    await waitFor(() => screen.getByRole("heading", { name: /rename pairing/i }));
+    const input = screen.getByPlaceholderText(/Björn's iPhone 16 Pro/i);
+    fireEvent.change(input, { target: { value: "Renamed iPhone" } });
+    fireEvent.click(screen.getByRole("button", { name: /save label/i }));
+
+    await waitFor(() => {
+      expect(renamePairingMock).toHaveBeenCalledWith(1, {
+        friendlyLabel: "Renamed iPhone",
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: /rename pairing/i })).not.toBeInTheDocument();
+    });
+  });
+
+  it("opens ConfirmDialog for revoke instead of window.confirm", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    revokePairingMock.mockResolvedValue({ revokedAtUnix: 1700002000 });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    fireEvent.click(screen.getByRole("button", { name: /^Revoke$/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: /revoke pairing/i })).toBeInTheDocument();
+    });
+    // The old window.confirm prompt must not appear in the dialog body.
+    expect(screen.getByText(/All its API keys will stop working immediately/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm revoke/i }));
+    await waitFor(() => {
+      expect(revokePairingMock).toHaveBeenCalledWith(1);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: /revoke pairing/i })).not.toBeInTheDocument();
+    });
+  });
+
+  it("opens ConfirmDialog for delete instead of window.confirm", async () => {
+    listPairingsMock.mockResolvedValue({
+      pairings: [{ ...samplePairing, revokedAtUnix: 1700001000 }],
+      total: 1,
+    });
+    deletePairingMock.mockResolvedValue({ ok: true });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: /delete pairing/i })).toBeInTheDocument();
+    });
+    expect(screen.getByText(/This cannot be undone/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm delete/i }));
+    await waitFor(() => {
+      expect(deletePairingMock).toHaveBeenCalledWith(1);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: /delete pairing/i })).not.toBeInTheDocument();
     });
   });
 });
