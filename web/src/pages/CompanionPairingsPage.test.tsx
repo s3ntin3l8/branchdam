@@ -6,23 +6,32 @@ import CompanionPairingsPage from "./CompanionPairingsPage";
 import type {
   CompanionPairingDetail,
   CompanionPairingListItem,
+  CreateCompanionPairingRequest,
+  CreateCompanionPairingResponse,
   ListPairingsResponse,
+  RotateCompanionPairingRequest,
+  RotateCompanionPairingResponse,
 } from "../api/types";
 
 // Mock the api client at the module level. The pairing service tests
 // (server-side Go) cover the data flow; this just verifies the SPA
 // renders list rows and reacts to API responses correctly.
 const listPairingsMock = vi.fn<() => Promise<ListPairingsResponse>>();
-const createPairingMock = vi.fn();
-const rotatePairingMock = vi.fn();
+const createPairingMock = vi.fn<
+  (input: CreateCompanionPairingRequest) => Promise<CreateCompanionPairingResponse>
+>();
+const rotatePairingMock = vi.fn<
+  (id: number, input: RotateCompanionPairingRequest) => Promise<RotateCompanionPairingResponse>
+>();
 
 vi.mock("../api/client", () => ({
   api: {
     listPairings: () => listPairingsMock(),
     pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
     revokePairing: vi.fn(),
-    rotatePairing: (id: number, input: any) => rotatePairingMock(id, input),
-    createPairing: (input: any) => createPairingMock(input),
+    rotatePairing: (id: number, input: RotateCompanionPairingRequest) =>
+      rotatePairingMock(id, input),
+    createPairing: (input: CreateCompanionPairingRequest) => createPairingMock(input),
   },
   ApiError: class ApiError extends Error {
     status: number;
