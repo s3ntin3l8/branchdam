@@ -11,27 +11,34 @@
 -- the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
 -- user_id is the owner FK from migration 00020; nullable so legacy
 -- pairings pre-dating that migration stay valid.
+-- pairing_url (migration 00034) carries the sealed branchdam:// payload
+-- (or NULL when BRANCHDAM_SECRET_KEY is unset -- see the migration
+-- comment); qr_svg is likewise sealed before the insert when a box is
+-- configured. Sealing happens in pairing.Service, not here.
 --
 -- RETURNING includes user_id (the owner column) so the result struct
 -- matches the new DevicePairing shape introduced by migration 00019
 -- (otherwise sqlc creates a separate CreateDevicePairingRow struct that
 -- breaks the service call sites, which expect the DevicePairing type).
 INSERT INTO device_pairings (
-    agent_id, friendly_label, created_at, created_by, qr_svg, user_id
+    agent_id, friendly_label, created_at, created_by, qr_svg, user_id, pairing_url
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7
 )
-RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id;
+RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id, pairing_url;
 
 -- name: GetDevicePairingByID :one
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+-- user_id included so service methods that re-read a pairing inside a
+-- transaction (e.g. RenamePairing) can reconstruct the full Pairing
+-- struct for the audit/response without a second query.
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id, pairing_url
 FROM device_pairings
 WHERE id = ?1;
 
 -- name: GetDevicePairingByAgentID :one
 -- Used by the handshake's pendingRotation hint to load the pairing by
 -- the agent_id attached to the request's Principal.
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id, pairing_url
 FROM device_pairings
 WHERE agent_id = ?1;
 
@@ -134,6 +141,18 @@ WHERE k.pairing_id = ?1
 ORDER BY k.created_at DESC, k.id DESC
 LIMIT 1;
 
+-- name: ActiveKeyPreviewForPairing :one
+-- Newest still-active key's key_preview for credential re-display when
+-- pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
+-- only -- never key material. No rows when every key is revoked/expired.
+SELECT k.key_preview
+FROM device_pairing_keys k
+WHERE k.pairing_id = ?1
+  AND k.revoked_at IS NULL
+  AND (k.expires_at IS NULL OR k.expires_at > unixepoch())
+ORDER BY k.created_at DESC, k.id DESC
+LIMIT 1;
+
 -- name: SetActiveKeyExpirations :exec
 -- Rotation: set expires_at on every currently-active key for this pairing
 -- that doesn't already have one. Idempotent -- re-running after the same
@@ -169,12 +188,23 @@ WHERE pairing_id = ?1
 ORDER BY created_at DESC, id DESC
 LIMIT ?2 OFFSET ?3;
 
--- name: UpdateDevicePairingQRSVG :exec
--- Refresh the cached QR SVG after a key rotation. The SVG is computed
--- outside the transaction (in pairing.Service) so this UPDATE is a
--- pure byte-write with no rendering dependency.
+-- name: UpdateDevicePairingCredentials :exec
+-- Refresh the cached QR SVG and sealed pairing URL after a key rotation
+-- (or during the boot backfill that seals legacy plaintext SVGs). Both
+-- values are computed/sealed outside the transaction (in pairing.Service)
+-- so this UPDATE is a pure byte/string-write with no crypto dependency.
+-- pairing_url is NULL whenever BRANCHDAM_SECRET_KEY is unset -- the
+-- column never holds plaintext key material (migration 00034).
 UPDATE device_pairings
-SET qr_svg = ?2
+SET qr_svg = ?2, pairing_url = ?3
+WHERE id = ?1;
+
+-- name: UpdateDevicePairingFriendlyLabel :exec
+-- Rename an existing pairing's operator-facing label. friendly_label is
+-- deliberately NOT unique (migration 00017 comment): two pairings may
+-- share a label; only agent_id is UNIQUE.
+UPDATE device_pairings
+SET friendly_label = ?2
 WHERE id = ?1;
 
 -- name: GetDevicePairingQRSVG :one
@@ -183,6 +213,16 @@ WHERE id = ?1;
 SELECT qr_svg
 FROM device_pairings
 WHERE id = ?1;
+
+-- name: ListPairingSecrets :many
+-- Boot backfill scan (pairing.Service.BackfillSealedCredentials): every
+-- pairing that has credential material at rest, so the service can seal
+-- any row still holding a plaintext qr_svg. pairing_url is only ever
+-- NULL or sealed, so it is read for completeness but never re-written
+-- here (the plaintext key for a legacy row is not recoverable).
+SELECT id, qr_svg, pairing_url
+FROM device_pairings
+WHERE qr_svg IS NOT NULL;
 
 -- name: CountPairingAudit :one
 SELECT COUNT(*) FROM companion_pairing_audit WHERE pairing_id = ?1;

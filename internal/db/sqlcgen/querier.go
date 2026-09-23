@@ -10,6 +10,10 @@ import (
 )
 
 type Querier interface {
+	// Newest still-active key's key_preview for credential re-display when
+	// pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
+	// only -- never key material. No rows when every key is revoked/expired.
+	ActiveKeyPreviewForPairing(ctx context.Context, pairingID int64) (string, error)
 	AgentCreatedVirtualNode(ctx context.Context, arg AgentCreatedVirtualNodeParams) (bool, error)
 	// Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
 	// row FIRST, before inserting the new one. The partial unique index
@@ -128,6 +132,10 @@ type Querier interface {
 	// the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
 	// user_id is the owner FK from migration 00020; nullable so legacy
 	// pairings pre-dating that migration stay valid.
+	// pairing_url (migration 00034) carries the sealed branchdam:// payload
+	// (or NULL when BRANCHDAM_SECRET_KEY is unset -- see the migration
+	// comment); qr_svg is likewise sealed before the insert when a box is
+	// configured. Sealing happens in pairing.Service, not here.
 	//
 	// RETURNING includes user_id (the owner column) so the result struct
 	// matches the new DevicePairing shape introduced by migration 00019
@@ -286,7 +294,10 @@ type Querier interface {
 	// Used by the handshake's pendingRotation hint to load the pairing by
 	// the agent_id attached to the request's Principal.
 	GetDevicePairingByAgentID(ctx context.Context, agentID string) (DevicePairing, error)
-	GetDevicePairingByID(ctx context.Context, id int64) (GetDevicePairingByIDRow, error)
+	// user_id included so service methods that re-read a pairing inside a
+	// transaction (e.g. RenamePairing) can reconstruct the full Pairing
+	// struct for the audit/response without a second query.
+	GetDevicePairingByID(ctx context.Context, id int64) (DevicePairing, error)
 	// The hot path: KeyLookup runs this on every authenticated agent request.
 	// UNIQUE index on key_lookup_hash keeps it O(log n). Active means
 	// revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now).
@@ -592,6 +603,12 @@ type Querier interface {
 	// so offset drift isn't a concern the way it is for the unbounded
 	// audit_queue edge-review list.
 	ListPairingAudit(ctx context.Context, arg ListPairingAuditParams) ([]CompanionPairingAudit, error)
+	// Boot backfill scan (pairing.Service.BackfillSealedCredentials): every
+	// pairing that has credential material at rest, so the service can seal
+	// any row still holding a plaintext qr_svg. pairing_url is only ever
+	// NULL or sealed, so it is read for completeness but never re-written
+	// here (the plaintext key for a legacy row is not recoverable).
+	ListPairingSecrets(ctx context.Context) ([]ListPairingSecretsRow, error)
 	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
 	// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
 	// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
@@ -965,10 +982,17 @@ type Querier interface {
 	// path before this UPDATE; the lifecycle_state change is the durable
 	// record that the asset is queryable again.
 	UntrashNode(ctx context.Context, id int64) error
-	// Refresh the cached QR SVG after a key rotation. The SVG is computed
-	// outside the transaction (in pairing.Service) so this UPDATE is a
-	// pure byte-write with no rendering dependency.
-	UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error
+	// Refresh the cached QR SVG and sealed pairing URL after a key rotation
+	// (or during the boot backfill that seals legacy plaintext SVGs). Both
+	// values are computed/sealed outside the transaction (in pairing.Service)
+	// so this UPDATE is a pure byte/string-write with no crypto dependency.
+	// pairing_url is NULL whenever BRANCHDAM_SECRET_KEY is unset -- the
+	// column never holds plaintext key material (migration 00034).
+	UpdateDevicePairingCredentials(ctx context.Context, arg UpdateDevicePairingCredentialsParams) error
+	// Rename an existing pairing's operator-facing label. friendly_label is
+	// deliberately NOT unique (migration 00017 comment): two pairings may
+	// share a label; only agent_id is UNIQUE.
+	UpdateDevicePairingFriendlyLabel(ctx context.Context, arg UpdateDevicePairingFriendlyLabelParams) error
 	UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStepParams) error
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE

@@ -329,8 +329,20 @@ func main() {
 	// but it only matters when the agent routes are reachable (they
 	// are, behind the agent key check). Wiring the pairing service's
 	// KeyLookup into the AgentConfig (see httpapi/server.go's Handler())
-	// is what lets a device-paired API key authenticate.
-	pairingService := pairing.NewService(database, log, pairingPepper)
+	// is what lets a device-paired API key authenticate. secretBox seals
+	// credential material at rest (qr_svg + pairing_url); nil when
+	// BRANCHDAM_SECRET_KEY is unset, in which case pairing_url stays
+	// NULL and credential re-display degrades to QR-only.
+	pairingService := pairing.NewService(database, log, pairingPepper, secretBox)
+
+	// Seal any plaintext qr_svg rows left from before sealing existed.
+	// SQL migrations cannot run the crypto, so this runs here, after
+	// goose has applied migration 00034 (which added pairing_url).
+	// Best-effort at boot: a failure logs but does not block startup --
+	// the backfill is idempotent and reruns on the next boot.
+	if _, err := pairingService.BackfillSealedCredentials(ctx); err != nil {
+		log.Error("seal legacy pairing credentials", "err", err)
+	}
 
 	// Admin PATs (issue #453 PR E): the kubeadm-init bootstrap-token
 	// pattern for unattended operator tooling. Mint once at startup if

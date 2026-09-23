@@ -468,6 +468,41 @@ export interface DeleteCompanionPairingResponse {
   ok: boolean;
 }
 
+// RenamePairing: POST /{id}/rename -- action-style POST matching /rotate
+// and /revoke. Allowed on revoked pairings (history rename is harmless).
+export interface RenameCompanionPairingRequest {
+  friendlyLabel: string;
+}
+
+export interface RenameCompanionPairingResponse {
+  id: number;
+  agentId: string;
+  friendlyLabel: string;
+  createdAtUnix: number;
+  createdBy: string;
+  revokedAtUnix?: number;
+}
+
+// PairingCredentials: GET /{id}/credentials -- re-displayable material
+// for an existing pairing's current key. apiKey/pairingUrl are empty
+// strings when the row has no sealed pairing_url (keyless server or
+// pre-00034 legacy); keyPreview is always the newest active key's
+// last-4. sealingEnabled is s.box != nil -- whether a secrets box is
+// configured on this server *right now*, not row provenance. It only
+// tells the SPA how to label an empty pairingUrl: true => "legacy row
+// -- rotate to seal", false => "keyless server" (Hermes round 3/4).
+// Cache-Control is always private, no-store (set by the server header).
+export interface PairingCredentialsResponse {
+  pairingId: number;
+  agentId: string;
+  friendlyLabel: string;
+  apiKey: string;
+  keyPreview: string;
+  pairingUrl: string;
+  qrSvg: string;
+  sealingEnabled: boolean;
+}
+
 export interface ListPairingsResponse {
   pairings: CompanionPairingListItem[];
   total: number;

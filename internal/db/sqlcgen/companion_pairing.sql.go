@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const activeKeyPreviewForPairing = `-- name: ActiveKeyPreviewForPairing :one
+SELECT k.key_preview
+FROM device_pairing_keys k
+WHERE k.pairing_id = ?1
+  AND k.revoked_at IS NULL
+  AND (k.expires_at IS NULL OR k.expires_at > unixepoch())
+ORDER BY k.created_at DESC, k.id DESC
+LIMIT 1
+`
+
+// Newest still-active key's key_preview for credential re-display when
+// pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
+// only -- never key material. No rows when every key is revoked/expired.
+func (q *Queries) ActiveKeyPreviewForPairing(ctx context.Context, pairingID int64) (string, error) {
+	row := q.db.QueryRowContext(ctx, activeKeyPreviewForPairing, pairingID)
+	var key_preview string
+	err := row.Scan(&key_preview)
+	return key_preview, err
+}
+
 const countDevicePairings = `-- name: CountDevicePairings :one
 SELECT COUNT(*) FROM device_pairings
 `
@@ -35,11 +55,11 @@ func (q *Queries) CountPairingAudit(ctx context.Context, pairingID int64) (int64
 const createDevicePairing = `-- name: CreateDevicePairing :one
 
 INSERT INTO device_pairings (
-    agent_id, friendly_label, created_at, created_by, qr_svg, user_id
+    agent_id, friendly_label, created_at, created_by, qr_svg, user_id, pairing_url
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7
 )
-RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
+RETURNING id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id, pairing_url
 `
 
 type CreateDevicePairingParams struct {
@@ -49,6 +69,7 @@ type CreateDevicePairingParams struct {
 	CreatedBy     string
 	QrSvg         []byte
 	UserID        sql.NullInt64
+	PairingUrl    sql.NullString
 }
 
 // Companion pairing queries. The handlers in internal/httpapi/companion_pairings.go
@@ -62,6 +83,10 @@ type CreateDevicePairingParams struct {
 // the matching KEY_MINTED audit insert in the same tx (see pairing.Service).
 // user_id is the owner FK from migration 00020; nullable so legacy
 // pairings pre-dating that migration stay valid.
+// pairing_url (migration 00034) carries the sealed branchdam:// payload
+// (or NULL when BRANCHDAM_SECRET_KEY is unset -- see the migration
+// comment); qr_svg is likewise sealed before the insert when a box is
+// configured. Sealing happens in pairing.Service, not here.
 //
 // RETURNING includes user_id (the owner column) so the result struct
 // matches the new DevicePairing shape introduced by migration 00019
@@ -75,6 +100,7 @@ func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairi
 		arg.CreatedBy,
 		arg.QrSvg,
 		arg.UserID,
+		arg.PairingUrl,
 	)
 	var i DevicePairing
 	err := row.Scan(
@@ -86,6 +112,7 @@ func (q *Queries) CreateDevicePairing(ctx context.Context, arg CreateDevicePairi
 		&i.RevokedAt,
 		&i.QrSvg,
 		&i.UserID,
+		&i.PairingUrl,
 	)
 	return i, err
 }
@@ -155,7 +182,7 @@ func (q *Queries) DeletePairingKeysForPairing(ctx context.Context, pairingID int
 }
 
 const getDevicePairingByAgentID = `-- name: GetDevicePairingByAgentID :one
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id, pairing_url
 FROM device_pairings
 WHERE agent_id = ?1
 `
@@ -174,29 +201,23 @@ func (q *Queries) GetDevicePairingByAgentID(ctx context.Context, agentID string)
 		&i.RevokedAt,
 		&i.QrSvg,
 		&i.UserID,
+		&i.PairingUrl,
 	)
 	return i, err
 }
 
 const getDevicePairingByID = `-- name: GetDevicePairingByID :one
-SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg
+SELECT id, agent_id, friendly_label, created_at, created_by, revoked_at, qr_svg, user_id, pairing_url
 FROM device_pairings
 WHERE id = ?1
 `
 
-type GetDevicePairingByIDRow struct {
-	ID            int64
-	AgentID       string
-	FriendlyLabel string
-	CreatedAt     int64
-	CreatedBy     string
-	RevokedAt     sql.NullInt64
-	QrSvg         []byte
-}
-
-func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (GetDevicePairingByIDRow, error) {
+// user_id included so service methods that re-read a pairing inside a
+// transaction (e.g. RenamePairing) can reconstruct the full Pairing
+// struct for the audit/response without a second query.
+func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (DevicePairing, error) {
 	row := q.db.QueryRowContext(ctx, getDevicePairingByID, id)
-	var i GetDevicePairingByIDRow
+	var i DevicePairing
 	err := row.Scan(
 		&i.ID,
 		&i.AgentID,
@@ -205,6 +226,8 @@ func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (GetDevice
 		&i.CreatedBy,
 		&i.RevokedAt,
 		&i.QrSvg,
+		&i.UserID,
+		&i.PairingUrl,
 	)
 	return i, err
 }
@@ -469,6 +492,46 @@ func (q *Queries) ListPairingAudit(ctx context.Context, arg ListPairingAuditPara
 	return items, nil
 }
 
+const listPairingSecrets = `-- name: ListPairingSecrets :many
+SELECT id, qr_svg, pairing_url
+FROM device_pairings
+WHERE qr_svg IS NOT NULL
+`
+
+type ListPairingSecretsRow struct {
+	ID         int64
+	QrSvg      []byte
+	PairingUrl sql.NullString
+}
+
+// Boot backfill scan (pairing.Service.BackfillSealedCredentials): every
+// pairing that has credential material at rest, so the service can seal
+// any row still holding a plaintext qr_svg. pairing_url is only ever
+// NULL or sealed, so it is read for completeness but never re-written
+// here (the plaintext key for a legacy row is not recoverable).
+func (q *Queries) ListPairingSecrets(ctx context.Context) ([]ListPairingSecretsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPairingSecrets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPairingSecretsRow{}
+	for rows.Next() {
+		var i ListPairingSecretsRow
+		if err := rows.Scan(&i.ID, &i.QrSvg, &i.PairingUrl); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const newestActiveKeyForPairing = `-- name: NewestActiveKeyForPairing :one
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
        k.expires_at, k.revoked_at
@@ -572,21 +635,44 @@ func (q *Queries) SetActiveKeyExpirations(ctx context.Context, arg SetActiveKeyE
 	return err
 }
 
-const updateDevicePairingQRSVG = `-- name: UpdateDevicePairingQRSVG :exec
+const updateDevicePairingCredentials = `-- name: UpdateDevicePairingCredentials :exec
 UPDATE device_pairings
-SET qr_svg = ?2
+SET qr_svg = ?2, pairing_url = ?3
 WHERE id = ?1
 `
 
-type UpdateDevicePairingQRSVGParams struct {
-	ID    int64
-	QrSvg []byte
+type UpdateDevicePairingCredentialsParams struct {
+	ID         int64
+	QrSvg      []byte
+	PairingUrl sql.NullString
 }
 
-// Refresh the cached QR SVG after a key rotation. The SVG is computed
-// outside the transaction (in pairing.Service) so this UPDATE is a
-// pure byte-write with no rendering dependency.
-func (q *Queries) UpdateDevicePairingQRSVG(ctx context.Context, arg UpdateDevicePairingQRSVGParams) error {
-	_, err := q.db.ExecContext(ctx, updateDevicePairingQRSVG, arg.ID, arg.QrSvg)
+// Refresh the cached QR SVG and sealed pairing URL after a key rotation
+// (or during the boot backfill that seals legacy plaintext SVGs). Both
+// values are computed/sealed outside the transaction (in pairing.Service)
+// so this UPDATE is a pure byte/string-write with no crypto dependency.
+// pairing_url is NULL whenever BRANCHDAM_SECRET_KEY is unset -- the
+// column never holds plaintext key material (migration 00034).
+func (q *Queries) UpdateDevicePairingCredentials(ctx context.Context, arg UpdateDevicePairingCredentialsParams) error {
+	_, err := q.db.ExecContext(ctx, updateDevicePairingCredentials, arg.ID, arg.QrSvg, arg.PairingUrl)
+	return err
+}
+
+const updateDevicePairingFriendlyLabel = `-- name: UpdateDevicePairingFriendlyLabel :exec
+UPDATE device_pairings
+SET friendly_label = ?2
+WHERE id = ?1
+`
+
+type UpdateDevicePairingFriendlyLabelParams struct {
+	ID            int64
+	FriendlyLabel string
+}
+
+// Rename an existing pairing's operator-facing label. friendly_label is
+// deliberately NOT unique (migration 00017 comment): two pairings may
+// share a label; only agent_id is UNIQUE.
+func (q *Queries) UpdateDevicePairingFriendlyLabel(ctx context.Context, arg UpdateDevicePairingFriendlyLabelParams) error {
+	_, err := q.db.ExecContext(ctx, updateDevicePairingFriendlyLabel, arg.ID, arg.FriendlyLabel)
 	return err
 }

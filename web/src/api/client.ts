@@ -33,6 +33,7 @@ import type {
   MfaSetupResponse,
   NodeMetadatum,
   PairingAuditResponse,
+  PairingCredentialsResponse,
   PasswordResetConfirmInput,
   PasswordResetConfirmResponse,
   PasswordResetRequestInput,
@@ -43,6 +44,8 @@ import type {
   PruneResponse,
   PutSettingsRequest,
   PutStorageLocationRequest,
+  RenameCompanionPairingRequest,
+  RenameCompanionPairingResponse,
   RevokeCompanionPairingResponse,
   RevokeUserSessionsResponse,
   RotateCompanionPairingRequest,
@@ -308,13 +311,19 @@ export const api = {
     request<DeleteCompanionPairingResponse>(`/api/v1/companion/pairings/${id}`, {
       method: "DELETE",
     }),
+  renamePairing: (id: number, input: RenameCompanionPairingRequest) =>
+    request<RenameCompanionPairingResponse>(`/api/v1/companion/pairings/${id}/rename`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  pairingCredentials: (id: number) =>
+    request<PairingCredentialsResponse>(`/api/v1/companion/pairings/${id}/credentials`),
   pairingAudit: (id: number, params: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
     return request<PairingAuditResponse>(`/api/v1/companion/pairings/${id}/audit?${qs}`);
   },
-  pairingQRSVGUrl: (id: number) => `/api/v1/companion/pairings/${id}/qr.svg`,
 
   pruneCache: (input: PruneRequest) =>
     request<PruneResponse>("/api/v1/prune", {

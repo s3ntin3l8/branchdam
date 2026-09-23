@@ -11,6 +11,7 @@
 package secrets
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -109,4 +110,37 @@ func (b *Box) Open(stored string) (string, error) {
 		return "", ErrDecryptFailed
 	}
 	return string(plaintext), nil
+}
+
+// IsSealed reports whether stored carries the versioned ciphertext
+// prefix. Callers use it to distinguish a sealed value from a legacy
+// plaintext row written before sealing existed (pairing's qr_svg) -- a
+// rendered SVG always starts with "<?xml", so prefix confusion with the
+// "v1:" marker is impossible. It does not depend on a configured Box:
+// a sealed row must stay detectable even when BRANCHDAM_SECRET_KEY has
+// since been unset, so callers fail with ErrUnavailable instead of
+// serving ciphertext as if it were plaintext.
+func IsSealed(stored []byte) bool {
+	return bytes.HasPrefix(stored, []byte(version1Prefix))
+}
+
+// SealBytes is Seal for BLOB columns (pairing's qr_svg). The stored
+// form is the same "v1:" + base64 string, widened to bytes so callers
+// do not round-trip through string conversions on the write path.
+func (b *Box) SealBytes(plaintext []byte) ([]byte, error) {
+	s, err := b.Seal(string(plaintext))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(s), nil
+}
+
+// OpenBytes is Open for BLOB columns. Any authentication failure
+// (wrong key, rotated key, corrupted row) returns ErrDecryptFailed.
+func (b *Box) OpenBytes(stored []byte) ([]byte, error) {
+	s, err := b.Open(string(stored))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(s), nil
 }

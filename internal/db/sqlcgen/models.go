@@ -65,6 +65,7 @@ type DevicePairing struct {
 	RevokedAt     sql.NullInt64
 	QrSvg         []byte
 	UserID        sql.NullInt64
+	PairingUrl    sql.NullString
 }
 
 type DevicePairingKey struct {

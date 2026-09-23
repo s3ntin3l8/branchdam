@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,20 +18,40 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/secrets"
 )
 
 // testPepper is the HMAC key used by the test helper and newTestService.
 // Must match the pepper passed to NewService in newTestService.
 var testPepper = sha256.Sum256([]byte("test-pepper"))
 
+// testSecretBase64 is a fixed 32-byte key for secrets.Box in tests.
+// Deterministic so seal/open round-trips across helpers are stable.
+const testSecretBase64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
 func newTestService(t *testing.T) (*Service, *db.DB) {
+	t.Helper()
+	return newTestServiceWithBox(t, nil)
+}
+
+// newTestServiceWithBox is newTestService with an explicit secrets.Box
+// (nil = keyless server: plaintext qr_svg, NULL pairing_url).
+func newTestServiceWithBox(t *testing.T, box *secrets.Box) (*Service, *db.DB) {
 	t.Helper()
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "pairing.db")
 	database, err := db.Open(context.Background(), dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = database.Close() })
-	return NewService(database, nil, testPepper[:]), database
+	return NewService(database, nil, testPepper[:], box), database
+}
+
+func testBox(t *testing.T) *secrets.Box {
+	t.Helper()
+	box, err := secrets.NewBox(testSecretBase64)
+	require.NoError(t, err)
+	require.NotNil(t, box)
+	return box
 }
 
 // stubQRPayload returns a stable closure so tests don't depend on the
@@ -393,4 +414,204 @@ func TestDeletePairing_KeysNotLookupableAfterDelete(t *testing.T) {
 	result, err = svc.KeyLookup(ctx, key.Plaintext)
 	require.NoError(t, err)
 	assert.Empty(t, result.AgentID)
+}
+
+// --- credential sealing / reveal / rename (feature: show credentials) ---
+
+func TestCreatePairing_SealsCredentialsWithBox(t *testing.T) {
+	svc, database := newTestServiceWithBox(t, testBox(t))
+	ctx := context.Background()
+
+	p, key, err := svc.CreatePairing(ctx, "Sealed iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+
+	row, err := database.Reader.GetDevicePairingByID(ctx, p.ID)
+	require.NoError(t, err)
+	require.True(t, secrets.IsSealed(row.QrSvg), "qr_svg must be sealed at rest")
+	require.True(t, row.PairingUrl.Valid, "pairing_url must be stored when box is set")
+	require.True(t, secrets.IsSealed([]byte(row.PairingUrl.String)), "pairing_url must be sealed")
+
+	// Read path decrypts back to the original payload.
+	creds, err := svc.ActiveCredentials(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(creds.QRSVG), "<svg")
+	assert.True(t, strings.HasPrefix(creds.PairingURL, "branchdam://"), "got %q", creds.PairingURL)
+	assert.Contains(t, creds.PairingURL, key.Plaintext)
+	assert.NotEmpty(t, creds.KeyPreview, "keyed server surfaces last-4 from the active key row")
+	assert.True(t, creds.SealingEnabled, "keyed server reports SealingEnabled")
+}
+
+func TestCreatePairing_KeylessStoresPlaintextSVGNullURL(t *testing.T) {
+	svc, database := newTestService(t)
+	ctx := context.Background()
+
+	p, _, err := svc.CreatePairing(ctx, "Keyless", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+
+	row, err := database.Reader.GetDevicePairingByID(ctx, p.ID)
+	require.NoError(t, err)
+	require.False(t, secrets.IsSealed(row.QrSvg), "keyless server stores plaintext SVG")
+	require.False(t, row.PairingUrl.Valid, "keyless server never writes pairing_url")
+
+	creds, err := svc.ActiveCredentials(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Empty(t, creds.PairingURL)
+	assert.Contains(t, string(creds.QRSVG), "<svg")
+	assert.NotEmpty(t, creds.KeyPreview, "keyless still surfaces last-4 from the active key row (Hermes r3)")
+	assert.Len(t, creds.KeyPreview, 4)
+	assert.False(t, creds.SealingEnabled, "keyless server has no box")
+}
+
+func TestRotateKey_ReSealsCredentials(t *testing.T) {
+	svc, database := newTestServiceWithBox(t, testBox(t))
+	ctx := context.Background()
+
+	p, oldKey, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	newKey, _, err := svc.RotateKey(ctx, p.ID, "user:tester", 60, stubQRPayload)
+	require.NoError(t, err)
+
+	creds, err := svc.ActiveCredentials(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Contains(t, creds.PairingURL, newKey.Plaintext, "credentials must reflect the rotated key")
+	assert.NotContains(t, creds.PairingURL, oldKey.Plaintext)
+
+	row, err := database.Reader.GetDevicePairingByID(ctx, p.ID)
+	require.NoError(t, err)
+	require.True(t, secrets.IsSealed(row.QrSvg))
+	require.True(t, row.PairingUrl.Valid)
+}
+
+func TestActiveCredentials_RevokedPairingReturnsNoActiveKey(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	p, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	_, err = svc.RevokePairing(ctx, p.ID, "user:tester")
+	require.NoError(t, err)
+
+	_, err = svc.ActiveCredentials(ctx, p.ID)
+	assert.ErrorIs(t, err, ErrNoActiveKey)
+}
+
+func TestRenamePairing_UpdatesLabelAndAudits(t *testing.T) {
+	svc, database := newTestService(t)
+	ctx := context.Background()
+
+	p, _, err := svc.CreatePairing(ctx, "Old name", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+
+	renamed, err := svc.RenamePairing(ctx, p.ID, "New name", "user:tester")
+	require.NoError(t, err)
+	assert.Equal(t, "New name", renamed.FriendlyLabel)
+
+	// Persisted label.
+	got, err := svc.GetPairing(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "New name", got.FriendlyLabel)
+
+	// LABEL_RENAMED audit row with old/new in details.
+	events, err := database.Reader.ListPairingAudit(ctx, sqlcgen.ListPairingAuditParams{
+		PairingID: p.ID,
+		Limit:     10,
+		Offset:    0,
+	})
+	require.NoError(t, err)
+	var found bool
+	for _, e := range events {
+		if e.Event == audit.EventLabelRenamed {
+			found = true
+			assert.Contains(t, e.Details, `"old":"Old name"`)
+			assert.Contains(t, e.Details, `"new":"New name"`)
+		}
+	}
+	assert.True(t, found, "expected LABEL_RENAMED audit event")
+}
+
+func TestRenamePairing_EmptyLabelRejected(t *testing.T) {
+	svc, _ := newTestService(t)
+	p, _, err := svc.CreatePairing(context.Background(), "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+
+	_, err = svc.RenamePairing(context.Background(), p.ID, "   ", "user:tester")
+	assert.ErrorIs(t, err, ErrEmptyLabel)
+}
+
+func TestRenamePairing_NotFound(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.RenamePairing(context.Background(), 99999, "x", "user:tester")
+	assert.ErrorIs(t, err, ErrPairingNotFound)
+}
+
+func TestRenamePairing_AllowedOnRevokedPairing(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	p, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	_, err = svc.RevokePairing(ctx, p.ID, "user:tester")
+	require.NoError(t, err)
+
+	renamed, err := svc.RenamePairing(ctx, p.ID, "Retired iPhone", "user:tester")
+	require.NoError(t, err)
+	assert.Equal(t, "Retired iPhone", renamed.FriendlyLabel)
+}
+
+func TestRecordCredentialReveal_WritesAudit(t *testing.T) {
+	svc, database := newTestService(t)
+	ctx := context.Background()
+
+	p, _, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	require.NoError(t, svc.RecordCredentialReveal(ctx, p.ID, "user:tester", "qr_svg"))
+
+	events, err := database.Reader.ListPairingAudit(ctx, sqlcgen.ListPairingAuditParams{
+		PairingID: p.ID,
+		Limit:     10,
+		Offset:    0,
+	})
+	require.NoError(t, err)
+	var found bool
+	for _, e := range events {
+		if e.Event == audit.EventCredentialsRevealed {
+			found = true
+			assert.Contains(t, e.Details, `"channel":"qr_svg"`)
+		}
+	}
+	assert.True(t, found, "expected CREDENTIALS_REVEALED audit event")
+}
+
+func TestBackfillSealedCredentials_SealsLegacyPlaintext(t *testing.T) {
+	svc, database := newTestServiceWithBox(t, testBox(t))
+	ctx := context.Background()
+
+	// Seed a legacy plaintext row directly (pre-sealing behavior).
+	p, _, err := svc.CreatePairing(ctx, "Legacy", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+	// Force plaintext QR into the row (simulating a pre-seal write).
+	plaintextSVG := []byte("<?xml version='1.0'?><svg></svg>")
+	_, err = database.ExecInTx(ctx,
+		"UPDATE device_pairings SET qr_svg = ?2, pairing_url = NULL WHERE id = ?1",
+		p.ID, plaintextSVG)
+	require.NoError(t, err)
+
+	sealed, err := svc.BackfillSealedCredentials(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, sealed)
+
+	row, err := database.Reader.GetDevicePairingByID(ctx, p.ID)
+	require.NoError(t, err)
+	require.True(t, secrets.IsSealed(row.QrSvg), "legacy plaintext QR must be sealed")
+
+	// Idempotent: second run seals nothing.
+	sealed, err = svc.BackfillSealedCredentials(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, sealed)
+}
+
+func TestBackfillSealedCredentials_KeylessNoop(t *testing.T) {
+	svc, _ := newTestService(t)
+	sealed, err := svc.BackfillSealedCredentials(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, sealed)
 }
