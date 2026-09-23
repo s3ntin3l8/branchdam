@@ -12,7 +12,7 @@ describe("InlineNotice", () => {
     vi.useRealTimers();
   });
 
-  it("renders message with polite status role", () => {
+  it("renders success message with polite status role", () => {
     render(
       <InlineNotice tone="success" message="Revoked 1 active session." onDismiss={vi.fn()} />,
     );
@@ -20,6 +20,14 @@ describe("InlineNotice", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveAttribute("aria-live", "polite");
     expect(status).toHaveTextContent("Revoked 1 active session.");
+  });
+
+  it("renders error message with assertive alert role", () => {
+    render(<InlineNotice tone="error" message="Failed to re-enable bob: boom" onDismiss={vi.fn()} />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveAttribute("aria-live", "assertive");
+    expect(alert).toHaveTextContent("Failed to re-enable bob: boom");
   });
 
   it("dismisses on click of close button", async () => {
@@ -77,5 +85,32 @@ describe("InlineNotice", () => {
     });
     expect(onDismiss2).toHaveBeenCalledTimes(1);
     expect(onDismiss1).not.toHaveBeenCalled();
+  });
+
+  it("resets the auto-dismiss countdown when the message is swapped in place", () => {
+    const onDismiss = vi.fn();
+    const { rerender } = render(
+      <InlineNotice tone="success" message="First message" onDismiss={onDismiss} />,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(7950);
+    });
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    rerender(
+      <InlineNotice tone="success" message="Second message" onDismiss={onDismiss} />,
+    );
+
+    // Old countdown would fire 50ms later; the new message must get a full window.
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(7950);
+    });
+    expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 });

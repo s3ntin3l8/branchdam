@@ -361,6 +361,7 @@ describe("UsersPage row actions", () => {
     });
     expect(alertSpy).not.toHaveBeenCalled();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     alertSpy.mockRestore();
   });
 
@@ -373,8 +374,8 @@ describe("UsersPage row actions", () => {
     renderPage();
     await user.click(await screen.findByRole("button", { name: /re-enable/i }));
 
-    const notice = await screen.findByRole("status");
-    expect(notice).toHaveTextContent("boom");
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("Failed to re-enable bob: boom");
     expect(alertSpy).not.toHaveBeenCalled();
     alertSpy.mockRestore();
   });
@@ -386,11 +387,12 @@ describe("UsersPage row actions", () => {
 
     renderPage();
     await user.click(await screen.findByRole("button", { name: /re-enable/i }));
-    await screen.findByRole("status");
+    await screen.findByRole("alert");
 
-    // After the failure, a subsequent success clears the notice.
+    // After the failure, a subsequent attempt clears the notice on open.
     await user.click(screen.getByRole("button", { name: /re-enable/i }));
     await waitFor(() => {
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
       expect(screen.queryByRole("status")).not.toBeInTheDocument();
     });
     expect(enableUserMock).toHaveBeenCalledTimes(2);

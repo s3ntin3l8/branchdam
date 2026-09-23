@@ -188,9 +188,12 @@ export default function UsersPage() {
     try {
       await enableUserMutation.mutateAsync(user.id);
     } catch (err) {
+      const detail = err instanceof Error ? err.message : null;
       setNotice({
         tone: "error",
-        message: err instanceof Error ? err.message : "Failed to re-enable user.",
+        message: detail
+          ? `Failed to re-enable ${user.username}: ${detail}`
+          : `Failed to re-enable ${user.username}.`,
       });
     }
   };
