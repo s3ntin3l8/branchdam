@@ -770,9 +770,12 @@ func readSPABuildID(spa fs.FS) string {
 	id := strings.TrimSpace(string(data))
 	// Cap to a sane identifier length; a malformed value is still a
 	// valid string but worth bounding so a stray web/dist with a giant
-	// file doesn't get echoed verbatim to clients.
+	// file doesn't get echoed verbatim to clients. Truncating
+	// mid-UTF-8 can split a rune, and the value lands verbatim inside
+	// /api/v1/config's JSON body -- ToValidUTF8 drops the broken
+	// suffix rather than emit invalid UTF-8 to lenient parsers.
 	if len(id) > 128 {
-		id = id[:128]
+		id = strings.ToValidUTF8(id[:128], "")
 	}
 	return id
 }

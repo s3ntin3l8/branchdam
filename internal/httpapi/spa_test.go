@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"unicode/utf8"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -357,10 +358,39 @@ func TestSPABuildIDReadFromEmbeddedFS(t *testing.T) {
 	srv = testServerWithSPA(t, noStamp)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://branchdam.example/api/v1/config", nil))
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+	var missing struct {
+		SPABuildID string `json:"spaBuildId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &missing); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.SPABuildID != "" {
-		t.Errorf("spaBuildId = %q, want empty when BUILD_ID missing", got.SPABuildID)
+	if missing.SPABuildID != "" {
+		t.Errorf("spaBuildId = %q, want empty when BUILD_ID missing", missing.SPABuildID)
+	}
+
+	// Oversize BUILD_ID with a UTF-8 rune straddling the 128-byte cap:
+	// the previous id[:128] truncated mid-rune and emitted invalid
+	// UTF-8 to JSON clients. ToValidUTF8 drops the broken suffix.
+	oversize := strings.Repeat("a", 125) + "€€€€€€€" // bytes 125..127 = ASCII,
+	// 128 onward = 0xE2 0x82 0xAC (euro sign) so the 128th byte starts
+	// a new rune -- 128-byte slice leaves a 2-byte partial rune.
+	spa = fstest.MapFS{
+		"index.html": {Data: []byte(indexHTMLFixture)},
+		"BUILD_ID":   {Data: []byte(oversize + "\n")},
+	}
+	srv = testServerWithSPA(t, spa)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://branchdam.example/api/v1/config", nil))
+	var oversizeOut struct {
+		SPABuildID string `json:"spaBuildId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &oversizeOut); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !utf8.ValidString(oversizeOut.SPABuildID) {
+		t.Errorf("spaBuildId = %q, want valid UTF-8 after cap", oversizeOut.SPABuildID)
+	}
+	if len(oversizeOut.SPABuildID) > 128 {
+		t.Errorf("spaBuildId length = %d, want <=128", len(oversizeOut.SPABuildID))
 	}
 }

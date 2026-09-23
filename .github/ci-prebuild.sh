@@ -11,8 +11,10 @@
 #
 # Stale-dist detection (local-`make dev` only, never the backend CI lane):
 # if web/dist already exists but is older than any web/src file, print a
-# warning pointing at the newest offending source. CI intentionally keeps
-# the stub for speed; the warning is a hint, not a failure.
+# warning pointing at the newest offending source and export
+# BRANCHDAM_DIST_STALE=1 so the Makefile web-ensure target can rebuild
+# without re-implementing the verdict. CI intentionally keeps the stub for
+# speed; the warning is a hint, not a failure.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -24,6 +26,22 @@ WEB_ROOT="$REPO_ROOT/web"
 # not a real Vite build. Detecting it lets us tell "no SPA built yet"
 # apart from "stale SPA sitting around from last time".
 STUB_MARKER='<!doctype html><title>branchDAM</title>'
+
+# mtime_of FILE prints integer epoch seconds for FILE on stdout, or 0 if
+# FILE is missing or stat is unavailable. POSIX sh only has `stat` with
+# wildly different flags per platform -- GNU: -c %Y, BSD/macOS: -f %m.
+# Probe in order and accept whatever returns a non-empty integer.
+mtime_of() {
+  local f="$1"
+  local t
+  if t=$(stat -c %Y "$f" 2>/dev/null) && [ -n "$t" ]; then
+    echo "$t"
+  elif t=$(stat -f %m "$f" 2>/dev/null) && [ -n "$t" ]; then
+    echo "$t"
+  else
+    echo 0
+  fi
+}
 
 is_stub() {
   if [ ! -f "$INDEX" ]; then return 1; fi
@@ -64,7 +82,7 @@ if [ -d "$SRC_DIR" ]; then
   newest_src_path=""
   newest_src_epoch=0
   while IFS= read -r -d '' f; do
-    epoch=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+    epoch=$(mtime_of "$f")
     if [ "$epoch" -gt "$newest_src_epoch" ]; then
       newest_src_epoch="$epoch"
       newest_src_path="$f"
@@ -75,7 +93,7 @@ if [ -d "$SRC_DIR" ]; then
   for root in "$WEB_ROOT"; do
     for f in "$root/vite.config.ts" "$root/package.json" "$root/package-lock.json" "$root/index.html"; do
       [ -f "$f" ] || continue
-      epoch=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+      epoch=$(mtime_of "$f")
       if [ "$epoch" -gt "$newest_src_epoch" ]; then
         newest_src_epoch="$epoch"
         newest_src_path="$f"
@@ -83,7 +101,7 @@ if [ -d "$SRC_DIR" ]; then
     done
   done
 
-  dist_epoch=$(stat -c %Y "$INDEX" 2>/dev/null || echo 0)
+  dist_epoch=$(mtime_of "$INDEX")
   if [ "$newest_src_epoch" -gt "$dist_epoch" ] && [ "$newest_src_epoch" -ne 0 ]; then
     src_iso=$(date -u -d "@$newest_src_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "$newest_src_epoch")
     dist_iso=$(date -u -d "@$dist_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "$dist_epoch")
@@ -91,6 +109,12 @@ if [ -d "$SRC_DIR" ]; then
     # a stale stub vs. fresh sources is fine, the user just hasn't built yet.
     if ! is_stub; then
       warn_stale "$newest_src_path" "$dist_iso" "$src_iso"
+      # Drop a sentinel next to the dist so the Makefile web-ensure
+      # gate can rebuild without re-implementing "is dist stale".
+      # (env-var doesn't propagate across make's per-line subshells.)
+      # The sentinel sits inside web/dist/ which is gitignored.
+      mkdir -p "$(dirname "$INDEX")"
+      : > "$REPO_ROOT/web/dist/.branchdam-stale"
     fi
   fi
 fi

@@ -49,13 +49,24 @@ function resolveBuildId(): string {
 // stamp there. `closeBundle` runs after every asset has been emitted,
 // so we write on the real on-disk outDir rather than Vite's in-memory
 // bundle map.
+//
+// The outDir comes from `configResolved(cfg).build.outDir` (Vite
+// resolves it to an absolute path) so a future `--outDir` override or
+// a change to `build.outDir` below still lands BUILD_ID inside the
+// embedded FS. Hardcoding `dist` here was a Hermes-round-1 footgun:
+// a config change in either place without the other silently fails
+// open (BUILD_ID written outside the FS, /api/v1/config.spaBuildId
+// returns "").
 function branchdamBuildStamp(buildId: string): Plugin {
+  let outDir = "dist";
   return {
     name: "branchdam-build-stamp",
     apply: "build",
+    configResolved(config) {
+      outDir = config.build.outDir;
+    },
     closeBundle() {
-      const target = join(process.cwd(), "dist", "BUILD_ID");
-      writeFileSync(target, `${buildId}\n`, { encoding: "utf8" });
+      writeFileSync(join(outDir, "BUILD_ID"), `${buildId}\n`, { encoding: "utf8" });
     },
   };
 }

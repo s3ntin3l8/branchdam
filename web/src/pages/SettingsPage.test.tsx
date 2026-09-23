@@ -188,6 +188,28 @@ describe("SettingsPage", () => {
     expect(screen.queryByTestId("spa-build-mismatch")).toBeNull();
   });
 
+  // resolveBuildId() appends `-dirty` whenever the working tree has
+  // any uncommitted change, and Vite applies `define` in dev too, so
+  // under `make dev-web` / `make dev-all` the client value is e.g.
+  // `abc1234-dirty` while the server reports `abc1234` from the last
+  // real build. Strip the suffix before comparing so the hint doesn't
+  // fire on a healthy dirty dev tree (Hermes round 1 W2).
+  it("treats a `-dirty` server id as equivalent to a clean client id", async () => {
+    const clientValue = getInlinedBuildId();
+    const cleanBase = clientValue.replace(/-dirty$/, "") || "abc1234";
+    vi.mocked(api.config).mockResolvedValue({
+      version: "v1.2.3",
+      spaBuildId: cleanBase, // clean
+    });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    await screen.findByTestId("spa-build-id");
+    expect(screen.queryByTestId("spa-build-mismatch")).toBeNull();
+  });
+
   it("renders server version and path rewrites table", async () => {
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
     vi.mocked(api.listPathRewrites).mockResolvedValue([]);

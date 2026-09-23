@@ -22,12 +22,26 @@ web-stub: ## Stub web/dist so `go build`/`go test` work before the SPA (PR 10) e
 # never reaches here (it calls web-stub directly), so we don't drag Node
 # into the Go test/benchmark gate. Skips silently if Node isn't on PATH
 # -- the stub is still produced, just not refreshed.
-web-ensure:
+#
+# Staleness verdict comes from .github/ci-prebuild.sh (which writes
+# web/dist/.branchdam-stale when a real dist is older than web/src).
+# The gate also catches the common edit case via `find -newer`, which
+# compares per-file mtime -- `[ web/src -nt web/dist/index.html ]` only
+# sees directory-level changes (added/removed entries) and silently misses
+# the most common edit. ci-prebuild.sh's verdict + `find -newer` together
+# cover both "any source newer than dist" and the dirty-bit sentinel.
+web-ensure: ## Stub-or-rebuild web/dist so the embedded SPA matches web/src (local dev only)
 	@bash .github/ci-prebuild.sh
 	@if [ -d web/src ] && [ -f web/package.json ] && command -v npm >/dev/null 2>&1; then \
-	  if [ ! -f web/dist/index.html ] || [ ! -d web/dist/assets ] || [ web/src -nt web/dist/index.html ] || [ web/package.json -nt web/dist/index.html ] || [ web/vite.config.ts -nt web/dist/index.html ]; then \
+	  if [ ! -f web/dist/index.html ] || [ ! -d web/dist/assets ] \
+	     || [ -f web/dist/.branchdam-stale ] \
+	     || find web/src -type f -newer web/dist/index.html -print -quit 2>/dev/null | grep -q . \
+	     || [ web/package.json -nt web/dist/index.html ] \
+	     || [ web/package-lock.json -nt web/dist/index.html ] \
+	     || [ web/vite.config.ts -nt web/dist/index.html ]; then \
 	    echo "web-ensure: web/dist missing or stale; running npm run build"; \
 	    (cd web && npm ci --silent && npm run build --silent); \
+	    rm -f web/dist/.branchdam-stale; \
 	  fi \
 	else \
 	  echo "web-ensure: Node/npm not available; leaving whatever web/dist contains (likely a stub)."; \

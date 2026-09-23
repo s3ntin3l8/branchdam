@@ -393,6 +393,15 @@ export default function SettingsPage() {
   const clientBuildId: string =
     typeof __BRANCHDAM_BUILD__ === "string" ? __BRANCHDAM_BUILD__ : "";
 
+  // resolveBuildId() appends `-dirty` whenever the working tree has
+  // any uncommitted change, and Vite applies `define` in dev as well
+  // as build -- so under `make dev-web` / `make dev-all` the client
+  // value carries `-dirty` even on a perfectly healthy setup, while
+  // the server's BUILD_ID only gets `-dirty` after a real `npm run
+  // build`. Strip the suffix before comparing so the mismatch hint
+  // doesn't fire on a dirty dev tree.
+  const normalizeBuildId = (id: string): string => id.replace(/-dirty$/, "");
+
   const pathRewritesField = useMemo(() => {
     return settings?.fields.find((f) => f.key === "pathRewrites");
   }, [settings]);
@@ -492,15 +501,17 @@ export default function SettingsPage() {
               >
                 {clientBuildId || "unknown"}
               </span>
-              {config && config.spaBuildId && config.spaBuildId !== clientBuildId && (
-                <span
-                  className="ml-3 text-amber-400"
-                  data-testid="spa-build-mismatch"
-                  title="The running binary's embedded SPA is older than the SPA this browser is currently executing. Pull a new image / re-run `make build-embed` and hard-refresh."
-                >
-                  (server embeds {config.spaBuildId})
-                </span>
-              )}
+              {config &&
+                config.spaBuildId &&
+                normalizeBuildId(config.spaBuildId) !== normalizeBuildId(clientBuildId) && (
+                  <span
+                    className="ml-3 text-amber-400"
+                    data-testid="spa-build-mismatch"
+                    title="The running binary's embedded SPA is older than the SPA this browser is currently executing. Pull a new image / re-run `make build-embed` and hard-refresh."
+                  >
+                    (server embeds {config.spaBuildId})
+                  </span>
+                )}
             </p>
           </div>
           {categoryGroups.get("server")?.map(([group, fields]) => (
