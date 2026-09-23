@@ -58,6 +58,20 @@ Recording the digest (or the `-X main.version` build stamp visible via `GET /api
 the SPA) is what makes "did the last pull cause this?" an answerable question later — a floating
 tag with no record of what you were actually running isn't reproducible.
 
+After the upgrade, open **Settings** → **Server Info** and confirm two things match the
+release notes / the image digest you just pulled:
+
+- **Version** (from `-X main.version`, exposed at `GET /api/v1/config.version`)
+- **UI build** (from `web/dist/BUILD_ID` written by Vite's `branchdamBuildStamp` plugin
+  at build time, exposed at `GET /api/v1/config.spaBuildId`; the SPA's own inlined
+  `__BRANCHDAM_BUILD__` shows next to it)
+
+If Version matches the new release but UI build does not, the running binary embedded an
+older SPA than the one in the freshly-pulled image — most often a cached Docker layer that
+didn't rebuild `web/`. Re-pull with `--no-cache` and confirm the new UI build shows up.
+A mismatch on UI build between the Settings page and the value `/api/v1/config` returns
+means the browser is holding a stale shell: hard-refresh (`Ctrl/Cmd+Shift+R`).
+
 ## Backup and restore
 
 Stop the container, then copy the entire `/data` volume — **not** just `branchdam.db`. SQLite runs

@@ -8,9 +8,15 @@ cd web && npm ci
 ```
 
 The Go binary embeds `web/dist` via `//go:embed`. If `web/dist` doesn't exist, backend builds
-and tests fail. `make build`/`make test`/`make dev` all depend on the `web-stub` target, which
-runs `.github/ci-prebuild.sh` to create a placeholder if none exists yet. Run `npm run build` in
-`web/` first if you want the real SPA embedded instead of the stub.
+and tests fail. `make build`/`make test`/`make vet`/`make golangci-lint` all depend on the
+`web-stub` target, which runs `.github/ci-prebuild.sh` to create a placeholder if none exists yet.
+`make dev`/`make dev-api`/`make dev-all` instead depend on `web-ensure`, which auto-runs
+`npm ci && npm run build` when `web/src` is newer than `web/dist` (or when `web/dist` is missing).
+For the backend-only CI lane and any contributor without Node, `web-ensure` is harmless: it writes
+the stub and moves on. Use `make build-embed` when you want a locally-built Go binary with a real
+embedded SPA (`make build` alone keeps whatever `web/dist` already has).
+
+Run `npm run build` in `web/` first if you want the real SPA embedded instead of the stub.
 
 See [`AGENTS.md`](AGENTS.md) for the full architecture and package tour.
 

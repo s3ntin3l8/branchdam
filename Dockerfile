@@ -6,6 +6,15 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 COPY web/ ./
+# BRANCHDAM_BUILD_ID is read by vite's branchdamBuildStamp plugin
+# (web/vite.config.ts) and stamped into both the JS bundle as
+# __BRANCHDAM_BUILD__ and into web/dist/BUILD_ID. Operators compare
+# it on the Settings page against the server's `-X main.version`
+# (Config.version) to spot a stale embed. `docker build` sets
+# BRANCHDAM_BUILD_ID via the CI workflow's `--build-arg`; locally
+# `make build-embed` falls back to `git rev-parse --short HEAD`.
+ARG BRANCHDAM_BUILD_ID=dev-docker
+ENV BRANCHDAM_BUILD_ID=$BRANCHDAM_BUILD_ID
 RUN npm run build
 
 # --- Stage 2: static ffprobe + ffmpeg, pinned by digest (not tag) for

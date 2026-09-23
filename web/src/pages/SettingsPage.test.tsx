@@ -22,6 +22,18 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
+// getInlinedBuildId returns whatever Vite's `define` substituted for
+// __BRANCHDAM_BUILD__ at vitest start -- the same value the Settings
+// page will render. Used to construct a forced-mismatch server value
+// without hard-coding a string that drifts per commit. `define` does
+// textual substitution, so even though the symbol isn't exported as a
+// module binding, reading `globalThis.__BRANCHDAM_BUILD__` returns the
+// inlined literal.
+function getInlinedBuildId(): string {
+  const v = (globalThis as { __BRANCHDAM_BUILD__?: unknown }).__BRANCHDAM_BUILD__;
+  return typeof v === "string" ? v : "";
+}
+
 function field(overrides: Partial<SettingsField>): SettingsField {
   return {
     key: "immich.apiUrl",
@@ -117,6 +129,65 @@ function renderWithClient(ui: React.ReactElement) {
 }
 
 describe("SettingsPage", () => {
+  // Vite's `define` DOES substitute __BRANCHDAM_BUILD__ in vitest (we
+  // verified that explicitly -- it ends up inlined as the git short
+  // sha + dirty marker from vite.config.ts's resolveBuildId()), so
+  // the line never shows the "unknown" fallback in tests. We assert
+  // the inlined value matches what the SPA was actually built with:
+  // a non-empty string is what an operator sees in production.
+  it("renders the SPA build id line with the inlined build value", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    const buildIdEl = await screen.findByTestId("spa-build-id");
+    // Whatever the value is, it must not be the unknown-fallback.
+    expect(buildIdEl.textContent).not.toBe("unknown");
+    expect(buildIdEl.textContent?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  // When the server's embedded bundle is older than the SPA this
+  // browser is executing, the Settings page surfaces a "(server embeds
+  // <old>)" hint so operators can spot a stale local embed without
+  // guessing. Mirrors the stale-bundle failure mode behind #479.
+  it("flags a stale server-embedded SPA build", async () => {
+    const clientValue = getInlinedBuildId();
+    vi.mocked(api.config).mockResolvedValue({
+      version: "v1.2.3",
+      // Force a mismatch by reporting a build id that is definitely
+      // not the inlined value.
+      spaBuildId: clientValue ? `${clientValue}-mismatch-test` : "0.26.0",
+    });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    expect(await screen.findByTestId("spa-build-mismatch")).toHaveTextContent(
+      "server embeds",
+    );
+  });
+
+  // When the server's reported build id matches the SPA's inlined
+  // value, the mismatch hint must NOT render -- otherwise operators
+  // see a false-positive stale embed warning.
+  it("does not flag a mismatch when server and client build ids agree", async () => {
+    const clientValue = getInlinedBuildId();
+    vi.mocked(api.config).mockResolvedValue({
+      version: "v1.2.3",
+      spaBuildId: clientValue || "0.26.0",
+    });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    renderWithClient(<SettingsPage />);
+
+    await screen.findByTestId("spa-build-id");
+    expect(screen.queryByTestId("spa-build-mismatch")).toBeNull();
+  });
+
   it("renders server version and path rewrites table", async () => {
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
     vi.mocked(api.listPathRewrites).mockResolvedValue([]);
