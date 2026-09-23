@@ -57,7 +57,7 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
             Resolver: <code className="text-neutral-300">{entry.resolver}</code>
           </span>
           {entry.parentMissing && (
-            <span className="rounded bg-red-900/60 px-2 py-0.5 text-xs text-red-200">parent missing</span>
+            <span className="rounded bg-red-900 px-2 py-0.5 text-xs text-red-200">parent missing</span>
           )}
         </div>
         <div className="flex shrink-0 gap-2">
@@ -291,7 +291,7 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
         >
           <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-neutral-100">Manual Link Edge</h2>
           {errorMsg && (
-            <div className="mb-4 rounded bg-red-900/60 p-3 text-xs text-red-200 border border-red-800">
+            <div className="mb-4 rounded bg-red-900 p-3 text-xs text-red-200 border border-red-800">
               {errorMsg}
             </div>
           )}

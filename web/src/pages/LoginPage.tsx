@@ -283,7 +283,7 @@ function LoginForm({
       ) : resetSent ? (
         <div
           data-testid="reset-sent"
-          className="mt-3 rounded border border-emerald-800 bg-emerald-950/30 p-3 text-xs text-emerald-200"
+          className="mt-3 rounded border border-emerald-800 bg-emerald-950 p-3 text-xs text-emerald-300"
         >
           <p className="font-medium">If an account exists, an operator has been notified.</p>
           <p className="mt-1 text-emerald-300/80">
@@ -296,7 +296,7 @@ function LoginForm({
               setResetOpen(false);
               setResetEmail("");
             }}
-            className="mt-2 rounded border border-emerald-700 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-900/30"
+            className="mt-2 rounded border border-emerald-700 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-900/30"
           >
             Dismiss
           </button>
