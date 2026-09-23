@@ -487,11 +487,11 @@ export interface RenameCompanionPairingResponse {
 // for an existing pairing's current key. apiKey/pairingUrl are empty
 // strings when the row has no sealed pairing_url (keyless server or
 // pre-00034 legacy); keyPreview is always the newest active key's
-// last-4. secretsConfigured tells the SPA whether BRANCHDAM_SECRET_KEY
-// was set when the row was written so an empty pairingUrl can be
-// labeled "legacy row -- rotate to seal" vs "keyless server"
-// (Hermes round 3). Cache-Control is always private, no-store (set by
-// the server header).
+// last-4. sealingEnabled is s.box != nil -- whether a secrets box is
+// configured on this server *right now*, not row provenance. It only
+// tells the SPA how to label an empty pairingUrl: true => "legacy row
+// -- rotate to seal", false => "keyless server" (Hermes round 3/4).
+// Cache-Control is always private, no-store (set by the server header).
 export interface PairingCredentialsResponse {
   pairingId: number;
   agentId: string;
@@ -500,7 +500,7 @@ export interface PairingCredentialsResponse {
   keyPreview: string;
   pairingUrl: string;
   qrSvg: string;
-  secretsConfigured: boolean;
+  sealingEnabled: boolean;
 }
 
 export interface ListPairingsResponse {

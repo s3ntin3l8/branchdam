@@ -91,18 +91,18 @@ type Key struct {
 // carried here: HTTP handlers parse it out of PairingURL so the key
 // never lingers in a second field. KeyPreview is always populated from
 // the newest active key's last-4 (never key material) so the SPA can
-// show a stable masked value even when PairingURL is unavailable;
-// SecretsConfigured tells the handler/SPA whether the box was set when
-// this row was written, so an empty PairingURL can be labeled either
-// "legacy row -- rotate to seal" (true) or "keyless server" (false)
-// instead of a blanket Unavailable claim (Hermes round 3).
+// show a stable masked value even when PairingURL is unavailable.
+// SealingEnabled is s.box != nil -- whether a secrets box is configured
+// on this server *right now*, not row provenance. It only answers the
+// empty-PairingURL question: true => "legacy row -- rotate to seal",
+// false => "keyless server" (Hermes round 3/4).
 type Credentials struct {
-	AgentID           string
-	FriendlyLabel     string
-	QRSVG             []byte
-	PairingURL        string
-	KeyPreview        string
-	SecretsConfigured bool
+	AgentID        string
+	FriendlyLabel  string
+	QRSVG          []byte
+	PairingURL     string
+	KeyPreview     string
+	SealingEnabled bool
 }
 
 // PairingRow is the joined list-row shape returned by ListPairings: it
@@ -715,10 +715,10 @@ func (s *Service) ActiveCredentials(ctx context.Context, pairingID int64) (*Cred
 		return nil, err
 	}
 	creds := &Credentials{
-		AgentID:           row.AgentID,
-		FriendlyLabel:     row.FriendlyLabel,
-		QRSVG:             svg,
-		SecretsConfigured: s.box != nil,
+		AgentID:        row.AgentID,
+		FriendlyLabel:  row.FriendlyLabel,
+		QRSVG:          svg,
+		SealingEnabled: s.box != nil,
 	}
 	// Always surface the newest active key's last-4 from the DB so an
 	// empty PairingURL (NULL column: keyless or pre-00034 legacy) still

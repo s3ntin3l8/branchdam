@@ -171,24 +171,25 @@ type RenamePairingOutput struct {
 // of the sealed pairing URL (never a separate DB column) so the full
 // credential set the create/rotate flows return once can be re-shown to
 // an admin. pairingUrl and apiKey are empty strings when the row has no
-// sealed pairing_url (keyless/legacy -- QR-only fallback);
-// secretsConfigured tells the SPA whether BRANCHDAM_SECRET_KEY was set
-// when this row was written so it can label an empty pairingUrl as
-// "legacy row -- rotate to seal" rather than a blanket Unavailable
-// claim (Hermes round 3). keyPreview is always the newest active key's
-// last-4 from the DB. CacheControl is set to no-store: the response
-// carries the plaintext API key and must not land in any shared cache.
+// sealed pairing_url (keyless/legacy -- QR-only fallback).
+// sealingEnabled is s.box != nil -- whether a secrets box is configured
+// on this server *right now*, not row provenance. It only tells the SPA
+// how to label an empty pairingUrl: true => "legacy row -- rotate to
+// seal", false => "keyless server" (Hermes round 3/4).
+// keyPreview is always the newest active key's last-4 from the DB.
+// CacheControl is set to no-store: the response carries the plaintext
+// API key and must not land in any shared cache.
 type PairingCredentialsOutput struct {
 	CacheControl string `header:"Cache-Control"`
 	Body         struct {
-		PairingID         int64  `json:"pairingId"`
-		AgentID           string `json:"agentId"`
-		FriendlyLabel     string `json:"friendlyLabel"`
-		APIKey            string `json:"apiKey"`
-		KeyPreview        string `json:"keyPreview"`
-		PairingURL        string `json:"pairingUrl"`
-		QRSVG             string `json:"qrSvg"`
-		SecretsConfigured bool   `json:"secretsConfigured"`
+		PairingID      int64  `json:"pairingId"`
+		AgentID        string `json:"agentId"`
+		FriendlyLabel  string `json:"friendlyLabel"`
+		APIKey         string `json:"apiKey"`
+		KeyPreview     string `json:"keyPreview"`
+		PairingURL     string `json:"pairingUrl"`
+		QRSVG          string `json:"qrSvg"`
+		SealingEnabled bool   `json:"sealingEnabled"`
 	}
 }
 
@@ -479,7 +480,7 @@ func (s *Server) handlePairingCredentials(ctx context.Context, in *GetPairingInp
 	out.Body.KeyPreview = keyPreview
 	out.Body.PairingURL = creds.PairingURL
 	out.Body.QRSVG = string(creds.QRSVG)
-	out.Body.SecretsConfigured = creds.SecretsConfigured
+	out.Body.SealingEnabled = creds.SealingEnabled
 	out.CacheControl = "private, no-store, max-age=0"
 	return out, nil
 }

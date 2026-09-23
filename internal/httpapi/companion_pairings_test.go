@@ -474,7 +474,7 @@ func TestCompanionPairings_CredentialsEndpoint(t *testing.T) {
 	// credentials endpoint re-serves only the QR SVG -- apiKey/pairingUrl
 	// stay empty (QR-only fallback). keyPreview still comes from the
 	// active key row so the SPA can mask instead of claiming Unavailable;
-	// secretsConfigured=false labels it "Keyless server" (Hermes r3).
+	// sealingEnabled=false labels it "Keyless server" (Hermes r3).
 	srv, _, _ := newPairingTestServer(t)
 
 	rec := doAdmin(t, srv, http.MethodPost, "/api/v1/companion/pairings",
@@ -493,18 +493,18 @@ func TestCompanionPairings_CredentialsEndpoint(t *testing.T) {
 	assert.Equal(t, "private, no-store, max-age=0", rec.Header().Get("Cache-Control"))
 
 	var creds struct {
-		APIKey            string `json:"apiKey"`
-		KeyPreview        string `json:"keyPreview"`
-		PairingURL        string `json:"pairingUrl"`
-		QRSVG             string `json:"qrSvg"`
-		SecretsConfigured bool   `json:"secretsConfigured"`
+		APIKey         string `json:"apiKey"`
+		KeyPreview     string `json:"keyPreview"`
+		PairingURL     string `json:"pairingUrl"`
+		QRSVG          string `json:"qrSvg"`
+		SealingEnabled bool   `json:"sealingEnabled"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &creds))
 	assert.Empty(t, creds.APIKey, "keyless server must not expose apiKey")
 	assert.Equal(t, created.KeyPreview, creds.KeyPreview, "keyPreview must come from the active key row")
 	assert.NotEmpty(t, creds.KeyPreview, "keyless row still has a last-4 (Hermes r3)")
 	assert.Empty(t, creds.PairingURL)
-	assert.False(t, creds.SecretsConfigured, "keyless server has no BRANCHDAM_SECRET_KEY")
+	assert.False(t, creds.SealingEnabled, "keyless server has no BRANCHDAM_SECRET_KEY")
 	assert.Contains(t, creds.QRSVG, "<svg")
 	assert.NotEqual(t, created.APIKey, creds.APIKey, "create-time apiKey must not be re-served keyless")
 }
@@ -512,7 +512,7 @@ func TestCompanionPairings_CredentialsEndpoint(t *testing.T) {
 func TestCompanionPairings_CredentialsEndpointWithBoxReturnsAPIKey(t *testing.T) {
 	// Sealed box: pairing_url is stored sealed and reopened so apiKey /
 	// keyPreview / pairingUrl round-trip the create-time credential.
-	// secretsConfigured=true so an empty pairingUrl on a keyed server
+	// sealingEnabled=true so an empty pairingUrl on a keyed server
 	// would label as legacy rather than keyless (Hermes r3).
 	box, err := secrets.NewBox("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 	require.NoError(t, err)
@@ -534,24 +534,24 @@ func TestCompanionPairings_CredentialsEndpointWithBoxReturnsAPIKey(t *testing.T)
 	assert.Equal(t, "private, no-store, max-age=0", rec.Header().Get("Cache-Control"))
 
 	var creds struct {
-		APIKey            string `json:"apiKey"`
-		KeyPreview        string `json:"keyPreview"`
-		PairingURL        string `json:"pairingUrl"`
-		QRSVG             string `json:"qrSvg"`
-		SecretsConfigured bool   `json:"secretsConfigured"`
+		APIKey         string `json:"apiKey"`
+		KeyPreview     string `json:"keyPreview"`
+		PairingURL     string `json:"pairingUrl"`
+		QRSVG          string `json:"qrSvg"`
+		SealingEnabled bool   `json:"sealingEnabled"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &creds))
 	assert.Equal(t, created.APIKey, creds.APIKey)
 	assert.Equal(t, created.APIKey[len(created.APIKey)-4:], creds.KeyPreview)
 	assert.Contains(t, creds.PairingURL, created.APIKey)
-	assert.True(t, creds.SecretsConfigured, "keyed server reports SecretsConfigured")
+	assert.True(t, creds.SealingEnabled, "keyed server reports SealingEnabled")
 	assert.Contains(t, creds.QRSVG, "<svg")
 }
 
 func TestCompanionPairings_CredentialsEndpointLegacyNullURL(t *testing.T) {
 	// Keyed server, pre-00034 legacy row: pairing_url is still NULL even
 	// though the box is set. apiKey/pairingUrl stay empty, but keyPreview
-	// is populated and secretsConfigured=true so the SPA labels
+	// is populated and sealingEnabled=true so the SPA labels
 	// "Legacy row -- rotate to seal" instead of Unavailable (Hermes r3).
 	box, err := secrets.NewBox("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 	require.NoError(t, err)
@@ -578,17 +578,17 @@ func TestCompanionPairings_CredentialsEndpointLegacyNullURL(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
 
 	var creds struct {
-		APIKey            string `json:"apiKey"`
-		KeyPreview        string `json:"keyPreview"`
-		PairingURL        string `json:"pairingUrl"`
-		QRSVG             string `json:"qrSvg"`
-		SecretsConfigured bool   `json:"secretsConfigured"`
+		APIKey         string `json:"apiKey"`
+		KeyPreview     string `json:"keyPreview"`
+		PairingURL     string `json:"pairingUrl"`
+		QRSVG          string `json:"qrSvg"`
+		SealingEnabled bool   `json:"sealingEnabled"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &creds))
 	assert.Empty(t, creds.APIKey, "legacy NULL pairing_url cannot re-serve apiKey")
 	assert.Equal(t, created.KeyPreview, creds.KeyPreview, "legacy row still has a last-4 from the key row")
 	assert.Empty(t, creds.PairingURL)
-	assert.True(t, creds.SecretsConfigured, "keyed server with NULL url is legacy, not keyless")
+	assert.True(t, creds.SealingEnabled, "keyed server with NULL url is legacy, not keyless")
 	assert.Contains(t, creds.QRSVG, "<svg")
 }
 

@@ -133,9 +133,13 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
 // CredentialsBody renders the shared credential display used by the
 // create-success modal, the rotate-success modal, and the show-credentials
 // re-display for an existing pairing. apiKey/pairingUrl may be empty when
-// the row has no sealed pairing_url (keyless server or pre-00034 legacy);
-// secretsConfigured tells the two cases apart so we never claim
-// Unavailable when a key exists (Hermes round 3). Copy is intentionally
+// the row has no sealed pairing_url (keyless server or pre-00034 legacy).
+// sealingEnabled is optional and only meaningful on the credentials
+// re-display surface (server-provided s.box != nil): when present and
+// apiKey is empty it labels "Legacy row -- rotate to seal" vs "Keyless
+// server -- QR only". Create/rotate omit it -- those surfaces always
+// return a fresh apiKey, and the SPA cannot know the server's box state
+// from the create response alone (Hermes round 4). Copy is intentionally
 // re-openable: Show credentials re-serves the current key, so a
 // show-once claim would be false on every surface (Hermes round 2).
 function CredentialsBody({
@@ -144,14 +148,14 @@ function CredentialsBody({
   keyPreview,
   pairingUrl,
   qrSvg,
-  secretsConfigured,
+  sealingEnabled,
 }: {
   agentId: string;
   apiKey: string;
   keyPreview: string;
   pairingUrl: string;
   qrSvg: string;
-  secretsConfigured: boolean;
+  sealingEnabled?: boolean;
 }) {
   const apiKeyDisplay = apiKey
     ? apiKey
@@ -159,8 +163,8 @@ function CredentialsBody({
       ? `••••${keyPreview}`
       : "Unavailable";
   const apiKeyHint =
-    !apiKey && keyPreview
-      ? secretsConfigured
+    !apiKey && keyPreview && sealingEnabled !== undefined
+      ? sealingEnabled
         ? "Legacy row — rotate to seal"
         : "Keyless server — QR only"
       : null;
@@ -447,7 +451,6 @@ export default function CompanionPairingsPage() {
               keyPreview={createdResult.keyPreview}
               pairingUrl={createdResult.pairingUrl}
               qrSvg={createdResult.qrSvg}
-              secretsConfigured
             />
           ) : (
             <div className="space-y-4">
@@ -497,7 +500,7 @@ export default function CompanionPairingsPage() {
               keyPreview={credentials.keyPreview}
               pairingUrl={credentials.pairingUrl}
               qrSvg={credentials.qrSvg}
-              secretsConfigured={credentials.secretsConfigured}
+              sealingEnabled={credentials.sealingEnabled}
             />
           ) : (
             <p className="text-sm text-neutral-400">No credentials loaded.</p>

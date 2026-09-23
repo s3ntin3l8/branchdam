@@ -438,7 +438,7 @@ func TestCreatePairing_SealsCredentialsWithBox(t *testing.T) {
 	assert.True(t, strings.HasPrefix(creds.PairingURL, "branchdam://"), "got %q", creds.PairingURL)
 	assert.Contains(t, creds.PairingURL, key.Plaintext)
 	assert.NotEmpty(t, creds.KeyPreview, "keyed server surfaces last-4 from the active key row")
-	assert.True(t, creds.SecretsConfigured, "keyed server reports SecretsConfigured")
+	assert.True(t, creds.SealingEnabled, "keyed server reports SealingEnabled")
 }
 
 func TestCreatePairing_KeylessStoresPlaintextSVGNullURL(t *testing.T) {
@@ -459,7 +459,7 @@ func TestCreatePairing_KeylessStoresPlaintextSVGNullURL(t *testing.T) {
 	assert.Contains(t, string(creds.QRSVG), "<svg")
 	assert.NotEmpty(t, creds.KeyPreview, "keyless still surfaces last-4 from the active key row (Hermes r3)")
 	assert.Len(t, creds.KeyPreview, 4)
-	assert.False(t, creds.SecretsConfigured, "keyless server has no box")
+	assert.False(t, creds.SealingEnabled, "keyless server has no box")
 }
 
 func TestRotateKey_ReSealsCredentials(t *testing.T) {

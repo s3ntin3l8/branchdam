@@ -239,7 +239,7 @@ describe("CompanionPairingsPage", () => {
       keyPreview: "1234",
       pairingUrl,
       qrSvg: "<svg></svg>",
-      secretsConfigured: true,
+      sealingEnabled: true,
     });
 
     renderPage();
@@ -260,7 +260,7 @@ describe("CompanionPairingsPage", () => {
     expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
   });
 
-  it("labels empty apiKey as legacy row when secretsConfigured (Hermes r3)", async () => {
+  it("labels empty apiKey as legacy row when sealingEnabled (Hermes r4)", async () => {
     listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
     pairingCredentialsMock.mockResolvedValue({
       pairingId: 1,
@@ -270,7 +270,7 @@ describe("CompanionPairingsPage", () => {
       keyPreview: "1234",
       pairingUrl: "",
       qrSvg: "<svg></svg>",
-      secretsConfigured: true,
+      sealingEnabled: true,
     });
 
     renderPage();
@@ -284,7 +284,7 @@ describe("CompanionPairingsPage", () => {
     expect(screen.queryByText(/Unavailable \(keyless server\)/i)).not.toBeInTheDocument();
   });
 
-  it("labels empty apiKey as keyless server when !secretsConfigured (Hermes r3)", async () => {
+  it("labels empty apiKey as keyless server when !sealingEnabled (Hermes r4)", async () => {
     listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
     pairingCredentialsMock.mockResolvedValue({
       pairingId: 1,
@@ -294,7 +294,7 @@ describe("CompanionPairingsPage", () => {
       keyPreview: "abcd",
       pairingUrl: "",
       qrSvg: "<svg></svg>",
-      secretsConfigured: false,
+      sealingEnabled: false,
     });
 
     renderPage();
@@ -359,7 +359,7 @@ describe("CompanionPairingsPage", () => {
         keyPreview: "aaaa",
         pairingUrl: "branchdam://?key=second-key-aaaaaaaaaaaaaaaaaaaa&agent=dev-second99",
         qrSvg: "<svg></svg>",
-        secretsConfigured: true,
+        sealingEnabled: true,
       });
     });
 
@@ -385,7 +385,7 @@ describe("CompanionPairingsPage", () => {
       keyPreview: "zzzz",
       pairingUrl: "branchdam://?key=first-key-zzzzzzzzzzzzzzzzzzzzzz&agent=dev-abc12345",
       qrSvg: "<svg></svg>",
-      secretsConfigured: true,
+      sealingEnabled: true,
     });
     // Give the microtask queue a turn to flush the stale resolve.
     await new Promise((r) => setTimeout(r, 0));
