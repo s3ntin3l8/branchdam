@@ -57,7 +57,7 @@ Frontend changes:
 make check-web
 ```
 
-which is `cd web && npm run lint && npm run typecheck && npm run build`.
+which is `cd web && npm run lint && npm run typecheck && npm run test && npm run build`.
 
 ## PR title
 

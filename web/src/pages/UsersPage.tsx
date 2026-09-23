@@ -427,7 +427,7 @@ export default function UsersPage() {
                             <button
                               type="button"
                               onClick={() => openToggleAdmin(user)}
-                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                             >
                               {user.isAdmin ? "Remove Admin" : "Make Admin"}
                             </button>
@@ -436,7 +436,7 @@ export default function UsersPage() {
                             <button
                               type="button"
                               onClick={() => openRevokeSessions(user)}
-                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                             >
                               Revoke Sessions
                             </button>
@@ -448,7 +448,7 @@ export default function UsersPage() {
                                 setResetTargetUser(user);
                                 setResetError(null);
                               }}
-                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                             >
                               Reset Password
                             </button>
@@ -659,7 +659,7 @@ export default function UsersPage() {
           body={
             <>
               Disable logins for{" "}
-              <strong className="text-white">{disableTarget.username}</strong>?
+              <strong className="text-neutral-100">{disableTarget.username}</strong>?
             </>
           }
           confirmLabel="Confirm Disable"
@@ -684,7 +684,7 @@ export default function UsersPage() {
             <>
               {adminTarget.newAdmin ? "Grant" : "Remove"} admin privileges{" "}
               {adminTarget.newAdmin ? "to" : "from"}{" "}
-              <strong className="text-white">{adminTarget.user.username}</strong>?
+              <strong className="text-neutral-100">{adminTarget.user.username}</strong>?
             </>
           }
           confirmLabel={adminTarget.newAdmin ? "Confirm Grant Admin" : "Confirm Remove Admin"}
@@ -709,7 +709,7 @@ export default function UsersPage() {
           body={
             <>
               Revoke all active sessions for{" "}
-              <strong className="text-white">{revokeSessionsTarget.username}</strong>? They will
+              <strong className="text-neutral-100">{revokeSessionsTarget.username}</strong>? They will
               be logged out everywhere.
             </>
           }

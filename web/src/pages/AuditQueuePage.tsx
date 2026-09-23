@@ -474,7 +474,7 @@ function BatchConfirmModal({
         </h3>
         <p className="text-xs text-neutral-300">
           Are you sure you want to <strong>{action}</strong> all{" "}
-          <strong className="text-white">{edges.length}</strong> currently filtered edge candidates on this page?
+          <strong className="text-neutral-100">{edges.length}</strong> currently filtered edge candidates on this page?
         </p>
 
         {running && (
