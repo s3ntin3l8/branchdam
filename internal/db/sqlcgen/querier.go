@@ -109,8 +109,13 @@ type Querier interface {
 	// request that hits the SPA shell, so kept O(1)-ish.
 	CountUsers(ctx context.Context) (int64, error)
 	// Lazy-provisioning insert. The caller resolves auth_provider +
-	// external_uid from the Principal; username/email are denormalized
-	// display fields refreshed on every ResolveOrCreate. source='forward-link'
+	// external_uid from the Principal; username/email/is_admin are
+	// denormalized display fields refreshed on every ResolveOrCreate.
+	// is_admin is the caller's computed verdict (Principal group membership
+	// against the configured admin groups) for the INSERT case only -- the
+	// ON CONFLICT branch leaves is_admin untouched (see the DO UPDATE SET
+	// note below); RefreshAttributionUserSeen is what re-syncs is_admin on
+	// every subsequent sighting, in the same transaction. source='forward-link'
 	// with NULL password_hash matches PR #407's existing CHECK constraint --
 	// these rows are attribution-only, not local-auth credentials.
 	// Returns the row id on both insert and on conflict (no-op) so the
@@ -832,10 +837,18 @@ type Querier interface {
 	// Clears disabled_at, re-enabling the account. Idempotent.
 	ReenableUser(ctx context.Context, id int64) error
 	// Updates the denormalized username/email (a user may have renamed since
-	// their last request) and bumps last_seen_at. Called by
+	// their last request), re-syncs is_admin to the caller's freshly computed
+	// verdict (so an Authentik group promotion/demotion takes effect on the
+	// very next request), and bumps last_seen_at. Called by
 	// ResolveOrCreate after a cache miss, in the same transaction as the
 	// create-or-no-op insert above. No-op on a missing row (the create
 	// branch above will have just inserted one in the same tx).
+	//
+	// ResolveOrCreate's local-session branch (resolveLocal) passes the
+	// row's own current is_admin value back unchanged here -- local
+	// accounts are managed by an admin via the /admin/users endpoints, not
+	// by forward-auth group membership, so this query must never be the
+	// thing that overwrites a local user's admin bit.
 	RefreshAttributionUserSeen(ctx context.Context, arg RefreshAttributionUserSeenParams) error
 	// The metadata-inheritance endpoint (#54) is the first server-initiated
 	// filesystem write: it rewrites a child's file in place via exiftool, which
