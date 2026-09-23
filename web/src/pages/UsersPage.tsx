@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   useAdminResetPassword,
@@ -87,8 +87,19 @@ export default function UsersPage() {
   const [revokeSessionsTarget, setRevokeSessionsTarget] = useState<AttributionUser | null>(null);
 
   // Transient page-level notice replacing window.alert (issue #483):
-  // revoke-sessions success and re-enable error both land here.
-  const [notice, setNotice] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  // revoke-sessions success and re-enable error both land here. The id keys
+  // InlineNotice so re-showing an identical message remounts it (fresh timer
+  // + scroll-into-view) instead of inheriting the old countdown.
+  const noticeSeq = useRef(0);
+  const [notice, setNotice] = useState<{
+    id: number;
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
+  const showNotice = (tone: "success" | "error", message: string) => {
+    noticeSeq.current += 1;
+    setNotice({ id: noticeSeq.current, tone, message });
+  };
 
   // Create user modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -189,12 +200,12 @@ export default function UsersPage() {
       await enableUserMutation.mutateAsync(user.id);
     } catch (err) {
       const detail = err instanceof Error ? err.message : null;
-      setNotice({
-        tone: "error",
-        message: detail
+      showNotice(
+        "error",
+        detail
           ? `Failed to re-enable ${user.username}: ${detail}`
           : `Failed to re-enable ${user.username}.`,
-      });
+      );
     }
   };
 
@@ -270,6 +281,7 @@ export default function UsersPage() {
 
       {notice && (
         <InlineNotice
+          key={notice.id}
           tone={notice.tone}
           message={notice.message}
           onDismiss={() => setNotice(null)}
@@ -673,10 +685,10 @@ export default function UsersPage() {
             revokeUserSessionsMutation.mutate(revokeSessionsTarget.id, {
               onSuccess: (res) => {
                 setRevokeSessionsTarget(null);
-                setNotice({
-                  tone: "success",
-                  message: `Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`,
-                });
+                showNotice(
+                  "success",
+                  `Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`,
+                );
               },
             });
           }}

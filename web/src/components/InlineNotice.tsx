@@ -22,13 +22,18 @@ const dismissClasses = {
 // Pattern mirrors DedupNotice: ref-guarded auto-dismiss timer so parent
 // re-renders with new callback references do not reset the countdown, but a
 // swapped-in message still gets a fresh full window. Errors use role="alert"
-// (assertive) so screen readers announce failures; success stays polite.
+// so screen readers announce them assertively; success stays role="status"
+// (polite) -- the roles carry the live-region semantics, so no explicit
+// aria-live is set. Parents should key the component (e.g. a notice id) when
+// re-showing an identical message so the timer fully restarts. Scrolls itself
+// into view on appear so feedback above a long table is not missed.
 export default function InlineNotice({
   tone,
   message,
   onDismiss,
   autoDismissMs = 8000,
 }: InlineNoticeProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const onDismissRef = useRef(onDismiss);
   useEffect(() => {
     onDismissRef.current = onDismiss;
@@ -42,12 +47,17 @@ export default function InlineNotice({
     return () => clearTimeout(timer);
   }, [autoDismissMs, message]);
 
+  useEffect(() => {
+    // jsdom leaves scrollIntoView undefined; optional-call keeps tests happy.
+    rootRef.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  }, [message]);
+
   const isError = tone === "error";
 
   return (
     <div
+      ref={rootRef}
       role={isError ? "alert" : "status"}
-      aria-live={isError ? "assertive" : "polite"}
       className={`mb-4 flex items-start justify-between gap-3 rounded border p-4 text-sm ${toneClasses[tone]}`}
     >
       <span>{message}</span>

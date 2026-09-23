@@ -17,17 +17,17 @@ describe("InlineNotice", () => {
       <InlineNotice tone="success" message="Revoked 1 active session." onDismiss={vi.fn()} />,
     );
 
-    const status = screen.getByRole("status");
-    expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveTextContent("Revoked 1 active session.");
+    // role="status" implies aria-live="polite"; no explicit attribute.
+    expect(screen.getByRole("status")).toHaveTextContent("Revoked 1 active session.");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("renders error message with assertive alert role", () => {
     render(<InlineNotice tone="error" message="Failed to re-enable bob: boom" onDismiss={vi.fn()} />);
 
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveAttribute("aria-live", "assertive");
-    expect(alert).toHaveTextContent("Failed to re-enable bob: boom");
+    // role="alert" implies aria-live="assertive"; no explicit attribute.
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to re-enable bob: boom");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("dismisses on click of close button", async () => {
