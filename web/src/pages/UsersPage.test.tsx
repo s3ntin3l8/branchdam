@@ -402,7 +402,7 @@ describe("UsersPage row actions", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("hides Make Admin and Reset Password for forward-link accounts", async () => {
+  it("hides Make Admin, Reset Password, and Revoke Sessions for forward-link accounts", async () => {
     stubUsers([
       makeUser({ id: 2, username: "bob", source: "forward-link", authProvider: "authentik" }),
     ]);
@@ -411,8 +411,11 @@ describe("UsersPage row actions", () => {
     await screen.findByText("bob");
     expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
-    // Revoke Sessions is unrelated to local-auth credentials and stays available.
-    expect(screen.getByRole("button", { name: /revoke sessions/i })).toBeInTheDocument();
+    // Revoke Sessions routes to the *NoLocal 503 handler when local auth
+    // is off (auth.mode: forward), same as Make Admin/Reset Password --
+    // hidden for non-local rows, matching main's behavior (not part of
+    // this PR's delta over #487).
+    expect(screen.queryByRole("button", { name: /revoke sessions/i })).not.toBeInTheDocument();
   });
 
   it("hides Remove Admin for a forward-link admin account and marks the role IdP-managed", async () => {

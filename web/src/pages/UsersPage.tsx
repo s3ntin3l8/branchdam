@@ -432,7 +432,7 @@ export default function UsersPage() {
                               {user.isAdmin ? "Remove Admin" : "Make Admin"}
                             </button>
                           )}
-                          {!isSelf && (
+                          {!isSelf && isLocalManaged && (
                             <button
                               type="button"
                               onClick={() => openRevokeSessions(user)}

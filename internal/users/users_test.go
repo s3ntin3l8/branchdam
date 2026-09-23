@@ -161,151 +161,6 @@ func TestResolveOrCreate_RefreshesDisplayFields(t *testing.T) {
 	}
 }
 
-// TestResolveOrCreate_SyncsIsAdminOnCreate: a forward-link principal
-// whose groups match the configured admin groups gets is_admin=1 from
-// the very first ResolveOrCreate call (the INSERT), not just on a
-// later refresh.
-func TestResolveOrCreate_SyncsIsAdminOnCreate(t *testing.T) {
-	svc := newService(t).WithAdminGroups(func() []string { return []string{"dam-admins"} })
-	ctx := context.Background()
-
-	p := auth.Principal{
-		Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid-stable",
-		Groups: []string{"dam-admins"}, Authenticated: true,
-	}
-	got, err := svc.ResolveOrCreate(ctx, p)
-	if err != nil {
-		t.Fatalf("ResolveOrCreate: %v", err)
-	}
-	if !got.IsAdmin {
-		t.Errorf("IsAdmin = false, want true for a principal in the configured admin group")
-	}
-
-	row, err := svc.db.Reader.GetAttributionUserByID(ctx, got.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if row.IsAdmin != 1 {
-		t.Errorf("stored is_admin = %d, want 1", row.IsAdmin)
-	}
-}
-
-// TestResolveOrCreate_SyncsIsAdminOnRefresh: a promotion or demotion
-// in the identity provider's group membership must flip users.is_admin
-// on the user's very next request -- not require a separate
-// reconciliation job. Covers both directions.
-func TestResolveOrCreate_SyncsIsAdminOnRefresh(t *testing.T) {
-	adminGroups := []string{"dam-admins"}
-	svc := newService(t).WithAdminGroups(func() []string { return adminGroups })
-	ctx := context.Background()
-
-	// First sight: not in the admin group.
-	p := auth.Principal{
-		Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid-stable",
-		Groups: nil, Authenticated: true,
-	}
-	first, err := svc.ResolveOrCreate(ctx, p)
-	if err != nil {
-		t.Fatalf("first ResolveOrCreate: %v", err)
-	}
-	if first.IsAdmin {
-		t.Fatalf("IsAdmin = true on first sight, want false (no group membership)")
-	}
-
-	// Promotion: Authentik now reports dam-admins membership.
-	p.Groups = []string{"dam-admins"}
-	promoted, err := svc.ResolveOrCreate(ctx, p)
-	if err != nil {
-		t.Fatalf("promoted ResolveOrCreate: %v", err)
-	}
-	if promoted.ID != first.ID {
-		t.Fatalf("id changed across refresh: %d -> %d", first.ID, promoted.ID)
-	}
-	if !promoted.IsAdmin {
-		t.Errorf("IsAdmin = false after promotion, want true")
-	}
-
-	// Demotion: group membership removed again.
-	p.Groups = nil
-	demoted, err := svc.ResolveOrCreate(ctx, p)
-	if err != nil {
-		t.Fatalf("demoted ResolveOrCreate: %v", err)
-	}
-	if demoted.IsAdmin {
-		t.Errorf("IsAdmin = true after demotion, want false")
-	}
-}
-
-// TestResolveOrCreate_IsAdminEmptyGroupsDefaultsAdmin: mirrors
-// auth.IsAdmin's solo-homelab default -- an unset/empty admin-groups
-// list means every authenticated forward-link user is admin, exactly
-// like live request authorization already treats them.
-func TestResolveOrCreate_IsAdminEmptyGroupsDefaultsAdmin(t *testing.T) {
-	svc := newService(t) // WithAdminGroups never called
-	ctx := context.Background()
-
-	p := auth.Principal{
-		Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid-stable",
-		Authenticated: true,
-	}
-	got, err := svc.ResolveOrCreate(ctx, p)
-	if err != nil {
-		t.Fatalf("ResolveOrCreate: %v", err)
-	}
-	if !got.IsAdmin {
-		t.Errorf("IsAdmin = false, want true when no admin groups are configured")
-	}
-}
-
-// TestResolveOrCreate_LocalUser_DoesNotSyncIsAdmin: resolveLocal (the
-// source='local' branch) must never overwrite is_admin from group
-// membership -- local accounts are promoted/demoted only through the
-// explicit admin-UI action.
-func TestResolveOrCreate_LocalUser_DoesNotSyncIsAdmin(t *testing.T) {
-	svc := newService(t).WithAdminGroups(func() []string { return []string{"dam-admins"} })
-	ctx := context.Background()
-
-	// Local admin row, seeded directly like the other local-branch tests.
-	_, err := svc.db.ExecInTx(ctx,
-		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
-		 VALUES ('carol', 'carol@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 1, 'local', unixepoch(), 'test', 'local', 'carol')`,
-	)
-	if err != nil {
-		t.Fatalf("insert local admin user: %v", err)
-	}
-
-	// The local Principal carries no admin-group membership at all --
-	// if resolveLocal synced is_admin the same way the forward branch
-	// does, this would demote carol on the spot.
-	p := auth.Principal{
-		Kind:          auth.KindUser,
-		Name:          "carol",
-		Email:         "carol@example.com",
-		ExternalUID:   "carol",
-		AuthProvider:  auth.AuthProviderLocal,
-		Groups:        nil,
-		Authenticated: true,
-	}
-	got, err := svc.ResolveOrCreate(ctx, p)
-	if err != nil {
-		t.Fatalf("ResolveOrCreate: %v", err)
-	}
-	if !got.IsAdmin {
-		t.Errorf("IsAdmin = false after resolveLocal, want true (local is_admin must not be overwritten)")
-	}
-
-	row, err := svc.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
-		AuthProvider: "local",
-		ExternalUid:  "carol",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if row.IsAdmin != 1 {
-		t.Errorf("stored is_admin = %d, want 1 (unchanged)", row.IsAdmin)
-	}
-}
-
 // TestResolveOrCreate_DoesNotOverwriteForwardJITAdmin: a source=
 // 'forward-jit' row (provisioned by internal/auth/users/jit.go, using
 // its own separate admin-groups config) can share the exact
@@ -314,11 +169,14 @@ func TestResolveOrCreate_LocalUser_DoesNotSyncIsAdmin(t *testing.T) {
 // pre-existing row -- including forward-jit rows provisioned before
 // that migration -- auth_provider='authentik' and
 // external_uid=username; that's precisely the key
-// BrowserChain.pickExternalUID falls back to when X-Authentik-Uid
-// isn't sent. If ResolveOrCreate's is_admin sync ran unconditionally
-// on whatever row that key resolves to, a plain forward-auth request
-// from that same username would silently demote (or promote) a JIT
-// admin using authz.groups -- the wrong policy for a forward-jit row.
+// BrowserChain.pickExternalUID falls back to when the identity proxy
+// doesn't send a stable per-user id header. If ResolveOrCreate's
+// is_admin sync ran unconditionally on whatever row that key resolves
+// to, a plain forward-auth request from that same username would
+// silently demote (or promote) a JIT admin using authz.groups -- the
+// wrong policy for a forward-jit row. This is the unique follow-up
+// delta over #487; the create-time and refresh-on-sight is_admin sync
+// paths are already covered there.
 func TestResolveOrCreate_DoesNotOverwriteForwardJITAdmin(t *testing.T) {
 	svc := newService(t).WithAdminGroups(func() []string { return []string{"dam-admins"} })
 	ctx := context.Background()
@@ -776,5 +634,178 @@ func TestResolveOrCreate_LocalUser_NonLocalRowByName(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "reconciled drifted local external_uid") {
 		t.Errorf("reconciliation logged despite non-local row: %q", buf.String())
+	}
+}
+
+// TestResolveOrCreate_ForwardAuth_SetsIsAdminOnCreate covers issue #485:
+// a forward-auth Principal whose Groups intersect the configured admin
+// groups must get is_admin=1 persisted on first sight, not just live
+// request authorization via auth.IsAdmin.
+func TestResolveOrCreate_ForwardAuth_SetsIsAdminOnCreate(t *testing.T) {
+	svc := newService(t).WithAdminGroups(func() []string { return []string{"admins"} })
+	ctx := context.Background()
+
+	p := auth.Principal{
+		Kind: auth.KindUser, Name: "alice", ExternalUID: "alice-uid",
+		Groups: []string{"admins", "everyone"}, Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if !got.IsAdmin {
+		t.Errorf("Attribution.IsAdmin = false, want true for a member of the configured admin group")
+	}
+	row, err := svc.db.Reader.GetAttributionUserByID(ctx, got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IsAdmin != 1 {
+		t.Errorf("stored is_admin = %d, want 1", row.IsAdmin)
+	}
+}
+
+// TestResolveOrCreate_ForwardAuth_NonAdminGroupStaysNonAdmin is the
+// mirror of the above: a Principal that does NOT belong to any
+// configured admin group must persist is_admin=0.
+func TestResolveOrCreate_ForwardAuth_NonAdminGroupStaysNonAdmin(t *testing.T) {
+	svc := newService(t).WithAdminGroups(func() []string { return []string{"admins"} })
+	ctx := context.Background()
+
+	p := auth.Principal{
+		Kind: auth.KindUser, Name: "bob", ExternalUID: "bob-uid",
+		Groups: []string{"everyone"}, Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if got.IsAdmin {
+		t.Errorf("Attribution.IsAdmin = true, want false for a non-admin-group Principal")
+	}
+	row, err := svc.db.Reader.GetAttributionUserByID(ctx, got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IsAdmin != 0 {
+		t.Errorf("stored is_admin = %d, want 0", row.IsAdmin)
+	}
+}
+
+// TestResolveOrCreate_ForwardAuth_EmptyAdminGroupsPermitsAll mirrors
+// auth.IsAdmin's solo-homelab default: when no admin groups are
+// configured at all (WithAdminGroups never called, or configured to
+// return an empty slice), every authenticated forward-auth Principal is
+// admin -- matching what auth.IsAdmin already grants for live request
+// authorization, so the persisted is_admin bit doesn't lie about it.
+func TestResolveOrCreate_ForwardAuth_EmptyAdminGroupsPermitsAll(t *testing.T) {
+	svc := newService(t) // no WithAdminGroups call
+	ctx := context.Background()
+
+	p := auth.Principal{
+		Kind: auth.KindUser, Name: "carol", ExternalUID: "carol-uid",
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if !got.IsAdmin {
+		t.Errorf("Attribution.IsAdmin = false, want true when no admin groups are configured (permit-all default)")
+	}
+}
+
+// TestResolveOrCreate_ForwardAuth_SyncsAdminOnGroupChange covers the
+// AC's promotion/demotion requirement: is_admin must track the
+// Principal's current Groups on every ResolveOrCreate call, not just
+// the first one -- an Authentik group edit takes effect on the very
+// next request.
+func TestResolveOrCreate_ForwardAuth_SyncsAdminOnGroupChange(t *testing.T) {
+	svc := newService(t).WithAdminGroups(func() []string { return []string{"admins"} })
+	ctx := context.Background()
+
+	base := auth.Principal{
+		Kind: auth.KindUser, Name: "dave", ExternalUID: "dave-uid",
+		Authenticated: true,
+	}
+
+	nonAdmin := base
+	nonAdmin.Groups = []string{"everyone"}
+	first, err := svc.ResolveOrCreate(ctx, nonAdmin)
+	if err != nil {
+		t.Fatalf("first ResolveOrCreate: %v", err)
+	}
+	if first.IsAdmin {
+		t.Fatalf("first.IsAdmin = true, want false before promotion")
+	}
+
+	promoted := base
+	promoted.Groups = []string{"admins"}
+	second, err := svc.ResolveOrCreate(ctx, promoted)
+	if err != nil {
+		t.Fatalf("second ResolveOrCreate: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("id changed across group change: %d -> %d", first.ID, second.ID)
+	}
+	if !second.IsAdmin {
+		t.Errorf("second.IsAdmin = false, want true after promotion to the admin group")
+	}
+
+	demoted := base
+	demoted.Groups = []string{"everyone"}
+	third, err := svc.ResolveOrCreate(ctx, demoted)
+	if err != nil {
+		t.Fatalf("third ResolveOrCreate: %v", err)
+	}
+	if third.IsAdmin {
+		t.Errorf("third.IsAdmin = true, want false after demotion out of the admin group")
+	}
+}
+
+// TestResolveOrCreate_LocalUser_DoesNotOverwriteIsAdmin pins the AC's
+// third requirement: resolveLocal (source='local' accounts) must never
+// let the forward-auth admin-groups sync clobber an admin bit that's
+// managed by an admin via /admin/users. Configure admin groups that do
+// NOT match the local Principal's Groups, so a bug that ran the
+// forward-auth sync logic against local rows would demote the user --
+// catching that regression.
+func TestResolveOrCreate_LocalUser_DoesNotOverwriteIsAdmin(t *testing.T) {
+	svc := newService(t).WithAdminGroups(func() []string { return []string{"admins"} })
+	ctx := context.Background()
+
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('erin', 'erin@example.com', '$argon2id$v=19$m=65536,t=3,p=4$fakehash', 1, 'local', unixepoch(), 'test', 'local', 'erin')`,
+	)
+	if err != nil {
+		t.Fatalf("insert local admin user: %v", err)
+	}
+
+	p := auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "erin",
+		ExternalUID:   "erin",
+		AuthProvider:  auth.AuthProviderLocal,
+		Groups:        []string{"everyone"}, // does not intersect the configured admin groups
+		Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if !got.IsAdmin {
+		t.Errorf("Attribution.IsAdmin = false, want true: resolveLocal must preserve the local is_admin bit")
+	}
+
+	row, err := svc.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+		AuthProvider: "local",
+		ExternalUid:  "erin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IsAdmin != 1 {
+		t.Errorf("stored is_admin = %d, want 1 (unchanged)", row.IsAdmin)
 	}
 }
