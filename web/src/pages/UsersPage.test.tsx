@@ -402,6 +402,46 @@ describe("UsersPage row actions", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("hides Make Admin and Reset Password for forward-link accounts", async () => {
+    stubUsers([
+      makeUser({ id: 2, username: "bob", source: "forward-link", authProvider: "authentik" }),
+    ]);
+
+    renderPage();
+    await screen.findByText("bob");
+    expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
+    // Revoke Sessions is unrelated to local-auth credentials and stays available.
+    expect(screen.getByRole("button", { name: /revoke sessions/i })).toBeInTheDocument();
+  });
+
+  it("hides Remove Admin for a forward-link admin account and marks the role IdP-managed", async () => {
+    stubUsers([
+      makeUser({
+        id: 2,
+        username: "bob",
+        source: "forward-link",
+        authProvider: "authentik",
+        isAdmin: true,
+      }),
+    ]);
+
+    renderPage();
+    await screen.findByText("bob");
+    expect(screen.queryByRole("button", { name: /remove admin/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/admin/i)).toBeInTheDocument();
+    expect(screen.getByText(/via idp/i)).toBeInTheDocument();
+  });
+
+  it("shows Make Admin and Reset Password for local accounts (no IdP marker)", async () => {
+    stubUsers([makeUser({ id: 2, username: "bob", source: "local" })]);
+
+    renderPage();
+    expect(await screen.findByRole("button", { name: /make admin/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reset password/i })).toBeInTheDocument();
+    expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
+  });
+
   it("re-enable attempt clears any previous notice", async () => {
     const user = userEvent.setup();
     enableUserMock.mockRejectedValueOnce(new Error("boom"));

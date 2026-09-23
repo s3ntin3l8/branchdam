@@ -109,17 +109,24 @@ type Querier interface {
 	// request that hits the SPA shell, so kept O(1)-ish.
 	CountUsers(ctx context.Context) (int64, error)
 	// Lazy-provisioning insert. The caller resolves auth_provider +
-	// external_uid from the Principal; username/email are denormalized
-	// display fields refreshed on every ResolveOrCreate. source='forward-link'
-	// with NULL password_hash matches PR #407's existing CHECK constraint --
-	// these rows are attribution-only, not local-auth credentials.
+	// external_uid from the Principal; username/email/is_admin are
+	// denormalized display fields refreshed on every ResolveOrCreate.
+	// is_admin is derived by the caller from the Principal's group
+	// membership against the configured admin groups (auth.IsAdmin) --
+	// this is the same policy live request authorization already applies,
+	// just persisted so GET /api/v1/users reflects it (issue: forward-auth
+	// users' Role column was stuck at the is_admin column default).
+	// source='forward-link' with NULL password_hash matches PR #407's
+	// existing CHECK constraint -- these rows are attribution-only, not
+	// local-auth credentials.
 	// Returns the row id on both insert and on conflict (no-op) so the
 	// caller never has to distinguish "created" from "already existed" --
 	// matching the ResolveOrCreate contract: get-or-create with stable id.
 	// SQLite's RETURNING on ON CONFLICT DO NOTHING returns nothing for the
 	// no-op case; the workaround is DO UPDATE SET on the conflict target
 	// column with a no-op value so the row is "updated" (still returned) but
-	// nothing actually changes.
+	// nothing actually changes. is_admin sync for an EXISTING row happens
+	// via RefreshAttributionUserSeenWithAdmin below, not here.
 	CreateAttributionUser(ctx context.Context, arg CreateAttributionUserParams) (int64, error)
 	// Companion pairing queries. The handlers in internal/httpapi/companion_pairings.go
 	// and the KeyLookup callback in internal/pairing/service.go both go through
@@ -832,11 +839,24 @@ type Querier interface {
 	// Clears disabled_at, re-enabling the account. Idempotent.
 	ReenableUser(ctx context.Context, id int64) error
 	// Updates the denormalized username/email (a user may have renamed since
-	// their last request) and bumps last_seen_at. Called by
-	// ResolveOrCreate after a cache miss, in the same transaction as the
-	// create-or-no-op insert above. No-op on a missing row (the create
-	// branch above will have just inserted one in the same tx).
+	// their last request) and bumps last_seen_at. Called by resolveLocal
+	// (source='local' branch of ResolveOrCreate) -- deliberately does NOT
+	// touch is_admin, which for local accounts is only ever changed via the
+	// explicit admin-UI promote/demote actions (PromoteUserToAdmin /
+	// DemoteUserFromAdmin), never resynced from a Principal on sight.
+	// See RefreshAttributionUserSeenWithAdmin for the forward-link
+	// counterpart that DOES resync is_admin.
 	RefreshAttributionUserSeen(ctx context.Context, arg RefreshAttributionUserSeenParams) error
+	// Forward-link counterpart of RefreshAttributionUserSeen: also syncs
+	// is_admin to the caller-computed value (auth.IsAdmin against the
+	// Principal's current groups) so an Authentik group promotion or
+	// demotion is reflected in users.is_admin -- and therefore in
+	// GET /api/v1/users' Role column -- on the very next request, without
+	// a separate reconciliation job. Called only from the forward-link
+	// branch of ResolveOrCreate; resolveLocal uses the plain
+	// RefreshAttributionUserSeen above so a local account's is_admin is
+	// never silently overwritten by this sync.
+	RefreshAttributionUserSeenWithAdmin(ctx context.Context, arg RefreshAttributionUserSeenWithAdminParams) error
 	// The metadata-inheritance endpoint (#54) is the first server-initiated
 	// filesystem write: it rewrites a child's file in place via exiftool, which
 	// changes size_bytes/mtime_unix/fast_hash on disk. Without this update the

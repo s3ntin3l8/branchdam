@@ -78,6 +78,7 @@ type Attribution struct {
 	ExternalUID  string
 	Username     string
 	Email        sql.NullString
+	IsAdmin      bool
 }
 
 // Service is the per-process users attribution service. It holds the db
@@ -88,6 +89,7 @@ type Service struct {
 	systemUser  Attribution
 	systemCache bool // true once EnsureSystemUser has run successfully
 	log         *slog.Logger
+	adminGroups func() []string
 }
 
 // NewService constructs an attribution service. It does NOT provision the
@@ -111,6 +113,40 @@ func (s *Service) WithLogger(log *slog.Logger) *Service {
 		s.log = log
 	}
 	return s
+}
+
+// WithAdminGroups installs a getter for the configured admin groups
+// (config.Authz.Groups), consulted by ResolveOrCreate to sync
+// users.is_admin for forward-link principals -- the same policy
+// auth.IsAdmin already applies to live request authorization (see
+// that function's doc comment: local-`is_admin` override beats the
+// group check, empty allowedGroups means every authenticated user is
+// admin, otherwise group membership decides).
+//
+// A func getter -- not a static []string -- because authz.groups is a
+// live-reloadable setting (internal/settings.Store): baking in a
+// snapshot at construction time would let a promote/demote in the
+// running config silently stop taking effect. Chainable, like
+// WithLogger. A nil fn (the default) is treated as "no groups
+// configured", matching auth.IsAdmin's empty-slice "everyone admin"
+// solo-homelab default.
+func (s *Service) WithAdminGroups(fn func() []string) *Service {
+	if fn != nil {
+		s.adminGroups = fn
+	}
+	return s
+}
+
+// allowedAdminGroups returns the current admin groups, or nil if
+// WithAdminGroups was never called -- auth.IsAdmin treats a nil/empty
+// slice as "every authenticated user is admin" (the solo-homelab
+// default), so an unwired Service behaves like a deployment with
+// authz.groups left empty.
+func (s *Service) allowedAdminGroups() []string {
+	if s.adminGroups == nil {
+		return nil
+	}
+	return s.adminGroups()
 }
 
 // EnsureSystemUser lazy-provisions the system sentinel row and caches its
@@ -137,6 +173,7 @@ func (s *Service) EnsureSystemUser(ctx context.Context) (Attribution, error) {
 			ExternalUID:  row.ExternalUid,
 			Username:     row.Username,
 			Email:        row.Email,
+			IsAdmin:      row.IsAdmin != 0,
 		}
 		return nil
 	})
@@ -185,13 +222,18 @@ func (s *Service) SystemUserSafe() (Attribution, error) {
 //     returning the row id either way.
 //  2. UPDATEs the denormalized username/email and bumps last_seen_at so
 //     a username rename or email change shows up on the next request
-//     without a separate background refresh job.
+//     without a separate background refresh job. is_admin is synced in
+//     the same UPDATE, computed via auth.IsAdmin against the current
+//     admin groups (WithAdminGroups) -- an Authentik group promotion
+//     or demotion takes effect on the user's very next request.
 //
 // For local-session Principals (AuthProvider == "local"), the user row
 // already exists (source='local', password_hash set) so this skips the
 // INSERT and does a lookup+refresh instead -- the INSERT path uses
 // source='forward-link' with NULL password_hash, which would violate the
-// CHECK constraint on local rows.
+// CHECK constraint on local rows. is_admin is NOT synced on this branch:
+// local accounts are promoted/demoted only via the explicit admin-UI
+// action, never resynced from group membership on sight.
 //
 // The two writes happen in the same write transaction (single-connection
 // writer pool, AGENTS.md invariant #2), so a slow scan/insert doesn't
@@ -226,6 +268,14 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 		return s.resolveLocal(ctx, p)
 	}
 
+	// Sync is_admin to the same policy live request authorization
+	// applies (auth.IsAdmin), so GET /api/v1/users' Role column matches
+	// what this principal can actually do on this and every subsequent
+	// request. localView is the zero value here -- the local `is_admin`
+	// override only applies to source='local' sessions (resolveLocal),
+	// never to forward-link principals.
+	isAdmin := auth.IsAdmin(p, s.allowedAdminGroups(), auth.LocalUserView{})
+
 	var out Attribution
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		id, err := q.CreateAttributionUser(ctx, sqlcgen.CreateAttributionUserParams{
@@ -233,14 +283,16 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 			ExternalUid:  p.ExternalUID,
 			Username:     p.Name,
 			Email:        sql.NullString{String: p.Email, Valid: p.Email != ""},
+			IsAdmin:      boolToInt64(isAdmin),
 		})
 		if err != nil {
 			return fmt.Errorf("create attribution user: %w", err)
 		}
-		if err := q.RefreshAttributionUserSeen(ctx, sqlcgen.RefreshAttributionUserSeenParams{
+		if err := q.RefreshAttributionUserSeenWithAdmin(ctx, sqlcgen.RefreshAttributionUserSeenWithAdminParams{
 			ID:       id,
 			Username: p.Name,
 			Email:    sql.NullString{String: p.Email, Valid: p.Email != ""},
+			IsAdmin:  boolToInt64(isAdmin),
 		}); err != nil {
 			return fmt.Errorf("refresh attribution user: %w", err)
 		}
@@ -254,6 +306,7 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 			ExternalUID:  row.ExternalUid,
 			Username:     row.Username,
 			Email:        row.Email,
+			IsAdmin:      row.IsAdmin != 0,
 		}
 		return nil
 	})
@@ -261,6 +314,15 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 		return Attribution{}, err
 	}
 	return out, nil
+}
+
+// boolToInt64 converts a bool to the 0/1 users.is_admin CHECK-constrained
+// column value.
+func boolToInt64(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // resolveLocal handles the auth_provider="local" case of ResolveOrCreate.
@@ -324,6 +386,7 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 			ExternalUID:  refreshed.ExternalUid,
 			Username:     refreshed.Username,
 			Email:        refreshed.Email,
+			IsAdmin:      refreshed.IsAdmin != 0,
 		}
 		return nil
 	})

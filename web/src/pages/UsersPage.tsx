@@ -328,6 +328,17 @@ export default function UsersPage() {
                 const isSystem = user.authProvider === "system" || user.username === "system";
                 const isDisabled = Boolean(user.disabledAt);
                 const isSelf = me?.localUserId !== undefined && user.id === me.localUserId;
+                // Forward-link accounts (source !== "local") have no
+                // password_hash and their role is resynced from the
+                // identity provider's groups on every request
+                // (internal/users.ResolveOrCreate) -- the local-auth-only
+                // admin toggle and password reset routes 503 for them
+                // when auth.mode is "forward" (no local auth configured
+                // at all), and even where local auth IS configured
+                // ("both" mode) a manual admin toggle would just be
+                // reverted by the next sync. Hide both actions rather
+                // than offer a control that can't stick.
+                const isLocalManaged = user.source === "local";
 
                 return (
                   <tr key={user.id} className="hover:bg-neutral-900/30">
@@ -346,15 +357,25 @@ export default function UsersPage() {
                       {user.email || "—"}
                     </td>
                     <td className="px-4 py-3">
-                      {user.isAdmin ? (
-                        <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
-                          Admin
-                        </span>
-                      ) : (
-                        <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
-                          User
-                        </span>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {user.isAdmin ? (
+                          <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
+                            Admin
+                          </span>
+                        ) : (
+                          <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
+                            User
+                          </span>
+                        )}
+                        {!isLocalManaged && (
+                          <span
+                            title="Role is managed by the identity provider and synced on every login."
+                            className="text-[10px] text-neutral-500"
+                          >
+                            (via IdP)
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       {user.mfaEnabled ? (
@@ -396,7 +417,7 @@ export default function UsersPage() {
                               Re-enable
                             </button>
                           )}
-                          {!isSelf && (
+                          {!isSelf && isLocalManaged && (
                             <button
                               type="button"
                               onClick={() => openToggleAdmin(user)}
@@ -414,16 +435,18 @@ export default function UsersPage() {
                               Revoke Sessions
                             </button>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setResetTargetUser(user);
-                              setResetError(null);
-                            }}
-                            className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
-                          >
-                            Reset Password
-                          </button>
+                          {isLocalManaged && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResetTargetUser(user);
+                                setResetError(null);
+                              }}
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                            >
+                              Reset Password
+                            </button>
+                          )}
                           {!isDisabled && !isSelf && (
                             <button
                               type="button"
