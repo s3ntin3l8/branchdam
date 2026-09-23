@@ -328,6 +328,15 @@ export default function UsersPage() {
                 const isSystem = user.authProvider === "system" || user.username === "system";
                 const isDisabled = Boolean(user.disabledAt);
                 const isSelf = me?.localUserId !== undefined && user.id === me.localUserId;
+                // Forward-link accounts (source !== "local") have no
+                // password_hash, and their role is synced from the
+                // identity provider's group membership on every request
+                // (ResolveOrCreate), not toggled by an admin here. Hide
+                // the local-only admin-toggle/reset-password/revoke-session
+                // actions for them (issue #485) -- all three route to the
+                // *NoLocal 503 handlers in internal/httpapi/local_auth.go
+                // when auth.mode is "forward" and s.localAuth is nil.
+                const isForwardLink = user.source !== "local";
 
                 return (
                   <tr key={user.id} className="hover:bg-neutral-900/30">
@@ -396,7 +405,7 @@ export default function UsersPage() {
                               Re-enable
                             </button>
                           )}
-                          {!isSelf && (
+                          {!isSelf && !isForwardLink && (
                             <button
                               type="button"
                               onClick={() => openToggleAdmin(user)}
@@ -405,7 +414,12 @@ export default function UsersPage() {
                               {user.isAdmin ? "Remove Admin" : "Make Admin"}
                             </button>
                           )}
-                          {!isSelf && (
+                          {isForwardLink && (
+                            <span className="text-xs text-neutral-500" title="Role and password are managed by the identity provider">
+                              Managed by IdP
+                            </span>
+                          )}
+                          {!isSelf && !isForwardLink && (
                             <button
                               type="button"
                               onClick={() => openRevokeSessions(user)}
@@ -414,16 +428,18 @@ export default function UsersPage() {
                               Revoke Sessions
                             </button>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setResetTargetUser(user);
-                              setResetError(null);
-                            }}
-                            className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
-                          >
-                            Reset Password
-                          </button>
+                          {!isForwardLink && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResetTargetUser(user);
+                                setResetError(null);
+                              }}
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                            >
+                              Reset Password
+                            </button>
+                          )}
                           {!isDisabled && !isSelf && (
                             <button
                               type="button"
