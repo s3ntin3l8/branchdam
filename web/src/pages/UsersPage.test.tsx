@@ -308,7 +308,6 @@ describe("UsersPage row actions", () => {
   it("opens ConfirmDialog for revoke sessions instead of window.confirm", async () => {
     const user = userEvent.setup();
     const confirmSpy = vi.spyOn(window, "confirm");
-    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
     stubUsers([makeUser({ id: 2, username: "bob" })]);
 
     renderPage();
@@ -320,15 +319,33 @@ describe("UsersPage row actions", () => {
 
     await user.click(screen.getByRole("button", { name: /confirm revoke/i }));
     expect(revokeUserSessionsMock).toHaveBeenCalledWith(2);
-    expect(alertSpy).toHaveBeenCalledWith("Revoked 1 active session.");
     await waitFor(() => {
       expect(
         screen.queryByRole("dialog", { name: /revoke sessions/i }),
       ).not.toBeInTheDocument();
     });
+    expect(await screen.findByRole("status")).toHaveTextContent("Revoked 1 active session.");
   });
 
-  it("revoke dialog surfaces a failed mutation and stays open", async () => {
+  it("revoke success notice does not call window.alert and is dismissible", async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
+    stubUsers([makeUser({ id: 2, username: "bob" })]);
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /revoke sessions/i }));
+    await user.click(screen.getByRole("button", { name: /confirm revoke/i }));
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent("Revoked 1 active session.");
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /dismiss notice/i }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    alertSpy.mockRestore();
+  });
+
+  it("revoke dialog surfaces a failed mutation and stays open without a notice", async () => {
     const user = userEvent.setup();
     const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
     revokeUserSessionsMock.mockRejectedValue(new Error("nope"));
@@ -343,5 +360,39 @@ describe("UsersPage row actions", () => {
       expect(dialog).toHaveTextContent(/Failed to revoke sessions: Error: nope/);
     });
     expect(alertSpy).not.toHaveBeenCalled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    alertSpy.mockRestore();
+  });
+
+  it("re-enable failure shows an inline error notice instead of alert", async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
+    enableUserMock.mockRejectedValue(new Error("boom"));
+    stubUsers([makeUser({ id: 2, username: "bob", disabledAt: 1700002000 })]);
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /re-enable/i }));
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent("boom");
+    expect(alertSpy).not.toHaveBeenCalled();
+    alertSpy.mockRestore();
+  });
+
+  it("re-enable success clears any previous notice", async () => {
+    const user = userEvent.setup();
+    enableUserMock.mockRejectedValueOnce(new Error("boom"));
+    stubUsers([makeUser({ id: 2, username: "bob", disabledAt: 1700002000 })]);
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /re-enable/i }));
+    await screen.findByRole("status");
+
+    // After the failure, a subsequent success clears the notice.
+    await user.click(screen.getByRole("button", { name: /re-enable/i }));
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+    expect(enableUserMock).toHaveBeenCalledTimes(2);
   });
 });

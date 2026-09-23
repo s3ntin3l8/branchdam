@@ -13,6 +13,7 @@ import {
 import { ApiError } from "../api/client";
 import type { AttributionUser } from "../api/types";
 import ConfirmDialog from "../components/ConfirmDialog";
+import InlineNotice from "../components/InlineNotice";
 
 function formatUnixTime(unix: number | undefined): string {
   if (!unix) return "—";
@@ -84,6 +85,10 @@ export default function UsersPage() {
     newAdmin: boolean;
   } | null>(null);
   const [revokeSessionsTarget, setRevokeSessionsTarget] = useState<AttributionUser | null>(null);
+
+  // Transient page-level notice replacing window.alert (issue #483):
+  // revoke-sessions success and re-enable error both land here.
+  const [notice, setNotice] = useState<{ tone: "success" | "error"; message: string } | null>(null);
 
   // Create user modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -173,24 +178,31 @@ export default function UsersPage() {
   };
 
   const openDisable = (user: AttributionUser) => {
+    setNotice(null);
     disableUserMutation.reset();
     setDisableTarget(user);
   };
 
   const handleReEnable = async (user: AttributionUser) => {
+    setNotice(null);
     try {
       await enableUserMutation.mutateAsync(user.id);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to re-enable user.");
+      setNotice({
+        tone: "error",
+        message: err instanceof Error ? err.message : "Failed to re-enable user.",
+      });
     }
   };
 
   const openToggleAdmin = (user: AttributionUser) => {
+    setNotice(null);
     updateUserMutation.reset();
     setAdminTarget({ user, newAdmin: !user.isAdmin });
   };
 
   const openRevokeSessions = (user: AttributionUser) => {
+    setNotice(null);
     revokeUserSessionsMutation.reset();
     setRevokeSessionsTarget(user);
   };
@@ -252,6 +264,14 @@ export default function UsersPage() {
           className="w-full max-w-sm rounded border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm text-neutral-100 placeholder-neutral-500 focus:border-brand focus:outline-none"
         />
       </div>
+
+      {notice && (
+        <InlineNotice
+          tone={notice.tone}
+          message={notice.message}
+          onDismiss={() => setNotice(null)}
+        />
+      )}
 
       {isLoading ? (
         <div className="flex h-32 items-center justify-center text-neutral-500">
@@ -650,9 +670,10 @@ export default function UsersPage() {
             revokeUserSessionsMutation.mutate(revokeSessionsTarget.id, {
               onSuccess: (res) => {
                 setRevokeSessionsTarget(null);
-                alert(
-                  `Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`,
-                );
+                setNotice({
+                  tone: "success",
+                  message: `Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`,
+                });
               },
             });
           }}
