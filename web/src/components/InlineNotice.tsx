@@ -20,18 +20,24 @@ const dismissClasses = {
 // InlineNotice is a transient, non-blocking page-level banner for success
 // or error feedback that previously would have required a window.alert.
 // Pattern mirrors DedupNotice: ref-guarded auto-dismiss timer so parent
-// re-renders with new callback references do not reset the countdown, but a
-// swapped-in message still gets a fresh full window. Errors use role="alert"
-// so screen readers announce them assertively; success stays role="status"
-// (polite) -- the roles carry the live-region semantics, so no explicit
-// aria-live is set. Parents should key the component (e.g. a notice id) when
-// re-showing an identical message so the timer fully restarts. Scrolls itself
-// into view on appear so feedback above a long table is not missed.
+// re-renders with new callback references do not reset the countdown.
+//
+// Timer reset contract: the countdown starts on mount only. Callers that
+// re-show a notice (identical message or not) MUST change the React key
+// (e.g. a monotonic notice id) so the component remounts with a fresh
+// window -- swapping props in place never restarts the timer.
+//
+// Errors use role="alert" so screen readers announce them assertively;
+// success stays role="status" (polite). The roles carry the live-region
+// semantics, so no explicit aria-live is set. Error tone is sticky by
+// default (autoDismissMs 0) so a failure cannot vanish unread; success
+// auto-dismisses after 8s. Scrolls itself into view on appear (and on
+// message/tone change) so feedback above a long table is not missed.
 export default function InlineNotice({
   tone,
   message,
   onDismiss,
-  autoDismissMs = 8000,
+  autoDismissMs = tone === "error" ? 0 : 8000,
 }: InlineNoticeProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const onDismissRef = useRef(onDismiss);
@@ -45,12 +51,12 @@ export default function InlineNotice({
       onDismissRef.current();
     }, autoDismissMs);
     return () => clearTimeout(timer);
-  }, [autoDismissMs, message]);
+  }, [autoDismissMs]);
 
   useEffect(() => {
     // jsdom leaves scrollIntoView undefined; optional-call keeps tests happy.
     rootRef.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
-  }, [message]);
+  }, [message, tone]);
 
   const isError = tone === "error";
 

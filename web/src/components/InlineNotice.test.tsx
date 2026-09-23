@@ -4,12 +4,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import InlineNotice from "./InlineNotice";
 
 describe("InlineNotice", () => {
+  let scrollIntoViewSpy: ReturnType<typeof vi.fn<(options?: ScrollIntoViewOptions | boolean) => void>>;
+
   beforeEach(() => {
     vi.useFakeTimers();
+    scrollIntoViewSpy = vi.fn<(options?: ScrollIntoViewOptions | boolean) => void>();
+    Element.prototype.scrollIntoView = scrollIntoViewSpy;
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (Element.prototype as any).scrollIntoView;
   });
 
   it("renders success message with polite status role", () => {
@@ -39,7 +45,7 @@ describe("InlineNotice", () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
-  it("auto-dismisses after the default 8s timeout", () => {
+  it("auto-dismisses success after the default 8s timeout", () => {
     const onDismiss = vi.fn();
     render(<InlineNotice tone="success" message="Done." onDismiss={onDismiss} />);
 
@@ -54,10 +60,20 @@ describe("InlineNotice", () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
-  it("does not auto-dismiss when autoDismissMs is 0", () => {
+  it("error tone is sticky by default (autoDismissMs defaults to 0)", () => {
+    const onDismiss = vi.fn();
+    render(<InlineNotice tone="error" message="Failed." onDismiss={onDismiss} />);
+
+    act(() => {
+      vi.advanceTimersByTime(60000);
+    });
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it("does not auto-dismiss when autoDismissMs is explicitly 0", () => {
     const onDismiss = vi.fn();
     render(
-      <InlineNotice tone="error" message="Sticky." onDismiss={onDismiss} autoDismissMs={0} />,
+      <InlineNotice tone="success" message="Sticky success." onDismiss={onDismiss} autoDismissMs={0} />,
     );
 
     act(() => {
@@ -87,30 +103,68 @@ describe("InlineNotice", () => {
     expect(onDismiss1).not.toHaveBeenCalled();
   });
 
-  it("resets the auto-dismiss countdown when the message is swapped in place", () => {
+  it("does not restart the countdown when message is swapped in place (key contract)", () => {
+    // Timer starts on mount only; callers re-showing a notice must change
+    // the React key to remount. Swapping props alone keeps the deadline.
     const onDismiss = vi.fn();
     const { rerender } = render(
       <InlineNotice tone="success" message="First message" onDismiss={onDismiss} />,
     );
 
     act(() => {
-      vi.advanceTimersByTime(7950);
+      vi.advanceTimersByTime(7000);
     });
     expect(onDismiss).not.toHaveBeenCalled();
 
-    rerender(
-      <InlineNotice tone="success" message="Second message" onDismiss={onDismiss} />,
+    rerender(<InlineNotice tone="success" message="Second message" onDismiss={onDismiss} />);
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    // Original 8s deadline from first mount, not a fresh 8s from the swap.
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts the countdown when remounted via a new key", () => {
+    const onDismiss = vi.fn();
+    const { rerender } = render(
+      <InlineNotice key={1} tone="success" message="Done." onDismiss={onDismiss} />,
     );
 
-    // Old countdown would fire 50ms later; the new message must get a full window.
     act(() => {
-      vi.advanceTimersByTime(50);
+      vi.advanceTimersByTime(7000);
+    });
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    rerender(<InlineNotice key={2} tone="success" message="Done." onDismiss={onDismiss} />);
+
+    // Fresh 8s window from remount; old deadline would fire 1s later.
+    act(() => {
+      vi.advanceTimersByTime(1000);
     });
     expect(onDismiss).not.toHaveBeenCalled();
 
     act(() => {
-      vi.advanceTimersByTime(7950);
+      vi.advanceTimersByTime(7000);
     });
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("scrolls itself into view on mount", () => {
+    render(<InlineNotice tone="success" message="Done." onDismiss={vi.fn()} />);
+
+    expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1);
+    expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: "smooth", block: "nearest" });
+  });
+
+  it("scrolls itself into view again when the message swaps", () => {
+    const { rerender } = render(
+      <InlineNotice tone="success" message="First" onDismiss={vi.fn()} />,
+    );
+    expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1);
+
+    rerender(<InlineNotice tone="success" message="Second" onDismiss={vi.fn()} />);
+    expect(scrollIntoViewSpy).toHaveBeenCalledTimes(2);
+    expect(scrollIntoViewSpy).toHaveBeenLastCalledWith({ behavior: "smooth", block: "nearest" });
   });
 });

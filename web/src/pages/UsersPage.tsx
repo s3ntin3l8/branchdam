@@ -88,8 +88,11 @@ export default function UsersPage() {
 
   // Transient page-level notice replacing window.alert (issue #483):
   // revoke-sessions success and re-enable error both land here. The id keys
-  // InlineNotice so re-showing an identical message remounts it (fresh timer
-  // + scroll-into-view) instead of inheriting the old countdown.
+  // InlineNotice so re-showing a notice remounts it (fresh timer + scroll-
+  // into-view) instead of inheriting the old countdown. Errors are sticky
+  // (InlineNotice defaults autoDismissMs to 0 for error tone) so a failure
+  // cannot vanish unread; only success notices auto-dismiss or get cleared
+  // when a row-action dialog opens.
   const noticeSeq = useRef(0);
   const [notice, setNotice] = useState<{
     id: number;
@@ -99,6 +102,9 @@ export default function UsersPage() {
   const showNotice = (tone: "success" | "error", message: string) => {
     noticeSeq.current += 1;
     setNotice({ id: noticeSeq.current, tone, message });
+  };
+  const clearSuccessNotice = () => {
+    setNotice((n) => (n && n.tone === "success" ? null : n));
   };
 
   // Create user modal state
@@ -189,12 +195,14 @@ export default function UsersPage() {
   };
 
   const openDisable = (user: AttributionUser) => {
-    setNotice(null);
+    clearSuccessNotice();
     disableUserMutation.reset();
     setDisableTarget(user);
   };
 
   const handleReEnable = async (user: AttributionUser) => {
+    // Clear any previous notice (success or stale error) when retrying so
+    // only the outcome of this attempt is shown.
     setNotice(null);
     try {
       await enableUserMutation.mutateAsync(user.id);
@@ -210,13 +218,13 @@ export default function UsersPage() {
   };
 
   const openToggleAdmin = (user: AttributionUser) => {
-    setNotice(null);
+    clearSuccessNotice();
     updateUserMutation.reset();
     setAdminTarget({ user, newAdmin: !user.isAdmin });
   };
 
   const openRevokeSessions = (user: AttributionUser) => {
-    setNotice(null);
+    clearSuccessNotice();
     revokeUserSessionsMutation.reset();
     setRevokeSessionsTarget(user);
   };
