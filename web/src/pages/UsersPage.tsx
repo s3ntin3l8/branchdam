@@ -332,11 +332,10 @@ export default function UsersPage() {
                 // password_hash, and their role is synced from the
                 // identity provider's group membership on every request
                 // (ResolveOrCreate), not toggled by an admin here. Hide
-                // the local-only admin-toggle/reset-password actions for
-                // them (issue #485) -- Revoke Sessions stays visible
-                // since it's a harmless no-op for an account with no
-                // local session to revoke, unlike the other two which
-                // 503 outright when auth.mode is "forward".
+                // the local-only admin-toggle/reset-password/revoke-session
+                // actions for them (issue #485) -- all three hit
+                // handleAdminXNoLocal 503s when auth.mode is "forward"
+                // and s.localAuth is nil.
                 const isForwardLink = user.source !== "local";
 
                 return (
@@ -420,7 +419,7 @@ export default function UsersPage() {
                               Managed by IdP
                             </span>
                           )}
-                          {!isSelf && (
+                          {!isSelf && !isForwardLink && (
                             <button
                               type="button"
                               onClick={() => openRevokeSessions(user)}

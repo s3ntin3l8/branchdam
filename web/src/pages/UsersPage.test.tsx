@@ -422,7 +422,7 @@ describe("UsersPage row actions", () => {
 });
 
 describe("UsersPage forward-link (Authentik-provisioned) users", () => {
-  it("does NOT show Make Admin/Remove Admin or Reset Password for a forward-link user, and shows a managed-by-IdP note instead", async () => {
+  it("does NOT show Make Admin/Remove Admin, Reset Password, or Revoke Sessions for a forward-link user, and shows a managed-by-IdP note instead", async () => {
     stubUsers([
       makeUser({ id: 2, username: "bob", source: "forward-link", authProvider: "authentik" }),
     ]);
@@ -432,24 +432,17 @@ describe("UsersPage forward-link (Authentik-provisioned) users", () => {
     expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /remove admin/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /revoke sessions/i })).not.toBeInTheDocument();
     expect(screen.getByText(/managed by idp/i)).toBeInTheDocument();
   });
 
-  it("still shows Revoke Sessions for a forward-link user", async () => {
-    stubUsers([
-      makeUser({ id: 2, username: "bob", source: "forward-link", authProvider: "authentik" }),
-    ]);
-
-    renderPage();
-    expect(await screen.findByRole("button", { name: /revoke sessions/i })).toBeInTheDocument();
-  });
-
-  it("shows Make Admin/Remove Admin and Reset Password again for a local user", async () => {
+  it("shows Make Admin/Remove Admin, Reset Password, and Revoke Sessions again for a local user", async () => {
     stubUsers([makeUser({ id: 2, username: "bob", source: "local" })]);
 
     renderPage();
     expect(await screen.findByRole("button", { name: /make admin/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /reset password/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /revoke sessions/i })).toBeInTheDocument();
     expect(screen.queryByText(/managed by idp/i)).not.toBeInTheDocument();
   });
 });
