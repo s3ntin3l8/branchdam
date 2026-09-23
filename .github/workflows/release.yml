@@ -35,4 +35,23 @@ jobs:
       image-name: ${{ github.repository }}
       push-release: true
       release-tag: ${{ needs.release-please.outputs.tag_name }}
+      # Stamp the release tag (e.g. v1.2.3) into the embedded SPA via
+      # BRANCHDAM_BUILD_ID. release-please already stamps the matching
+      # bare-semver version (e.g. 1.2.3) into main.version via
+      # -ldflags on Dockerfile:50-52, so the v-prefix on tag_name is
+      # the only difference: Settings will read "Version: 1.2.3" and
+      # "UI build: v1.2.3" on a clean release image. They refer to the
+      # same release, just with/without the v prefix.
+      #
+      # The mismatch banner compares server spaBuildId vs client
+      # __BRANCHDAM_BUILD__; both come from this same ARG so they
+      # always agree -- no false-positive risk from the v-prefix gap.
+      # Stripping the v in the workflow would require an extra job or
+      # shell step (the GitHub Actions expression language has no
+      # substring / replace primitive), which isn't worth it for a
+      # cosmetic one-character difference that operators learn quickly.
+      #
+      # docker-publish.yml's `build-args` is multiline key=value, one
+      # per line.
+      build-args: BRANCHDAM_BUILD_ID=${{ needs.release-please.outputs.tag_name }}
     secrets: inherit
