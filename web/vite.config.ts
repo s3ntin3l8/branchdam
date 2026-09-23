@@ -1,7 +1,7 @@
 /// <reference types="vitest/config" />
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import path, { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -50,20 +50,21 @@ function resolveBuildId(): string {
 // so we write on the real on-disk outDir rather than Vite's in-memory
 // bundle map.
 //
-// The outDir comes from `configResolved(cfg).build.outDir` (Vite
-// resolves it to an absolute path) so a future `--outDir` override or
-// a change to `build.outDir` below still lands BUILD_ID inside the
-// embedded FS. Hardcoding `dist` here was a Hermes-round-1 footgun:
-// a config change in either place without the other silently fails
-// open (BUILD_ID written outside the FS, /api/v1/config.spaBuildId
-// returns "").
+// The outDir comes from `configResolved(cfg)` and is resolved against
+// `config.root` -- vite 8.x's resolveConfig returns a RELATIVE
+// build.outDir (Hermes round-2 reproducer); `join("dist", "BUILD_ID")`
+// alone only works because config.root happens to equal cwd. A future
+// --root override or a config that pins root elsewhere would silently
+// fail-open: BUILD_ID written outside the embedded FS, /api/v1/config
+// .spaBuildId returns "". path.resolve(root, outDir) gives the
+// guarantee the comment used to claim.
 function branchdamBuildStamp(buildId: string): Plugin {
-  let outDir = "dist";
+  let outDir = path.resolve("dist"); // captured by configResolved below
   return {
     name: "branchdam-build-stamp",
     apply: "build",
     configResolved(config) {
-      outDir = config.build.outDir;
+      outDir = path.resolve(config.root, config.build.outDir);
     },
     closeBundle() {
       writeFileSync(join(outDir, "BUILD_ID"), `${buildId}\n`, { encoding: "utf8" });

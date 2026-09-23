@@ -371,12 +371,31 @@ func TestSPABuildIDReadFromEmbeddedFS(t *testing.T) {
 	// Oversize BUILD_ID with a UTF-8 rune straddling the 128-byte cap:
 	// the previous id[:128] truncated mid-rune and emitted invalid
 	// UTF-8 to JSON clients. ToValidUTF8 drops the broken suffix.
-	oversize := strings.Repeat("a", 125) + "€€€€€€€" // bytes 125..127 = ASCII,
-	// 128 onward = 0xE2 0x82 0xAC (euro sign) so the 128th byte starts
-	// a new rune -- 128-byte slice leaves a 2-byte partial rune.
+	//
+	// Fixture math: 126 ASCII bytes + a 3-byte '€' = 129 total bytes;
+	// byte 128 is the lone 0x82 trailing byte of the € rune, so
+	// id[:128] ends mid-rune and decodes as invalid UTF-8 (Hermes
+	// round-2 reproducer). Earlier fixtures using 125 ASCII bytes
+	// landed byte 128 exactly on a rune boundary and silently passed
+	// against the pre-fix code -- the test was meaningless there.
+	oversize := strings.Repeat("a", 126) + "€€€€€€€"
+	raw := oversize + "\n"
+	trimmed := strings.TrimSpace(raw)
+
+	// Sanity-check the fixture before exercising the cap: the pre-fix
+	// form (id[:128]) MUST be invalid UTF-8, otherwise we are not
+	// actually exercising the regression. This catches a future tweak
+	// that quietly re-aligns the boundary.
+	if utf8.ValidString(trimmed[:128]) {
+		t.Fatalf("fixture no longer reproduces the bug: id[:128] = %q is valid UTF-8; bump the ASCII prefix to land byte 128 mid-rune", trimmed[:128])
+	}
+	if !utf8.ValidString(oversize) {
+		t.Fatalf("fixture itself is invalid UTF-8 before the cap: %q", oversize)
+	}
+
 	spa = fstest.MapFS{
 		"index.html": {Data: []byte(indexHTMLFixture)},
-		"BUILD_ID":   {Data: []byte(oversize + "\n")},
+		"BUILD_ID":   {Data: []byte(raw)},
 	}
 	srv = testServerWithSPA(t, spa)
 	rec = httptest.NewRecorder()
