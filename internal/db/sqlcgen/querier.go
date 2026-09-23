@@ -856,6 +856,23 @@ type Querier interface {
 	// branch of ResolveOrCreate; resolveLocal uses the plain
 	// RefreshAttributionUserSeen above so a local account's is_admin is
 	// never silently overwritten by this sync.
+	//
+	// The is_admin write is guarded by source='forward-link' rather than
+	// applied unconditionally: the (auth_provider, external_uid) row this
+	// targets can, on some deployments, actually be a source='forward-jit'
+	// row -- 00020_users_and_audit.sql's backfill gave every pre-existing
+	// row (including forward-jit admins provisioned before that migration)
+	// auth_provider='authentik' and external_uid=username, which is exactly
+	// the key BrowserChain.pickExternalUID's username fallback resolves to
+	// when the identity proxy's stable per-user id header isn't sent.
+	// Without the guard, a plain forward-auth request from that same
+	// username would overwrite a JIT admin's is_admin using authz.groups --
+	// a different, unrelated admin policy from the one that provisioned
+	// them (internal/auth/users/jit.go's own adminGroups config). The CASE
+	// is a no-op for the common case (source really is 'forward-link');
+	// username/email/last_seen_at still refresh unconditionally, matching
+	// RefreshAttributionUserSeen's existing behavior for a same-key row of
+	// any source.
 	RefreshAttributionUserSeenWithAdmin(ctx context.Context, arg RefreshAttributionUserSeenWithAdminParams) error
 	// The metadata-inheritance endpoint (#54) is the first server-initiated
 	// filesystem write: it rewrites a child's file in place via exiftool, which
