@@ -35,4 +35,13 @@ jobs:
       image-name: ${{ github.repository }}
       push-release: true
       release-tag: ${{ needs.release-please.outputs.tag_name }}
+      # Stamp the release tag (e.g. v1.2.3) into the embedded SPA via
+      # BRANCHDAM_BUILD_ID -- the same identifier release-please already
+      # stamps into -ldflags="-X main.version=${VERSION}" on line 52 of
+      # the Dockerfile, so Settings page's "Version" and "UI build" lines
+      # tell operators a consistent story when the two halves of an image
+      # disagree. Matches Dockerfile:16 ARG BRANCHDAM_BUILD_ID=dev-docker.
+      # docker-publish.yml's `build-args` is multiline key=value, one per
+      # line.
+      build-args: BRANCHDAM_BUILD_ID=${{ needs.release-please.outputs.tag_name }}
     secrets: inherit

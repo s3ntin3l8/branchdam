@@ -124,4 +124,13 @@ jobs:
       # CGO is on (mattn/go-sqlite3, see docs/schema.md), so the arm64 leg genuinely
       # compiles C — deliberately excluded from the PR-fast lane, not just slow there.
       platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      # Stamp the commit the image was built from into the embedded SPA via
+      # BRANCHDAM_BUILD_ID, so Settings → "UI build" can warn about a stale
+      # embedded SPA vs. a server that was rebuilt without rebuilding the SPA.
+      # Matches Dockerfile:16 ARG BRANCHDAM_BUILD_ID=dev-docker. PR-time build
+      # is kept for CGO/ldflags/alpine-layer validation (see comment above on
+      # this job's `if:`), but the BUILD_ID stamp is meaningful on every leg,
+      # not just :edge. docker-publish.yml's `build-args` is multiline
+      # key=value, one per line.
+      build-args: BRANCHDAM_BUILD_ID=${{ github.sha }}
     secrets: inherit
