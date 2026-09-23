@@ -44,7 +44,7 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
       <div className="mb-3 flex items-center justify-between border-b border-neutral-800/80 pb-3">
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span className="font-semibold text-neutral-200">Edge #{entry.id}</span>
-          <span className="rounded bg-indigo-900 px-2 py-0.5 text-xs text-indigo-300 font-medium">
+          <span className="rounded bg-indigo-900 px-2 py-0.5 text-xs text-indigo-200 font-medium">
             {entry.relationshipType}
           </span>
           <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">

@@ -36,13 +36,31 @@ import { KNOWN_SAFE } from "./hardcodedTextColors.fixture";
  * literal closes all three -- a string containing one of the banned tokens
  * is checked against the allowlist no matter how it ends up in a className.
  *
- * Why exclude `\n` from the single-quoted string match: a regex that pairs
- * `'…'` greedily across newlines swallows the next real `'`-literal after
- * any prose apostrophe -- e.g. `<p>don't</p>` followed by
- * `'bg-neutral-900 text-white'` consumes both into one bogus "literal".
- * Real `'`-quoted strings in JS don't span newlines unless explicitly
- * escaped (`'\n'`), so excluding newlines from the negated class closes
- * the gap without dropping real coverage.
+ * Why `(?<![A-Za-z0-9_'])` lookbehind on `reSingle`: closing the same-line
+ * probe `<p>don't</p>; const X = 'real'` -- without the lookbehind, the
+ * apostrophe in `don't` opens a single-quoted string and consumes all the
+ * text up to the next `'`, swallowing the real `'…'` literal entirely. The
+ * lookbehind requires the opening `'` to follow a non-identifier
+ * character (or string start), so prose apostrophes are skipped while
+ * real JS string literals still match. Real `'`-quoted strings in JS
+ * don't span newlines unless explicitly escaped (`'\n'`), so the existing
+ * `\n` exclusion in the negated class is kept as a defensive belt.
+ *
+ * Why prefix-matching between bg and banned token: a state-prefixed bg
+ * (`hover:bg-amber-600`) doesn't satisfy an un-prefixed banned token
+ * (`text-white`) because at-rest the text still sits on the un-prefixed
+ * parent bg. `bg-neutral-900 hover:bg-amber-600 text-white` is banned
+ * (unprefixed text-white has no unprefixed allowlisted bg), while
+ * `hover:bg-amber-600 hover:text-white` is allowed (both hover-prefixed).
+ *
+ * Why a `FLIPPING_TEXT_TOKENS` exception set: `--color-indigo-200` is
+ * declared in BOTH theme blocks and FLIPS (`#c7d2fe` dark, `#4338ca`
+ * light) -- so `text-indigo-200` is theme-aware and stays legible on a
+ * dark chip in both modes. The general "ban the 50/100/200 stops"
+ * heuristic over-bans it; explicit exception is used instead of parsing
+ * theme.css for luminance. If a new flip is added to theme.css, add an
+ * explicit exception here AND a fixture probe so the scanner and the
+ * theme stay in sync.
  *
  * Runs under vitest like theme.test.ts (jsdom can't resolve CSS custom
  * properties through getComputedStyle, so a source scan is the closest
@@ -53,68 +71,106 @@ import { KNOWN_SAFE } from "./hardcodedTextColors.fixture";
 const here = dirname(fileURLToPath(import.meta.url));
 const srcRoot = resolve(here, "..");
 
-/**
- * Banned tokens. `text-white` is unconditionally banned. The accent stop
- * pattern covers the always-pale stops for every accent family Tailwind
- * ships -- theme.css only overrides the 300/400 (and sometimes 200)
- * stops; 50/100/200 fall through to Tailwind's pale defaults in both
- * themes. `{amber,red,emerald}` get explicit overrides at *100/*200 in
- * theme.css but stay pale; the others aren't declared at all.
- */
-const BANNED_TOKEN_PATTERNS: string[] = [
-  "text-white",
-  "text-amber-(?:50|100|200)",
-  "text-red-(?:50|100|200)",
-  "text-emerald-(?:50|100|200)",
-  "text-sky-(?:50|100|200)",
-  "text-indigo-(?:50|100|200)",
-  "text-blue-(?:50|100|200)",
-  "text-purple-(?:50|100|200)",
-  "text-rose-(?:50|100|200)",
-  "text-fuchsia-(?:50|100|200)",
-  "text-teal-(?:50|100|200)",
-  "text-orange-(?:50|100|200)",
-  "text-yellow-(?:50|100|200)",
-  "text-pink-(?:50|100|200)",
-  "text-cyan-(?:50|100|200)",
-  "text-lime-(?:50|100|200)",
-  "text-violet-(?:50|100|200)",
+const ACCENT_FAMILIES = [
+  "amber",
+  "red",
+  "emerald",
+  "sky",
+  "indigo",
+  "blue",
+  "purple",
+  "rose",
+  "fuchsia",
+  "teal",
+  "orange",
+  "yellow",
+  "pink",
+  "cyan",
+  "lime",
+  "violet",
 ];
 
-const BANNED_RE = new RegExp(
-  String.raw`\b(?:(?:group-hover:|hover:|focus:|active:|disabled:|visited:)?(?:${BANNED_TOKEN_PATTERNS.join("|")}))\b`,
+// Theme-aware flips: declared in both theme blocks and pale-in-one /
+// dark-in-other, so they stay legible on a theme-invariant dark bg in both
+// modes. Probe-confirmed for text-indigo-200 against bg-indigo-900. Add a
+// new entry here AND a matching `it()` probe in "round-4 scanner probes"
+// when theme.css declares another flipper.
+const FLIPPING_TEXT_TOKENS = new Set<string>(["text-indigo-200"]);
+
+const BANNED_TOKEN_PATTERNS: string[] = (() => {
+  const out: string[] = ["text-white"];
+  for (const family of ACCENT_FAMILIES) {
+    const stops: string[] = [];
+    for (const stop of ["50", "100", "200"]) {
+      if (!FLIPPING_TEXT_TOKENS.has(`text-${family}-${stop}`)) {
+        stops.push(stop);
+      }
+    }
+    if (stops.length > 0) {
+      out.push(`text-${family}-(?:${stops.join("|")})`);
+    }
+  }
+  return out;
+})();
+
+// Theme-invariant or dark-in-both-themes solid backgrounds. White text on
+// any of these is legible in both modes:
+//   - `bg-brand` (constant, theme.css line 24 / 144)
+//   - `bg-black` (Tailwind built-in, `#000` in both themes)
+//   - `bg-{amber,red,emerald,sky}-[5-8]00` (theme.css comments at
+//     175-202 explicitly pin 500-800 dark in both themes)
+//   - `bg-indigo-[5-8]00` (theme.css line 168-171, dark both themes;
+//     indigo-900 flips PALE in light and is intentionally excluded)
+//   - `bg-{blue,purple,rose,fuchsia,teal}-[6-8]00` (undeclared, fall
+//     back to Tailwind dark defaults in both themes)
+//   - `bg-{amber,red,emerald,sky}-900` is also allowlisted: those four
+//     stay dark in both themes; `bg-indigo-900` (and friends) flip pale
+//     in light and is intentionally excluded.
+//   - `bg-white` is NOT included: it's `#fff` in both themes (undeclared
+//     -> Tailwind default), so `bg-white text-X-pale` is pale-on-pale in
+//     both modes. Hermes round-4 R4.1.
+const BG_NAME_PATTERN =
+  "(?:brand|black|amber-[5-8]00|red-[5-8]00|emerald-[5-8]00|sky-[5-8]00|indigo-[5-8]00|amber-900|red-900|emerald-900|sky-900|blue-[6-8]00|purple-[6-8]00|rose-[6-8]00|fuchsia-[6-8]00|teal-[6-8]00)";
+
+// Each banned token's optional state prefix is captured in group 1.
+const BANNED_TOKEN_RE = new RegExp(
+  String.raw`\b((?:hover:|group-hover:|focus:|active:|disabled:|visited:)?)(?:${BANNED_TOKEN_PATTERNS.join("|")})\b`,
+  "g",
 );
 
-/**
- * Theme-invariant or dark-in-both-themes solid backgrounds. White text on
- * any of these is legible in both modes:
- *   - `bg-brand` (constant, theme.css line 24 / 144)
- *   - `bg-black`, `bg-white` (Tailwind built-ins)
- *   - `bg-{amber,red,emerald,sky}-[5-8]00` (theme.css comments at
- *     175-202 explicitly pin 500-800 dark in both themes)
- *   - `bg-indigo-[5-8]00` (theme.css line 168-171, dark both themes;
- *     indigo-900 flips PALE in light and is intentionally excluded)
- *   - `bg-{blue,purple,rose,fuchsia,teal}-[6-8]00` (undeclared, fall
- *     back to Tailwind dark defaults in both themes)
- *   - `bg-{amber,red,emerald,sky,indigo,blue,purple,rose,fuchsia,teal}-900`
- *     is NOT included: indigo-900 / blue-900 / purple-900 / etc. flip
- *     pale in light, while amber/red/emerald/sky-900 stay dark. The
- *     asymmetric family lets those four stay in the allowlist while
- *     excluding the rest. A genuine dark solid bg for a pale-text chip
- *     is the safer choice.
- *
- * The `(?:^|[\s"'`$:]|hover:|group-hover:|focus:|active:|disabled:|visited:)`
- * prefix accepts any Tailwind state-modifier position; the trailing
- * `(?![/\w-])` rejects opacity-modified bgs (`bg-indigo-600/50`,
- * `bg-red-900/60`) which would otherwise silently fall through to the
- * page bg and defeat the contrast guarantee.
- */
-const ALLOWED_SOLID_BG =
-  /(?:^|[\s"'`$:]|hover:|group-hover:|focus:|active:|disabled:|visited:)bg-(?:brand|black|white|amber-[5-8]00|red-[5-8]00|emerald-[5-8]00|sky-[5-8]00|indigo-[5-8]00|amber-900|red-900|emerald-900|sky-900|blue-[6-8]00|purple-[6-8]00|rose-[6-8]00|fuchsia-[6-8]00|teal-[6-8]00)(?![/\w-])/;
+// Anchor for an unprefixed bg: start of string, whitespace, quote, or `$`
+// (template-literal end). `:` is intentionally excluded because `:` is part
+// of state prefixes (`hover:`, `focus:`, etc.) -- the prefix-matching logic
+// requires the bg prefix to match the token prefix, so an unprefixed bg
+// must NOT match the prefix portion of a state-prefixed bg.
+const BG_PREFIX_ANCHOR = "(?:^|[\\s\"'`$])";
+const STATE_PREFIXES = ["", "hover:", "group-hover:", "focus:", "active:", "disabled:", "visited:"];
 
-/** group-hover pairing: solid bg and banned text must flip together. */
-const ALLOWED_GROUP_HOVER_BG =
-  /group-hover:bg-(?:brand|black|white|amber-[5-8]00|red-[5-8]00|emerald-[5-8]00|sky-[5-8]00|indigo-[5-8]00|amber-900|red-900|emerald-900|sky-900|blue-[6-8]00|purple-[6-8]00|rose-[6-8]00|fuchsia-[6-8]00|teal-[6-8]00)(?![/\w-])/;
+const BG_REGEX_BY_PREFIX: Record<string, RegExp> = Object.fromEntries(
+  STATE_PREFIXES.map((prefix) => [
+    prefix,
+    new RegExp(`${BG_PREFIX_ANCHOR}${prefix}bg-${BG_NAME_PATTERN}(?![/\\w-])`),
+  ]),
+);
+
+function bgMatches(s: string, prefix: string): boolean {
+  const re = BG_REGEX_BY_PREFIX[prefix] ?? BG_REGEX_BY_PREFIX[""];
+  return re.test(s);
+}
+
+function findBannedTokens(s: string): Array<{ prefix: string; token: string }> {
+  const out: Array<{ prefix: string; token: string }> = [];
+  for (const m of s.matchAll(BANNED_TOKEN_RE)) {
+    out.push({ prefix: m[1] ?? "", token: m[0] });
+  }
+  return out;
+}
+
+function isStringAllowed(s: string): boolean {
+  const banned = findBannedTokens(s);
+  if (banned.length === 0) return true;
+  return banned.every((b) => bgMatches(s, b.prefix));
+}
 
 function listSourceFiles(dir: string): string[] {
   const out: string[] = [];
@@ -138,8 +194,10 @@ function listSourceFiles(dir: string): string[] {
  * literals may span lines and embed `${…}` conditionals; the non-greedy
  * match stops at the first closing backtick, which is correct for the
  * single-level templates this codebase uses. The single-quoted match
- * excludes newlines so a prose apostrophe (e.g. `don't`) doesn't pair
- * with the next real `'…'` literal and swallow it.
+ * has a negative lookbehind for the opening quote so a prose apostrophe
+ * (e.g. `don't`) doesn't pair with the next real `'…'` literal and
+ * swallow it; the negated class also excludes `\n` as a defensive
+ * belt.
  *
  * Comments are stripped first so a comment mentioning `text-black` or
  * `text-white` doesn't false-positive the zero-tolerance assertions.
@@ -150,7 +208,12 @@ function extractStringLiterals(src: string): string[] {
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/(^|[^:\\])\/\/[^\n]*/g, "$1 ");
   const reDouble = /"([^"\\\n]*(?:\\.[^"\\\n]*)*)"/g;
-  const reSingle = /'([^'\\\n]*(?:\\.[^'\\\n]*)*)'/g;
+  // Opening `'` must follow a non-identifier char (or string start), so a
+  // prose apostrophe (`don't`) doesn't pair with the next real `'…'`
+  // literal and swallow it. The lookbehind is anchored to the explicit
+  // opening `'` (not the regex start position) so it can't be bypassed by
+  // greedy content matching across multiple `'`s on the same line.
+  const reSingle = /(?<![A-Za-z0-9_'])'((?:[^'\\\n]|\\.)*)'/g;
   const reTpl = /`([^`\\]*(?:\\.[^`\\]*)*)`/g;
   let m: RegExpExecArray | null;
   while ((m = reDouble.exec(stripped)) !== null) out.push(m[1]);
@@ -169,12 +232,8 @@ for (const file of listSourceFiles(srcRoot)) {
 
   for (const s of extractStringLiterals(src)) {
     if (/\btext-black\b/.test(s)) textBlackCount++;
-    if (!BANNED_RE.test(s)) continue;
-    const hasSolidBg = ALLOWED_SOLID_BG.test(s);
-    const hasGroupHoverPair =
-      /group-hover:(?:text-white|text-(?:amber|red|emerald|sky|indigo|blue|purple|rose|fuchsia|teal|orange|yellow|pink|cyan|lime|violet)-(?:50|100|200))\b/.test(s) &&
-      ALLOWED_GROUP_HOVER_BG.test(s);
-    if (hasSolidBg || hasGroupHoverPair) {
+    if (findBannedTokens(s).length === 0) continue;
+    if (isStringAllowed(s)) {
       allowed.push(`${rel}: ${s.trim().slice(0, 80)}`);
     } else {
       violations.push(`${rel}: ${s.trim()}`);
@@ -209,5 +268,51 @@ describe("hardcoded theme-unsafe text colors", () => {
 
   it("never hardcodes text-black", () => {
     expect(textBlackCount).toBe(0);
+  });
+});
+
+describe("round-4 scanner probes (Hermes review)", () => {
+  it("R4.1: bans bg-white text-X-pale (bg-white is undeclared -> Tailwind pale both themes)", () => {
+    expect(isStringAllowed("bg-white text-white")).toBe(false);
+    expect(isStringAllowed("bg-white text-amber-200")).toBe(false);
+  });
+
+  it("R4.2: requires matching state prefix on bg and token", () => {
+    // Unprefixed text-white has no unprefixed allowlisted bg -> banned.
+    expect(isStringAllowed("bg-neutral-900 hover:bg-amber-600 text-white")).toBe(false);
+    // Both hover-prefixed -> allowed.
+    expect(isStringAllowed("hover:bg-amber-600 hover:text-white")).toBe(true);
+    // group-hover pairing survives the refactor (live at NodePickerModal.tsx:238).
+    expect(
+      isStringAllowed(
+        "border-indigo-600/50 bg-indigo-600/20 text-indigo-300 group-hover:bg-indigo-600 group-hover:text-white",
+      ),
+    ).toBe(true);
+  });
+
+  it("R4.3: skips same-line apostrophe before a single-quoted literal", () => {
+    // The `'` in `don't` is preceded by `n` (lookbehind fires at the opening
+    // quote), so it doesn't open a string. The real literal
+    // `bg-neutral-900 text-white` is the only one captured (preceded by ` `)
+    // and is flagged because unprefixed text-white has no unprefixed
+    // allowlisted bg in the string.
+    const input = "<p>don't</p>; const X = 'bg-neutral-900 text-white';";
+    const literals = extractStringLiterals(input);
+    expect(literals).toEqual(["bg-neutral-900 text-white"]);
+    expect(isStringAllowed("bg-neutral-900 text-white")).toBe(false);
+  });
+
+  it("R4.4: allows text-indigo-200 as a theme-aware flip (theme.css:40 / :165)", () => {
+    expect(isStringAllowed("bg-indigo-900 text-indigo-200")).toBe(true);
+    expect(isStringAllowed("bg-indigo-950/60 text-indigo-200")).toBe(true);
+  });
+
+  it("still flags text-amber-200 / text-red-200 (family rule, no flip)", () => {
+    // amber-200 and red-200 stay pale in both themes per theme.css:181 / :194,
+    // so the family rule still bans them without an allowlisted bg.
+    expect(isStringAllowed("text-amber-200")).toBe(false);
+    expect(isStringAllowed("text-red-200")).toBe(false);
+    expect(isStringAllowed("bg-amber-900 text-amber-200")).toBe(true);
+    expect(isStringAllowed("bg-red-900 text-red-200")).toBe(true);
   });
 });

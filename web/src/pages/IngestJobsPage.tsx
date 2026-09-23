@@ -144,7 +144,7 @@ export default function IngestJobsPage() {
               onClick={() => updateFilters({ kind: "FULL_SCAN" })}
               className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
                 kind === "FULL_SCAN"
-                  ? "bg-indigo-900 text-indigo-300 border border-indigo-700"
+                  ? "bg-indigo-900 text-indigo-200 border border-indigo-700"
                   : "bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200"
               }`}
             >
@@ -271,7 +271,7 @@ export default function IngestJobsPage() {
                                 onSettled: () => setCancellingId(null),
                               });
                             }}
-                            className="rounded bg-red-950/60 border border-red-800/80 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-900/80 hover:text-red-300 disabled:opacity-50 transition-colors"
+                            className="rounded bg-red-950/60 border border-red-800/80 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-900/80 disabled:opacity-50 transition-colors"
                             title="Cancel this running scan job"
                           >
                             {cancelMutation.isPending && cancellingId === j.id ? "Cancelling…" : "Cancel"}

@@ -389,7 +389,7 @@ export default function AssetListPage() {
 
       {someSelected && (
         <div className="sticky top-0 z-10 flex items-center justify-between gap-4 rounded-lg border border-indigo-800/60 bg-indigo-950/60 px-4 py-2 text-xs">
-          <span className="text-indigo-300">
+          <span className="text-indigo-200">
             {selectedIds.size} selected
           </span>
           <div className="flex items-center gap-3">
