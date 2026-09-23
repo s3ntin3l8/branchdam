@@ -10,7 +10,6 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
-	"github.com/s3ntin3l8/branchdam/internal/settings"
 	attributionusers "github.com/s3ntin3l8/branchdam/internal/users"
 )
 
@@ -119,122 +118,6 @@ func TestMeOutput_AttributionUserIDOmitEmpty(t *testing.T) {
 	}
 }
 
-// newAttributionServerForAdminSyncTest builds a Server the way
-// cmd/branchdam wires it at boot: a settings.Store providing the live
-// authz.groups list, and the attribution service's WithAdminGroups
-// pointed at that same store, so ResolveOrCreate's persisted is_admin
-// and handleMe's live auth.IsAdmin verdict are computed from the same
-// source (issue #485).
-func newAttributionServerForAdminSyncTest(t *testing.T, adminGroups []string) *Server {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "attribution-admin.db")
-	database, err := db.Open(context.Background(), path)
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-
-	base := config.Config{Authz: config.Authz{Groups: adminGroups}}
-	store, err := settings.NewStore(context.Background(), database, base, settingsTestKey(t), nil)
-	if err != nil {
-		t.Fatalf("settings.NewStore: %v", err)
-	}
-
-	usersSvc := attributionusers.NewService(database).
-		WithAdminGroups(func() []string { return store.Effective().Authz.Groups })
-	if _, err := usersSvc.EnsureSystemUser(context.Background()); err != nil {
-		t.Fatalf("EnsureSystemUser: %v", err)
-	}
-	auditSvc := audit.NewService(database, usersSvc)
-
-	srv := New(Deps{
-		Settings:    store,
-		DB:          database,
-		Version:     "test",
-		Attribution: usersSvc,
-		Audit:       auditSvc,
-
-		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
-	return srv
-}
-
-// TestHandleMe_ForwardAuth_IsAdminSyncedToAttributionRow: issue #485 --
-// a forward-auth Principal whose Groups match the configured admin
-// groups must, via ResolveOrCreate inside handleMe, persist
-// users.is_admin=1 -- not just the live-computed /me isAdmin value.
-// GET /api/v1/users (handleListUsers) reads is_admin straight from the
-// DB column, so this is what makes the Users page's Role column agree
-// with what handleMe itself reports for the same Principal.
-func TestHandleMe_ForwardAuth_IsAdminSyncedToAttributionRow(t *testing.T) {
-	srv := newAttributionServerForAdminSyncTest(t, []string{"dam-admins"})
-	p := auth.Principal{
-		Kind:          auth.KindUser,
-		Name:          "alice",
-		ExternalUID:   "alice-uid-stable",
-		Groups:        []string{"dam-admins"},
-		Authenticated: true,
-	}
-	ctx := auth.WithPrincipal(context.Background(), p)
-	out, err := srv.handleMe(ctx, nil)
-	if err != nil {
-		t.Fatalf("handleMe: %v", err)
-	}
-	if !out.Body.IsAdmin {
-		t.Fatalf("handleMe reported IsAdmin=false for a dam-admins member")
-	}
-	if out.Body.AttributionUserID == 0 {
-		t.Fatalf("AttributionUserID = 0, want > 0")
-	}
-
-	dbRow, err := srv.db.Reader.GetAttributionUserByID(ctx, out.Body.AttributionUserID)
-	if err != nil {
-		t.Fatalf("GetAttributionUserByID: %v", err)
-	}
-	if dbRow.IsAdmin != 1 {
-		t.Errorf("stored is_admin = %d, want 1 to match handleMe's live IsAdmin=true", dbRow.IsAdmin)
-	}
-}
-
-// TestHandleMe_ForwardAuth_IsAdminSyncedOnDemotion: a Principal that
-// loses admin-group membership between requests must see its persisted
-// is_admin flip back to 0 on the very next ResolveOrCreate -- not just
-// its live /me verdict, which was already correct before this fix.
-func TestHandleMe_ForwardAuth_IsAdminSyncedOnDemotion(t *testing.T) {
-	srv := newAttributionServerForAdminSyncTest(t, []string{"dam-admins"})
-
-	admin := auth.Principal{
-		Kind: auth.KindUser, Name: "bob", ExternalUID: "bob-uid",
-		Groups: []string{"dam-admins"}, Authenticated: true,
-	}
-	firstCtx := auth.WithPrincipal(context.Background(), admin)
-	first, err := srv.handleMe(firstCtx, nil)
-	if err != nil {
-		t.Fatalf("handleMe (admin): %v", err)
-	}
-	if !first.Body.IsAdmin {
-		t.Fatalf("handleMe reported IsAdmin=false on first (admin) request")
-	}
-
-	demoted := admin
-	demoted.Groups = []string{"everyone"}
-	secondCtx := auth.WithPrincipal(context.Background(), demoted)
-	second, err := srv.handleMe(secondCtx, nil)
-	if err != nil {
-		t.Fatalf("handleMe (demoted): %v", err)
-	}
-	if second.Body.IsAdmin {
-		t.Fatalf("handleMe reported IsAdmin=true after demotion out of dam-admins")
-	}
-
-	dbRow, err := srv.db.Reader.GetAttributionUserByID(context.Background(), second.Body.AttributionUserID)
-	if err != nil {
-		t.Fatalf("GetAttributionUserByID: %v", err)
-	}
-	if dbRow.IsAdmin != 0 {
-		t.Errorf("stored is_admin = %d, want 0 after demotion", dbRow.IsAdmin)
-	}
-}
-
 func contains(haystack, needle string) bool {
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		if haystack[i:i+len(needle)] == needle {
@@ -242,4 +125,140 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// newAttributionServerForAdminSyncTest builds a Server with the same
+// admin-group policy wired on both sides of the sync this test suite
+// covers: Deps.Config.Authz.Groups (what requireSettingsAdmin/handleMe's
+// live IsAdmin check reads) and attribution.WithAdminGroups (what
+// ResolveOrCreate reads to persist users.is_admin) -- mirroring how
+// cmd/branchdam wires both from the same settingsStore.Effective().
+func newAttributionServerForAdminSyncTest(t *testing.T, adminGroups []string) (*Server, *attributionusers.Service) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "attribution-admin-sync.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	usersSvc := attributionusers.NewService(database).
+		WithAdminGroups(func() []string { return adminGroups })
+	if _, err := usersSvc.EnsureSystemUser(context.Background()); err != nil {
+		t.Fatalf("EnsureSystemUser: %v", err)
+	}
+	auditSvc := audit.NewService(database, usersSvc)
+
+	srv := New(Deps{
+		Config:      &config.Config{Authz: config.Authz{Groups: adminGroups}},
+		DB:          database,
+		Version:     "test",
+		Attribution: usersSvc,
+		Audit:       auditSvc,
+
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	return srv, usersSvc
+}
+
+// adminSyncPrincipal returns an authenticated forward-auth Principal
+// with a stable external uid, so repeated calls resolve to the same
+// users.id across group-membership changes (the promotion/demotion
+// test flips Groups between calls on the same struct).
+func adminSyncPrincipal(name string, groups []string) auth.Principal {
+	return auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          name,
+		Email:         name + "@example.com",
+		ExternalUID:   name + "-uid-stable",
+		Groups:        groups,
+		Authenticated: true,
+	}
+}
+
+// TestHandleMe_ResolveOrCreateSyncsIsAdmin_GroupMatch: a forward-auth
+// principal whose groups include the configured admin group is
+// persisted with is_admin=1 by handleMe's ResolveOrCreate call --
+// verified by reading it back through GET /api/v1/users, since that's
+// the admin-only column the issue's UsersPage.tsx Role display depends
+// on (handleMe's own IsAdmin field is computed independently and
+// doesn't touch the DB).
+func TestHandleMe_ResolveOrCreateSyncsIsAdmin_GroupMatch(t *testing.T) {
+	srv, _ := newAttributionServerForAdminSyncTest(t, []string{"dam-admins"})
+	p := adminSyncPrincipal("alice", []string{"dam-admins"})
+	ctx := auth.WithPrincipal(context.Background(), p)
+
+	if _, err := srv.handleMe(ctx, nil); err != nil {
+		t.Fatalf("handleMe: %v", err)
+	}
+
+	adminCtx := auth.WithPrincipal(context.Background(), adminPrincipal())
+	out, err := srv.handleListUsers(adminCtx, &ListUsersInput{Limit: 50, Offset: 0})
+	if err != nil {
+		t.Fatalf("handleListUsers: %v", err)
+	}
+	var found bool
+	for _, u := range out.Body.Users {
+		if u.Username != "alice" {
+			continue
+		}
+		found = true
+		if !u.IsAdmin {
+			t.Errorf("alice.isAdmin = false, want true (member of configured admin group dam-admins)")
+		}
+	}
+	if !found {
+		t.Fatal("alice not found in GET /api/v1/users after handleMe provisioned her")
+	}
+}
+
+// TestHandleMe_ResolveOrCreateSyncsIsAdmin_PromotionAndDemotion:
+// group membership changes in the identity provider must flip
+// users.is_admin (and therefore GET /api/v1/users' isAdmin) on the
+// very next request, in both directions -- no separate reconciliation
+// step required.
+func TestHandleMe_ResolveOrCreateSyncsIsAdmin_PromotionAndDemotion(t *testing.T) {
+	srv, _ := newAttributionServerForAdminSyncTest(t, []string{"dam-admins"})
+	adminCtx := auth.WithPrincipal(context.Background(), adminPrincipal())
+
+	isAdminFor := func(username string) bool {
+		t.Helper()
+		out, err := srv.handleListUsers(adminCtx, &ListUsersInput{Limit: 50, Offset: 0})
+		if err != nil {
+			t.Fatalf("handleListUsers: %v", err)
+		}
+		for _, u := range out.Body.Users {
+			if u.Username == username {
+				return u.IsAdmin
+			}
+		}
+		t.Fatalf("%s not found in GET /api/v1/users", username)
+		return false
+	}
+
+	// First sight: bob is not in the admin group.
+	ctx := auth.WithPrincipal(context.Background(), adminSyncPrincipal("bob", nil))
+	if _, err := srv.handleMe(ctx, nil); err != nil {
+		t.Fatalf("handleMe (first sight): %v", err)
+	}
+	if isAdminFor("bob") {
+		t.Fatal("bob.isAdmin = true on first sight, want false")
+	}
+
+	// Promotion.
+	ctx = auth.WithPrincipal(context.Background(), adminSyncPrincipal("bob", []string{"dam-admins"}))
+	if _, err := srv.handleMe(ctx, nil); err != nil {
+		t.Fatalf("handleMe (promoted): %v", err)
+	}
+	if !isAdminFor("bob") {
+		t.Error("bob.isAdmin = false after promotion, want true")
+	}
+
+	// Demotion.
+	ctx = auth.WithPrincipal(context.Background(), adminSyncPrincipal("bob", nil))
+	if _, err := srv.handleMe(ctx, nil); err != nil {
+		t.Fatalf("handleMe (demoted): %v", err)
+	}
+	if isAdminFor("bob") {
+		t.Error("bob.isAdmin = true after demotion, want false")
+	}
 }

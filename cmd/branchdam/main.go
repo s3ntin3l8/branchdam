@@ -258,12 +258,10 @@ func main() {
 	// can attribute their writes to a stable id. Wired into
 	// Deps.Attribution / Deps.Audit below; ScanDeps.StartedByUserID uses
 	// the system user id for the SweeperSupervisor's INCREMENTAL passes.
-	// WithAdminGroups wires the same authz.groups list that gates live
-	// request authorization (auth.IsAdmin, see internal/httpapi's
-	// s.cfg().Authz.Groups reads) so a forward-auth user's persisted
-	// users.is_admin stays in sync with their actual admin authority --
-	// resolved fresh via settingsStore.Effective() on every call since
-	// authz.groups is a live-editable setting (issue #485).
+	// WithAdminGroups reads authz.groups through settingsStore.Effective()
+	// (not a captured cfg snapshot) so a live authz.groups edit is
+	// reflected in ResolveOrCreate's is_admin sync on the very next
+	// request, same as every other settings-driven closure in this file.
 	attributionSvc := attributionusers.NewService(database).
 		WithLogger(log).
 		WithAdminGroups(func() []string { return settingsStore.Effective().Authz.Groups })

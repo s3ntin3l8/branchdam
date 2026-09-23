@@ -89,17 +89,7 @@ type Service struct {
 	systemUser  Attribution
 	systemCache bool // true once EnsureSystemUser has run successfully
 	log         *slog.Logger
-	// adminGroupsFn, when set, is consulted by ResolveOrCreate's
-	// forward-auth branch on every call to compute is_admin for the
-	// Principal being resolved. It's a func rather than a captured
-	// []string because authz.groups is a live-editable setting
-	// (internal/settings/registry.go) -- capturing it once at
-	// construction time would go stale the moment an admin edits the
-	// setting without a restart. nil means "no admin groups configured
-	// source", which adminGroups() below reports as an empty slice --
-	// the same input auth.IsAdmin treats as permit-all (the
-	// solo-homelab default).
-	adminGroupsFn func() []string
+	adminGroups func() []string
 }
 
 // NewService constructs an attribution service. It does NOT provision the
@@ -125,27 +115,38 @@ func (s *Service) WithLogger(log *slog.Logger) *Service {
 	return s
 }
 
-// WithAdminGroups installs the live admin-groups source used by
-// ResolveOrCreate's forward-auth branch to compute users.is_admin.
-// Chainable, so cmd/branchdam can do
-// NewService(database).WithLogger(log).WithAdminGroups(func() []string {
-// return settingsStore.Effective().Authz.Groups }) at boot. A nil fn is
-// ignored (adminGroupsFn stays nil, i.e. permit-all) so callers don't
-// need to nil-guard.
+// WithAdminGroups installs a getter for the configured admin groups
+// (config.Authz.Groups), consulted by ResolveOrCreate to sync
+// users.is_admin for forward-link principals -- the same policy
+// auth.IsAdmin already applies to live request authorization (see
+// that function's doc comment: local-`is_admin` override beats the
+// group check, empty allowedGroups means every authenticated user is
+// admin, otherwise group membership decides).
+//
+// A func getter -- not a static []string -- because authz.groups is a
+// live-reloadable setting (internal/settings.Store): baking in a
+// snapshot at construction time would let a promote/demote in the
+// running config silently stop taking effect. Chainable, like
+// WithLogger. A nil fn (the default) is treated as "no groups
+// configured", matching auth.IsAdmin's empty-slice "everyone admin"
+// solo-homelab default.
 func (s *Service) WithAdminGroups(fn func() []string) *Service {
 	if fn != nil {
-		s.adminGroupsFn = fn
+		s.adminGroups = fn
 	}
 	return s
 }
 
-// adminGroups returns the currently configured admin groups, or nil if
-// WithAdminGroups was never called.
-func (s *Service) adminGroups() []string {
-	if s.adminGroupsFn == nil {
+// allowedAdminGroups returns the current admin groups, or nil if
+// WithAdminGroups was never called -- auth.IsAdmin treats a nil/empty
+// slice as "every authenticated user is admin" (the solo-homelab
+// default), so an unwired Service behaves like a deployment with
+// authz.groups left empty.
+func (s *Service) allowedAdminGroups() []string {
+	if s.adminGroups == nil {
 		return nil
 	}
-	return s.adminGroupsFn()
+	return s.adminGroups()
 }
 
 // EnsureSystemUser lazy-provisions the system sentinel row and caches its
@@ -172,7 +173,7 @@ func (s *Service) EnsureSystemUser(ctx context.Context) (Attribution, error) {
 			ExternalUID:  row.ExternalUid,
 			Username:     row.Username,
 			Email:        row.Email,
-			IsAdmin:      row.IsAdmin == 1,
+			IsAdmin:      row.IsAdmin != 0,
 		}
 		return nil
 	})
@@ -221,13 +222,18 @@ func (s *Service) SystemUserSafe() (Attribution, error) {
 //     returning the row id either way.
 //  2. UPDATEs the denormalized username/email and bumps last_seen_at so
 //     a username rename or email change shows up on the next request
-//     without a separate background refresh job.
+//     without a separate background refresh job. is_admin is synced in
+//     the same UPDATE, computed via auth.IsAdmin against the current
+//     admin groups (WithAdminGroups) -- an Authentik group promotion
+//     or demotion takes effect on the user's very next request.
 //
 // For local-session Principals (AuthProvider == "local"), the user row
 // already exists (source='local', password_hash set) so this skips the
 // INSERT and does a lookup+refresh instead -- the INSERT path uses
 // source='forward-link' with NULL password_hash, which would violate the
-// CHECK constraint on local rows.
+// CHECK constraint on local rows. is_admin is NOT synced on this branch:
+// local accounts are promoted/demoted only via the explicit admin-UI
+// action, never resynced from group membership on sight.
 //
 // The two writes happen in the same write transaction (single-connection
 // writer pool, AGENTS.md invariant #2), so a slow scan/insert doesn't
@@ -262,18 +268,13 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 		return s.resolveLocal(ctx, p)
 	}
 
-	// is_admin sync (issue #485): a forward-auth Principal's admin bit is
-	// derived the same way auth.IsAdmin derives it for live request
-	// authorization -- membership in the configured admin groups, with
-	// an empty group list meaning permit-all (the solo-homelab
-	// default). localView is deliberately the zero value: the local
-	// `is_admin` override only applies to source='local' sessions,
-	// which never reach this branch (see resolveLocal below).
-	isAdmin := auth.IsAdmin(p, s.adminGroups(), auth.LocalUserView{})
-	isAdminInt := int64(0)
-	if isAdmin {
-		isAdminInt = 1
-	}
+	// Sync is_admin to the same policy live request authorization
+	// applies (auth.IsAdmin), so GET /api/v1/users' Role column matches
+	// what this principal can actually do on this and every subsequent
+	// request. localView is the zero value here -- the local `is_admin`
+	// override only applies to source='local' sessions (resolveLocal),
+	// never to forward-link principals.
+	isAdmin := auth.IsAdmin(p, s.allowedAdminGroups(), auth.LocalUserView{})
 
 	var out Attribution
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -282,16 +283,16 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 			ExternalUid:  p.ExternalUID,
 			Username:     p.Name,
 			Email:        sql.NullString{String: p.Email, Valid: p.Email != ""},
-			IsAdmin:      isAdminInt,
+			IsAdmin:      boolToInt64(isAdmin),
 		})
 		if err != nil {
 			return fmt.Errorf("create attribution user: %w", err)
 		}
-		if err := q.RefreshAttributionUserSeen(ctx, sqlcgen.RefreshAttributionUserSeenParams{
+		if err := q.RefreshAttributionUserSeenWithAdmin(ctx, sqlcgen.RefreshAttributionUserSeenWithAdminParams{
 			ID:       id,
 			Username: p.Name,
 			Email:    sql.NullString{String: p.Email, Valid: p.Email != ""},
-			IsAdmin:  isAdminInt,
+			IsAdmin:  boolToInt64(isAdmin),
 		}); err != nil {
 			return fmt.Errorf("refresh attribution user: %w", err)
 		}
@@ -305,7 +306,7 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 			ExternalUID:  row.ExternalUid,
 			Username:     row.Username,
 			Email:        row.Email,
-			IsAdmin:      row.IsAdmin == 1,
+			IsAdmin:      row.IsAdmin != 0,
 		}
 		return nil
 	})
@@ -313,6 +314,15 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 		return Attribution{}, err
 	}
 	return out, nil
+}
+
+// boolToInt64 converts a bool to the 0/1 users.is_admin CHECK-constrained
+// column value.
+func boolToInt64(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // resolveLocal handles the auth_provider="local" case of ResolveOrCreate.
@@ -359,16 +369,10 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 		} else if err != nil {
 			return fmt.Errorf("resolve local user: %w", err)
 		}
-		// Local accounts' admin bit is managed by an admin via the
-		// /admin/users endpoints (PATCH .../{id} -> PromoteUserToAdmin /
-		// DemoteUserFromAdmin), never by forward-auth group membership.
-		// Pass row.IsAdmin straight through unchanged so this refresh
-		// can't clobber it.
 		if err := q.RefreshAttributionUserSeen(ctx, sqlcgen.RefreshAttributionUserSeenParams{
 			ID:       row.ID,
 			Username: p.Name,
 			Email:    sql.NullString{String: p.Email, Valid: p.Email != ""},
-			IsAdmin:  row.IsAdmin,
 		}); err != nil {
 			return fmt.Errorf("refresh local attribution user: %w", err)
 		}
@@ -382,7 +386,7 @@ func (s *Service) resolveLocal(ctx context.Context, p auth.Principal) (Attributi
 			ExternalUID:  refreshed.ExternalUid,
 			Username:     refreshed.Username,
 			Email:        refreshed.Email,
-			IsAdmin:      refreshed.IsAdmin == 1,
+			IsAdmin:      refreshed.IsAdmin != 0,
 		}
 		return nil
 	})

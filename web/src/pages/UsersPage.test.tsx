@@ -402,6 +402,84 @@ describe("UsersPage row actions", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("hides Make Admin, Reset Password, and Revoke Sessions for forward-link accounts", async () => {
+    stubUsers([
+      makeUser({ id: 2, username: "bob", source: "forward-link", authProvider: "authentik" }),
+    ]);
+
+    renderPage();
+    await screen.findByText("bob");
+    expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
+    // Revoke Sessions routes to the *NoLocal 503 handler when local auth
+    // is off (auth.mode: forward), same as Make Admin/Reset Password --
+    // hidden for non-local rows, matching main's behavior (not part of
+    // this PR's delta over #487).
+    expect(screen.queryByRole("button", { name: /revoke sessions/i })).not.toBeInTheDocument();
+  });
+
+  it("hides Remove Admin for a forward-link admin account and marks the role IdP-managed", async () => {
+    stubUsers([
+      makeUser({
+        id: 2,
+        username: "bob",
+        source: "forward-link",
+        authProvider: "authentik",
+        isAdmin: true,
+      }),
+    ]);
+
+    renderPage();
+    await screen.findByText("bob");
+    expect(screen.queryByRole("button", { name: /remove admin/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/admin/i)).toBeInTheDocument();
+    expect(screen.getByText(/via idp/i)).toBeInTheDocument();
+  });
+
+  it("shows Make Admin and Reset Password for local accounts (no IdP marker)", async () => {
+    stubUsers([makeUser({ id: 2, username: "bob", source: "local" })]);
+
+    renderPage();
+    expect(await screen.findByRole("button", { name: /make admin/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reset password/i })).toBeInTheDocument();
+    expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
+  });
+
+  it("shows Make Admin but hides Reset Password for forward-jit accounts (not IdP-synced)", async () => {
+    // forward-jit rows are provisioned once by internal/auth/users/jit.go
+    // and never resynced by ResolveOrCreate afterward (unlike
+    // forward-link) -- a manual admin toggle sticks, so the button
+    // should be offered. Reset Password stays hidden: forward-jit rows
+    // have password_hash=NULL (CHECK constraint), so a reset would
+    // fail regardless of source-based UI gating.
+    stubUsers([
+      makeUser({ id: 2, username: "bob", source: "forward-jit", authProvider: "forward-jit" }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByRole("button", { name: /make admin/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
+  });
+
+  it("does NOT mark the system user's role as IdP-synced", async () => {
+    // The system sentinel is source="forward-link" in production (same
+    // as a real forward-auth user), but its whole actions cell -- and
+    // by extension the IdP-sync semantics -- are out of scope for it.
+    stubUsers([
+      makeUser({
+        id: 999,
+        username: "system",
+        authProvider: "system",
+        source: "forward-link",
+      }),
+    ]);
+
+    renderPage();
+    await screen.findByText(/ID:\s*999/);
+    expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
+  });
+
   it("re-enable attempt clears any previous notice", async () => {
     const user = userEvent.setup();
     enableUserMock.mockRejectedValueOnce(new Error("boom"));
@@ -418,31 +496,5 @@ describe("UsersPage row actions", () => {
       expect(screen.queryByRole("status")).not.toBeInTheDocument();
     });
     expect(enableUserMock).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("UsersPage forward-link (Authentik-provisioned) users", () => {
-  it("does NOT show Make Admin/Remove Admin, Reset Password, or Revoke Sessions for a forward-link user, and shows a managed-by-IdP note instead", async () => {
-    stubUsers([
-      makeUser({ id: 2, username: "bob", source: "forward-link", authProvider: "authentik" }),
-    ]);
-
-    renderPage();
-    await screen.findByText("bob");
-    expect(screen.queryByRole("button", { name: /make admin/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /remove admin/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /revoke sessions/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/managed by idp/i)).toBeInTheDocument();
-  });
-
-  it("shows Make Admin/Remove Admin, Reset Password, and Revoke Sessions again for a local user", async () => {
-    stubUsers([makeUser({ id: 2, username: "bob", source: "local" })]);
-
-    renderPage();
-    expect(await screen.findByRole("button", { name: /make admin/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /reset password/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /revoke sessions/i })).toBeInTheDocument();
-    expect(screen.queryByText(/managed by idp/i)).not.toBeInTheDocument();
   });
 });

@@ -39,20 +39,22 @@ type CreateAttributionUserParams struct {
 // Lazy-provisioning insert. The caller resolves auth_provider +
 // external_uid from the Principal; username/email/is_admin are
 // denormalized display fields refreshed on every ResolveOrCreate.
-// is_admin is the caller's computed verdict (Principal group membership
-// against the configured admin groups) for the INSERT case only -- the
-// ON CONFLICT branch leaves is_admin untouched (see the DO UPDATE SET
-// note below); RefreshAttributionUserSeen is what re-syncs is_admin on
-// every subsequent sighting, in the same transaction. source='forward-link'
-// with NULL password_hash matches PR #407's existing CHECK constraint --
-// these rows are attribution-only, not local-auth credentials.
+// is_admin is derived by the caller from the Principal's group
+// membership against the configured admin groups (auth.IsAdmin) --
+// this is the same policy live request authorization already applies,
+// just persisted so GET /api/v1/users reflects it (issue: forward-auth
+// users' Role column was stuck at the is_admin column default).
+// source='forward-link' with NULL password_hash matches PR #407's
+// existing CHECK constraint -- these rows are attribution-only, not
+// local-auth credentials.
 // Returns the row id on both insert and on conflict (no-op) so the
 // caller never has to distinguish "created" from "already existed" --
 // matching the ResolveOrCreate contract: get-or-create with stable id.
 // SQLite's RETURNING on ON CONFLICT DO NOTHING returns nothing for the
 // no-op case; the workaround is DO UPDATE SET on the conflict target
 // column with a no-op value so the row is "updated" (still returned) but
-// nothing actually changes.
+// nothing actually changes. is_admin sync for an EXISTING row happens
+// via RefreshAttributionUserSeenWithAdmin below, not here.
 func (q *Queries) CreateAttributionUser(ctx context.Context, arg CreateAttributionUserParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, createAttributionUser,
 		arg.AuthProvider,
@@ -138,7 +140,7 @@ func (q *Queries) EnsureSystemUser(ctx context.Context) (int64, error) {
 
 const getAttributionUserByExternalUID = `-- name: GetAttributionUserByExternalUID :one
 
-SELECT id, auth_provider, external_uid, username, email, is_admin, created_at, last_seen_at
+SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at, is_admin
 FROM users
 WHERE auth_provider = ?1 AND external_uid = ?2
 `
@@ -154,9 +156,9 @@ type GetAttributionUserByExternalUIDRow struct {
 	ExternalUid  string
 	Username     string
 	Email        sql.NullString
-	IsAdmin      int64
 	CreatedAt    int64
 	LastSeenAt   int64
+	IsAdmin      int64
 }
 
 // users: one row per human principal that has ever authenticated via
@@ -176,15 +178,15 @@ func (q *Queries) GetAttributionUserByExternalUID(ctx context.Context, arg GetAt
 		&i.ExternalUid,
 		&i.Username,
 		&i.Email,
-		&i.IsAdmin,
 		&i.CreatedAt,
 		&i.LastSeenAt,
+		&i.IsAdmin,
 	)
 	return i, err
 }
 
 const getAttributionUserByID = `-- name: GetAttributionUserByID :one
-SELECT id, auth_provider, external_uid, username, email, is_admin, created_at, last_seen_at
+SELECT id, auth_provider, external_uid, username, email, created_at, last_seen_at, is_admin
 FROM users
 WHERE id = ?1
 `
@@ -195,9 +197,9 @@ type GetAttributionUserByIDRow struct {
 	ExternalUid  string
 	Username     string
 	Email        sql.NullString
-	IsAdmin      int64
 	CreatedAt    int64
 	LastSeenAt   int64
+	IsAdmin      int64
 }
 
 func (q *Queries) GetAttributionUserByID(ctx context.Context, id int64) (GetAttributionUserByIDRow, error) {
@@ -209,9 +211,9 @@ func (q *Queries) GetAttributionUserByID(ctx context.Context, id int64) (GetAttr
 		&i.ExternalUid,
 		&i.Username,
 		&i.Email,
-		&i.IsAdmin,
 		&i.CreatedAt,
 		&i.LastSeenAt,
+		&i.IsAdmin,
 	)
 	return i, err
 }
@@ -381,7 +383,7 @@ func (q *Queries) ReconcileLocalExternalUID(ctx context.Context, arg ReconcileLo
 
 const refreshAttributionUserSeen = `-- name: RefreshAttributionUserSeen :exec
 UPDATE users
-SET username = ?2, email = ?3, is_admin = ?4, last_seen_at = unixepoch()
+SET username = ?2, email = ?3, last_seen_at = unixepoch()
 WHERE id = ?1
 `
 
@@ -389,24 +391,64 @@ type RefreshAttributionUserSeenParams struct {
 	ID       int64
 	Username string
 	Email    sql.NullString
-	IsAdmin  int64
 }
 
 // Updates the denormalized username/email (a user may have renamed since
-// their last request), re-syncs is_admin to the caller's freshly computed
-// verdict (so an Authentik group promotion/demotion takes effect on the
-// very next request), and bumps last_seen_at. Called by
-// ResolveOrCreate after a cache miss, in the same transaction as the
-// create-or-no-op insert above. No-op on a missing row (the create
-// branch above will have just inserted one in the same tx).
-//
-// ResolveOrCreate's local-session branch (resolveLocal) passes the
-// row's own current is_admin value back unchanged here -- local
-// accounts are managed by an admin via the /admin/users endpoints, not
-// by forward-auth group membership, so this query must never be the
-// thing that overwrites a local user's admin bit.
+// their last request) and bumps last_seen_at. Called by resolveLocal
+// (source='local' branch of ResolveOrCreate) -- deliberately does NOT
+// touch is_admin, which for local accounts is only ever changed via the
+// explicit admin-UI promote/demote actions (PromoteUserToAdmin /
+// DemoteUserFromAdmin), never resynced from a Principal on sight.
+// See RefreshAttributionUserSeenWithAdmin for the forward-link
+// counterpart that DOES resync is_admin.
 func (q *Queries) RefreshAttributionUserSeen(ctx context.Context, arg RefreshAttributionUserSeenParams) error {
-	_, err := q.db.ExecContext(ctx, refreshAttributionUserSeen,
+	_, err := q.db.ExecContext(ctx, refreshAttributionUserSeen, arg.ID, arg.Username, arg.Email)
+	return err
+}
+
+const refreshAttributionUserSeenWithAdmin = `-- name: RefreshAttributionUserSeenWithAdmin :exec
+UPDATE users
+SET username = ?2, email = ?3,
+    is_admin = CASE WHEN source = 'forward-link' THEN ?4 ELSE is_admin END,
+    last_seen_at = unixepoch()
+WHERE id = ?1
+`
+
+type RefreshAttributionUserSeenWithAdminParams struct {
+	ID       int64
+	Username string
+	Email    sql.NullString
+	IsAdmin  int64
+}
+
+// Forward-link counterpart of RefreshAttributionUserSeen: also syncs
+// is_admin to the caller-computed value (auth.IsAdmin against the
+// Principal's current groups) so an Authentik group promotion or
+// demotion is reflected in users.is_admin -- and therefore in
+// GET /api/v1/users' Role column -- on the very next request, without
+// a separate reconciliation job. Called only from the forward-link
+// branch of ResolveOrCreate; resolveLocal uses the plain
+// RefreshAttributionUserSeen above so a local account's is_admin is
+// never silently overwritten by this sync.
+//
+// The is_admin write is guarded by source='forward-link' rather than
+// applied unconditionally: the (auth_provider, external_uid) row this
+// targets can, on some deployments, actually be a source='forward-jit'
+// row -- 00020_users_and_audit.sql's backfill gave every pre-existing
+// row (including forward-jit admins provisioned before that migration)
+// auth_provider='authentik' and external_uid=username, which is exactly
+// the key BrowserChain.pickExternalUID's username fallback resolves to
+// when the identity proxy's stable per-user id header isn't sent.
+// Without the guard, a plain forward-auth request from that same
+// username would overwrite a JIT admin's is_admin using authz.groups --
+// a different, unrelated admin policy from the one that provisioned
+// them (internal/auth/users/jit.go's own adminGroups config). The CASE
+// is a no-op for the common case (source really is 'forward-link');
+// username/email/last_seen_at still refresh unconditionally, matching
+// RefreshAttributionUserSeen's existing behavior for a same-key row of
+// any source.
+func (q *Queries) RefreshAttributionUserSeenWithAdmin(ctx context.Context, arg RefreshAttributionUserSeenWithAdminParams) error {
+	_, err := q.db.ExecContext(ctx, refreshAttributionUserSeenWithAdmin,
 		arg.ID,
 		arg.Username,
 		arg.Email,

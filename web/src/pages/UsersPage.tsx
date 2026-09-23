@@ -328,15 +328,23 @@ export default function UsersPage() {
                 const isSystem = user.authProvider === "system" || user.username === "system";
                 const isDisabled = Boolean(user.disabledAt);
                 const isSelf = me?.localUserId !== undefined && user.id === me.localUserId;
-                // Forward-link accounts (source !== "local") have no
-                // password_hash, and their role is synced from the
-                // identity provider's group membership on every request
-                // (ResolveOrCreate), not toggled by an admin here. Hide
-                // the local-only admin-toggle/reset-password/revoke-session
-                // actions for them (issue #485) -- all three route to the
-                // *NoLocal 503 handlers in internal/httpapi/local_auth.go
-                // when auth.mode is "forward" and s.localAuth is nil.
-                const isForwardLink = user.source !== "local";
+                // source==="local" is the only source with a
+                // password_hash (CHECK constraint) -- Reset Password is
+                // gated on this alone, for both local and forward-jit/
+                // forward-link non-local accounts.
+                const isLocalManaged = user.source === "local";
+                // source==="forward-link" is the only source whose
+                // is_admin internal/users.ResolveOrCreate actually
+                // resyncs from the identity provider's groups on every
+                // request (see RefreshAttributionUserSeenWithAdmin) --
+                // forward-jit rows are provisioned once by
+                // internal/auth/users/jit.go and never resynced after
+                // that, so they don't belong under this label. Also
+                // excludes the system/ansible-bootstrap sentinels
+                // (also source==="forward-link", but their whole
+                // actions cell and role semantics are out of scope --
+                // see the isSystem guard below).
+                const isIdpSynced = user.source === "forward-link" && !isSystem;
 
                 return (
                   <tr key={user.id} className="hover:bg-neutral-900/30">
@@ -355,15 +363,25 @@ export default function UsersPage() {
                       {user.email || "—"}
                     </td>
                     <td className="px-4 py-3">
-                      {user.isAdmin ? (
-                        <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
-                          Admin
-                        </span>
-                      ) : (
-                        <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
-                          User
-                        </span>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {user.isAdmin ? (
+                          <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
+                            Admin
+                          </span>
+                        ) : (
+                          <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
+                            User
+                          </span>
+                        )}
+                        {isIdpSynced && (
+                          <span
+                            title="Role is managed by the identity provider and synced on every login."
+                            className="text-[10px] text-neutral-500"
+                          >
+                            (via IdP)
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       {user.mfaEnabled ? (
@@ -405,7 +423,7 @@ export default function UsersPage() {
                               Re-enable
                             </button>
                           )}
-                          {!isSelf && !isForwardLink && (
+                          {!isSelf && !isIdpSynced && (
                             <button
                               type="button"
                               onClick={() => openToggleAdmin(user)}
@@ -414,12 +432,7 @@ export default function UsersPage() {
                               {user.isAdmin ? "Remove Admin" : "Make Admin"}
                             </button>
                           )}
-                          {isForwardLink && (
-                            <span className="text-xs text-neutral-500" title="Role and password are managed by the identity provider">
-                              Managed by IdP
-                            </span>
-                          )}
-                          {!isSelf && !isForwardLink && (
+                          {!isSelf && isLocalManaged && (
                             <button
                               type="button"
                               onClick={() => openRevokeSessions(user)}
@@ -428,7 +441,7 @@ export default function UsersPage() {
                               Revoke Sessions
                             </button>
                           )}
-                          {!isForwardLink && (
+                          {isLocalManaged && (
                             <button
                               type="button"
                               onClick={() => {

@@ -161,6 +161,69 @@ func TestResolveOrCreate_RefreshesDisplayFields(t *testing.T) {
 	}
 }
 
+// TestResolveOrCreate_DoesNotOverwriteForwardJITAdmin: a source=
+// 'forward-jit' row (provisioned by internal/auth/users/jit.go, using
+// its own separate admin-groups config) can share the exact
+// (auth_provider, external_uid) key ResolveOrCreate's forward-link
+// branch upserts on. 00020_users_and_audit.sql's backfill gave every
+// pre-existing row -- including forward-jit rows provisioned before
+// that migration -- auth_provider='authentik' and
+// external_uid=username; that's precisely the key
+// BrowserChain.pickExternalUID falls back to when the identity proxy
+// doesn't send a stable per-user id header. If ResolveOrCreate's
+// is_admin sync ran unconditionally on whatever row that key resolves
+// to, a plain forward-auth request from that same username would
+// silently demote (or promote) a JIT admin using authz.groups -- the
+// wrong policy for a forward-jit row. This is the unique follow-up
+// delta over #487; the create-time and refresh-on-sight is_admin sync
+// paths are already covered there.
+func TestResolveOrCreate_DoesNotOverwriteForwardJITAdmin(t *testing.T) {
+	svc := newService(t).WithAdminGroups(func() []string { return []string{"dam-admins"} })
+	ctx := context.Background()
+
+	// Pre-00020-shaped forward-jit admin row: source='forward-jit',
+	// but auth_provider/external_uid backfilled to the authentik/
+	// username shape.
+	_, err := svc.db.ExecInTx(ctx,
+		`INSERT INTO users (username, email, password_hash, is_admin, source, created_at, created_by, auth_provider, external_uid)
+		 VALUES ('dave', 'dave@example.com', NULL, 1, 'forward-jit', unixepoch(), 'forward:dave', 'authentik', 'dave')`,
+	)
+	if err != nil {
+		t.Fatalf("insert forward-jit admin user: %v", err)
+	}
+
+	// A plain forward-auth request for the same username, NOT a member
+	// of authz.groups' dam-admins -- if the sync ran unconditionally
+	// this would demote dave.
+	p := auth.Principal{
+		Kind: auth.KindUser, Name: "dave", Email: "dave@example.com",
+		ExternalUID: "dave", Groups: nil, Authenticated: true,
+	}
+	got, err := svc.ResolveOrCreate(ctx, p)
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if !got.IsAdmin {
+		t.Errorf("IsAdmin = false, want true (forward-jit row's is_admin must not be overwritten)")
+	}
+
+	row, err := svc.db.Reader.GetUserByUsername(ctx, "dave")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IsAdmin != 1 {
+		t.Errorf("stored is_admin = %d, want 1 (unchanged)", row.IsAdmin)
+	}
+	if row.Source != "forward-jit" {
+		t.Fatalf("test setup invariant broken: row.Source = %q, want forward-jit", row.Source)
+	}
+	// Username/email/last_seen_at still refresh like any same-key row
+	// -- only is_admin is guarded.
+	if row.Username != "dave" {
+		t.Errorf("Username = %q, want %q (denormalized fields still refresh)", row.Username, "dave")
+	}
+}
+
 func TestResolveOrCreate_RejectsMachinePrincipal(t *testing.T) {
 	svc := newService(t)
 	p := auth.Principal{
