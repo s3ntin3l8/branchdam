@@ -127,10 +127,20 @@ jobs:
       # Stamp the commit the image was built from into the embedded SPA via
       # BRANCHDAM_BUILD_ID, so Settings → "UI build" can warn about a stale
       # embedded SPA vs. a server that was rebuilt without rebuilding the SPA.
-      # Matches Dockerfile:16 ARG BRANCHDAM_BUILD_ID=dev-docker. PR-time build
-      # is kept for CGO/ldflags/alpine-layer validation (see comment above on
-      # this job's `if:`), but the BUILD_ID stamp is meaningful on every leg,
-      # not just :edge. docker-publish.yml's `build-args` is multiline
-      # key=value, one per line.
+      # Matches Dockerfile:16 ARG BRANCHDAM_BUILD_ID=dev-docker.
+      #
+      # The PR leg's image is build-only (never pushed), so the stamp there
+      # is never observed by anything running it -- only :edge and release
+      # images reach an operator. The PR-time docker build is kept because
+      # the paths-filter gate above ensures it runs only when a touched file
+      # could plausibly break the image (Dockerfile, lockfiles, go.mod), and
+      # it's the only CI leg that exercises the Dockerfile's actual build
+      # flags (CGO_ENABLED=1, -trimpath, -X main.version) and the alpine
+      # base. First real run of this line is the next push to main; the
+      # docker job is SKIPPED on this PR because detect's paths-filter does
+      # not match .github/workflows/*.
+      #
+      # docker-publish.yml's `build-args` is multiline key=value, one per
+      # line.
       build-args: BRANCHDAM_BUILD_ID=${{ github.sha }}
     secrets: inherit
