@@ -372,12 +372,14 @@ func TestSPABuildIDReadFromEmbeddedFS(t *testing.T) {
 	// the previous id[:128] truncated mid-rune and emitted invalid
 	// UTF-8 to JSON clients. ToValidUTF8 drops the broken suffix.
 	//
-	// Fixture math: 126 ASCII bytes + a 3-byte '€' = 129 total bytes;
-	// byte 128 is the lone 0x82 trailing byte of the € rune, so
-	// id[:128] ends mid-rune and decodes as invalid UTF-8 (Hermes
-	// round-2 reproducer). Earlier fixtures using 125 ASCII bytes
-	// landed byte 128 exactly on a rune boundary and silently passed
-	// against the pre-fix code -- the test was meaningless there.
+	// Fixture math: 126 ASCII bytes + a 3-byte '€' = 129 total bytes.
+	// The leading € rune spans bytes 126/127/128 (0xE2 0x82 0xAC); the
+	// id[:128] slice cuts off after byte 127 (0x82), so it ends with
+	// the first two bytes of an unfinished rune and decodes as invalid
+	// UTF-8 (Hermes round-2 reproducer). Earlier fixtures using 125
+	// ASCII bytes landed byte 128 exactly on a rune boundary and
+	// silently passed against the pre-fix code -- the test was
+	// meaningless there.
 	oversize := strings.Repeat("a", 126) + "€€€€€€€"
 	raw := oversize + "\n"
 	trimmed := strings.TrimSpace(raw)

@@ -58,8 +58,13 @@ function resolveBuildId(): string {
 // fail-open: BUILD_ID written outside the embedded FS, /api/v1/config
 // .spaBuildId returns "". path.resolve(root, outDir) gives the
 // guarantee the comment used to claim.
+//
+// `outDir` starts as null and is set in configResolved; closeBundle
+// throws if it is still null. Hermes round-3 wanted a fail-loud
+// fallback in case a future configResolved hook skips us, instead of
+// silently writing to a default cwd-resolved path.
 function branchdamBuildStamp(buildId: string): Plugin {
-  let outDir = path.resolve("dist"); // captured by configResolved below
+  let outDir: string | null = null;
   return {
     name: "branchdam-build-stamp",
     apply: "build",
@@ -67,6 +72,11 @@ function branchdamBuildStamp(buildId: string): Plugin {
       outDir = path.resolve(config.root, config.build.outDir);
     },
     closeBundle() {
+      if (outDir === null) {
+        throw new Error(
+          "branchdam-build-stamp: configResolved did not run; cannot determine outDir",
+        );
+      }
       writeFileSync(join(outDir, "BUILD_ID"), `${buildId}\n`, { encoding: "utf8" });
     },
   };
