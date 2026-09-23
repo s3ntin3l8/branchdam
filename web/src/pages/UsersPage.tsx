@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   useAdminResetPassword,
@@ -13,6 +13,7 @@ import {
 import { ApiError } from "../api/client";
 import type { AttributionUser } from "../api/types";
 import ConfirmDialog from "../components/ConfirmDialog";
+import InlineNotice from "../components/InlineNotice";
 
 function formatUnixTime(unix: number | undefined): string {
   if (!unix) return "—";
@@ -84,6 +85,27 @@ export default function UsersPage() {
     newAdmin: boolean;
   } | null>(null);
   const [revokeSessionsTarget, setRevokeSessionsTarget] = useState<AttributionUser | null>(null);
+
+  // Transient page-level notice replacing window.alert (issue #483):
+  // revoke-sessions success and re-enable error both land here. The id keys
+  // InlineNotice so re-showing a notice remounts it (fresh timer + scroll-
+  // into-view) instead of inheriting the old countdown. Errors are sticky
+  // (InlineNotice defaults autoDismissMs to 0 for error tone) so a failure
+  // cannot vanish unread; only success notices auto-dismiss or get cleared
+  // when a row-action dialog opens.
+  const noticeSeq = useRef(0);
+  const [notice, setNotice] = useState<{
+    id: number;
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
+  const showNotice = (tone: "success" | "error", message: string) => {
+    noticeSeq.current += 1;
+    setNotice({ id: noticeSeq.current, tone, message });
+  };
+  const clearSuccessNotice = () => {
+    setNotice((n) => (n && n.tone === "success" ? null : n));
+  };
 
   // Create user modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -173,24 +195,36 @@ export default function UsersPage() {
   };
 
   const openDisable = (user: AttributionUser) => {
+    clearSuccessNotice();
     disableUserMutation.reset();
     setDisableTarget(user);
   };
 
   const handleReEnable = async (user: AttributionUser) => {
+    // Clear any previous notice (success or stale error) when retrying so
+    // only the outcome of this attempt is shown.
+    setNotice(null);
     try {
       await enableUserMutation.mutateAsync(user.id);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to re-enable user.");
+      const detail = err instanceof Error ? err.message : null;
+      showNotice(
+        "error",
+        detail
+          ? `Failed to re-enable ${user.username}: ${detail}`
+          : `Failed to re-enable ${user.username}.`,
+      );
     }
   };
 
   const openToggleAdmin = (user: AttributionUser) => {
+    clearSuccessNotice();
     updateUserMutation.reset();
     setAdminTarget({ user, newAdmin: !user.isAdmin });
   };
 
   const openRevokeSessions = (user: AttributionUser) => {
+    clearSuccessNotice();
     revokeUserSessionsMutation.reset();
     setRevokeSessionsTarget(user);
   };
@@ -252,6 +286,15 @@ export default function UsersPage() {
           className="w-full max-w-sm rounded border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm text-neutral-100 placeholder-neutral-500 focus:border-brand focus:outline-none"
         />
       </div>
+
+      {notice && (
+        <InlineNotice
+          key={notice.id}
+          tone={notice.tone}
+          message={notice.message}
+          onDismiss={() => setNotice(null)}
+        />
+      )}
 
       {isLoading ? (
         <div className="flex h-32 items-center justify-center text-neutral-500">
@@ -650,7 +693,8 @@ export default function UsersPage() {
             revokeUserSessionsMutation.mutate(revokeSessionsTarget.id, {
               onSuccess: (res) => {
                 setRevokeSessionsTarget(null);
-                alert(
+                showNotice(
+                  "success",
                   `Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`,
                 );
               },
