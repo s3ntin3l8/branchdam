@@ -57,7 +57,11 @@ Frontend changes:
 make check-web
 ```
 
-which is `cd web && npm run lint && npm run typecheck && npm run test && npm run build`.
+which is `cd web && npm run lint && npm run typecheck && npm run test && npm run build`. The vitest
+suite is sharded in CI via `Web (typecheck · build) / test-shard` and `test-merge`, but `make check-web`
+runs it single-process locally -- expect ~30-40s on a warm cache. New contract tests added under
+`web/src/styles/` (theme, hardcoded-token ban) run on every push, so prefer focused fixtures over
+heavy `render()` trees when adding new contracts.
 
 ## PR title
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, resolve } from "node:path";
+import { KNOWN_SAFE } from "./hardcodedTextColors.fixture";
 
 /*
  * Static analysis of JSX class strings: hard bans a family of theme-unsafe
@@ -192,15 +193,16 @@ describe("hardcoded theme-unsafe text colors", () => {
   it("keeps the documented bg-X text-white button pattern on the allowlist", () => {
     // Sanity: the scan must not ban every occurrence (empty allowlist
     // would pass the first assertion vacuously if extractStringLiterals
-    // broke). Spot-check a known button pattern stays allowed -- if the
-    // allowlist regex regresses this fails first.
+    // broke). Spot-check the documented button pattern stays allowed --
+    // sourced from `hardcodedTextColors.fixture.tsx` (which only the
+    // scanner reads, not the app), so the assertion doesn't drift when
+    // a production file refactors its class string into a const.
     expect(allowed.length).toBeGreaterThan(0);
     expect(
       allowed.some(
         (a) =>
-          a.startsWith("pages/LoginPage.tsx:") &&
-          a.includes("bg-brand") &&
-          a.includes("text-white"),
+          a.startsWith("styles/hardcodedTextColors.fixture.tsx:") &&
+          a.includes(KNOWN_SAFE),
       ),
     ).toBe(true);
   });
