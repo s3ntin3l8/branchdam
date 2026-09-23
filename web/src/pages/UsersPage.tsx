@@ -12,6 +12,7 @@ import {
 } from "../hooks/queries";
 import { ApiError } from "../api/client";
 import type { AttributionUser } from "../api/types";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 function formatUnixTime(unix: number | undefined): string {
   if (!unix) return "—";
@@ -72,6 +73,17 @@ export default function UsersPage() {
   const enableUserMutation = useEnableUser();
   const updateUserMutation = useUpdateUser();
   const revokeUserSessionsMutation = useRevokeUserSessions();
+
+  // ConfirmDialog targets: replace the three window.confirm gates
+  // (disable, toggle admin, revoke sessions) -- issue #478. newAdmin is
+  // captured at click time so a list refetch can't flip the intent
+  // while the dialog is open.
+  const [disableTarget, setDisableTarget] = useState<AttributionUser | null>(null);
+  const [adminTarget, setAdminTarget] = useState<{
+    user: AttributionUser;
+    newAdmin: boolean;
+  } | null>(null);
+  const [revokeSessionsTarget, setRevokeSessionsTarget] = useState<AttributionUser | null>(null);
 
   // Create user modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -160,13 +172,9 @@ export default function UsersPage() {
     }
   };
 
-  const handleDisable = async (user: AttributionUser) => {
-    if (!window.confirm(`Disable logins for ${user.username}?`)) return;
-    try {
-      await disableUserMutation.mutateAsync(user.id);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to disable user.");
-    }
+  const openDisable = (user: AttributionUser) => {
+    disableUserMutation.reset();
+    setDisableTarget(user);
   };
 
   const handleReEnable = async (user: AttributionUser) => {
@@ -177,25 +185,14 @@ export default function UsersPage() {
     }
   };
 
-  const handleToggleAdmin = async (user: AttributionUser) => {
-    const newAdmin = !user.isAdmin;
-    const action = newAdmin ? "grant admin privileges to" : "remove admin privileges from";
-    if (!window.confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} ${user.username}?`)) return;
-    try {
-      await updateUserMutation.mutateAsync({ userId: user.id, input: { isAdmin: newAdmin } });
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to update user.");
-    }
+  const openToggleAdmin = (user: AttributionUser) => {
+    updateUserMutation.reset();
+    setAdminTarget({ user, newAdmin: !user.isAdmin });
   };
 
-  const handleRevokeSessions = async (user: AttributionUser) => {
-    if (!window.confirm(`Revoke all active sessions for ${user.username}? They will be logged out everywhere.`)) return;
-    try {
-      const res = await revokeUserSessionsMutation.mutateAsync(user.id);
-      alert(`Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to revoke sessions.");
-    }
+  const openRevokeSessions = (user: AttributionUser) => {
+    revokeUserSessionsMutation.reset();
+    setRevokeSessionsTarget(user);
   };
 
   const handleCopyPassword = async () => {
@@ -359,7 +356,7 @@ export default function UsersPage() {
                           {!isSelf && (
                             <button
                               type="button"
-                              onClick={() => handleToggleAdmin(user)}
+                              onClick={() => openToggleAdmin(user)}
                               className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
                             >
                               {user.isAdmin ? "Remove Admin" : "Make Admin"}
@@ -368,7 +365,7 @@ export default function UsersPage() {
                           {!isSelf && (
                             <button
                               type="button"
-                              onClick={() => handleRevokeSessions(user)}
+                              onClick={() => openRevokeSessions(user)}
                               className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
                             >
                               Revoke Sessions
@@ -387,7 +384,7 @@ export default function UsersPage() {
                           {!isDisabled && !isSelf && (
                             <button
                               type="button"
-                              onClick={() => handleDisable(user)}
+                              onClick={() => openDisable(user)}
                               className="rounded border border-neutral-800 px-2.5 py-1 text-xs text-red-400 hover:border-red-700 hover:text-red-300"
                             >
                               Disable
@@ -582,6 +579,86 @@ export default function UsersPage() {
           </div>
         </div>
       </Modal>
+
+      {disableTarget && (
+        <ConfirmDialog
+          titleId="disable-user-title"
+          title="Disable User"
+          body={
+            <>
+              Disable logins for{" "}
+              <strong className="text-white">{disableTarget.username}</strong>?
+            </>
+          }
+          confirmLabel="Confirm Disable"
+          pendingLabel="Disabling…"
+          isPending={disableUserMutation.isPending}
+          error={disableUserMutation.isError ? disableUserMutation.error : undefined}
+          errorLabel="Failed to disable user"
+          onConfirm={() => {
+            disableUserMutation.mutate(disableTarget.id, {
+              onSuccess: () => setDisableTarget(null),
+            });
+          }}
+          onCancel={() => setDisableTarget(null)}
+        />
+      )}
+
+      {adminTarget && (
+        <ConfirmDialog
+          titleId={adminTarget.newAdmin ? "grant-admin-title" : "remove-admin-title"}
+          title={adminTarget.newAdmin ? "Grant Admin Privileges" : "Remove Admin Privileges"}
+          body={
+            <>
+              {adminTarget.newAdmin ? "Grant" : "Remove"} admin privileges{" "}
+              {adminTarget.newAdmin ? "to" : "from"}{" "}
+              <strong className="text-white">{adminTarget.user.username}</strong>?
+            </>
+          }
+          confirmLabel={adminTarget.newAdmin ? "Confirm Grant Admin" : "Confirm Remove Admin"}
+          pendingLabel="Updating…"
+          isPending={updateUserMutation.isPending}
+          error={updateUserMutation.isError ? updateUserMutation.error : undefined}
+          errorLabel="Failed to update user"
+          onConfirm={() => {
+            updateUserMutation.mutate(
+              { userId: adminTarget.user.id, input: { isAdmin: adminTarget.newAdmin } },
+              { onSuccess: () => setAdminTarget(null) },
+            );
+          }}
+          onCancel={() => setAdminTarget(null)}
+        />
+      )}
+
+      {revokeSessionsTarget && (
+        <ConfirmDialog
+          titleId="revoke-sessions-title"
+          title="Revoke Sessions"
+          body={
+            <>
+              Revoke all active sessions for{" "}
+              <strong className="text-white">{revokeSessionsTarget.username}</strong>? They will
+              be logged out everywhere.
+            </>
+          }
+          confirmLabel="Confirm Revoke"
+          pendingLabel="Revoking…"
+          isPending={revokeUserSessionsMutation.isPending}
+          error={revokeUserSessionsMutation.isError ? revokeUserSessionsMutation.error : undefined}
+          errorLabel="Failed to revoke sessions"
+          onConfirm={() => {
+            revokeUserSessionsMutation.mutate(revokeSessionsTarget.id, {
+              onSuccess: (res) => {
+                setRevokeSessionsTarget(null);
+                alert(
+                  `Revoked ${res.revokedCount} active session${res.revokedCount === 1 ? "" : "s"}.`,
+                );
+              },
+            });
+          }}
+          onCancel={() => setRevokeSessionsTarget(null)}
+        />
+      )}
     </div>
   );
 }
