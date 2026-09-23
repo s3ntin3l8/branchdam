@@ -328,17 +328,23 @@ export default function UsersPage() {
                 const isSystem = user.authProvider === "system" || user.username === "system";
                 const isDisabled = Boolean(user.disabledAt);
                 const isSelf = me?.localUserId !== undefined && user.id === me.localUserId;
-                // Forward-link accounts (source !== "local") have no
-                // password_hash and their role is resynced from the
-                // identity provider's groups on every request
-                // (internal/users.ResolveOrCreate) -- the local-auth-only
-                // admin toggle and password reset routes 503 for them
-                // when auth.mode is "forward" (no local auth configured
-                // at all), and even where local auth IS configured
-                // ("both" mode) a manual admin toggle would just be
-                // reverted by the next sync. Hide both actions rather
-                // than offer a control that can't stick.
+                // source==="local" is the only source with a
+                // password_hash (CHECK constraint) -- Reset Password is
+                // gated on this alone, for both local and forward-jit/
+                // forward-link non-local accounts.
                 const isLocalManaged = user.source === "local";
+                // source==="forward-link" is the only source whose
+                // is_admin internal/users.ResolveOrCreate actually
+                // resyncs from the identity provider's groups on every
+                // request (see RefreshAttributionUserSeenWithAdmin) --
+                // forward-jit rows are provisioned once by
+                // internal/auth/users/jit.go and never resynced after
+                // that, so they don't belong under this label. Also
+                // excludes the system/ansible-bootstrap sentinels
+                // (also source==="forward-link", but their whole
+                // actions cell and role semantics are out of scope --
+                // see the isSystem guard below).
+                const isIdpSynced = user.source === "forward-link" && !isSystem;
 
                 return (
                   <tr key={user.id} className="hover:bg-neutral-900/30">
@@ -367,7 +373,7 @@ export default function UsersPage() {
                             User
                           </span>
                         )}
-                        {!isLocalManaged && (
+                        {isIdpSynced && (
                           <span
                             title="Role is managed by the identity provider and synced on every login."
                             className="text-[10px] text-neutral-500"
@@ -417,7 +423,7 @@ export default function UsersPage() {
                               Re-enable
                             </button>
                           )}
-                          {!isSelf && isLocalManaged && (
+                          {!isSelf && !isIdpSynced && (
                             <button
                               type="button"
                               onClick={() => openToggleAdmin(user)}

@@ -442,6 +442,41 @@ describe("UsersPage row actions", () => {
     expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
   });
 
+  it("shows Make Admin but hides Reset Password for forward-jit accounts (not IdP-synced)", async () => {
+    // forward-jit rows are provisioned once by internal/auth/users/jit.go
+    // and never resynced by ResolveOrCreate afterward (unlike
+    // forward-link) -- a manual admin toggle sticks, so the button
+    // should be offered. Reset Password stays hidden: forward-jit rows
+    // have password_hash=NULL (CHECK constraint), so a reset would
+    // fail regardless of source-based UI gating.
+    stubUsers([
+      makeUser({ id: 2, username: "bob", source: "forward-jit", authProvider: "forward-jit" }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByRole("button", { name: /make admin/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reset password/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
+  });
+
+  it("does NOT mark the system user's role as IdP-synced", async () => {
+    // The system sentinel is source="forward-link" in production (same
+    // as a real forward-auth user), but its whole actions cell -- and
+    // by extension the IdP-sync semantics -- are out of scope for it.
+    stubUsers([
+      makeUser({
+        id: 999,
+        username: "system",
+        authProvider: "system",
+        source: "forward-link",
+      }),
+    ]);
+
+    renderPage();
+    await screen.findByText(/ID:\s*999/);
+    expect(screen.queryByText(/via idp/i)).not.toBeInTheDocument();
+  });
+
   it("re-enable attempt clears any previous notice", async () => {
     const user = userEvent.setup();
     enableUserMock.mockRejectedValueOnce(new Error("boom"));
