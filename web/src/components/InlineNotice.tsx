@@ -22,10 +22,12 @@ const dismissClasses = {
 // Pattern mirrors DedupNotice: ref-guarded auto-dismiss timer so parent
 // re-renders with new callback references do not reset the countdown.
 //
-// Timer reset contract: the countdown starts on mount only. Callers that
-// re-show a notice (identical message or not) MUST change the React key
-// (e.g. a monotonic notice id) so the component remounts with a fresh
-// window -- swapping props in place never restarts the timer.
+// Timer reset contract: the countdown starts on mount and is governed only
+// by autoDismissMs (which is tone-derived, so an in-place tone change
+// restarts or cancels it as appropriate). Swapping message alone never
+// restarts the timer -- callers that re-show a notice (identical message
+// or not) MUST change the React key (e.g. a monotonic notice id) so the
+// component remounts with a fresh window.
 //
 // Errors use role="alert" so screen readers announce them assertively;
 // success stays role="status" (polite). The roles carry the live-region
