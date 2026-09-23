@@ -333,9 +333,9 @@ export default function UsersPage() {
                 // identity provider's group membership on every request
                 // (ResolveOrCreate), not toggled by an admin here. Hide
                 // the local-only admin-toggle/reset-password/revoke-session
-                // actions for them (issue #485) -- all three hit
-                // handleAdminXNoLocal 503s when auth.mode is "forward"
-                // and s.localAuth is nil.
+                // actions for them (issue #485) -- all three route to the
+                // *NoLocal 503 handlers in internal/httpapi/local_auth.go
+                // when auth.mode is "forward" and s.localAuth is nil.
                 const isForwardLink = user.source !== "local";
 
                 return (
