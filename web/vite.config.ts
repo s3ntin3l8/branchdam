@@ -1,10 +1,99 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from "vite";
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import path, { join } from "node:path";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+// resolveBuildId returns a short, human-readable identifier for this
+// SPA build. CI / Docker set BRANCHDAM_BUILD_ID (matching the same env
+// the backend Dockerfile uses for `-X main.version`); locally we fall
+// back to `git rev-parse --short HEAD` with a `-dirty` marker so a
+// developer running `npm run build` sees something more useful than
+// "dev" -- and can spot uncommitted SPA changes from the Settings
+// page. Final fallback: `dev-<UTC date>`, e.g. for tarball checkouts
+// without .git.
+function resolveBuildId(): string {
+  const fromEnv = process.env.BRANCHDAM_BUILD_ID?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const sha = execSync("git rev-parse --short HEAD", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    if (!sha) throw new Error("empty");
+    let dirty = "";
+    try {
+      const porcelain = execSync("git status --porcelain", {
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim();
+      if (porcelain) dirty = "-dirty";
+    } catch {
+      // status failing is fine -- leave it un-dirty (e.g. tarball
+      // checkout without .git).
+    }
+    return `${sha}${dirty}`;
+  } catch {
+    return `dev-${new Date().toISOString().slice(0, 10)}`;
+  }
+}
+
+// branchdamBuildStamp writes a one-line BUILD_ID into the emitted
+// outDir (web/dist/BUILD_ID) so the Go server can read it from the
+// embedded FS at startup and surface it via /api/v1/config.spaBuildId.
+// `apply: "build"` excludes the dev server and vitest -- nothing to
+// stamp there. `closeBundle` runs after every asset has been emitted,
+// so we write on the real on-disk outDir rather than Vite's in-memory
+// bundle map.
+//
+// The outDir comes from `configResolved(cfg)` and is resolved against
+// `config.root` -- vite 8.x's resolveConfig returns a RELATIVE
+// build.outDir (Hermes round-2 reproducer); `join("dist", "BUILD_ID")`
+// alone only works because config.root happens to equal cwd. A future
+// --root override or a config that pins root elsewhere would silently
+// fail-open: BUILD_ID written outside the embedded FS, /api/v1/config
+// .spaBuildId returns "". path.resolve(root, outDir) gives the
+// guarantee the comment used to claim.
+//
+// `outDir` starts as null and is set in configResolved; closeBundle
+// throws if it is still null. Hermes round-3 wanted a fail-loud
+// fallback in case a future configResolved hook skips us, instead of
+// silently writing to a default cwd-resolved path.
+function branchdamBuildStamp(buildId: string): Plugin {
+  let outDir: string | null = null;
+  return {
+    name: "branchdam-build-stamp",
+    apply: "build",
+    configResolved(config) {
+      outDir = path.resolve(config.root, config.build.outDir);
+    },
+    closeBundle() {
+      if (outDir === null) {
+        throw new Error(
+          "branchdam-build-stamp: configResolved did not run; cannot determine outDir",
+        );
+      }
+      writeFileSync(join(outDir, "BUILD_ID"), `${buildId}\n`, { encoding: "utf8" });
+    },
+  };
+}
+
+const buildId = resolveBuildId();
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  define: {
+    // JSON.stringify keeps this a literal string in the bundle; the
+    // SPA reads it via `declare const __BRANCHDAM_BUILD__: string`
+    // in src/vite-env.d.ts. Operators compare this against the
+    // backend's `-X main.version` (exposed as Config.version) to
+    // spot a stale local embed.
+    __BRANCHDAM_BUILD__: JSON.stringify(buildId),
+  },
+  plugins: [react(), tailwindcss(), branchdamBuildStamp(buildId)],
   server: {
     // Bind on all interfaces so the dev server is reachable on a
     // remote/headless host. Override the port with VITE_PORT if 5173 is taken.

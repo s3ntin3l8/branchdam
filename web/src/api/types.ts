@@ -112,6 +112,13 @@ export interface PathRewrite {
 
 export interface Config {
   version: string;
+  // spaBuildId is the identifier the backend read from
+  // web/dist/BUILD_ID at startup (written by vite.config.ts's
+  // branchdamBuildStamp plugin at build time). Empty string when the
+  // embedded bundle is the ci-prebuild.sh stub, which has no BUILD_ID.
+  // Operators compare it against the inlined __BRANCHDAM_BUILD__ the
+  // Settings page renders to spot a stale local embed.
+  spaBuildId?: string;
   pathRewrites?: PathRewrite[];
 }
 

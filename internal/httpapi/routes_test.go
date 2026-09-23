@@ -1182,6 +1182,29 @@ func TestConfigReturnsVersion(t *testing.T) {
 	}
 }
 
+// TestConfigExposesSPABuildID asserts that the SPA build id written
+// into web/dist/BUILD_ID by vite's branchdamBuildStamp plugin is
+// surfaced through /api/v1/config. fullTestServer doesn't pass an SPA
+// to Deps, so the value must be the empty string (no bundle to read).
+// The with-SPA case is exercised by TestSPABuildIDReadFromEmbeddedFS
+// in spa_test.go.
+func TestConfigExposesSPABuildID(t *testing.T) {
+	srv, _ := fullTestServer(t)
+	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/config", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		SPABuildID string `json:"spaBuildId"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.SPABuildID != "" {
+		t.Errorf("spaBuildId = %q, want empty (no SPA supplied to fullTestServer)", got.SPABuildID)
+	}
+}
+
 func TestGetAssetNotFound(t *testing.T) {
 	srv, _ := fullTestServer(t)
 	rr := doJSON(t, srv.Handler(), http.MethodGet, "/api/v1/assets/999999", nil)

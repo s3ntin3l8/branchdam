@@ -3,14 +3,17 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
+	"unicode/utf8"
 
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -66,6 +69,13 @@ func TestServeIndexHTMLSubstitutesOriginFromDirectRequest(t *testing.T) {
 	}
 	if ct := rr.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Errorf("Content-Type = %q, want text/html; charset=utf-8", ct)
+	}
+	// Shell must revalidate on every load -- hashed asset filenames
+	// change every build, so a cached old shell is exactly the
+	// "looks like the deploy didn't take" failure mode SPA cache
+	// hardening is meant to prevent.
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "no-cache")
 	}
 	body, _ := io.ReadAll(rr.Body)
 	want := `content="http://branchdam.example/og-image.png"`
@@ -267,5 +277,141 @@ func TestServeIndexHTMLOnDeepLinkFallback(t *testing.T) {
 	want := `content="http://branchdam.example/og-image.png"`
 	if !bytes.Contains(body, []byte(want)) {
 		t.Errorf("body = %q, want the templated shell", body)
+	}
+}
+
+// TestSPAAssetCacheHeaders pins the immutable-cache policy for hashed
+// assets under /assets/. Vite content-hashes every emitted JS/CSS chunk,
+// so a year-long max-age is safe: the filename itself changes per build.
+// Non-asset paths (favicon, manifest) keep the FileServer default so a
+// stale favicon doesn't last a year.
+func TestSPAAssetCacheHeaders(t *testing.T) {
+	spa := fstest.MapFS{
+		"index.html":              {Data: []byte(indexHTMLFixture)},
+		"assets/index-AbCdEf.js":  {Data: []byte("// hashed asset")},
+		"assets/index-AbCdEf.css": {Data: []byte("/* hashed asset */")},
+		"favicon.ico":             {Data: []byte{0x00, 0x01, 0x02}},
+	}
+	srv := testServerWithSPA(t, spa)
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/assets/index-AbCdEf.js", "public, max-age=31536000, immutable"},
+		{"/assets/index-AbCdEf.css", "public, max-age=31536000, immutable"},
+		// Non-asset embedded files: FileServer default (no Cache-Control
+		// from us). Asset names always live under assets/ in a Vite
+		// build, so this won't pin a year-long cache to anything
+		// content-addressable.
+		{"/favicon.ico", ""},
+	}
+	for _, tc := range tests {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://branchdam.example"+tc.path, nil)
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rr.Code)
+			}
+			if got := rr.Header().Get("Cache-Control"); got != tc.want {
+				t.Errorf("Cache-Control = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSPABuildIDReadFromEmbeddedFS asserts that the identifier vite's
+// branchdamBuildStamp plugin writes to web/dist/BUILD_ID is read at
+// startup and exposed through /api/v1/config. Tests that supply no SPA
+// (the default fullTestServer case) must see an empty string -- the
+// read failures must never panic / block boot.
+func TestSPABuildIDReadFromEmbeddedFS(t *testing.T) {
+	spa := fstest.MapFS{
+		"index.html": {Data: []byte(indexHTMLFixture)},
+		// A trailing newline is what the vite plugin actually writes;
+		// verify the trim, not the byte-for-byte round-trip.
+		"BUILD_ID": {Data: []byte("a1b2c3d-dirty\n")},
+	}
+	srv := testServerWithSPA(t, spa)
+
+	rr := httptest.NewRequest(http.MethodGet, "http://branchdam.example/api/v1/config", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, rr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		SPABuildID string `json:"spaBuildId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.SPABuildID != "a1b2c3d-dirty" {
+		t.Errorf("spaBuildId = %q, want %q", got.SPABuildID, "a1b2c3d-dirty")
+	}
+
+	// No BUILD_ID file -> empty string, never an error.
+	noStamp := fstest.MapFS{
+		"index.html": {Data: []byte(indexHTMLFixture)},
+	}
+	srv = testServerWithSPA(t, noStamp)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://branchdam.example/api/v1/config", nil))
+	var missing struct {
+		SPABuildID string `json:"spaBuildId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &missing); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if missing.SPABuildID != "" {
+		t.Errorf("spaBuildId = %q, want empty when BUILD_ID missing", missing.SPABuildID)
+	}
+
+	// Oversize BUILD_ID with a UTF-8 rune straddling the 128-byte cap:
+	// the previous id[:128] truncated mid-rune and emitted invalid
+	// UTF-8 to JSON clients. ToValidUTF8 drops the broken suffix.
+	//
+	// Fixture math: 126 ASCII bytes + a 3-byte '€' = 129 total bytes.
+	// The leading € rune spans bytes 126/127/128 (0xE2 0x82 0xAC); the
+	// id[:128] slice cuts off after byte 127 (0x82), so it ends with
+	// the first two bytes of an unfinished rune and decodes as invalid
+	// UTF-8 (Hermes round-2 reproducer). Earlier fixtures using 125
+	// ASCII bytes landed byte 128 exactly on a rune boundary and
+	// silently passed against the pre-fix code -- the test was
+	// meaningless there.
+	oversize := strings.Repeat("a", 126) + "€€€€€€€"
+	raw := oversize + "\n"
+	trimmed := strings.TrimSpace(raw)
+
+	// Sanity-check the fixture before exercising the cap: the pre-fix
+	// form (id[:128]) MUST be invalid UTF-8, otherwise we are not
+	// actually exercising the regression. This catches a future tweak
+	// that quietly re-aligns the boundary.
+	if utf8.ValidString(trimmed[:128]) {
+		t.Fatalf("fixture no longer reproduces the bug: id[:128] = %q is valid UTF-8; bump the ASCII prefix to land byte 128 mid-rune", trimmed[:128])
+	}
+	if !utf8.ValidString(oversize) {
+		t.Fatalf("fixture itself is invalid UTF-8 before the cap: %q", oversize)
+	}
+
+	spa = fstest.MapFS{
+		"index.html": {Data: []byte(indexHTMLFixture)},
+		"BUILD_ID":   {Data: []byte(raw)},
+	}
+	srv = testServerWithSPA(t, spa)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://branchdam.example/api/v1/config", nil))
+	var oversizeOut struct {
+		SPABuildID string `json:"spaBuildId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &oversizeOut); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !utf8.ValidString(oversizeOut.SPABuildID) {
+		t.Errorf("spaBuildId = %q, want valid UTF-8 after cap", oversizeOut.SPABuildID)
+	}
+	if len(oversizeOut.SPABuildID) > 128 {
+		t.Errorf("spaBuildId length = %d, want <=128", len(oversizeOut.SPABuildID))
 	}
 }

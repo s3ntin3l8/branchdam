@@ -246,7 +246,14 @@ type PathRewriteDTO struct {
 
 type ConfigOutput struct {
 	Body struct {
-		Version      string           `json:"version"`
+		Version string `json:"version"`
+		// SPABuildID is the identifier vite's branchdamBuildStamp plugin
+		// wrote into web/dist/BUILD_ID at build time (see web/vite.config.ts).
+		// Empty when the embedded bundle is the ci-prebuild.sh stub (no
+		// BUILD_ID file). The Settings page compares this against the
+		// SPA's own inlined __BRANCHDAM_BUILD__ to flag a stale local
+		// embed (binary rebuilt, old web/dist re-embedded).
+		SPABuildID   string           `json:"spaBuildId"`
 		PathRewrites []PathRewriteDTO `json:"pathRewrites"`
 	}
 }
@@ -254,6 +261,7 @@ type ConfigOutput struct {
 func (s *Server) handleConfig(_ context.Context, _ *struct{}) (*ConfigOutput, error) {
 	out := &ConfigOutput{}
 	out.Body.Version = s.version
+	out.Body.SPABuildID = s.spaBuildId
 	out.Body.PathRewrites = make([]PathRewriteDTO, 0)
 	if cfg := s.cfg(); cfg != nil {
 		for _, rw := range cfg.PathRewrites {

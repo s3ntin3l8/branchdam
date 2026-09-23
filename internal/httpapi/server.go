@@ -201,19 +201,27 @@ type LocalAuthDeps struct {
 
 // Server bundles the dependencies handlers need.
 type Server struct {
-	cfgProvider    configProvider
-	settingsStore  *settings.Store // nil unless Deps.Settings was supplied
-	log            *slog.Logger
-	db             *db.DB
-	guard          *storage.Guard
-	prober         *probe.Prober
-	pool           *workers.Pool[string]
-	engine         *graph.Engine
-	hub            *sse.Hub
-	sseSlot        *limiter
-	sseCache       ssePayloadCache
-	spa            fs.FS
-	version        string
+	cfgProvider   configProvider
+	settingsStore *settings.Store // nil unless Deps.Settings was supplied
+	log           *slog.Logger
+	db            *db.DB
+	guard         *storage.Guard
+	prober        *probe.Prober
+	pool          *workers.Pool[string]
+	engine        *graph.Engine
+	hub           *sse.Hub
+	sseSlot       *limiter
+	sseCache      ssePayloadCache
+	spa           fs.FS
+	version       string
+	// spaBuildId is the identifier the vite branchdamBuildStamp plugin
+	// wrote into web/dist/BUILD_ID at build time (see web/vite.config.ts).
+	// Empty when the embedded bundle is the ci-prebuild.sh stub, which
+	// has no BUILD_ID file. Surface it via /api/v1/config so the SPA's
+	// Settings page can compare against its own inlined __BRANCHDAM_BUILD__
+	// and flag a stale local embed (the binary rebuilt but the old
+	// web/dist got embedded again).
+	spaBuildId     string
 	tracker        *pipeline.ScanTracker
 	watcher        *pipeline.WatcherSupervisor
 	shutdown       <-chan struct{}
@@ -297,6 +305,7 @@ func New(d Deps) *Server {
 		pairingService: d.Pairing,
 		agentKeyLookup: d.agentKeyLookup,
 		patService:     d.PAT,
+		spaBuildId:     readSPABuildID(d.SPA),
 		attribution:    d.Attribution,
 		audit:          d.Audit,
 	}
@@ -670,6 +679,15 @@ func (s *Server) spaHandler() http.Handler {
 			s.serveIndexHTML(w, r)
 			return
 		}
+		// Vite emits content-hashed filenames under /assets/ -- safe to
+		// cache forever at the edge because the hash changes every build.
+		// Setting the header BEFORE fileServer.ServeHTTP matters: the
+		// http server writes headers on the first Write/WriteHeader, so
+		// anything we set here is visible to the client unless fileServer
+		// explicitly overwrites it (it doesn't, for Cache-Control).
+		if strings.HasPrefix(p, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
 		fileServer.ServeHTTP(w, r)
 	})
 }
@@ -687,6 +705,14 @@ func (s *Server) spaHandler() http.Handler {
 // values below, so it's HTML-escaped before substitution -- without this, a
 // crafted header (e.g. `X-Forwarded-Host: x"><script>...`) would be a
 // reflected-XSS vector.
+//
+// Cache-Control is no-cache: the shell references hashed asset filenames,
+// so on every build those URLs change and we want every browser to
+// revalidate -- not to serve a stale shell that points at hashed asset
+// names from a previous deploy. no-cache (not no-store) so the shell can
+// still be cached, just revalidated; the file is small enough that the
+// extra round-trip is cheaper than the operational surprise of a stale
+// UI.
 func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
 	data, err := fs.ReadFile(s.spa, "index.html")
 	if err != nil {
@@ -700,6 +726,7 @@ func (s *Server) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
 	origin := html.EscapeString(requestOrigin(r, trustedProxies))
 	page := bytes.ReplaceAll(data, []byte("__BRANCHDAM_ORIGIN__"), []byte(origin))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
 	_, _ = w.Write(page)
 }
@@ -724,6 +751,33 @@ func requestOrigin(r *http.Request, trustedProxies []string) string {
 		scheme = "https"
 	}
 	return scheme + "://" + host
+}
+
+// readSPABuildID returns the identifier the vite branchdamBuildStamp
+// plugin wrote into web/dist/BUILD_ID at build time, or "" when the
+// embedded bundle is the ci-prebuild.sh stub (which has no BUILD_ID
+// file) or when no SPA was supplied to Deps. Embedded FS errors are
+// treated as "not built" rather than fatal -- a misconfigured embed
+// path must not prevent the API from starting.
+func readSPABuildID(spa fs.FS) string {
+	if spa == nil {
+		return ""
+	}
+	data, err := fs.ReadFile(spa, "BUILD_ID")
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(data))
+	// Cap to a sane identifier length; a malformed value is still a
+	// valid string but worth bounding so a stray web/dist with a giant
+	// file doesn't get echoed verbatim to clients. Truncating
+	// mid-UTF-8 can split a rune, and the value lands verbatim inside
+	// /api/v1/config's JSON body -- ToValidUTF8 drops the broken
+	// suffix rather than emit invalid UTF-8 to lenient parsers.
+	if len(id) > 128 {
+		id = strings.ToValidUTF8(id[:128], "")
+	}
+	return id
 }
 
 // isTrustedProxy checks whether remoteAddr belongs to a trusted proxy range.
