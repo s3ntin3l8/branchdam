@@ -114,11 +114,19 @@ const BANNED_TOKEN_PATTERNS: string[] = (() => {
 })();
 
 // Theme-invariant or dark-in-both-themes solid backgrounds. White text on
-// any of these is legible in both modes:
+// any of these sits on a bg that stays dark in both modes (so a `text-white`
+// token has the dark-bg precondition satisfied in both modes):
 //   - `bg-brand` (constant, theme.css line 24 / 144)
 //   - `bg-black` (Tailwind built-in, `#000` in both themes)
 //   - `bg-{amber,red,emerald,sky}-[5-8]00` (theme.css comments at
 //     175-202 explicitly pin 500-800 dark in both themes)
+//
+// Note: the scanner proves *theme invariance* of the bg, **not** contrast.
+// Live sites like `RestartServerButton.tsx:36` (`bg-amber-600 text-white`
+// ≈ 3.2:1) and `UsersPage.tsx:610` (`hover:bg-amber-500 text-white` ≈ 2.8:1)
+// are below WCAG AA 4.5 but pass the scanner because the bg stays dark in
+// both themes -- a separate luminance check is needed for a hard contrast
+// guarantee. Tracked as #493.
 //   - `bg-indigo-[5-8]00` (theme.css line 168-171, dark both themes;
 //     indigo-900 flips PALE in light and is intentionally excluded)
 //   - `bg-{blue,purple,rose,fuchsia,teal}-[6-8]00` (undeclared, fall
