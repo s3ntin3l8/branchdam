@@ -241,8 +241,7 @@ export default function CompanionPairingsPage() {
   const [rotateResult, setRotateResult] = useState<RotateCompanionPairingResponse | null>(null);
 
   // ConfirmDialog targets: revoke and delete replace the old
-  // window.confirm prompts (pairing page only; UsersPage's three
-  // confirms are tracked separately).
+  // window.confirm prompts.
   const [revokeTarget, setRevokeTarget] = useState<CompanionPairingListItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CompanionPairingListItem | null>(null);
 
