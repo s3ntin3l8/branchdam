@@ -108,7 +108,7 @@ export default function MfaSetupPage() {
             <button
               type="submit"
               disabled={enableMutation.isPending || !code}
-              className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+              className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
               {enableMutation.isPending ? "Verifying…" : "Enable MFA"}
             </button>
@@ -141,7 +141,7 @@ export default function MfaSetupPage() {
         </div>
         <button
           onClick={() => navigate("/users")}
-          className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark"
+          className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
         >
           Done
         </button>

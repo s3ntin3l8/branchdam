@@ -195,12 +195,13 @@ const BG_NAME_PATTERN = `(?:brand(?:-dark)?|black|${ACCENT_FAMILIES.map(
   (family) => `${family}-(?:${BG_STOPS_BY_FAMILY[family]})`,
 ).join("|")})`;
 
-// Effectively-opaque opacity modifiers are safe on an allowlisted bg: at
-// >=80% the composite color stays on the dark side of the page bg in both
-// modes (the bleeding-through page bg is at most 20% of the mix).
-// `bg-amber-950/70` and friends stay rejected -- that's the translucent-chip
-// bug class this scanner exists to catch (round-8; folds the #493 S2
-// follow-up into the allowlist).
+// Effectively-opaque opacity modifiers on an allowlisted bg are allowed by
+// the scanner: at >=80% the composite color stays dark enough that the
+// theme-invariance heuristic still holds. This is NOT a contrast guarantee
+// -- for a mid-luminance bg the page bg bleeds through even at 80%
+// (`bg-emerald-600/80` gives white text ~2.9:1 over a light page, vs 3.77
+// solid). Hermes round-9 S3. The translucent-chip bug class this scanner
+// exists to catch (`bg-amber-950/70`) stays rejected.
 const BG_OPACITY = "(?:\\/(?:[89]\\d|100))?";
 
 // Each banned token's optional state prefix is captured in group 1.
@@ -489,11 +490,9 @@ describe("round-7 scanner probes (Hermes review)", () => {
 describe("round-8 scanner probes (Hermes review)", () => {
   it("R8: bg-brand / bg-brand-dark are registered and license text-white", () => {
     // The round-8 critical: `bg-brand` emitted NO CSS before the @theme
-    // registration in theme.css (verified: zero rules in a built bundle),
-    // so `bg-brand text-white` was white-on-transparent in light mode.
-    // Live strings this must keep passing (LoginPage/MfaSetupPage/... CTAs):
-    expect(isStringAllowed("bg-brand text-white hover:bg-brand-dark")).toBe(true);
-    expect(isStringAllowed("bg-brand text-white hover:bg-brand/90")).toBe(true);
+    // registration in theme.css (verified: zero rules in a built bundle).
+    // Live strings (login/MFA/password-reset CTAs, round-9 S1):
+    expect(isStringAllowed("bg-brand-dark text-white hover:bg-indigo-700")).toBe(true);
     // ...and the opacity gate must still reject translucent chips:
     expect(isStringAllowed("bg-brand/70 text-white")).toBe(false);
     expect(isStringAllowed("bg-amber-950/70 text-amber-200")).toBe(false);
@@ -519,9 +518,11 @@ describe("round-8 scanner probes (Hermes review)", () => {
     expect(isStringAllowed("bg-emerald-600/60 text-white")).toBe(false);
   });
 
-  it("R8: hover:bg-neutral-750 resolves (custom stop registered in @theme)", () => {
-    // Live at IngestJobsPage.tsx:137-170; was a dead utility (Tailwind has
-    // no 750 stop and no theme.css declaration) before the registration.
+  it("R8: IngestJobsPage kind-filter hover shape passes the scanner", () => {
+    // Note: this probe only proves the string carries no banned tokens
+    // (neutral-750 is not a banned text stop). The "utility actually emits
+    // CSS" half of the round-8 fix is guarded by theme.test.ts's @theme
+    // registration block, not here.
     expect(isStringAllowed("bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200")).toBe(true);
   });
 });

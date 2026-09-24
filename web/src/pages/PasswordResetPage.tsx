@@ -71,7 +71,7 @@ function ResetForm({ token }: { token: string }) {
           </p>
           <Link
             to="/login"
-            className="block w-full rounded bg-brand px-3 py-1.5 text-center text-sm font-medium text-white hover:bg-brand-dark"
+            className="block w-full rounded bg-brand-dark px-3 py-1.5 text-center text-sm font-medium text-white hover:bg-indigo-700"
           >
             Sign in
           </Link>
@@ -131,7 +131,7 @@ function ResetForm({ token }: { token: string }) {
           <button
             type="submit"
             disabled={submitDisabled}
-            className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+            className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
             {confirmMutation.isPending ? "Updating…" : "Update password"}
           </button>

@@ -195,7 +195,7 @@ function SetupForm({
           <button
             type="submit"
             disabled={pending || !username || password.length < 8 || mismatch}
-            className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+            className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
             {pending ? "Creating…" : "Create admin"}
           </button>
@@ -267,7 +267,7 @@ function LoginForm({
         <button
           type="submit"
           disabled={pending}
-          className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+          className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {pending ? "Signing in…" : "Sign in"}
         </button>
@@ -327,7 +327,7 @@ function LoginForm({
             <button
               type="submit"
               disabled={resetPending || !resetEmail}
-              className="flex-1 rounded bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+              className="flex-1 rounded bg-brand-dark px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
               {resetPending ? "Notifying…" : "Notify operator"}
             </button>
@@ -372,7 +372,7 @@ function ForwardOnly({ onSso }: { onSso: () => void }) {
       <button
         type="button"
         onClick={onSso}
-        className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark"
+        className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
       >
         Sign in with SSO
       </button>
