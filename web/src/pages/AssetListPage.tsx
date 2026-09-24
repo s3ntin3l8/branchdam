@@ -556,10 +556,10 @@ export default function AssetListPage() {
           title="Trash Asset"
           body={
             <>
-              Move <strong className="text-amber-400">{archiveTarget.fileName}</strong> to{" "}
-              <code className="text-amber-400">.trash/</code>? The media node and any linked Tier-2 export copies
+              Move <strong className="text-amber-300">{archiveTarget.fileName}</strong> to{" "}
+              <code className="text-amber-300">.trash/</code>? The media node and any linked Tier-2 export copies
               will be removed from their original locations, marked{" "}
-              <code className="text-amber-400">TRASHED</code>, and auto-purged after 30 days unless restored.
+              <code className="text-amber-300">TRASHED</code>, and auto-purged after 30 days unless restored.
             </>
           }
           confirmLabel="Confirm Trash"

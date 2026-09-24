@@ -269,9 +269,9 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
           title="Trash Asset"
           body={
             <>
-              Move <strong className="text-amber-400">{asset.fileName}</strong> to <code className="text-amber-400">.trash/</code>?
+              Move <strong className="text-amber-300">{asset.fileName}</strong> to <code className="text-amber-300">.trash/</code>?
               The master file and any linked Tier-2 export copies will be removed from their original locations.
-              The media node is marked <code className="text-amber-400">TRASHED</code> and the bytes are auto-purged after 30 days unless restored.
+              The media node is marked <code className="text-amber-300">TRASHED</code> and the bytes are auto-purged after 30 days unless restored.
             </>
           }
           confirmLabel="Confirm Trash"
@@ -295,7 +295,7 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
           title="Free Up Space"
           body={
             <>
-              Move <strong className="text-amber-400">{asset.fileName}</strong> to <code className="text-amber-400">.trash/</code> but keep any Tier-2 export copies on disk?
+              Move <strong className="text-amber-300">{asset.fileName}</strong> to <code className="text-amber-300">.trash/</code> but keep any Tier-2 export copies on disk?
               The master file is removed from the archive; cloud galleries are left untouched. Auto-purged after 30 days unless restored.
             </>
           }
