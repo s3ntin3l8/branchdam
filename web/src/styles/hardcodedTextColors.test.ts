@@ -52,6 +52,13 @@ import { KNOWN_SAFE } from "./hardcodedTextColors.fixture";
  * parent bg. `bg-neutral-900 hover:bg-amber-600 text-white` is banned
  * (unprefixed text-white has no unprefixed allowlisted bg), while
  * `hover:bg-amber-600 hover:text-white` is allowed (both hover-prefixed).
+ * An unprefixed allowlisted bg also licenses a state-prefixed banned
+ * token (`bg-brand hover:text-white`): the base bg is present underneath
+ * whenever no state bg overrides it (round-7 S1). The override case is
+ * checked separately -- if a bg exists at the token's state prefix, it
+ * must itself be allowlisted at that prefix, otherwise it replaces the
+ * base bg in that state (`bg-brand hover:bg-white hover:text-white` is
+ * still banned).
  *
  * Why a `FLIPPING_TEXT_TOKENS` exception set: `--color-indigo-200` is
  * declared in BOTH theme blocks and FLIPS (`#c7d2fe` dark, `#4338ca`
@@ -118,34 +125,70 @@ const BANNED_TOKEN_PATTERNS: string[] = (() => {
 // token has the dark-bg precondition satisfied in both modes):
 //   - `bg-brand` (constant, theme.css line 24 / 144)
 //   - `bg-black` (Tailwind built-in, `#000` in both themes)
-//   - `bg-{amber,red,emerald,sky}-[5-8]00` (theme.css comments at
-//     175-202 explicitly pin 500-800 dark in both themes)
+//   - the accent stops in BG_STOPS_BY_FAMILY below, derived from
+//     ACCENT_FAMILIES so a newly added family cannot ship without bg
+//     coverage (a module-level throw enforces it):
+//     amber/red/emerald/sky: `[5-8]00|900` (theme.css comments at
+//       175-202 explicitly pin 500-800 dark in both themes; the 900s
+//       also stay dark in both)
+//     indigo: `[5-8]00` only -- indigo-900 flips PALE in light
+//       (theme.css:172 `#e0e7ff`) and indigo-950 likewise
+//       (theme.css:173 `#eef2ff`); both intentionally excluded
+//     blue: `[6-8]00` only -- blue-900 (theme.css:228 `#dbeafe`) and
+//       blue-950 (theme.css:229 `#eff6ff`) flip PALE in light; excluded
+//     purple/rose/fuchsia/teal: `[6-8]00|900|950` (undeclared in
+//       theme.css at all, so their 900/950 stops stay Tailwind-dark in
+//       both themes; Hermes round-6 W2 -- the earlier comment lumped
+//       them in with indigo/blue and the allowlist wrongly rejected
+//       theme-safe pairs like `bg-purple-900 text-purple-200`)
+//     orange/yellow/pink/cyan/lime/violet: `[5-8]00|900|950`
+//       (undeclared beyond graph-edge 400s, so these stops stay
+//       Tailwind-dark in both themes; Hermes round-7 W2 -- the old
+//       hand-written pattern covered only 10 of the 16 ACCENT_FAMILIES
+//       and hard-failed theme-safe strings like
+//       `bg-orange-600 text-white`)
 //
 // Note: the scanner proves *theme invariance* of the bg, **not** contrast.
 // Live sites like `RestartServerButton.tsx:36` (`bg-amber-600 text-white`
 // ≈ 3.2:1) and `UsersPage.tsx:610` (`hover:bg-amber-500 text-white` ≈ 2.8:1)
 // are below WCAG AA 4.5 but pass the scanner because the bg stays dark in
 // both themes -- a separate luminance check is needed for a hard contrast
-// guarantee. Tracked as #493.
-//   - `bg-indigo-[5-8]00` (theme.css line 168-171, dark both themes;
-//     indigo-900 flips PALE in light and is intentionally excluded)
-//   - `bg-{blue,purple,rose,fuchsia,teal}-[6-8]00` (undeclared, fall
-//     back to Tailwind dark defaults in both themes)
-//   - `bg-{amber,red,emerald,sky}-900` is also allowlisted: those four
-//     stay dark in both themes. Only `bg-indigo-900` (theme.css:172
-//     `#e0e7ff`) and `bg-blue-900` (theme.css:228 `#dbeafe`) are
-//     declared in both theme blocks and flip PALE in light -- those two
-//     are intentionally excluded. purple/rose/fuchsia/teal have no
-//     declaration in theme.css at all, so their 900/950 stops stay
-//     Tailwind-dark in both themes and are allowlisted (Hermes round-6
-//     W2; the earlier comment lumped them in with indigo/blue and the
-//     allowlist wrongly rejected theme-safe pairs like
-//     `bg-purple-900 text-purple-200`).
+// guarantee. Tracked as #493. The same applies to the newly allowlisted
+// undeclared 500 stops (e.g. `bg-lime-500 text-white` ≈ 2.0:1).
 //   - `bg-white` is NOT included: it's `#fff` in both themes (undeclared
 //     -> Tailwind default), so `bg-white text-X-pale` is pale-on-pale in
 //     both modes. Hermes round-4 R4.1.
-const BG_NAME_PATTERN =
-  "(?:brand|black|amber-[5-8]00|red-[5-8]00|emerald-[5-8]00|sky-[5-8]00|indigo-[5-8]00|amber-900|red-900|emerald-900|sky-900|blue-[6-8]00|purple-(?:[6-8]00|900|950)|rose-(?:[6-8]00|900|950)|fuchsia-(?:[6-8]00|900|950)|teal-(?:[6-8]00|900|950))";
+const BG_STOPS_BY_FAMILY: Record<string, string> = {
+  amber: "[5-8]00|900",
+  red: "[5-8]00|900",
+  emerald: "[5-8]00|900",
+  sky: "[5-8]00|900",
+  indigo: "[5-8]00",
+  blue: "[6-8]00",
+  purple: "[6-8]00|900|950",
+  rose: "[6-8]00|900|950",
+  fuchsia: "[6-8]00|900|950",
+  teal: "[6-8]00|900|950",
+  orange: "[5-8]00|900|950",
+  yellow: "[5-8]00|900|950",
+  pink: "[5-8]00|900|950",
+  cyan: "[5-8]00|900|950",
+  lime: "[5-8]00|900|950",
+  violet: "[5-8]00|900|950",
+};
+
+// Fail fast: every ACCENT_FAMILIES entry must have bg coverage, so a new
+// family cannot be added to the ban list without deciding which of its
+// solid stops are theme-invariant (Hermes round-7 W2).
+for (const family of ACCENT_FAMILIES) {
+  if (!(family in BG_STOPS_BY_FAMILY)) {
+    throw new Error(`BG_STOPS_BY_FAMILY is missing accent family "${family}"`);
+  }
+}
+
+const BG_NAME_PATTERN = `(?:brand|black|${ACCENT_FAMILIES.map(
+  (family) => `${family}-(?:${BG_STOPS_BY_FAMILY[family]})`,
+).join("|")})`;
 
 // Each banned token's optional state prefix is captured in group 1.
 const BANNED_TOKEN_RE = new RegExp(
@@ -173,6 +216,17 @@ function bgMatches(s: string, prefix: string): boolean {
   return re.test(s);
 }
 
+// True when a bg token exists at this state prefix at all (allowlisted or
+// not). An unallowlisted state bg overrides the base bg in that state, so
+// it blocks the unprefixed-bg fallback in isStringAllowed (round-7 S1).
+const ANY_BG_REGEX_BY_PREFIX: Record<string, RegExp> = Object.fromEntries(
+  STATE_PREFIXES.map((prefix) => [prefix, new RegExp(`${BG_PREFIX_ANCHOR}${prefix}bg-`)]),
+);
+
+function hasBgAtPrefix(s: string, prefix: string): boolean {
+  return ANY_BG_REGEX_BY_PREFIX[prefix]?.test(s) ?? false;
+}
+
 function findBannedTokens(s: string): Array<{ prefix: string; token: string }> {
   const out: Array<{ prefix: string; token: string }> = [];
   for (const m of s.matchAll(BANNED_TOKEN_RE)) {
@@ -184,7 +238,18 @@ function findBannedTokens(s: string): Array<{ prefix: string; token: string }> {
 function isStringAllowed(s: string): boolean {
   const banned = findBannedTokens(s);
   if (banned.length === 0) return true;
-  return banned.every((b) => bgMatches(s, b.prefix));
+  return banned.every((b) => {
+    // Same-prefix allowlisted bg always wins (the classic
+    // `hover:bg-amber-600 hover:text-white` pairing).
+    if (bgMatches(s, b.prefix)) return true;
+    // Otherwise fall back to an unprefixed allowlisted base bg -- but only
+    // when no bg exists at this token's state prefix, because such a bg
+    // would replace the base bg in that state (round-7 S1: fixes
+    // `bg-brand hover:text-white` without also licensing
+    // `bg-brand hover:bg-white hover:text-white`).
+    if (b.prefix !== "" && hasBgAtPrefix(s, b.prefix)) return false;
+    return bgMatches(s, "");
+  });
 }
 
 function listSourceFiles(dir: string): string[] {
@@ -351,5 +416,43 @@ describe("round-4 scanner probes (Hermes review)", () => {
     expect(isStringAllowed("bg-blue-900 text-white")).toBe(false);
     expect(isStringAllowed("bg-indigo-950 text-white")).toBe(false);
     expect(isStringAllowed("bg-blue-950 text-white")).toBe(false);
+  });
+});
+
+describe("round-7 scanner probes (Hermes review)", () => {
+  it("R7 W2: every ACCENT_FAMILIES entry has BG_STOPS coverage (bg-*-600 text-white)", () => {
+    // The fail-fast throw above catches a missing map entry at module load;
+    // this probe proves each entry actually licenses a solid text-white pair.
+    for (const family of ACCENT_FAMILIES) {
+      expect(BG_STOPS_BY_FAMILY[family], `missing stops for ${family}`).toBeTruthy();
+      expect(isStringAllowed(`bg-${family}-600 text-white`)).toBe(true);
+    }
+  });
+
+  it("R7 W2: allows the six previously-missing families' 500/900/950 stops", () => {
+    // orange/yellow/pink/cyan/lime/violet are undeclared beyond graph-edge
+    // 400s, so these stops stay Tailwind-dark in both themes.
+    expect(isStringAllowed("bg-orange-600 text-white")).toBe(true);
+    expect(isStringAllowed("bg-lime-500 text-white")).toBe(true);
+    expect(isStringAllowed("bg-pink-600 text-white")).toBe(true);
+    expect(isStringAllowed("bg-cyan-900 text-cyan-200")).toBe(true);
+    expect(isStringAllowed("bg-yellow-950 text-yellow-200")).toBe(true);
+    expect(isStringAllowed("bg-violet-900 text-white")).toBe(true);
+    // The two flipping families stay banned (regression guard for W2).
+    expect(isStringAllowed("bg-indigo-900 text-white")).toBe(false);
+    expect(isStringAllowed("bg-blue-950 text-white")).toBe(false);
+  });
+
+  it("R7 S1: unprefixed allowlisted bg licenses a state-prefixed banned token", () => {
+    expect(isStringAllowed("bg-brand hover:text-white")).toBe(true);
+    expect(isStringAllowed("bg-amber-600 focus:text-white")).toBe(true);
+    // Regression: unprefixed banned token still needs an unprefixed
+    // allowlisted bg (R4.2).
+    expect(isStringAllowed("bg-neutral-900 hover:bg-amber-600 text-white")).toBe(false);
+    // An unallowlisted state bg overrides the base bg in that state, so it
+    // must not be rescued by the unprefixed fallback.
+    expect(isStringAllowed("bg-brand hover:bg-white hover:text-white")).toBe(false);
+    // Same-prefix allowlisted pairing still wins over the override check.
+    expect(isStringAllowed("hover:bg-amber-600 hover:text-white")).toBe(true);
   });
 });

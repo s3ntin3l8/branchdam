@@ -17,8 +17,8 @@ export function ToggleField({ checked, onChange, disabled }: ToggleFieldProps) {
       } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
     >
       <span
-        className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-neutral-100 transition-transform ${
-          checked ? "translate-x-5" : ""
+        className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full transition-transform ${
+          checked ? "translate-x-5 bg-white" : "bg-neutral-100"
         }`}
       />
     </button>
