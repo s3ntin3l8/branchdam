@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.26.1](https://github.com/s3ntin3l8/branchdam/compare/v0.26.0...v0.26.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **auth:** guard is_admin sync to forward-link rows only (follow-up to [#487](https://github.com/s3ntin3l8/branchdam/issues/487)) ([#488](https://github.com/s3ntin3l8/branchdam/issues/488)) ([8e18d8c](https://github.com/s3ntin3l8/branchdam/commit/8e18d8c041f66ea1b0f000320eb67c52c83de2dd))
+* **auth:** sync is_admin in ResolveOrCreate for forward-auth users ([55c3168](https://github.com/s3ntin3l8/branchdam/commit/55c3168a4209fe9d276582ad7c6606cb361759a6))
+* **web:** ban theme-unsafe text colors and harden light-mode contrast ([55a935d](https://github.com/s3ntin3l8/branchdam/commit/55a935d016ee3f8f6e77c98b14577717fb1a4f48))
+* **web:** close [#493](https://github.com/s3ntin3l8/branchdam/issues/493) scanner gaps (template segments, breakpoint/dark: prefixes) and dialog AA pairs ([e14fb52](https://github.com/s3ntin3l8/branchdam/commit/e14fb5225354ebb1086a8ab0d7f6aa73710228f2))
+
 ## [0.26.0](https://github.com/s3ntin3l8/branchdam/compare/v0.25.0...v0.26.0) (2026-09-23)
 
 
