@@ -34,6 +34,18 @@
   --color-neutral-750: #333333;
 }
 
+/*
+ * Tailwind v4's default `dark:` variant keys off the OS
+ * `prefers-color-scheme` media query, but this app themes via the
+ * <html data-theme> attribute (useTheme can force light/dark independent
+ * of the OS). Redefining the variant on data-theme keeps `dark:` utilities
+ * in sync with the rendered palette -- without it, `dark:` classes apply
+ * under the OS preference while the CSS variables resolve to the
+ * app-forced theme. Zero live usage today; registered so future `dark:`
+ * pairs mean what they say (#493 S3).
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* ---------- DARK (default) ---------- */
 :root,
 :root[data-theme="dark"] {

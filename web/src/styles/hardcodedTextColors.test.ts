@@ -62,6 +62,17 @@ import { KNOWN_SAFE } from "./hardcodedTextColors.fixture";
  * UNPREFIXED tokens: `bg-red-900 hover:bg-white text-white` is banned
  * because on hover the text sits on the unallowlisted hover bg.
  *
+ * Why template literals are checked per segment (#493 S1): a template body
+ * is split at each `${…}` interpolation and every static segment is checked
+ * independently, because a bg in one segment must not license a banned
+ * token in a sibling -- at runtime the two may never coexist (probe:
+ * `text-white ${ok ? "bg-white" : "bg-red-600"}` renders white-on-white on
+ * the first branch). The interpolation's own string literals are extracted
+ * separately (reDouble/reSingle) and checked on their own, so nothing
+ * escapes. Trade-off: a true pair split by a class-neutral interpolation
+ * (`bg-amber-600 ${x} text-white`) is flagged; zero live instances, and the
+ * fix (self-contained branches) is the safer source shape anyway.
+ *
  * Why a `FLIPPING_TEXT_TOKENS` exception set: `--color-indigo-200` is
  * declared in BOTH theme blocks and FLIPS (`#c7d2fe` dark, `#4338ca`
  * light) -- so `text-indigo-200` is theme-aware and stays legible on a
@@ -157,9 +168,10 @@ const BANNED_TOKEN_PATTERNS: string[] = (() => {
 // Live sites like `RestartServerButton.tsx:36` (`bg-amber-600 text-white`
 // ≈ 3.2:1) and `UsersPage.tsx:610` (`hover:bg-amber-500 text-white` ≈ 2.8:1)
 // are below WCAG AA 4.5 but pass the scanner because the bg stays dark in
-// both themes -- a separate luminance check is needed for a hard contrast
-// guarantee. Tracked as #493. The same applies to the newly allowlisted
-// undeclared 500 stops (e.g. `bg-lime-500 text-white` ≈ 2.0:1).
+// both themes. A hard contrast guarantee would need a separate luminance
+// check; that is intentionally out of scope for this scanner. The same
+// applies to the newly allowlisted undeclared 500 stops (e.g.
+// `bg-lime-500 text-white` ≈ 2.0:1).
 //   - `bg-white` is NOT included: it's `#fff` in both themes (undeclared
 //     -> Tailwind default), so `bg-white text-X-pale` is pale-on-pale in
 //     both modes. Hermes round-4 R4.1.
@@ -204,19 +216,51 @@ const BG_NAME_PATTERN = `(?:brand(?:-dark)?|black|${ACCENT_FAMILIES.map(
 // exists to catch (`bg-amber-950/70`) stays rejected.
 const BG_OPACITY = "(?:\\/(?:[89]\\d|100))?";
 
-// Each banned token's optional state prefix is captured in group 1.
+// Recognized non-color prefixes, shared by the banned-token capture below
+// and the per-prefix bg regexes further down, so a token and its bg pair
+// correctly when both carry the same modifier (#493 S3):
+//   - interactive states: hover/group-hover/focus/active/disabled/visited
+//   - responsive breakpoints: sm/md/lg/xl/2xl (apply together at a width)
+//   - `dark:`: a theme selector, not a UI state. Included because paired
+//     `dark:bg-X dark:text-Y` utilities only render together in dark mode,
+//     and the bg allowlist contains ONLY theme-invariant (dark-in-both)
+//     stops -- so the pair is safe in every mode, and stays safe under an
+//     OS/app theme desync (an allowlisted bg cannot turn pale in either
+//     theme). Flipping bgs like `dark:bg-neutral-900` stay banned because
+//     neutrals simply aren't in BG_NAME_PATTERN.
+// Stacked multi-modifiers (`sm:hover:bg-…`) are a documented non-goal (no
+// live instance). theme.css registers `@custom-variant dark` on
+// `[data-theme="dark"]` so `dark:` tracks the app's theme toggle instead
+// of the OS media query.
+const STATE_PREFIXES = [
+  "",
+  "hover:",
+  "group-hover:",
+  "focus:",
+  "active:",
+  "disabled:",
+  "visited:",
+  "sm:",
+  "md:",
+  "lg:",
+  "xl:",
+  "2xl:",
+  "dark:",
+];
+
+// Each banned token's optional prefix is captured in group 1, derived from
+// STATE_PREFIXES so the two can never drift.
 const BANNED_TOKEN_RE = new RegExp(
-  String.raw`\b((?:hover:|group-hover:|focus:|active:|disabled:|visited:)?)(?:${BANNED_TOKEN_PATTERNS.join("|")})\b`,
+  String.raw`\b((?:${STATE_PREFIXES.filter((p) => p !== "").join("|")})?)(?:${BANNED_TOKEN_PATTERNS.join("|")})\b`,
   "g",
 );
 
 // Anchor for an unprefixed bg: start of string, whitespace, quote, or `$`
 // (template-literal end). `:` is intentionally excluded because `:` is part
-// of state prefixes (`hover:`, `focus:`, etc.) -- the prefix-matching logic
-// requires the bg prefix to match the token prefix, so an unprefixed bg
-// must NOT match the prefix portion of a state-prefixed bg.
+// of every recognized prefix (`hover:`, `sm:`, `dark:`, …) -- the
+// prefix-matching logic requires the bg prefix to match the token prefix,
+// so an unprefixed bg must NOT match the prefix portion of a prefixed bg.
 const BG_PREFIX_ANCHOR = "(?:^|[\\s\"'`$])";
-const STATE_PREFIXES = ["", "hover:", "group-hover:", "focus:", "active:", "disabled:", "visited:"];
 
 const BG_REGEX_BY_PREFIX: Record<string, RegExp> = Object.fromEntries(
   STATE_PREFIXES.map((prefix) => [
@@ -254,14 +298,12 @@ function isStringAllowed(s: string): boolean {
   if (banned.length === 0) return true;
   return banned.every((b) => {
     if (b.prefix === "") {
-      // Skip the state sweep for template bodies: a `${...}` interpolation
-      // may carry a sibling segment's state bg that never coexists with the
-      // token's element (live: the IngestJobsPage.tsx kind-filter ternary,
-      // where `hover:bg-neutral-750` sits in the INCREMENTAL-fallback
-      // branch, never behind the `bg-amber-900 text-amber-200` chip). The
-      // per-branch literals are extracted by reDouble/reSingle and checked
-      // individually, so nothing escapes. The flat-string S1 leniency
-      // (any bg anywhere licenses any token) stays tracked as #493.
+      // State sweep: a bg present at ANY recognized prefix must itself be
+      // allowlisted at that prefix (round-8 override guard). Skipped when
+      // the string still contains `${` -- only reachable for direct
+      // isStringAllowed callers (the scan loop splits template bodies into
+      // segments via checkLiteral before calling here, so a sibling
+      // segment's state bg can't leak into a scanned string).
       if (!s.includes("${")) {
         for (const prefix of STATE_PREFIXES) {
           if (hasBgAtPrefix(s, prefix) && !bgMatches(s, prefix)) return false;
@@ -332,6 +374,61 @@ function extractStringLiterals(src: string): string[] {
   return out;
 }
 
+/**
+ * Split a template-literal body at each top-level `${…}` interpolation and
+ * return the static segments. Brace-depth walk, so nested `{}` inside the
+ * expression doesn't end a segment early. The walk is NOT quote-aware: a
+ * `}` inside a string literal within the interpolation still counts toward
+ * the depth (e.g. `${x ? "}" : ""}`) -- harmless for real class names, and
+ * the worst case is the unbalanced-`${` fallback below returning the whole
+ * body, which is checked conservatively as one string. An unbalanced `${`
+ * (possible in a non-template literal that merely contains the two
+ * characters) also falls back to the whole body so nothing is silently
+ * dropped. #493 S1.
+ */
+function splitTemplateSegments(body: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (depth === 0) {
+      if (c === "$" && body[i + 1] === "{") {
+        depth = 1;
+        i++;
+        continue;
+      }
+      current += c;
+    } else if (c === "{") {
+      depth++;
+    } else if (c === "}") {
+      depth--;
+    }
+  }
+  if (depth !== 0) return [body];
+  segments.push(current);
+  return segments;
+}
+
+/**
+ * Check one extracted literal. Template bodies containing `${…}` are split
+ * into static segments and each segment is checked independently (#493 S1):
+ * a bg inside one interpolation must not license a banned token in a
+ * sibling segment. Returns one entry per segment that carries a banned
+ * token (segments without banned tokens need no decision); the
+ * interpolation's own string literals are extracted separately by
+ * reDouble/reSingle and checked on their own.
+ */
+function checkLiteral(s: string): Array<{ allowed: boolean; fragment: string }> {
+  const fragments = s.includes("${") ? splitTemplateSegments(s) : [s];
+  const out: Array<{ allowed: boolean; fragment: string }> = [];
+  for (const fragment of fragments) {
+    if (findBannedTokens(fragment).length === 0) continue;
+    out.push({ allowed: isStringAllowed(fragment), fragment: fragment.trim() });
+  }
+  return out;
+}
+
 const violations: string[] = [];
 const allowed: string[] = [];
 let textBlackCount = 0;
@@ -342,11 +439,12 @@ for (const file of listSourceFiles(srcRoot)) {
 
   for (const s of extractStringLiterals(src)) {
     if (/\btext-black\b/.test(s)) textBlackCount++;
-    if (findBannedTokens(s).length === 0) continue;
-    if (isStringAllowed(s)) {
-      allowed.push(`${rel}: ${s.trim().slice(0, 80)}`);
-    } else {
-      violations.push(`${rel}: ${s.trim()}`);
+    for (const { allowed: ok, fragment } of checkLiteral(s)) {
+      if (ok) {
+        allowed.push(`${rel}: ${fragment.slice(0, 80)}`);
+      } else {
+        violations.push(`${rel}: ${fragment}`);
+      }
     }
   }
 }
@@ -516,6 +614,10 @@ describe("round-8 scanner probes (Hermes review)", () => {
     expect(isStringAllowed("bg-brand/90 text-white")).toBe(true);
     // Below the threshold the page bg bleeds through enough to matter.
     expect(isStringAllowed("bg-emerald-600/60 text-white")).toBe(false);
+    // #493 S2 ban side: below >=80% a bg on an allowlisted stop is still
+    // translucent enough to bleed the page bg through.
+    expect(isStringAllowed("bg-red-900/60 text-red-200")).toBe(false);
+    expect(isStringAllowed("bg-amber-950/40 text-amber-200")).toBe(false);
   });
 
   it("R8: IngestJobsPage kind-filter hover shape passes the scanner", () => {
@@ -524,5 +626,59 @@ describe("round-8 scanner probes (Hermes review)", () => {
     // CSS" half of the round-8 fix is guarded by theme.test.ts's @theme
     // registration block, not here.
     expect(isStringAllowed("bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200")).toBe(true);
+  });
+});
+
+describe("#493 follow-up scanner probes", () => {
+  it("S1: template segments are checked independently; a sibling branch's bg cannot license them", () => {
+    // Hermes round-5 S1 probe: `banned.every(...)` used to let the
+    // allowlisted `bg-red-600` anywhere in the literal license `text-white`,
+    // even though the bg-white branch renders white-on-white at runtime.
+    const tpl = 'text-white ${ok ? "bg-white" : "bg-red-600"}';
+    expect(checkLiteral(tpl)).toEqual([{ allowed: false, fragment: "text-white" }]);
+    // Flat-string behavior is unchanged: the pair in one string resolves
+    // as before.
+    expect(checkLiteral("bg-red-600 text-white")).toEqual([
+      { allowed: true, fragment: "bg-red-600 text-white" },
+    ]);
+  });
+
+  it("S1: self-contained ternary branches (the restructured AuditQueuePage shape) pass", () => {
+    const tpl =
+      'rounded px-3 py-1.5 text-xs font-medium disabled:opacity-50 ${action === "confirm" ? "bg-emerald-600 text-white hover:bg-emerald-500" : "bg-red-600 text-white hover:bg-red-500"}';
+    // Static segments carry no banned tokens; the branch literals are
+    // extracted separately by reDouble in a real scan and pair their own bg
+    // with their own token:
+    expect(checkLiteral(tpl)).toEqual([]);
+    expect(checkLiteral("bg-emerald-600 text-white hover:bg-emerald-500")).toEqual([
+      { allowed: true, fragment: "bg-emerald-600 text-white hover:bg-emerald-500" },
+    ]);
+    expect(checkLiteral("bg-red-600 text-white hover:bg-red-500")).toEqual([
+      { allowed: true, fragment: "bg-red-600 text-white hover:bg-red-500" },
+    ]);
+  });
+
+  it("S3: tokens and bgs pair at the same responsive breakpoint prefix", () => {
+    expect(isStringAllowed("sm:bg-amber-600 sm:text-white")).toBe(true);
+    expect(isStringAllowed("md:bg-amber-600 md:text-white")).toBe(true);
+    expect(isStringAllowed("lg:bg-amber-600 lg:text-white")).toBe(true);
+    expect(isStringAllowed("xl:bg-amber-600 xl:text-white")).toBe(true);
+    expect(isStringAllowed("2xl:bg-amber-600 2xl:text-white")).toBe(true);
+    // Prefix mismatch (round-4 R4.2 rule): a breakpoint-prefixed bg does
+    // not license an unprefixed token.
+    expect(isStringAllowed("sm:bg-amber-600 text-white")).toBe(false);
+  });
+
+  it("S3: dark: pairs follow the same rules; flipping bgs stay banned", () => {
+    // amber-600 is theme-invariant, so the pair renders white-on-dark in
+    // dark mode and nothing in light mode.
+    expect(isStringAllowed("dark:bg-amber-600 dark:text-white")).toBe(true);
+    // neutral-900 flips pale in light mode and is not in the bg allowlist,
+    // so the dark: prefix cannot rescue it.
+    expect(isStringAllowed("dark:bg-neutral-900 dark:text-white")).toBe(false);
+    // An unallowlisted dark: bg overrides the unprefixed base bg fallback.
+    expect(isStringAllowed("bg-brand dark:bg-white dark:text-white")).toBe(false);
+    // Unprefixed token next to a dark:-prefixed bg: prefix mismatch.
+    expect(isStringAllowed("dark:bg-amber-600 text-white")).toBe(false);
   });
 });

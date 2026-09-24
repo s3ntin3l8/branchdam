@@ -510,10 +510,10 @@ function BatchConfirmModal({
               type="button"
               disabled={running || edges.length === 0}
               onClick={handleExecute}
-              className={`rounded px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 ${
+              className={`rounded px-3 py-1.5 text-xs font-medium disabled:opacity-50 ${
                 action === "confirm"
-                  ? "bg-emerald-600 hover:bg-emerald-500"
-                  : "bg-red-600 hover:bg-red-500"
+                  ? "bg-emerald-600 text-white hover:bg-emerald-500"
+                  : "bg-red-600 text-white hover:bg-red-500"
               }`}
             >
               {running ? "Processing…" : action === "confirm" ? "Confirm All" : "Reject All"}

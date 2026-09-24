@@ -283,4 +283,18 @@ describe("theme.css dual-theme contract", () => {
       });
     }
   });
+
+  /*
+   * The app's `dark:` variant must key off the data-theme attribute, not
+   * the OS prefers-color-scheme media query: useTheme can force light/dark
+   * independent of the OS, and Tailwind v4's default dark: variant would
+   * desync from the rendered palette (#493 S3). Registered in theme.css
+   * via @custom-variant.
+   */
+  it("registers the dark: variant on data-theme", () => {
+    const idx = themeCss.indexOf("@custom-variant dark");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const line = themeCss.slice(idx, themeCss.indexOf("\n", idx));
+    expect(line).toContain('[data-theme="dark"]');
+  });
 });
