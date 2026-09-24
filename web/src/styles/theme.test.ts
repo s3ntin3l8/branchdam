@@ -142,6 +142,8 @@ describe("theme.css dual-theme contract", () => {
     "--color-blue-900",
     "--color-blue-950",
     "--color-brand",
+    "--color-brand-dark",
+    "--color-neutral-750",
     "--surface-canvas",
     "--surface-raised",
     "--border-subtle",
@@ -238,4 +240,47 @@ describe("theme.css dual-theme contract", () => {
       expect(darkTokens.get(token)).toBe(lightTokens.get(token));
     });
   }
+
+  /*
+   * Custom color names must be registered in an @theme block. Tailwind v4
+   * generates utilities from the default theme's variables, so re-declaring
+   * --color-neutral-* under :root is enough for palette names, but names
+   * Tailwind never registered (brand, brand-dark, neutral-750) emit NO CSS
+   * at all unless declared in @theme -- verified against a build: before
+   * this registration, `bg-brand` appeared 0 times in the built CSS while
+   * 13 CTAs depended on it (Hermes round-8 critical on PR #491). The
+   * un-layered :root[data-theme] blocks override these layered values on
+   * theme swap, so @theme and :root must BOTH carry every custom name.
+   */
+  describe("@theme registration of custom color names", () => {
+    const CUSTOM_COLOR_TOKENS = ["--color-brand", "--color-brand-dark", "--color-neutral-750"];
+
+    function extractThemeBlock(css: string): string {
+      const idx = css.indexOf("@theme");
+      if (idx === -1) throw new Error("no @theme block found in theme.css");
+      const openBrace = css.indexOf("{", idx);
+      let depth = 1;
+      let j = openBrace + 1;
+      while (j < css.length && depth > 0) {
+        if (css[j] === "{") depth++;
+        else if (css[j] === "}") depth--;
+        j++;
+      }
+      if (depth !== 0) throw new Error("@theme block is unbalanced");
+      return css.slice(openBrace + 1, j - 1);
+    }
+
+    const themeBlock = extractThemeBlock(themeCss);
+    const themeTokens = tokensIn(themeBlock);
+
+    for (const token of CUSTOM_COLOR_TOKENS) {
+      it(`@theme declares ${token} so the Tailwind utility exists`, () => {
+        expect(themeTokens.get(token)).toMatch(/^#[0-9a-fA-F]{3,8}$/);
+      });
+      it(`${token} is also re-declared per theme (override contract)`, () => {
+        expect(darkTokens.has(token)).toBe(true);
+        expect(lightTokens.has(token)).toBe(true);
+      });
+    }
+  });
 });

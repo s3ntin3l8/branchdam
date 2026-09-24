@@ -63,7 +63,13 @@ Frontend changes:
 make check-web
 ```
 
-which is `cd web && npm run lint && npm run typecheck && npm run build`.
+which is `cd web && npm run lint && npm run typecheck && npm run test && npm run build`. The vitest
+suite runs single-process both locally (~30-40s on a warm cache) and inline in CI as
+`test:coverage` in the `Web (typecheck · build) / lint-and-test` job. `ci-node.yml` supports
+splitting tests across a `test-shard` matrix with a `test-merge` coverage job, but that only
+activates when a caller passes `test-shards > 1` -- this repo does not, so the sharded jobs are
+skipped. New contract tests added under `web/src/styles/` (theme, hardcoded-token ban) run on
+every push, so prefer focused fixtures over heavy `render()` trees when adding new contracts.
 
 ## PR title
 

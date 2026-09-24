@@ -613,7 +613,7 @@ export default function CompanionPairingsPage() {
           body={
             <>
               Revoke pairing{" "}
-              <strong className="text-white">"{revokeTarget.friendlyLabel}"</strong>? All its API
+              <strong className="text-neutral-100">"{revokeTarget.friendlyLabel}"</strong>? All its API
               keys will stop working immediately.
             </>
           }
@@ -638,7 +638,7 @@ export default function CompanionPairingsPage() {
           body={
             <>
               Permanently delete pairing{" "}
-              <strong className="text-white">"{deleteTarget.friendlyLabel}"</strong>? This cannot be
+              <strong className="text-neutral-100">"{deleteTarget.friendlyLabel}"</strong>? This cannot be
               undone.
             </>
           }

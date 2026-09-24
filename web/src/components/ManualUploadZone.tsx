@@ -351,7 +351,7 @@ export default function ManualUploadZone() {
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
         className={`flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
-          isDragging ? "border-brand bg-brand/10 text-brand" : "border-neutral-800 bg-neutral-900/30 text-neutral-400 hover:border-neutral-700"
+          isDragging ? "border-brand bg-brand/10 text-indigo-400" : "border-neutral-800 bg-neutral-900/30 text-neutral-400 hover:border-neutral-700"
         }`}
       >
         <svg

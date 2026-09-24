@@ -25,7 +25,7 @@ export function AuthErrorBanner() {
   if (!error) return null;
 
   return (
-    <div className="fixed top-0 left-0 right-0 z-[100] border-b border-red-800 bg-red-950 p-3 text-center text-sm text-red-200">
+    <div className="fixed top-0 left-0 right-0 z-[100] border-b border-red-800 bg-red-950 p-3 text-center text-sm text-red-300">
       <span className="font-semibold">
         {error.status === 401 ? "Authentication required" : "Access denied"}
       </span>
@@ -34,7 +34,7 @@ export function AuthErrorBanner() {
       <button
         type="button"
         onClick={() => setError(null)}
-        className="ml-3 text-red-400 hover:text-red-200"
+        className="ml-3 text-red-400 hover:text-red-300"
         aria-label="Dismiss"
       >
         &times;

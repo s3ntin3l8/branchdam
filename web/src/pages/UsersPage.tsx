@@ -271,7 +271,7 @@ export default function UsersPage() {
         <button
           type="button"
           onClick={handleOpenCreate}
-          className="rounded bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand/90"
+          className="rounded bg-brand-dark px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
         >
           Add User
         </button>
@@ -365,7 +365,7 @@ export default function UsersPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
                         {user.isAdmin ? (
-                          <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-brand">
+                          <span className="rounded bg-brand/20 px-2 py-0.5 text-xs font-medium text-indigo-400">
                             Admin
                           </span>
                         ) : (
@@ -427,7 +427,7 @@ export default function UsersPage() {
                             <button
                               type="button"
                               onClick={() => openToggleAdmin(user)}
-                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                             >
                               {user.isAdmin ? "Remove Admin" : "Make Admin"}
                             </button>
@@ -436,7 +436,7 @@ export default function UsersPage() {
                             <button
                               type="button"
                               onClick={() => openRevokeSessions(user)}
-                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                             >
                               Revoke Sessions
                             </button>
@@ -448,7 +448,7 @@ export default function UsersPage() {
                                 setResetTargetUser(user);
                                 setResetError(null);
                               }}
-                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 hover:text-white"
+                              className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                             >
                               Reset Password
                             </button>
@@ -568,7 +568,7 @@ export default function UsersPage() {
             <button
               type="submit"
               disabled={createUserMutation.isPending}
-              className="rounded bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand/90 disabled:opacity-50"
+              className="rounded bg-brand-dark px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
               {createUserMutation.isPending ? "Creating…" : "Create User"}
             </button>
@@ -644,7 +644,7 @@ export default function UsersPage() {
             <button
               type="button"
               onClick={() => setRevealPassword(null)}
-              className="rounded bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand/90"
+              className="rounded bg-brand-dark px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
             >
               Done
             </button>
@@ -659,7 +659,7 @@ export default function UsersPage() {
           body={
             <>
               Disable logins for{" "}
-              <strong className="text-white">{disableTarget.username}</strong>?
+              <strong className="text-neutral-100">{disableTarget.username}</strong>?
             </>
           }
           confirmLabel="Confirm Disable"
@@ -684,7 +684,7 @@ export default function UsersPage() {
             <>
               {adminTarget.newAdmin ? "Grant" : "Remove"} admin privileges{" "}
               {adminTarget.newAdmin ? "to" : "from"}{" "}
-              <strong className="text-white">{adminTarget.user.username}</strong>?
+              <strong className="text-neutral-100">{adminTarget.user.username}</strong>?
             </>
           }
           confirmLabel={adminTarget.newAdmin ? "Confirm Grant Admin" : "Confirm Remove Admin"}
@@ -709,7 +709,7 @@ export default function UsersPage() {
           body={
             <>
               Revoke all active sessions for{" "}
-              <strong className="text-white">{revokeSessionsTarget.username}</strong>? They will
+              <strong className="text-neutral-100">{revokeSessionsTarget.username}</strong>? They will
               be logged out everywhere.
             </>
           }

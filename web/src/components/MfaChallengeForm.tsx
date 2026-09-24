@@ -45,7 +45,7 @@ export default function MfaChallengeForm({
         <button
           type="submit"
           disabled={pending || !code}
-          className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+          className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {pending ? "Verifying…" : "Verify"}
         </button>

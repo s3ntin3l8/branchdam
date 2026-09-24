@@ -109,7 +109,7 @@ export function Layout() {
           <NavItem to="/assets">
             <span>Assets</span>
             {unlinkedCount && unlinkedCount > 0 ? (
-              <span className="rounded bg-amber-900/80 px-1.5 py-0.5 text-xs text-amber-200" title={`${unlinkedCount} unlinked nodes`}>
+              <span className="rounded bg-amber-900 px-1.5 py-0.5 text-xs text-amber-200" title={`${unlinkedCount} unlinked nodes`}>
                 {unlinkedCount}
               </span>
             ) : null}

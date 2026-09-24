@@ -13,8 +13,8 @@ const toneClasses = {
 } as const;
 
 const dismissClasses = {
-  success: "text-emerald-400 hover:text-emerald-200",
-  error: "text-red-400 hover:text-red-200",
+  success: "text-emerald-400 hover:text-emerald-300",
+  error: "text-red-400 hover:text-red-300",
 } as const;
 
 // InlineNotice is a transient, non-blocking page-level banner for success

@@ -18,7 +18,7 @@
 - [ ] `make test` — `go test -race ./...`
 - [ ] `make build`
 - [ ] golangci-lint (v2.x — `.golangci.yml` is `version: "2"`; CI pins v2.12.2 — see CONTRIBUTING.md)
-- [ ] Frontend changes: `cd web && npm run lint && npm run typecheck && npm run build`
+- [ ] Frontend changes: `cd web && npm run lint && npm run typecheck && npm run test && npm run build`
 - [ ] Migrations/queries (`internal/db/migrations/*.sql`, `internal/db/queries/*.sql`):
       ran `sqlc generate` and committed `internal/db/sqlcgen/` in this PR
 - [ ] Route DTO changes (`internal/httpapi/routes.go`): hand-updated `web/src/api/types.ts`

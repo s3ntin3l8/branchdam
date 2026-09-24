@@ -35,7 +35,7 @@ export default function DedupNotice({
     <div
       role="status"
       aria-live="polite"
-      className="flex items-center justify-between gap-3 rounded-lg border border-amber-800/80 bg-amber-950/70 px-4 py-3 text-xs text-amber-200 shadow-lg shadow-black/40 backdrop-blur-sm"
+      className="flex items-center justify-between gap-3 rounded-lg border border-amber-800/80 bg-amber-950 px-4 py-3 text-xs text-amber-300 shadow-lg shadow-black/40 backdrop-blur-sm"
     >
       <div className="flex items-center gap-2.5 min-w-0">
         <svg
@@ -55,7 +55,7 @@ export default function DedupNotice({
         <span className="truncate">
           {fileName ? (
             <>
-              <strong className="font-semibold text-amber-100">{fileName}</strong> is already in your library.
+              <strong className="font-semibold text-amber-400">{fileName}</strong> is already in your library.
             </>
           ) : (
             "This file is already in your library."
@@ -72,7 +72,7 @@ export default function DedupNotice({
       <button
         type="button"
         onClick={onDismiss}
-        className="shrink-0 p-1 text-amber-400 hover:text-amber-100 focus:outline-none"
+        className="shrink-0 p-1 text-amber-400 hover:text-amber-300 focus:outline-none"
         aria-label="Dismiss notice"
       >
         ✕

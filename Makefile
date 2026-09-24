@@ -119,7 +119,7 @@ web-test: web/node_modules ## Run vitest on web/
 	cd web && npm run test
 
 check: lint test build golangci-lint ## Backend pre-PR gate (NOTE: lint/gofmt hooks rewrite files in the working tree)
-check-web: web-lint web-typecheck web-build ## Frontend pre-PR gate
+check-web: web-lint web-typecheck web-test web-build ## Frontend pre-PR gate
 
 sqlc-generate: ## Regenerate internal/db/sqlcgen from internal/db/queries
 	sqlc generate

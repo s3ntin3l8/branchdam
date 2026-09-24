@@ -108,7 +108,7 @@ export default function MfaSetupPage() {
             <button
               type="submit"
               disabled={enableMutation.isPending || !code}
-              className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+              className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
               {enableMutation.isPending ? "Verifying…" : "Enable MFA"}
             </button>
@@ -128,7 +128,7 @@ export default function MfaSetupPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-neutral-950">
       <div className="w-full max-w-sm rounded-lg border border-emerald-800 bg-neutral-900 p-6 shadow">
-        <h1 className="mb-2 text-lg font-semibold text-emerald-200">MFA enabled</h1>
+        <h1 className="mb-2 text-lg font-semibold text-emerald-300">MFA enabled</h1>
         <p className="mb-4 text-sm text-neutral-400">
           Save these recovery codes in a safe place. They will not be shown again.
         </p>
@@ -141,7 +141,7 @@ export default function MfaSetupPage() {
         </div>
         <button
           onClick={() => navigate("/users")}
-          className="w-full rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark"
+          className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
         >
           Done
         </button>
