@@ -377,9 +377,13 @@ function extractStringLiterals(src: string): string[] {
 /**
  * Split a template-literal body at each top-level `${…}` interpolation and
  * return the static segments. Brace-depth walk, so nested `{}` inside the
- * expression doesn't end a segment early. An unbalanced `${` (possible in
- * a non-template literal that merely contains the two characters) falls
- * back to the whole body as a single segment so nothing is silently
+ * expression doesn't end a segment early. The walk is NOT quote-aware: a
+ * `}` inside a string literal within the interpolation still counts toward
+ * the depth (e.g. `${x ? "}" : ""}`) -- harmless for real class names, and
+ * the worst case is the unbalanced-`${` fallback below returning the whole
+ * body, which is checked conservatively as one string. An unbalanced `${`
+ * (possible in a non-template literal that merely contains the two
+ * characters) also falls back to the whole body so nothing is silently
  * dropped. #493 S1.
  */
 function splitTemplateSegments(body: string): string[] {
