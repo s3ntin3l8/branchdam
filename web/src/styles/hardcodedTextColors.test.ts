@@ -58,7 +58,9 @@ import { KNOWN_SAFE } from "./hardcodedTextColors.fixture";
  * checked separately -- if a bg exists at the token's state prefix, it
  * must itself be allowlisted at that prefix, otherwise it replaces the
  * base bg in that state (`bg-brand hover:bg-white hover:text-white` is
- * still banned).
+ * still banned). Round-8 extended the same override reasoning to
+ * UNPREFIXED tokens: `bg-red-900 hover:bg-white text-white` is banned
+ * because on hover the text sits on the unallowlisted hover bg.
  *
  * Why a `FLIPPING_TEXT_TOKENS` exception set: `--color-indigo-200` is
  * declared in BOTH theme blocks and FLIPS (`#c7d2fe` dark, `#4338ca`
@@ -123,7 +125,10 @@ const BANNED_TOKEN_PATTERNS: string[] = (() => {
 // Theme-invariant or dark-in-both-themes solid backgrounds. White text on
 // any of these sits on a bg that stays dark in both modes (so a `text-white`
 // token has the dark-bg precondition satisfied in both modes):
-//   - `bg-brand` (constant, theme.css line 24 / 144)
+//   - `bg-brand` / `bg-brand-dark` (constant in both themes, registered in
+//     the @theme block at theme.css so the utilities actually emit -- before
+//     that registration `bg-brand` produced zero CSS rules and 13 CTAs were
+//     white-on-transparent; Hermes round-8 critical)
 //   - `bg-black` (Tailwind built-in, `#000` in both themes)
 //   - the accent stops in BG_STOPS_BY_FAMILY below, derived from
 //     ACCENT_FAMILIES so a newly added family cannot ship without bg
@@ -186,9 +191,17 @@ for (const family of ACCENT_FAMILIES) {
   }
 }
 
-const BG_NAME_PATTERN = `(?:brand|black|${ACCENT_FAMILIES.map(
+const BG_NAME_PATTERN = `(?:brand(?:-dark)?|black|${ACCENT_FAMILIES.map(
   (family) => `${family}-(?:${BG_STOPS_BY_FAMILY[family]})`,
 ).join("|")})`;
+
+// Effectively-opaque opacity modifiers are safe on an allowlisted bg: at
+// >=80% the composite color stays on the dark side of the page bg in both
+// modes (the bleeding-through page bg is at most 20% of the mix).
+// `bg-amber-950/70` and friends stay rejected -- that's the translucent-chip
+// bug class this scanner exists to catch (round-8; folds the #493 S2
+// follow-up into the allowlist).
+const BG_OPACITY = "(?:\\/(?:[89]\\d|100))?";
 
 // Each banned token's optional state prefix is captured in group 1.
 const BANNED_TOKEN_RE = new RegExp(
@@ -207,7 +220,7 @@ const STATE_PREFIXES = ["", "hover:", "group-hover:", "focus:", "active:", "disa
 const BG_REGEX_BY_PREFIX: Record<string, RegExp> = Object.fromEntries(
   STATE_PREFIXES.map((prefix) => [
     prefix,
-    new RegExp(`${BG_PREFIX_ANCHOR}${prefix}bg-${BG_NAME_PATTERN}(?![/\\w-])`),
+    new RegExp(`${BG_PREFIX_ANCHOR}${prefix}bg-${BG_NAME_PATTERN}${BG_OPACITY}(?![/\\w-])`),
   ]),
 );
 
@@ -239,6 +252,22 @@ function isStringAllowed(s: string): boolean {
   const banned = findBannedTokens(s);
   if (banned.length === 0) return true;
   return banned.every((b) => {
+    if (b.prefix === "") {
+      // Skip the state sweep for template bodies: a `${...}` interpolation
+      // may carry a sibling segment's state bg that never coexists with the
+      // token's element (live: the IngestJobsPage.tsx kind-filter ternary,
+      // where `hover:bg-neutral-750` sits in the INCREMENTAL-fallback
+      // branch, never behind the `bg-amber-900 text-amber-200` chip). The
+      // per-branch literals are extracted by reDouble/reSingle and checked
+      // individually, so nothing escapes. The flat-string S1 leniency
+      // (any bg anywhere licenses any token) stays tracked as #493.
+      if (!s.includes("${")) {
+        for (const prefix of STATE_PREFIXES) {
+          if (hasBgAtPrefix(s, prefix) && !bgMatches(s, prefix)) return false;
+        }
+      }
+      return bgMatches(s, "");
+    }
     // Same-prefix allowlisted bg always wins (the classic
     // `hover:bg-amber-600 hover:text-white` pairing).
     if (bgMatches(s, b.prefix)) return true;
@@ -247,7 +276,7 @@ function isStringAllowed(s: string): boolean {
     // would replace the base bg in that state (round-7 S1: fixes
     // `bg-brand hover:text-white` without also licensing
     // `bg-brand hover:bg-white hover:text-white`).
-    if (b.prefix !== "" && hasBgAtPrefix(s, b.prefix)) return false;
+    if (hasBgAtPrefix(s, b.prefix)) return false;
     return bgMatches(s, "");
   });
 }
@@ -454,5 +483,45 @@ describe("round-7 scanner probes (Hermes review)", () => {
     expect(isStringAllowed("bg-brand hover:bg-white hover:text-white")).toBe(false);
     // Same-prefix allowlisted pairing still wins over the override check.
     expect(isStringAllowed("hover:bg-amber-600 hover:text-white")).toBe(true);
+  });
+});
+
+describe("round-8 scanner probes (Hermes review)", () => {
+  it("R8: bg-brand / bg-brand-dark are registered and license text-white", () => {
+    // The round-8 critical: `bg-brand` emitted NO CSS before the @theme
+    // registration in theme.css (verified: zero rules in a built bundle),
+    // so `bg-brand text-white` was white-on-transparent in light mode.
+    // Live strings this must keep passing (LoginPage/MfaSetupPage/... CTAs):
+    expect(isStringAllowed("bg-brand text-white hover:bg-brand-dark")).toBe(true);
+    expect(isStringAllowed("bg-brand text-white hover:bg-brand/90")).toBe(true);
+    // ...and the opacity gate must still reject translucent chips:
+    expect(isStringAllowed("bg-brand/70 text-white")).toBe(false);
+    expect(isStringAllowed("bg-amber-950/70 text-amber-200")).toBe(false);
+  });
+
+  it("R8: unprefixed banned token fails when a state bg would replace the base bg", () => {
+    // No live instance, but the exact shape Hermes probed: on hover the
+    // white text sits on the white hover bg.
+    expect(isStringAllowed("bg-red-900 hover:bg-white text-white")).toBe(false);
+    // Regression: state bg that IS allowlisted keeps the live buttons green
+    // (UsersPage.tsx:610 shape).
+    expect(isStringAllowed("bg-brand text-white hover:bg-amber-500")).toBe(true);
+    // A state bg on a sibling in the same literal is a documented
+    // heuristic limit (string-level scan can't prove element identity).
+  });
+
+  it("R8: effectively-opaque (>=80%) allowlisted bgs license text-white", () => {
+    // Folds the #493 S2 follow-up into the allowlist: the bg stays dark in
+    // both modes at >=80% opacity, so white text keeps its dark backdrop.
+    expect(isStringAllowed("bg-emerald-600/80 text-white")).toBe(true);
+    expect(isStringAllowed("bg-brand/90 text-white")).toBe(true);
+    // Below the threshold the page bg bleeds through enough to matter.
+    expect(isStringAllowed("bg-emerald-600/60 text-white")).toBe(false);
+  });
+
+  it("R8: hover:bg-neutral-750 resolves (custom stop registered in @theme)", () => {
+    // Live at IngestJobsPage.tsx:137-170; was a dead utility (Tailwind has
+    // no 750 stop and no theme.css declaration) before the registration.
+    expect(isStringAllowed("bg-neutral-800 text-neutral-400 hover:bg-neutral-750 hover:text-neutral-200")).toBe(true);
   });
 });

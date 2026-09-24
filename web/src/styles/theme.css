@@ -17,11 +17,29 @@
  * to if localStorage / matchMedia are unavailable.
  */
 
+/*
+ * The @theme block below is the ONLY place custom (non-Tailwind-palette) color
+ * names are registered. Tailwind v4 generates utilities from the default
+ * theme's variables, so re-declaring `--color-neutral-*` etc. under `:root`
+ * works without @theme. But names Tailwind never registered (`brand`,
+ * `brand-dark`, `neutral-750`) MUST be declared in @theme or `bg-brand`,
+ * `hover:bg-brand-dark`, `hover:bg-neutral-750` silently emit no CSS
+ * (verified against a build: zero `bg-brand` rules). The un-layered
+ * `:root[data-theme="light"]` block below still overrides these layered
+ * values when the theme swaps.
+ */
+@theme {
+  --color-brand: #6366f1;
+  --color-brand-dark: #4f46e5;
+  --color-neutral-750: #333333;
+}
+
 /* ---------- DARK (default) ---------- */
 :root,
 :root[data-theme="dark"] {
   /* Brand */
   --color-brand: #6366f1;
+  --color-brand-dark: #4f46e5;
 
   /* Neutral ladder (lightest -> darkest within this theme) */
   --color-neutral-50: #fafafa;
@@ -32,6 +50,7 @@
   --color-neutral-500: #737373;
   --color-neutral-600: #525252;
   --color-neutral-700: #404040;
+  --color-neutral-750: #333333;
   --color-neutral-800: #262626;
   --color-neutral-900: #171717;
   --color-neutral-950: #0a0a0a;
@@ -142,6 +161,7 @@
 /* ---------- LIGHT ---------- */
 :root[data-theme="light"] {
   --color-brand: #6366f1;
+  --color-brand-dark: #4f46e5;
 
   /*
    * Neutral ladder inverted: in this theme `bg-neutral-950` is the lightest
@@ -157,6 +177,7 @@
   --color-neutral-500: #737373;
   --color-neutral-600: #a3a3a3;
   --color-neutral-700: #d4d4d4;
+  --color-neutral-750: #dcdcdc;
   --color-neutral-800: #e5e5e5;
   --color-neutral-900: #f5f5f5;
   --color-neutral-950: #fafafa;
