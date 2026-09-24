@@ -132,13 +132,20 @@ const BANNED_TOKEN_PATTERNS: string[] = (() => {
 //   - `bg-{blue,purple,rose,fuchsia,teal}-[6-8]00` (undeclared, fall
 //     back to Tailwind dark defaults in both themes)
 //   - `bg-{amber,red,emerald,sky}-900` is also allowlisted: those four
-//     stay dark in both themes; `bg-indigo-900` (and friends) flip pale
-//     in light and is intentionally excluded.
+//     stay dark in both themes. Only `bg-indigo-900` (theme.css:172
+//     `#e0e7ff`) and `bg-blue-900` (theme.css:228 `#dbeafe`) are
+//     declared in both theme blocks and flip PALE in light -- those two
+//     are intentionally excluded. purple/rose/fuchsia/teal have no
+//     declaration in theme.css at all, so their 900/950 stops stay
+//     Tailwind-dark in both themes and are allowlisted (Hermes round-6
+//     W2; the earlier comment lumped them in with indigo/blue and the
+//     allowlist wrongly rejected theme-safe pairs like
+//     `bg-purple-900 text-purple-200`).
 //   - `bg-white` is NOT included: it's `#fff` in both themes (undeclared
 //     -> Tailwind default), so `bg-white text-X-pale` is pale-on-pale in
 //     both modes. Hermes round-4 R4.1.
 const BG_NAME_PATTERN =
-  "(?:brand|black|amber-[5-8]00|red-[5-8]00|emerald-[5-8]00|sky-[5-8]00|indigo-[5-8]00|amber-900|red-900|emerald-900|sky-900|blue-[6-8]00|purple-[6-8]00|rose-[6-8]00|fuchsia-[6-8]00|teal-[6-8]00)";
+  "(?:brand|black|amber-[5-8]00|red-[5-8]00|emerald-[5-8]00|sky-[5-8]00|indigo-[5-8]00|amber-900|red-900|emerald-900|sky-900|blue-[6-8]00|purple-(?:[6-8]00|900|950)|rose-(?:[6-8]00|900|950)|fuchsia-(?:[6-8]00|900|950)|teal-(?:[6-8]00|900|950))";
 
 // Each banned token's optional state prefix is captured in group 1.
 const BANNED_TOKEN_RE = new RegExp(
@@ -322,5 +329,27 @@ describe("round-4 scanner probes (Hermes review)", () => {
     expect(isStringAllowed("text-red-200")).toBe(false);
     expect(isStringAllowed("bg-amber-900 text-amber-200")).toBe(true);
     expect(isStringAllowed("bg-red-900 text-red-200")).toBe(true);
+  });
+
+  it("R6: allows undeclared {purple,rose,fuchsia,teal}-900/950 (Tailwind-dark both themes)", () => {
+    // Hermes round-6 W2: these families have no theme.css declaration at
+    // all, so their 900/950 stops fall back to Tailwind dark defaults in
+    // both themes. The old pattern only had [6-8]00 and wrongly rejected
+    // theme-safe pairs.
+    expect(isStringAllowed("bg-purple-900 text-purple-200")).toBe(true);
+    expect(isStringAllowed("bg-purple-950 text-white")).toBe(true);
+    expect(isStringAllowed("bg-rose-950 text-white")).toBe(true);
+    expect(isStringAllowed("bg-fuchsia-900 text-fuchsia-200")).toBe(true);
+    expect(isStringAllowed("bg-teal-950 text-white")).toBe(true);
+  });
+
+  it("R6: still bans the two -900 stops that actually flip (indigo, blue)", () => {
+    // indigo-900 (#312e81 -> #e0e7ff, theme.css:47/:172) and blue-900
+    // (#1e3a8a -> #dbeafe, theme.css:93/:228) are declared in both blocks
+    // and flip pale in light -- white text on them is invisible there.
+    expect(isStringAllowed("bg-indigo-900 text-white")).toBe(false);
+    expect(isStringAllowed("bg-blue-900 text-white")).toBe(false);
+    expect(isStringAllowed("bg-indigo-950 text-white")).toBe(false);
+    expect(isStringAllowed("bg-blue-950 text-white")).toBe(false);
   });
 });

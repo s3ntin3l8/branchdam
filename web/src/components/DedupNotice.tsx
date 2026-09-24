@@ -55,7 +55,7 @@ export default function DedupNotice({
         <span className="truncate">
           {fileName ? (
             <>
-              <strong className="font-semibold text-amber-300">{fileName}</strong> is already in your library.
+              <strong className="font-semibold text-amber-400">{fileName}</strong> is already in your library.
             </>
           ) : (
             "This file is already in your library."
