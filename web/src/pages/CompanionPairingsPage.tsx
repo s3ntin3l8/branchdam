@@ -137,10 +137,10 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
 // agent's version numbers.
 function PairAgentHint() {
   return (
-    <p className="text-xs text-neutral-500 pl-20">
+    <p className="text-xs text-neutral-400 pl-20">
       &ldquo;Pair with local agent&rdquo; opens the branchDAM agent on this computer. If nothing
       happens, install or update the agent, or copy the URL and run{" "}
-      <code className="text-neutral-400">branchdam-agent pair &lt;url&gt;</code>.
+      <code className="text-neutral-300">branchdam-agent pair &lt;url&gt;</code>.
     </p>
   );
 }
