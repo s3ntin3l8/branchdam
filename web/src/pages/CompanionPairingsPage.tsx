@@ -123,10 +123,25 @@ function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
   return (
     <a
       href={pairingUrl}
+      title="Opens the branchDAM agent on this computer"
       className="inline-flex items-center rounded border border-indigo-500/50 bg-indigo-600/20 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:bg-indigo-600/30"
     >
       Pair with local agent
     </a>
+  );
+}
+
+// PairAgentHint explains the deep-link button's failure mode: a browser hands
+// branchdam:// to the OS, and with no registered app (agent missing or too old)
+// nothing visible happens. Deliberately unversioned -- release-please owns the
+// agent's version numbers.
+function PairAgentHint() {
+  return (
+    <p className="text-xs text-neutral-400 pl-20">
+      &ldquo;Pair with local agent&rdquo; opens the branchDAM agent on this computer. If nothing
+      happens, install or update the agent, or copy the URL and run{" "}
+      <code className="text-neutral-300">branchdam-agent pair &lt;url&gt;</code>.
+    </p>
   );
 }
 
@@ -202,6 +217,7 @@ function CredentialsBody({
             <PairAgentButton pairingUrl={pairingUrl} />
           </div>
         )}
+        {pairingUrl && <PairAgentHint />}
       </div>
     </div>
   );
@@ -569,6 +585,7 @@ export default function CompanionPairingsPage() {
                   <PairAgentButton pairingUrl={rotateResult.pairingUrl} />
                 </div>
               )}
+              {rotateResult.pairingUrl && <PairAgentHint />}
             </div>
 
           ) : (

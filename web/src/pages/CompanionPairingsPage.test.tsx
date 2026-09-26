@@ -191,6 +191,7 @@ describe("CompanionPairingsPage", () => {
       expect(screen.getByRole("button", { name: /copy url/i })).toBeInTheDocument();
       const deepLink = screen.getByRole("link", { name: /pair with local agent/i });
       expect(deepLink).toHaveAttribute("href", pairingUrl);
+      expect(screen.getByText(/if nothing happens, install or update the agent/i)).toBeInTheDocument();
     });
   });
 
@@ -222,6 +223,7 @@ describe("CompanionPairingsPage", () => {
       expect(screen.getByRole("button", { name: /copy url/i })).toBeInTheDocument();
       const deepLink = screen.getByRole("link", { name: /pair with local agent/i });
       expect(deepLink).toHaveAttribute("href", pairingUrl);
+      expect(screen.getByText(/if nothing happens, install or update the agent/i)).toBeInTheDocument();
     });
     // Rotate success reuses the same re-openable copy; no show-once claim.
     expect(screen.queryByText(/will not be shown again/i)).not.toBeInTheDocument();
