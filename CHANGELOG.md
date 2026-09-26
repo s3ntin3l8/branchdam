@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.2](https://github.com/s3ntin3l8/branchdam/compare/v0.26.1...v0.26.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **web:** explain what "Pair with local agent" needs when nothing happens ([#495](https://github.com/s3ntin3l8/branchdam/issues/495)) ([b5fc46f](https://github.com/s3ntin3l8/branchdam/commit/b5fc46f2054e8cc940259c0fab4b85527d0f7a11))
+
 ## [0.26.1](https://github.com/s3ntin3l8/branchdam/compare/v0.26.0...v0.26.1) (2026-09-24)
 
 
