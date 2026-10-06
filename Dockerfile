@@ -31,7 +31,7 @@ RUN npm run build
 # see docs/operations.md's Docker image size note. Multi-arch: the manifest
 # list covers both linux/amd64 and linux/arm64, matching docker-publish.yml's
 # build matrix.
-FROM mwader/static-ffmpeg@sha256:0baebb46b58f29250222e76169bba15d6b73d1da8f1c3240466a2540b228fc32 AS ffprobe
+FROM mwader/static-ffmpeg@sha256:028fb402231d4f5f2223c67fca5d0abc04f5a38cffcbadf9844f06985e2259b8 AS ffprobe
 
 # --- Stage 3: build the Go binary (with embedded dist) ---
 # golang:1.26-bookworm, NOT -alpine: CGO_ENABLED=1 (mattn/go-sqlite3, see
