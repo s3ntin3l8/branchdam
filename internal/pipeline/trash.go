@@ -112,6 +112,9 @@ func TrashAssetTx(
 	nodeID int64,
 	keepExports bool,
 ) (sqlcgen.MediaNode, error) {
+	// Standalone entry point: it owns its own move log and undoes it on
+	// failure. TrashAsset does NOT go through here -- it calls trashAssetTx
+	// directly with ITS move log, so it can also undo when the commit fails.
 	ml := &moveLog{}
 	node, err := trashAssetTx(ctx, q, guard, log, nodeID, keepExports, ml)
 	if err != nil {
@@ -197,6 +200,11 @@ func trashAssetTx(
 	return updated, nil
 }
 
+// TODO(audit): unlike trash, a restore does not undo its rename if a later DB
+// step fails (the file ends up at the original path while the row is still
+// TRASHED). Symmetric to the moveLog fix above; rarer path, tracked in the
+// audit follow-ups.
+//
 // RestoreTrashedAsset moves the file back from .trash/<rel> to the original
 // path, sets lifecycle_state back to ACTIVE, and (when linked exports were
 // also trashed by a keepExports=false TrashAsset call) restores them too.

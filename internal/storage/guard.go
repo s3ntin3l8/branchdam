@@ -196,9 +196,18 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 // virtual location takes precedence and writes under it will be refused. Distinct,
 // non-overlapping root paths should be configured.
 func (g *Guard) Resolve(path string) (Location, error) {
+	loc, _, err := g.resolveCanonical(path)
+	return loc, err
+}
+
+// resolveCanonical is Resolve that also returns the canonical (symlink-free)
+// path it matched against, so a caller that goes on to open the file does not
+// walk the symlinks a second time. canon is "" for virtual locations, which
+// match lexically and have no on-disk path.
+func (g *Guard) resolveCanonical(path string) (Location, string, error) {
 	cleanPath := filepath.Clean(path)
 	if !filepath.IsAbs(cleanPath) {
-		return Location{}, fmt.Errorf("storage: resolve %q: path must be absolute", path)
+		return Location{}, "", fmt.Errorf("storage: resolve %q: path must be absolute", path)
 	}
 
 	g.mu.RLock()
@@ -207,24 +216,24 @@ func (g *Guard) Resolve(path string) (Location, error) {
 	for _, loc := range g.locs {
 		if loc.IsVirtual {
 			if cleanPath == loc.RootPath || strings.HasPrefix(cleanPath, loc.RootPath+string(filepath.Separator)) {
-				return loc, nil
+				return loc, "", nil
 			}
 		}
 	}
 
 	canon, err := canonicalize(cleanPath)
 	if err != nil {
-		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+		return Location{}, "", fmt.Errorf("storage: resolve %q: %w", path, err)
 	}
 
 	for _, loc := range g.locs {
 		if !loc.IsVirtual {
 			if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
-				return loc, nil
+				return loc, canon, nil
 			}
 		}
 	}
-	return Location{}, &ErrUnknownLocation{Path: path}
+	return Location{}, "", &ErrUnknownLocation{Path: path}
 }
 
 // CheckWrite returns *ErrReadOnlyTier if path resolves to a read-only
@@ -286,7 +295,7 @@ func (g *Guard) Remove(path string) error {
 // used to serve (or hash) files such as the server's own database. The
 // canonical, symlink-free path is what gets opened.
 func (g *Guard) OpenRead(path string) (*os.File, error) {
-	loc, err := g.Resolve(path)
+	loc, canon, err := g.resolveCanonical(path)
 	if err != nil {
 		var unknown *ErrUnknownLocation
 		if errors.As(err, &unknown) {
@@ -300,11 +309,10 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 		return nil, err
 	}
 	if loc.IsVirtual {
-		return os.Open(path)
-	}
-	canon, err := canonicalize(path)
-	if err != nil {
-		return nil, fmt.Errorf("storage: resolve %q: %w", path, err)
+		// A virtual location is a lexical namespace with no bytes behind it
+		// (Exists reports false for the same reason). Opening a path under
+		// it could only ever follow a planted symlink, so refuse.
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 	}
 	return os.Open(canon)
 }

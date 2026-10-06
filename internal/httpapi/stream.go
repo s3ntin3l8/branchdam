@@ -43,8 +43,11 @@ func assetContentType(ext string) string {
 	return "application/octet-stream"
 }
 
-// scriptCapableContentType reports types a browser will render as a document
-// or execute when served from the app's own origin.
+// scriptCapableContentType reports types a browser will render as a document,
+// execute, or interpret as active content when served from the app's own
+// origin. text/css is included not because CSS runs script but because
+// attacker-controlled CSS applied to an app page can exfiltrate attribute
+// values via selectors/url(); serving it as an opaque download costs nothing.
 func scriptCapableContentType(ct string) bool {
 	base, _, _ := strings.Cut(ct, ";")
 	switch strings.ToLower(strings.TrimSpace(base)) {

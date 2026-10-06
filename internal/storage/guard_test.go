@@ -561,3 +561,52 @@ func TestCreateExclAndLinkAndRenameAreGuarded(t *testing.T) {
 		t.Fatalf("Rename writable: %v", err)
 	}
 }
+
+// CreateExcl must refuse a path whose PARENT is a pre-existing symlink that
+// leaves every location: nothing is created on the other side.
+func TestCreateExclRefusesPathThroughEscapingSymlinkParent(t *testing.T) {
+	guard, tier2, _ := newTestGuard(t)
+	outside := t.TempDir()
+	link := filepath.Join(tier2, "2026")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	f, err := guard.CreateExcl(filepath.Join(link, "escaped.bin"), 0o644)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("CreateExcl created a file through a symlink that leaves the storage locations")
+	}
+	var unk *ErrUnknownLocation
+	if !errors.As(err, &unk) {
+		t.Fatalf("error = %v (%T), want *ErrUnknownLocation", err, err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("files appeared outside the locations: %v", entries)
+	}
+}
+
+// Virtual locations hold no bytes: OpenRead refuses them rather than
+// following whatever a symlink planted under the virtual root points at.
+func TestOpenReadRefusesVirtualLocation(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "real.txt")
+	if err := os.WriteFile(target, []byte("real"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	virt := filepath.Join(root, "virtual")
+	if err := os.MkdirAll(virt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(virt, "planted.txt")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	guard := NewGuard([]Location{{ID: 9, Name: "virt", RootPath: virt, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true, IsVirtual: true}})
+	f, err := guard.OpenRead(filepath.Join(virt, "planted.txt"))
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("OpenRead followed a symlink under a virtual location")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v, want ErrNotExist", err)
+	}
+}
