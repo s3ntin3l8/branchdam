@@ -516,8 +516,11 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 		if _, err := os.Lstat(n.FilePath); !errors.Is(err, fs.ErrNotExist) {
 			continue // still on disk: duplicate or collision, not a move
 		}
-		if n.FullHash != nil && result.FullHash != "" && *n.FullHash != result.FullHash {
-			continue // genuinely different content sharing a fast_hash (T1)
+		if !movePlausible(n.StorageLocationID, n.FullHash, loc.ID, result.FullHash) {
+			// Different content sharing a fast_hash (T1), or no full-hash
+			// evidence and a different location (e.g. a copy dropped into
+			// scratch while the NAS holding the original is unmounted).
+			continue
 		}
 		// TOCTOU: the GetLiveNodeByPath pre-check above read on the reader
 		// pool, this rebase writes later on the single writer connection. A

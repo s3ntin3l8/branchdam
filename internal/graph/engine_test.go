@@ -2096,3 +2096,47 @@ func TestHeuristicSpatialTemporalResolverFullTieBreaksOnLowestParentID(t *testin
 		t.Errorf("SourceNodeID = %d, want %d (lowest parent node ID, the final tie-break)", edges[0].SourceNodeID, wantWinner)
 	}
 }
+
+// A node already LINKED through a strong edge must not be knocked back to
+// NEEDS_REVIEW because a later pass also proposes an additional WEAK
+// candidate: status derives from ALL of the node's persisted edges, not just
+// the ones this pass happened to emit. (Every full scan re-resolves every
+// node, so the downgrade used to repeat constantly.)
+func TestWeakExtraCandidateDoesNotDowngradeLinkedNode(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database)
+
+	strongParent := seedNode(t, database, locationID, nodeFixture{Path: "/sp.jpg", FileName: "sp.jpg", FileExt: "jpg"})
+	weakParent := seedNode(t, database, locationID, nodeFixture{Path: "/wp.jpg", FileName: "wp.jpg", FileExt: "jpg"})
+	child := seedNode(t, database, locationID, nodeFixture{Path: "/child.jpg", FileName: "child.jpg", FileExt: "jpg"})
+
+	strong := Candidate{ParentID: strongParent.ID, ChildID: child.ID, Rel: "DERIVED_FROM", Confidence: 0.95, Tier: 1, Resolver: "strong", Evidence: map[string]any{}}
+	if _, _, err := NewEngine(database, nil, fixedCandidateResolver{strong}).ResolveAndCommit(ctx, asGraphNode(child)); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	got, err := database.Reader.GetMediaNodeByID(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GraphStatus != "LINKED" {
+		t.Fatalf("setup: graph_status = %q, want LINKED", got.GraphStatus)
+	}
+
+	// Second pass: ONLY a weak candidate from a different parent is proposed.
+	weak := Candidate{ParentID: weakParent.ID, ChildID: child.ID, Rel: "DERIVED_FROM", Confidence: 0.55, Tier: 2, Resolver: "weak", Evidence: map[string]any{}}
+	edges, _, err := NewEngine(database, nil, fixedCandidateResolver{weak}).ResolveAndCommit(ctx, asGraphNode(child))
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(edges) != 1 || edges[0].ReviewState != "NEEDS_REVIEW" {
+		t.Fatalf("setup: second pass edges = %+v, want one NEEDS_REVIEW edge", edges)
+	}
+	got, err = database.Reader.GetMediaNodeByID(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GraphStatus != "LINKED" {
+		t.Fatalf("graph_status = %q after a weak extra candidate; a node with a strong edge must stay LINKED", got.GraphStatus)
+	}
+}

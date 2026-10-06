@@ -175,19 +175,23 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 			// edges where TargetNodeID != child.ID, so keying on TargetNodeID
 			// ensures the true child gets updated and a parent node with only
 			// outbound edges isn't incorrectly marked NEEDS_REVIEW.
-			statusByTarget := make(map[int64]string)
+			//
+			// The status is derived from ALL of the target's persisted edges
+			// (the upserts above are already visible in this tx), not from the
+			// subset this pass emitted: a node already LINKED through a strong
+			// or human-confirmed edge must not be knocked back to
+			// NEEDS_REVIEW by an additional weak candidate -- and every full
+			// scan re-resolves every node. Only targets that had a non-REJECTED
+			// edge in this pass are touched, so a REJECTED-only pass still
+			// leaves graph_status alone.
+			touched := make(map[int64]struct{})
 			for _, edge := range committed {
-				if edge.ReviewState == "AUTO_ACCEPTED" || edge.ReviewState == "CONFIRMED" {
-					statusByTarget[edge.TargetNodeID] = "LINKED"
-				} else if edge.ReviewState != "REJECTED" && statusByTarget[edge.TargetNodeID] != "LINKED" {
-					statusByTarget[edge.TargetNodeID] = "NEEDS_REVIEW"
+				if edge.ReviewState != "REJECTED" {
+					touched[edge.TargetNodeID] = struct{}{}
 				}
 			}
-			for targetID, status := range statusByTarget {
-				if err := q.UpdateMediaNodeGraphStatus(ctx, sqlcgen.UpdateMediaNodeGraphStatusParams{
-					ID:          targetID,
-					GraphStatus: status,
-				}); err != nil {
+			for targetID := range touched {
+				if err := RecomputeStatusFromPersistedEdges(ctx, q, targetID); err != nil {
 					return fmt.Errorf("update graph_status: %w", err)
 				}
 			}

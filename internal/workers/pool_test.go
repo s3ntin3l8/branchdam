@@ -411,3 +411,65 @@ func stressSubmitOnce() error {
 	}
 	return nil
 }
+
+// SubmitWait applies backpressure instead of refusing: with a depth-1 queue
+// and a slow worker, every one of 20 jobs must eventually run -- none may be
+// dropped just because the queue was momentarily full.
+func TestPoolSubmitWaitAppliesBackpressure(t *testing.T) {
+	pool := New[int](1, 1)
+	runCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	pool.Run(runCtx)
+
+	var ran atomic.Int32
+	for i := 0; i < 20; i++ {
+		ok := pool.SubmitWait(context.Background(), Job[int]{Key: i, Run: func(context.Context) error {
+			time.Sleep(2 * time.Millisecond)
+			ran.Add(1)
+			return nil
+		}})
+		if !ok {
+			t.Fatalf("SubmitWait refused job %d on a full queue; it should have waited", i)
+		}
+	}
+	deadline := time.After(5 * time.Second)
+	for ran.Load() < 20 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d/20 jobs ran", ran.Load())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestPoolSubmitWaitReturnsFalseWhenContextCancelledWhileFull(t *testing.T) {
+	pool := New[int](1, 1) // never Run(): nothing drains
+	if !pool.Submit(context.Background(), Job[int]{Key: 1, Run: func(context.Context) error { return nil }}) {
+		t.Fatal("seed submit failed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if pool.SubmitWait(ctx, Job[int]{Key: 2, Run: func(context.Context) error { return nil }}) {
+		t.Fatal("SubmitWait succeeded into a full, undrained queue")
+	}
+	if time.Since(start) < 20*time.Millisecond {
+		t.Fatal("SubmitWait returned before its context expired; it should have waited")
+	}
+}
+
+// A duplicate key is not backpressure: the same path is already in flight,
+// retrying can't help, so SubmitWait returns false immediately.
+func TestPoolSubmitWaitDuplicateReturnsImmediately(t *testing.T) {
+	pool := New[int](1, 4)
+	if !pool.Submit(context.Background(), Job[int]{Key: 7, Run: func(context.Context) error { return nil }}) {
+		t.Fatal("seed submit failed")
+	}
+	start := time.Now()
+	if pool.SubmitWait(context.Background(), Job[int]{Key: 7, Run: func(context.Context) error { return nil }}) {
+		t.Fatal("SubmitWait accepted a duplicate in-flight key")
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatal("SubmitWait waited on a duplicate key")
+	}
+}

@@ -134,3 +134,47 @@ func TestPruneArchivedNodeMetadata(t *testing.T) {
 		}
 	}
 }
+
+// An ARCHIVED node WITHOUT a successor is a user soft-delete that can be
+// restored (and whose agent-supplied *_evidence metadata cannot be
+// re-derived from disk): its metadata must survive the prune. Only
+// superseded versions (superseded_by set) are pruned.
+func TestPruneArchivedNodeMetadataKeepsSoftDeletedNodes(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+
+	if _, err := Commit(ctx, database, locationID, []Result{{
+		Path: "/exports/softdel.jpg", FileName: "softdel.jpg", FileExt: "jpg", Size: 10, ModTime: time.Now(),
+		FastHash: "00000000000000a1", Make: "Sony",
+	}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	node := mustGetLiveNode(t, database, "/exports/softdel.jpg")
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if err := q.InsertNodeMetadata(ctx, sqlcgen.InsertNodeMetadataParams{NodeID: node.ID, Source: "resolve_evidence", Key: "timeline", Value: "A"}); err != nil {
+			return err
+		}
+		return q.ArchiveMediaNode(ctx, node.ID) // soft delete: no successor
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("setup: metadata rows = %d err=%v", len(before), err)
+	}
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.PruneArchivedNodeMetadata(ctx)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := database.Reader.ListNodeMetadata(ctx, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("soft-deleted node's metadata was pruned: %d rows -> %d", len(before), len(after))
+	}
+}

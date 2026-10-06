@@ -101,9 +101,12 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 FROM media_nodes
 WHERE file_path = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 
--- name: GetMissingNodeByFastHash :one
+-- name: ListMissingNodesByFastHash :many
 -- Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 -- a new file elsewhere hashes the same -- likely the same file, moved.
+-- Returns a few candidates (oldest first); the caller decides which one is
+-- plausibly the same file (same location, or matching full_hash) -- a fast
+-- hash alone must not steal a node from an unrelated location.
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -114,7 +117,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
-LIMIT 1;
+ORDER BY id
+LIMIT 8;
 
 -- name: ListLiveNodesByFastHash :many
 -- T1 (spec 9.5): before assuming two same-fast_hash files at DIFFERENT live
@@ -251,11 +255,13 @@ UPDATE media_nodes SET superseded_by = ?2, updated_at = unixepoch() WHERE id = ?
 -- Pillar 5 move detection, applied: the id and node_uuid never change, so
 -- every edge referencing this node (as parent or child) survives the move
 -- untouched -- no CASCADE, no rewrite needed.
+-- Refuses ARCHIVED/TRASHED rows: they are retired states, and a stale
+-- earlier read must not resurrect them by rebasing.
 UPDATE media_nodes
 SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
     lifecycle_state = 'ACTIVE', mtime_unix = ?5,
     last_seen_at = unixepoch(), updated_at = unixepoch()
-WHERE id = ?1;
+WHERE id = ?1 AND lifecycle_state NOT IN ('ARCHIVED', 'TRASHED');
 
 -- name: TouchMediaNode :exec
 -- Same content at the same path, seen again on a later scan. Records that
@@ -353,7 +359,11 @@ UPDATE media_nodes SET
 WHERE id = ?1;
 
 -- name: MarkNodeMissing :exec
-UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1;
+-- Only live nodes go MISSING. A caller's earlier read (reader pool) can be
+-- stale by the time this write runs; without the guard a node that was
+-- trashed or archived in between was silently flipped to MISSING.
+UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch()
+WHERE id = ?1 AND lifecycle_state IN ('ACTIVE', 'HIDDEN');
 
 -- name: MarkNodeTrashed :exec
 -- pipeline.TrashAsset calls this on the master node and on every linked
@@ -433,7 +443,9 @@ WHERE node_uuid = ?1;
 -- ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 -- vanished (MISSING) or archived Tier-3 master can never authorize a purge.
 -- Ancestor, not "same full_hash": walks media_edges target->source
--- (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
+-- (only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is an
+-- unreviewed guess and must never authorise deleting a file -- and each walked
+-- node must itself be non-ARCHIVED),
 -- mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
 -- exclusion exactly -- a chain that only connects through a superseded
 -- version doesn't represent the file currently on disk.
@@ -460,7 +472,7 @@ WITH RECURSIVE lineage(root, id) AS (
     FROM media_edges e
     JOIN lineage l ON e.target_node_id = l.id
     JOIN media_nodes a ON a.id = e.source_node_id
-    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state IN ('CONFIRMED', 'AUTO_ACCEPTED')
       AND a.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,

@@ -439,7 +439,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 			}
 
 			wg.Add(1)
-			submitted := deps.Pool.Submit(ctx, workers.Job[string]{
+			submitted := deps.Pool.SubmitWait(ctx, workers.Job[string]{
 				Key: rec.Path,
 				Run: func(jobCtx context.Context) error {
 					defer wg.Done()
@@ -491,12 +491,12 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				if isClosed(deps.Shutdown) {
 					interrupted.Store(true)
 				}
-				// This can be ordinary backpressure (duplicate in flight,
-				// queue full) OR the pool refusing because it's shutting
-				// down. If deps.Shutdown is already closed, it is recorded
-				// as interrupted by shutdown; otherwise it is treated as
-				// ordinary backpressure and the scan can still complete.
-				log.Warn("pipeline: submit refused (duplicate in flight, queue full, or pool shutting down)", "path", rec.Path)
+				// SubmitWait already waited out a merely-full queue, so a
+				// refusal here is a duplicate in-flight path, the scan's own
+				// ctx ending, or the pool shutting down. If deps.Shutdown is
+				// already closed it is recorded as interrupted by shutdown;
+				// otherwise the scan can still complete.
+				log.Warn("pipeline: submit refused (duplicate in flight or pool shutting down)", "path", rec.Path)
 			}
 			return nil
 		})
@@ -1022,7 +1022,7 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		}
 	}
 
-	if needsFullHash(deps.FullHashPolicy, location.Tier, hasCollision) {
+	if needsFullHash(deps.FullHashPolicy, location.Tier, hasCollision) && (deps.FullHashPolicy == "always" || !fullHashStillValid(ctx, deps, rec)) {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek for full hash: %w", err)
 		}
@@ -1082,6 +1082,24 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 	}
 
 	return result, nil
+}
+
+// fullHashStillValid reports whether the live node already indexed at rec's
+// path holds a full_hash and its size and mtime are unchanged -- i.e. the
+// stored BLAKE3 is still the file's. Without this every FULL_SCAN re-read
+// every byte of every Tier-3 file (archive-sized I/O) only for the touched
+// branch to discard the result. A moved mtime or size recomputes it, and the
+// explicit "always" policy still re-reads every time.
+func fullHashStillValid(ctx context.Context, deps ScanDeps, rec indexer.Record) bool {
+	if deps.DB == nil {
+		return false
+	}
+	node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, rec.Path)
+	if err != nil {
+		return false
+	}
+	return node.FullHash != nil && *node.FullHash != "" &&
+		node.SizeBytes == rec.Size && node.MtimeUnix == rec.ModTime.Unix()
 }
 
 func (d ScanDeps) logOrDiscard() *slog.Logger {

@@ -12,16 +12,13 @@ import (
 // one edge a caller just touched -- a single edge decision says nothing by
 // itself about whether the node overall is linked.
 //
-// This is deliberately NOT the same computation as Engine.ResolveAndCommit's
-// inline status update (below, around line 190): that one derives status
-// from in-memory candidates mid-resolution, before anything is persisted.
-// This one re-derives status from media_edges rows that are already
-// committed, and is meant to be called by anything that mutates an edge's
-// review_state outside of Engine's own resolve pass -- today that's
+// Engine.ResolveAndCommit uses this too, right after upserting a pass's
+// edges (they are visible in the same tx): deriving status from only the
+// edges a single pass emitted let a weak extra candidate downgrade an
+// already-LINKED node to NEEDS_REVIEW. It is also called by anything that
+// mutates an edge's review_state outside of Engine's own resolve pass --
 // httpapi's confirm/reject/manual-edge handlers and internal/agent's
-// applyEdgeAttached. Do not "unify" the two: mixing a mid-resolution,
-// candidate-based computation with a persisted-edge one would change
-// behavior in ways neither caller intends.
+// applyEdgeAttached.
 //
 // Precedence mirrors Engine.ResolveAndCommit's LINKED/NEEDS_REVIEW rule (an
 // AUTO_ACCEPTED or CONFIRMED edge wins outright; a REJECTED edge is never

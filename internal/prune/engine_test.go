@@ -116,7 +116,7 @@ func seedNode(t *testing.T, database *db.DB, spec nodeSpec) sqlcgen.MediaNode {
 func seedEdge(t *testing.T, database *db.DB, ancestorID, descendantID int64, reviewState string) {
 	t.Helper()
 	initial := reviewState
-	if initial == "REJECTED" {
+	if initial == "REJECTED" || initial == "CONFIRMED" {
 		initial = "AUTO_ACCEPTED"
 	}
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
@@ -127,8 +127,11 @@ func seedEdge(t *testing.T, database *db.DB, ancestorID, descendantID int64, rev
 		if err != nil {
 			return err
 		}
-		if reviewState == "REJECTED" {
+		switch reviewState {
+		case "REJECTED":
 			_, err = q.RejectMediaEdge(context.Background(), sqlcgen.RejectMediaEdgeParams{ID: edge.ID})
+		case "CONFIRMED":
+			_, err = q.ConfirmMediaEdge(context.Background(), sqlcgen.ConfirmMediaEdgeParams{ID: edge.ID})
 		}
 		return err
 	})
@@ -888,5 +891,52 @@ func TestExecuteSurfacesPlanFailureForLocation(t *testing.T) {
 	}
 	if !strings.Contains(results[0].Err.Error(), "closed") {
 		t.Errorf("err = %q, want it to surface the underlying DB error (got a closed DB, so \"closed\" should appear in the message)", results[0].Err)
+	}
+}
+
+// Only a CONFIRMED or AUTO_ACCEPTED edge may connect a Tier-1 cache to the
+// Tier-3 master that authorises deleting it. A NEEDS_REVIEW edge is a guess
+// nobody has looked at: a 0.6 filename-stem match to an unrelated RAW must
+// never be what lets prune delete the only copy of an edit (AGENTS.md
+// invariant 7).
+func TestPlanRequiresConfirmedOrAutoAcceptedEdge(t *testing.T) {
+	for _, tc := range []struct {
+		review   string
+		eligible bool
+	}{
+		{"CONFIRMED", true},
+		{"AUTO_ACCEPTED", true},
+		{"NEEDS_REVIEW", false},
+		{"REJECTED", false},
+	} {
+		t.Run(tc.review, func(t *testing.T) {
+			database := openTestDB(t)
+			tier1ID := seedLocation(t, database, "t1", t.TempDir(), "TIER1_LOCAL_SCRATCH", false, true)
+			tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+			master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/m.jpg", mtimeUnix: oldMtime, fullHash: hash64("v")})
+			candidate := seedNode(t, database, nodeSpec{locationID: tier1ID, path: "/scratch/p.jpg", mtimeUnix: oldMtime})
+			seedEdge(t, database, master.ID, candidate.ID, tc.review)
+
+			got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if tc.eligible && len(got) != 1 {
+				t.Fatalf("%s edge: Plan = %+v, want the candidate", tc.review, got)
+			}
+			if !tc.eligible && len(got) != 0 {
+				t.Fatalf("%s edge: Plan = %+v, want no candidates", tc.review, got)
+			}
+			ancestors, err := database.Reader.ListVerifiedTier3Ancestors(context.Background(), candidate.ID)
+			if err != nil {
+				t.Fatalf("ListVerifiedTier3Ancestors: %v", err)
+			}
+			if tc.eligible && len(ancestors) != 1 {
+				t.Fatalf("%s edge: ancestors = %+v, want the master", tc.review, ancestors)
+			}
+			if !tc.eligible && len(ancestors) != 0 {
+				t.Fatalf("%s edge: ancestors = %+v, want none (Execute's re-verify must agree with Plan)", tc.review, ancestors)
+			}
+		})
 	}
 }

@@ -1526,3 +1526,231 @@ func TestCommitArchivedNodeSticksAndSupersedesOnChange(t *testing.T) {
 		t.Errorf("archivedNode.SupersededBy = %v, want %d", archivedNode.SupersededBy, newNode.ID)
 	}
 }
+
+// A byte-identical copy at a second path violates the live full_hash unique
+// index. That must cost only the duplicate -- not roll back the other files
+// in the same 64-result commit batch (which then re-failed on every scan).
+func TestCommitDuplicateFullHashSkipsOnlyTheDuplicate(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER3_MASTER_ARCHIVE", false)
+	full := strings.Repeat("d", 64)
+
+	stats, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/archive/a.raw", FileName: "a.raw", FileExt: "raw", Size: 1, ModTime: time.Now(), FastHash: "1111111111111111", FullHash: full},
+		{Path: "/archive/unrelated.raw", FileName: "unrelated.raw", FileExt: "raw", Size: 2, ModTime: time.Now(), FastHash: "2222222222222222", FullHash: strings.Repeat("e", 64)},
+		{Path: "/archive/copy_of_a.raw", FileName: "copy_of_a.raw", FileExt: "raw", Size: 1, ModTime: time.Now(), FastHash: "1111111111111111", FullHash: full},
+		{Path: "/archive/also_unrelated.raw", FileName: "also_unrelated.raw", FileExt: "raw", Size: 3, ModTime: time.Now(), FastHash: "3333333333333333", FullHash: strings.Repeat("f", 64)},
+	}, 0)
+	if err != nil {
+		t.Fatalf("Commit: a duplicate in the batch failed the whole batch: %v", err)
+	}
+	if stats.Inserted != 3 {
+		t.Fatalf("stats = %+v, want Inserted=3 (everything except the duplicate)", stats)
+	}
+	if stats.Duplicates != 1 {
+		t.Fatalf("stats = %+v, want Duplicates=1", stats)
+	}
+	for _, p := range []string{"/archive/a.raw", "/archive/unrelated.raw", "/archive/also_unrelated.raw"} {
+		mustGetLiveNode(t, database, p)
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, "/archive/copy_of_a.raw"); err == nil {
+		t.Fatal("the duplicate was inserted as a second live node")
+	}
+}
+
+// A node indexed without a full hash (e.g. a transient hash failure) must get
+// it backfilled when a later pass computes one, instead of the touched branch
+// throwing the freshly computed hash away and leaving the node permanently
+// NULL -- which also keeps its Tier-1 caches un-prunable.
+func TestCommitTouchedBackfillsMissingFullHash(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER3_MASTER_ARCHIVE", false)
+	now := time.Now()
+
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/archive/m.raw", FileName: "m.raw", FileExt: "raw", Size: 5, ModTime: now, FastHash: "9999999999999999"},
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if n := mustGetLiveNode(t, database, "/archive/m.raw"); n.FullHash != nil {
+		t.Fatalf("setup: node already has full_hash %q", *n.FullHash)
+	}
+
+	full := strings.Repeat("7", 64)
+	stats, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/archive/m.raw", FileName: "m.raw", FileExt: "raw", Size: 5, ModTime: now, FastHash: "9999999999999999", FullHash: full},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Touched != 1 {
+		t.Fatalf("stats = %+v, want Touched=1", stats)
+	}
+	n := mustGetLiveNode(t, database, "/archive/m.raw")
+	if n.FullHash == nil || *n.FullHash != full {
+		t.Fatalf("full_hash = %v, want %q backfilled", n.FullHash, full)
+	}
+	if n.IndexingStatus != "INDEXED_FULL" {
+		t.Fatalf("indexing_status = %q, want INDEXED_FULL", n.IndexingStatus)
+	}
+}
+
+func TestMovePlausible(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	tests := []struct {
+		name    string
+		nodeLoc int64
+		nodeFH  *string
+		loc     int64
+		newFH   string
+		want    bool
+	}{
+		{"same location, no full hashes", 1, nil, 1, "", true},
+		{"different location, no full hashes: not a move", 1, nil, 2, "", false},
+		{"different location, only the new file hashed: not a move", 1, nil, 2, a, false},
+		{"equal full hashes may cross locations", 1, &a, 2, a, true},
+		{"differing full hashes never a move", 1, &a, 1, b, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := movePlausible(tt.nodeLoc, tt.nodeFH, tt.loc, tt.newFH); got != tt.want {
+				t.Fatalf("movePlausible = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A copy dropped into one location must not steal a MISSING node (and its
+// edges/lineage) from an unrelated location just because the fast hashes match.
+func TestMissingNodeNotStolenAcrossLocations(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	archiveLoc := seedLocation(t, database, "TIER3_MASTER_ARCHIVE", false)
+	scratchLoc := seedLocation(t, database, "TIER1_LOCAL_SCRATCH", false)
+
+	if _, err := Commit(ctx, database, archiveLoc, []Result{
+		{Path: "/archive/master.raw", FileName: "master.raw", FileExt: "raw", Size: 9, ModTime: time.Now(), FastHash: "abababababababab"},
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	master := mustGetLiveNode(t, database, "/archive/master.raw")
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error { return q.MarkNodeMissing(ctx, master.ID) }); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := Commit(ctx, database, scratchLoc, []Result{
+		{Path: "/scratch/copy.raw", FileName: "copy.raw", FileExt: "raw", Size: 9, ModTime: time.Now(), FastHash: "abababababababab"},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 0 || stats.Inserted != 1 {
+		t.Fatalf("stats = %+v, want a fresh insert (Moved=0), not a cross-location steal", stats)
+	}
+	got, err := database.Reader.GetMediaNodeByID(ctx, master.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FilePath != "/archive/master.raw" || got.LifecycleState != "MISSING" {
+		t.Fatalf("master was modified: path=%q state=%q", got.FilePath, got.LifecycleState)
+	}
+}
+
+// MarkNodeMissing/RebaseMissingNodePath act on a possibly stale earlier read;
+// they must never flip a node that has meanwhile been trashed or archived.
+func TestLifecycleWritesRefuseRetiredStates(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	if _, err := Commit(ctx, database, locationID, []Result{
+		{Path: "/x/a.jpg", FileName: "a.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "1212121212121212"},
+		{Path: "/x/b.jpg", FileName: "b.jpg", FileExt: "jpg", Size: 1, ModTime: time.Now(), FastHash: "3434343434343434"},
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	trashed := mustGetLiveNode(t, database, "/x/a.jpg")
+	archived := mustGetLiveNode(t, database, "/x/b.jpg")
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		if err := q.MarkNodeTrashed(ctx, trashed.ID); err != nil {
+			return err
+		}
+		return q.ArchiveMediaNode(ctx, archived.ID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, id := range []int64{trashed.ID, archived.ID} {
+			if err := q.MarkNodeMissing(ctx, id); err != nil {
+				return err
+			}
+			if err := q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
+				ID: id, FilePath: fmt.Sprintf("/rebased/%d.jpg", id), FileName: "r.jpg", StorageLocationID: locationID, MtimeUnix: 1,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[int64]string{trashed.ID: "TRASHED", archived.ID: "ARCHIVED"} {
+		n, err := database.Reader.GetMediaNodeByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.LifecycleState != want {
+			t.Errorf("node %d lifecycle_state = %q, want %q (stale write must not change a retired node)", id, n.LifecycleState, want)
+		}
+		if strings.HasPrefix(n.FilePath, "/rebased/") {
+			t.Errorf("node %d was rebased despite being %s", id, want)
+		}
+	}
+}
+
+// Trashing a Tier-3 master is logical-only (the bytes stay on disk), so the
+// next scan sees the file again. It must not create a fresh ACTIVE node next
+// to the TRASHED row -- that undid the user's trash and made a later restore
+// fail with a path collision.
+func TestCommitDoesNotResurrectLogicallyTrashedFile(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedLocation(t, database, "TIER3_MASTER_ARCHIVE", false)
+	now := time.Now()
+	res := Result{Path: "/archive/keep.raw", FileName: "keep.raw", FileExt: "raw", Size: 4, ModTime: now, FastHash: "5656565656565656"}
+
+	if _, err := Commit(ctx, database, locationID, []Result{res}, 0); err != nil {
+		t.Fatal(err)
+	}
+	node := mustGetLiveNode(t, database, res.Path)
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error { return q.MarkNodeTrashed(ctx, node.ID) }); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := Commit(ctx, database, locationID, []Result{res}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Inserted != 0 {
+		t.Fatalf("stats = %+v: a trashed file's unchanged bytes were re-indexed as a new node", stats)
+	}
+	if _, err := database.Reader.GetLiveNodeByPath(ctx, res.Path); err == nil {
+		t.Fatal("a live node now exists at the trashed path")
+	}
+	got, err := database.Reader.GetMediaNodeByID(ctx, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LifecycleState != "TRASHED" {
+		t.Fatalf("lifecycle_state = %q, want TRASHED", got.LifecycleState)
+	}
+
+	// Changed content at that path is a genuinely new version and IS indexed.
+	changed := res
+	changed.FastHash = "7878787878787878"
+	if stats, err := Commit(ctx, database, locationID, []Result{changed}, 0); err != nil || stats.Inserted != 1 {
+		t.Fatalf("changed content: stats=%+v err=%v, want Inserted=1", stats, err)
+	}
+}
