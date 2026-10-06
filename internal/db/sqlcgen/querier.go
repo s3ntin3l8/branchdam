@@ -1030,7 +1030,9 @@ type Querier interface {
 	// deliberately NOT unique (migration 00017 comment): two pairings may
 	// share a label; only agent_id is UNIQUE.
 	UpdateDevicePairingFriendlyLabel(ctx context.Context, arg UpdateDevicePairingFriendlyLabelParams) error
-	UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStepParams) error
+	// Compare-and-set: only advances the step. Zero rows affected means a
+	// concurrent request already consumed this (or a later) step, i.e. replay.
+	UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStepParams) (int64, error)
 	// Escalation path for T1: computed lazily, only when fast_hash collides
 	// with another live node or the file lives on a TIER3_MASTER_ARCHIVE
 	// location (docs/schema.md fix #8's full_hash policy).

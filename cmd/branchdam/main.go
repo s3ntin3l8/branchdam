@@ -402,9 +402,25 @@ func main() {
 			os.Exit(1)
 		}
 		usersService := users.NewService(database, rawKey, users.ServiceOptions{
-			Log: log,
+			Log:   log,
+			Argon: argonParams(cfg.Auth.Local.Argon),
 		})
-		loginLimiter := ratelimit.New()
+		rlCfg, err := rateLimitConfig(cfg.Auth.Local.RateLimit)
+		if err != nil {
+			log.Error("auth: invalid rate-limit config", "err", err.Error())
+			os.Exit(1)
+		}
+		idleTimeout, err := parseOptionalDuration("idleTimeout", cfg.Auth.Local.IdleTimeout)
+		if err != nil {
+			log.Error("auth: invalid config", "err", err.Error())
+			os.Exit(1)
+		}
+		absoluteTimeout, err := parseOptionalDuration("absoluteTimeout", cfg.Auth.Local.AbsoluteTimeout)
+		if err != nil {
+			log.Error("auth: invalid config", "err", err.Error())
+			os.Exit(1)
+		}
+		loginLimiter := ratelimit.NewFromConfig(rlCfg)
 		// resetLimiter is a separate sliding-window failure budget for
 		// the password-reset endpoints (PR #409, Hermes review).
 		// Rationale: the existing loginLimiter never records failures
@@ -417,14 +433,14 @@ func main() {
 		// wrong-token attempts eventually cool off. Per-IP, same
 		// defensive posture as loginLimiter (no per-account, to avoid
 		// leaking which addresses are registered via lockout timing).
-		resetLimiter := ratelimit.New()
+		resetLimiter := ratelimit.NewFromConfig(rlCfg)
 		// mfaChallengeLimiter is a per-IP sliding-window failure budget
 		// for /api/v1/mfa/challenge (Issue 2, PR #459 review): a 6-digit
 		// TOTP with +/-1 drift gives ~333k guesses per step, so a
 		// password-holder who reached /mfa/challenge could otherwise
 		// brute-force 3 tries per 30s. 5/min/IP matches loginLimiter's
 		// default fast threshold (60s cool-off after 5 failures).
-		mfaChallengeLimiter := ratelimit.New()
+		mfaChallengeLimiter := ratelimit.NewFromConfig(rlCfg)
 		// mfaDisableLimiter is a per-IP sliding-window failure budget
 		// for /api/v1/mfa/disable (PR #459 review follow-up). The
 		// endpoint takes password + 6-digit TOTP, so without
@@ -433,10 +449,12 @@ func main() {
 		// Config as mfaChallengeLimiter (5 failures/min -> 60s
 		// cool-off) -- reusing the threshold keeps operator mental
 		// model simple.
-		mfaDisableLimiter := ratelimit.New()
+		mfaDisableLimiter := ratelimit.NewFromConfig(rlCfg)
 		sessionMw := session.New(usersService, session.Config{
-			CookieName: "branchdam_session",
-			Log:        log,
+			CookieName:      cfg.Auth.Local.CookieName, // blank -> "branchdam_session"
+			IdleTimeout:     idleTimeout,               // zero -> 24h
+			AbsoluteTimeout: absoluteTimeout,           // zero -> 30d
+			Log:             log,
 		})
 		// Password-reset service: PR #409. tokenTTL defaults to 24h;
 		// operators can tighten (homelab) or loosen (1h, with active

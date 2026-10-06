@@ -10,7 +10,13 @@
 //   - "slow" window: a higher N within SlowWindow triggers a longer
 //     cool-off (CoolOffSlow).
 //
-// A successful login clears the IP's failure history immediately.
+// A successful login does NOT clear the IP's failure history: failures
+// age out of the window on their own. Clearing on success would let
+// anyone holding a single valid account interleave successful logins to
+// reset the counter and brute-force other accounts indefinitely.
+//
+// Begin reserves a slot per in-flight attempt so a burst of parallel
+// requests cannot all pass the gate before the first failure is recorded.
 package ratelimit
 
 import (
@@ -48,6 +54,7 @@ type Limiter struct {
 const sweepInterval = 30 * time.Second
 
 type ipState struct {
+	inflight     int
 	failures     []time.Time
 	coolOffUntil time.Time
 	coolOffKind  string
@@ -123,6 +130,46 @@ func (l *Limiter) Check(ip string) Decision {
 	return Decision{Allowed: true}
 }
 
+// Begin gates one attempt for ip and, when allowed, reserves an in-flight
+// slot that counts toward the thresholds until the returned release func
+// runs (safe to call more than once). Callers should defer release() and
+// report the outcome via RecordFailure / RecordSuccess as before.
+func (l *Limiter) Begin(ip string) (Decision, func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.maybeSweep()
+
+	now := l.now()
+	state, ok := l.ips[ip]
+	if !ok {
+		state = &ipState{}
+		l.ips[ip] = state
+	}
+	if now.Before(state.coolOffUntil) {
+		return Decision{
+			Allowed:     false,
+			RetryAfter:  state.coolOffUntil.Sub(now),
+			CoolOffKind: coolOffKindOf(state),
+		}, func() {}
+	}
+	if countWithin(state.failures, now, l.fastWindow)+state.inflight >= l.maxFailuresFast ||
+		len(state.failures)+state.inflight >= l.maxFailuresSlow {
+		return Decision{Allowed: false, RetryAfter: l.coolOffFast, CoolOffKind: "fast"}, func() {}
+	}
+	state.inflight++
+	var once sync.Once
+	return Decision{Allowed: true}, func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if st, ok := l.ips[ip]; ok && st.inflight > 0 {
+				st.inflight--
+			}
+		})
+	}
+}
+
 // RecordFailure marks ip as having failed once.
 func (l *Limiter) RecordFailure(ip string) Decision {
 	l.mu.Lock()
@@ -161,12 +208,10 @@ func (l *Limiter) RecordFailure(ip string) Decision {
 	return Decision{Allowed: true}
 }
 
-// RecordSuccess clears ip's failure history.
-func (l *Limiter) RecordSuccess(ip string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.ips, ip)
-}
+// RecordSuccess notes a successful attempt. It deliberately leaves the
+// failure history alone (see the package doc); the pending Begin slot is
+// freed by its release func.
+func (l *Limiter) RecordSuccess(_ string) {}
 
 func (l *Limiter) maybeSweep() {
 	now := l.now()
@@ -175,7 +220,7 @@ func (l *Limiter) maybeSweep() {
 	}
 	l.lastSweep = now
 	for ip, state := range l.ips {
-		if now.Before(state.coolOffUntil) {
+		if now.Before(state.coolOffUntil) || state.inflight > 0 {
 			continue
 		}
 		state.failures = evictOlderThan(state.failures, now, l.slowWindow)

@@ -118,7 +118,7 @@ func (s *Server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -209,7 +209,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := clientIP(s, r)
-	if d := s.localAuth.loginLimiter.Check(ip); !d.Allowed {
+	d, release := s.localAuth.loginLimiter.Begin(ip)
+	defer release()
+	if !d.Allowed {
 		w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
@@ -219,7 +221,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -240,6 +242,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !user.PasswordHash.Valid {
+		// Same cost and throttling as an unknown user / wrong password,
+		// so a password-less (e.g. forward-JIT) account is not
+		// distinguishable by timing or by escaping the rate limit.
+		_ = s.localAuth.users.VerifyPassword(body.Password, "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+		s.localAuth.loginLimiter.RecordFailure(ip)
 		s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{}, username, "local", "no-such-user", ip, r.UserAgent(), "{}")
 		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
@@ -367,7 +374,7 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		IsAdmin  bool   `json:"isAdmin"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -537,7 +544,7 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IsAdmin *bool `json:"isAdmin"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -729,13 +736,33 @@ func clientIP(s *Server, r *http.Request) string {
 	if !isTrustedProxy(remoteIP.String(), trusted) {
 		return remoteIP.String()
 	}
+	// X-Forwarded-For is appended to by every hop, so only the entries the
+	// trusted proxies themselves wrote are believable: walk right-to-left,
+	// skip hops that are explicitly-listed proxies, and take the first
+	// remaining entry. The leftmost entry is client-controlled and must
+	// never be used on its own. (A bare "*" entry can't classify hops, so
+	// the rightmost entry -- what the adjacent proxy appended -- wins.)
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		// First entry is the original client; trailing entries are
-		// additional proxies that received the request, ignored.
-		if comma := strings.IndexByte(fwd, ','); comma >= 0 {
-			fwd = fwd[:comma]
+		var explicit []string
+		for _, e := range trusted {
+			if e = strings.TrimSpace(e); e != "" && e != "*" {
+				explicit = append(explicit, e)
+			}
 		}
-		return strings.TrimSpace(fwd)
+		hops := strings.Split(fwd, ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			hop := strings.TrimSpace(hops[i])
+			if hop == "" {
+				continue
+			}
+			if len(explicit) > 0 && isTrustedProxy(hop, explicit) {
+				continue
+			}
+			if _, err := netip.ParseAddr(hop); err != nil {
+				break
+			}
+			return hop
+		}
 	}
 	return remoteIP.String()
 }

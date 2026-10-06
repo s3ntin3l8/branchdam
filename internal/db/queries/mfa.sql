@@ -20,8 +20,10 @@ ON CONFLICT (user_id) DO UPDATE SET
 -- name: DeleteMFACredentials :exec
 DELETE FROM mfa_credentials WHERE user_id = ?1;
 
--- name: UpdateLastUsedStep :exec
-UPDATE mfa_credentials SET last_used_step = ?2 WHERE user_id = ?1;
+-- name: UpdateLastUsedStep :execrows
+-- Compare-and-set: only advances the step. Zero rows affected means a
+-- concurrent request already consumed this (or a later) step, i.e. replay.
+UPDATE mfa_credentials SET last_used_step = ?2 WHERE user_id = ?1 AND last_used_step < ?2;
 
 -- name: InsertRecoveryCodes :exec
 INSERT INTO mfa_recovery_codes (user_id, code_hash)

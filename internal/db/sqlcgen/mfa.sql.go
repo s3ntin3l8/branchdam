@@ -211,8 +211,8 @@ func (q *Queries) SetSessionMFAVerified(ctx context.Context, arg SetSessionMFAVe
 	return err
 }
 
-const updateLastUsedStep = `-- name: UpdateLastUsedStep :exec
-UPDATE mfa_credentials SET last_used_step = ?2 WHERE user_id = ?1
+const updateLastUsedStep = `-- name: UpdateLastUsedStep :execrows
+UPDATE mfa_credentials SET last_used_step = ?2 WHERE user_id = ?1 AND last_used_step < ?2
 `
 
 type UpdateLastUsedStepParams struct {
@@ -220,9 +220,14 @@ type UpdateLastUsedStepParams struct {
 	LastUsedStep int64
 }
 
-func (q *Queries) UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStepParams) error {
-	_, err := q.db.ExecContext(ctx, updateLastUsedStep, arg.UserID, arg.LastUsedStep)
-	return err
+// Compare-and-set: only advances the step. Zero rows affected means a
+// concurrent request already consumed this (or a later) step, i.e. replay.
+func (q *Queries) UpdateLastUsedStep(ctx context.Context, arg UpdateLastUsedStepParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateLastUsedStep, arg.UserID, arg.LastUsedStep)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const upsertMFACredentials = `-- name: UpsertMFACredentials :exec
