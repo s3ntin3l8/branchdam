@@ -59,7 +59,8 @@ export default function IngestJobsPage() {
 
   const kind = (searchParams.get("kind") as ScanJob["kind"] | null) ?? "";
   const state = (searchParams.get("state") as ScanJob["state"] | null) ?? "";
-  const page = Math.max(1, Number(searchParams.get("page") || "1"));
+  const parsedPage = Number(searchParams.get("page") || "1");
+  const page = Number.isFinite(parsedPage) ? Math.max(1, Math.floor(parsedPage)) : 1;
 
   const offset = (page - 1) * PAGE_SIZE;
 

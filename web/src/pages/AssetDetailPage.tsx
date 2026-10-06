@@ -413,6 +413,7 @@ export default function AssetDetailPage() {
             assetId={asset.id}
             thumbState={asset.thumbState}
             alt={asset.fileName}
+            version={asset.fullHash ?? asset.fastHash}
             className="h-24 w-24 shrink-0 rounded-lg object-cover"
           />
           <div>

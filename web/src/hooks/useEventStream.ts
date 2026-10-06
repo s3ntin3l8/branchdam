@@ -42,6 +42,11 @@ export function useEventStream(): { disconnected: boolean } {
         // else here.
         void queryClient.invalidateQueries({ queryKey: ["jobs"] });
         void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+        // The nav badge (unlinked-count) and the asset list's filter facets
+        // are derived from the same rows a scan/agent ingest changes; they
+        // were never refreshed here and stayed stale until a full reload.
+        void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
+        void queryClient.invalidateQueries({ queryKey: ["asset-facets"] });
         // A settings write from a second browser session broadcasts the same
         // coarse nudge as a scan progress tick (the hub has no per-topic
         // channel) -- this session's SettingsPage, if mounted, must still

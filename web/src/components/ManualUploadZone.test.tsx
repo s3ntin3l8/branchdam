@@ -231,4 +231,59 @@ describe("ManualUploadZone", () => {
     expect(links.length).toBeGreaterThanOrEqual(1);
     expect(links[0]).toHaveAttribute("href", "/assets/018f-uuid-fallback");
   });
+
+  it("does not upload a queued file that was removed after Start was clicked", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
+    vi.mocked(api.uploadFile).mockReset();
+    let releaseFirst: (v: WebUploadResponse) => void = () => {};
+    vi.mocked(api.uploadFile).mockImplementationOnce(
+      () => new Promise<WebUploadResponse>((resolve) => (releaseFirst = resolve))
+    );
+    vi.mocked(api.uploadFile).mockResolvedValue({ status: "UPLOADED" } as WebUploadResponse);
+
+    renderWithClient(<ManualUploadZone />);
+    await screen.findByRole("combobox");
+    const input = document.querySelector('input[type="file"]:not([webkitdirectory])') as HTMLInputElement;
+    await userEvent.upload(input, [
+      new File(["a"], "first.jpg", { type: "image/jpeg" }),
+      new File(["b"], "second.jpg", { type: "image/jpeg" }),
+    ]);
+    await userEvent.click(await screen.findByRole("button", { name: /start upload/i }));
+    await waitFor(() => expect(api.uploadFile).toHaveBeenCalledTimes(1));
+
+    // Remove the still-queued second file while the first is in flight.
+    await userEvent.click(screen.getByRole("button", { name: "Remove second.jpg from upload queue" }));
+    releaseFirst({ status: "UPLOADED" } as WebUploadResponse);
+
+    await waitFor(() => expect(screen.queryByText("Uploading…")).not.toBeInTheDocument());
+    expect(api.uploadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts the in-flight upload and stops the queue when unmounted", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
+    vi.mocked(api.uploadFile).mockReset();
+    let signal: AbortSignal | undefined;
+    vi.mocked(api.uploadFile).mockImplementation(
+      (_f, _o, _p, sig) =>
+        new Promise<WebUploadResponse>((_resolve, reject) => {
+          signal = sig;
+          sig?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+        })
+    );
+
+    const view = renderWithClient(<ManualUploadZone />);
+    await screen.findByRole("combobox");
+    const input = document.querySelector('input[type="file"]:not([webkitdirectory])') as HTMLInputElement;
+    await userEvent.upload(input, [
+      new File(["a"], "a.jpg", { type: "image/jpeg" }),
+      new File(["b"], "b.jpg", { type: "image/jpeg" }),
+    ]);
+    await userEvent.click(await screen.findByRole("button", { name: /start upload/i }));
+    await waitFor(() => expect(api.uploadFile).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    expect(signal?.aborted).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(api.uploadFile).toHaveBeenCalledTimes(1);
+  });
 });

@@ -237,8 +237,14 @@ export const api = {
   // directly off the mux (see internal/httpapi/thumbnail.go), not through
   // Huma's JSON response path. The browser's own session cookie carries
   // auth, same as any other same-origin image request.
-  thumbnailUrl: (id: number) => `/api/v1/assets/${id}/thumbnail`,
-  streamUrl: (id: number) => `/api/v1/assets/${id}/stream`,
+  // version is a cache-buster (content hash): these URLs are otherwise
+  // stable and the server marks them cacheable for an hour, so a
+  // regenerated thumbnail or rewritten file would keep showing the old
+  // bytes until the cache expired.
+  thumbnailUrl: (id: number, version?: string) =>
+    `/api/v1/assets/${id}/thumbnail${version ? `?v=${encodeURIComponent(version)}` : ""}`,
+  streamUrl: (id: number, version?: string) =>
+    `/api/v1/assets/${id}/stream${version ? `?v=${encodeURIComponent(version)}` : ""}`,
 
   listAuditQueue: (params: { limit?: number; beforeId?: number } = {}) => {
     const qs = new URLSearchParams();

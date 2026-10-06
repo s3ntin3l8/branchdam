@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { useStorageLocations, useUploadFile } from "../hooks/queries";
 import type { StorageLocation, UploadProgressEvent, WebUploadResponse } from "../api/types";
@@ -27,8 +27,12 @@ export default function ManualUploadZone() {
   const { data: locationsData, isLoading: loadingLocations } = useStorageLocations();
   const uploadFile = useUploadFile();
 
-  const locations = locationsData?.locations ?? [];
-  const archiveLocations = locations.filter((l) => !l.readOnly && l.tier === "TIER3_MASTER_ARCHIVE");
+  // Memoised on the query data: a fresh array every render would re-fire
+  // the default-location effect below on every render.
+  const archiveLocations = useMemo(
+    () => (locationsData?.locations ?? []).filter((l) => !l.readOnly && l.tier === "TIER3_MASTER_ARCHIVE"),
+    [locationsData]
+  );
 
   const [selectedLocationId, setSelectedLocationId] = useState<number | "">("");
   const [applyNamingTemplate, setApplyNamingTemplate] = useState<boolean>(true);
@@ -40,6 +44,23 @@ export default function ManualUploadZone() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // startUploads is a long-running loop; it must see the queue as it is NOW
+  // (items removed or added mid-run), not the snapshot from the click.
+  const queueRef = useRef<QueueItem[]>([]);
+  queueRef.current = queue;
+  // Set on unmount: stops the loop and aborts the in-flight XHR so leaving
+  // the page doesn't keep uploading the rest of the queue in the background.
+  const cancelledRef = useRef(false);
+  useEffect(() => {
+    cancelledRef.current = false;
+    return () => {
+      cancelledRef.current = true;
+      for (const item of queueRef.current) {
+        item.abortController?.abort();
+      }
+    };
+  }, []);
 
   // Set default writable archive location once loaded
   React.useEffect(() => {
@@ -95,9 +116,14 @@ export default function ManualUploadZone() {
   const traverseFileTree = async (item: FileSystemEntry, path = ""): Promise<{ file: File; relativePath: string }[]> => {
     if (item.isFile) {
       return new Promise((resolve) => {
-        (item as FileSystemFileEntry).file((file) => {
-          resolve([{ file, relativePath: path ? `${path}/${file.name}` : file.name }]);
-        });
+        (item as FileSystemFileEntry).file(
+          (file) => {
+            resolve([{ file, relativePath: path ? `${path}/${file.name}` : file.name }]);
+          },
+          // An unreadable file must not leave this promise pending: that
+          // would hang Promise.all in handleDrop and queue nothing at all.
+          () => resolve([])
+        );
       });
     } else if (item.isDirectory) {
       const dirReader = (item as FileSystemDirectoryEntry).createReader();
@@ -163,9 +189,16 @@ export default function ManualUploadZone() {
     if (selectedLocationId === "" || isProcessingQueue) return;
     setIsProcessingQueue(true);
 
-    const queuedItems = queue.filter((item) => item.status === "queued" || item.status === "error");
+    // Each item is attempted at most once per run, so a failing file isn't
+    // retried in a tight loop; the next pick always reads the live queue.
+    const attempted = new Set<string>();
+    const nextItem = () =>
+      queueRef.current.find(
+        (i) => (i.status === "queued" || i.status === "error") && !attempted.has(i.id)
+      );
 
-    for (const item of queuedItems) {
+    for (let item = nextItem(); item && !cancelledRef.current; item = nextItem()) {
+      attempted.add(item.id);
       const abortController = new AbortController();
 
       setQueue((prev) =>
@@ -244,7 +277,7 @@ export default function ManualUploadZone() {
       }
     }
 
-    setIsProcessingQueue(false);
+    if (!cancelledRef.current) setIsProcessingQueue(false);
   };
 
   const totalBytes = queue.reduce((sum, item) => sum + item.file.size, 0);
