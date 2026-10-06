@@ -171,6 +171,12 @@ type MfaRecoveryCode struct {
 	UsedAt   sql.NullInt64
 }
 
+type NodeCreator struct {
+	NodeUuid  string
+	AgentID   string
+	CreatedAt int64
+}
+
 type NodeMetadatum struct {
 	NodeID int64
 	Source string

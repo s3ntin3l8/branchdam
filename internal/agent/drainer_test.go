@@ -148,6 +148,29 @@ func enqueueEvent(t *testing.T, database *db.DB, eventType string, payload any) 
 		payloadStr = string(b)
 	}
 
+	// The mechanics tests below build nodes directly (bypassing
+	// EVENT_NODE_CREATED) and then act on them as "agent-test". Devices may
+	// only act on nodes they created, so register that creator here for the
+	// event types that require ownership. Ownership itself is covered by
+	// ownership_drainer_test.go, which uses enqueueEventAs.
+	switch eventType {
+	case agent.EventNodeMoved, agent.EventNodeDeleted, agent.EventPathRebased:
+		var ref struct {
+			NodeUUID string `json:"nodeUuid"`
+		}
+		if json.Unmarshal([]byte(payloadStr), &ref) == nil && ref.NodeUUID != "" {
+			require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
+				if _, err := q.GetNodeCreator(ctx, ref.NodeUUID); err == nil {
+					return nil
+				}
+				if _, err := q.GetMediaNodeByUUID(ctx, ref.NodeUUID); err != nil {
+					return nil // node doesn't exist yet (e.g. insert-on-unknown rebase)
+				}
+				return q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: ref.NodeUUID, AgentID: "agent-test"})
+			}))
+		}
+	}
+
 	var row sqlcgen.EnqueueAgentEventRow
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error

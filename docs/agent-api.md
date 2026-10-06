@@ -172,6 +172,21 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 > with `error_log` describing the refusal; `POST /api/v1/agent/rebase` returns `404 Not Found`. An
 > agent holding a stale `node_uuid` from before a version collision should treat either as
 > terminal, not retry.
+>
+> **A device may only rebase, move or delete nodes it created itself.** The server records which
+> paired device created each node (via `EVENT_NODE_CREATED`, `EVENT_VIRTUAL_NODE_CREATED`, an
+> insert-on-unknown `EVENT_PATH_REBASED`/`POST /api/v1/agent/rebase`, or `POST /api/v1/agent/upload`
+> that created a new node). `EVENT_NODE_MOVED`, `EVENT_NODE_DELETED`, `EVENT_PATH_REBASED` (on an
+> existing node) and `POST /api/v1/agent/rebase` refuse any other node -- server-scanned nodes, web
+> uploads and other devices' nodes: events are marked `FAILED` (not retried) and the HTTP endpoint
+> returns `403 Forbidden`. A content-dedup hit on upload points at somebody else's node and is not
+> claimed by the uploader. Nodes created before this rule existed are attributed from their
+> processed creation event when it is still in the queue; otherwise no device owns them.
+>
+> **Identifiers are validated.** `nodeUuid` must be a canonical UUID and `fullHash` 64 lowercase
+> hex characters (`400 Bad Request` on the HTTP endpoint, a permanent event failure otherwise). A
+> node's existing `full_hash` is never replaced by a different value (`409 Conflict` /
+> permanent event failure); repeating the same value is accepted.
 
 ### 3.1. `EVENT_NODE_CREATED`
 
@@ -236,7 +251,9 @@ event fails outright.
 ### 3.4. `EVENT_NODE_DELETED`
 
 Processing `EVENT_NODE_DELETED` triggers a safe, multi-step soft delete:
-- Sets `media_nodes.lifecycle_state = 'MISSING'` and purges `remote_sync_state`.
+- Sets `media_nodes.lifecycle_state = 'TRASHED'` (user-initiated; `MISSING` is reserved for
+  scan-detected disappearance) and purges `remote_sync_state`. Only the device that created the
+  node may do this.
 - Safely relocates the master file to `.trash/<rel_path>` in the storage location, retaining
   it for 30 days (`trash.retentionDays`) before automated prune unlinks it.
 - Purges linked Tier 2 Immich exports immediately (unlinking export files and deleting sync

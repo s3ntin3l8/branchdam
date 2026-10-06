@@ -69,6 +69,27 @@ func TestAgentUploadStreaming(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "INDEXED_SHALLOW", node.IndexingStatus)
 	assert.Equal(t, expectedHash, *node.FullHash)
+
+	// The uploading device becomes the node's recorded creator, so it can
+	// later rebase / delete its own upload.
+	creator, err := database.Reader.GetNodeCreator(context.Background(), resp.NodeUUID)
+	require.NoError(t, err)
+	assert.Equal(t, "test-device", creator)
+
+	// A second upload of identical bytes dedups onto the existing node; it
+	// must not hand that node to whichever device uploaded the duplicate.
+	_, err = database.ExecInTx(context.Background(), `UPDATE node_creators SET agent_id = 'someone-else' WHERE node_uuid = ?`, resp.NodeUUID)
+	require.NoError(t, err)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "PXL_20260829_001_copy.dng")
+	req2.Header.Set("X-Blake3-Hash", expectedHash)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	creator, err = database.Reader.GetNodeCreator(context.Background(), resp.NodeUUID)
+	require.NoError(t, err)
+	assert.Equal(t, "someone-else", creator, "dedup must not reassign the creator")
 }
 
 func TestAgentUploadNoWritableLocation(t *testing.T) {

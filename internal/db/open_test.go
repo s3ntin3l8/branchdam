@@ -1028,3 +1028,71 @@ func TestMigration00028UpDownRoundTrip(t *testing.T) {
 		t.Errorf("external_uid = %q, want %q", extUID, "alice")
 	}
 }
+
+// TestMigration00035BackfillsNodeCreators: nodes created
+// by a device before node_creators existed get their
+// creator from the earliest processed creation-type event; a later event
+// from a different agent, a PENDING event and a non-creation event must not
+// override it, and nodes with no creating event stay NULL.
+func TestMigration00035BackfillsNodeCreators(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "creator-backfill.db")
+	writerDB := openRawWriter(t, path)
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 34); err != nil {
+		t.Fatalf("up to 34: %v", err)
+	}
+	const (
+		uuidA = "018f0000-0000-7000-8000-00000000000a"
+		uuidB = "018f0000-0000-7000-8000-00000000000b"
+		uuidC = "018f0000-0000-7000-8000-00000000000c"
+	)
+	seed := []string{
+		`INSERT INTO storage_locations (id, name, root_path, tier) VALUES (1, 'media', '/media', 'TIER2_EXPORTS')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (1, '` + uuidA + `', 1, '/media/a.jpg', 'a.jpg')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (2, '` + uuidB + `', 1, '/media/b.jpg', 'b.jpg')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name) VALUES (3, '` + uuidC + `', 1, '/media/c.jpg', 'c.jpg')`,
+		// A: created by phone-1, later "rebased" by phone-2 -> phone-1 stays creator.
+		`INSERT INTO event_queue (id, event_uuid, agent_id, event_type, payload_json, status) VALUES (1, 'e1', 'phone-1', 'EVENT_NODE_CREATED', '{"nodeUuid":"` + uuidA + `"}', 'PROCESSED')`,
+		`INSERT INTO event_queue (id, event_uuid, agent_id, event_type, payload_json, status) VALUES (2, 'e2', 'phone-2', 'EVENT_PATH_REBASED', '{"nodeUuid":"` + uuidA + `"}', 'PROCESSED')`,
+		// B: only a PENDING creation and a MOVED event -> no creator.
+		`INSERT INTO event_queue (id, event_uuid, agent_id, event_type, payload_json, status) VALUES (3, 'e3', 'phone-1', 'EVENT_NODE_CREATED', '{"nodeUuid":"` + uuidB + `"}', 'PENDING')`,
+		`INSERT INTO event_queue (id, event_uuid, agent_id, event_type, payload_json, status) VALUES (4, 'e4', 'phone-1', 'EVENT_NODE_MOVED', '{"nodeUuid":"` + uuidB + `"}', 'PROCESSED')`,
+		// C: created through an insert-on-unknown PATH_REBASED by phone-2.
+		`INSERT INTO event_queue (id, event_uuid, agent_id, event_type, payload_json, status) VALUES (5, 'e5', 'phone-2', 'EVENT_PATH_REBASED', '{"nodeUuid":"` + uuidC + `"}', 'PROCESSED')`,
+	}
+	for _, stmt := range seed {
+		if _, err := writerDB.Exec(stmt); err != nil {
+			t.Fatalf("seed %q: %v", stmt, err)
+		}
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 35); err != nil {
+		t.Fatalf("up to 35: %v", err)
+	}
+	got := map[string]sql.NullString{}
+	rows, err := writerDB.Query(`SELECT n.node_uuid, c.agent_id FROM media_nodes n LEFT JOIN node_creators c ON c.node_uuid = n.node_uuid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close() //nolint:errcheck // test
+	for rows.Next() {
+		var u string
+		var a sql.NullString
+		if err := rows.Scan(&u, &a); err != nil {
+			t.Fatal(err)
+		}
+		got[u] = a
+	}
+	if a := got[uuidA]; !a.Valid || a.String != "phone-1" {
+		t.Errorf("node A creator = %+v, want phone-1", a)
+	}
+	if a := got[uuidB]; a.Valid {
+		t.Errorf("node B creator = %+v, want NULL", a)
+	}
+	if a := got[uuidC]; !a.Valid || a.String != "phone-2" {
+		t.Errorf("node C creator = %+v, want phone-2", a)
+	}
+}

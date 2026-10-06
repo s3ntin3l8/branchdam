@@ -352,6 +352,7 @@ type Querier interface {
 	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
 	// a new file elsewhere hashes the same -- likely the same file, moved.
 	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
+	GetNodeCreator(ctx context.Context, nodeUuid string) (string, error)
 	// Confirm-time lookup: scan the active-token index for a specific
 	// token_hash. The active-partial unique index keeps the candidate
 	// set small. The handler iterates and finds the row whose hash
@@ -963,6 +964,9 @@ type Querier interface {
 	// Toggles the is_admin flag.
 	SetAdmin(ctx context.Context, arg SetAdminParams) error
 	SetMFAPendingSecret(ctx context.Context, arg SetMFAPendingSecretParams) error
+	// Records the paired device that created a node through the agent API.
+	// First writer wins: a node's creator never changes.
+	SetNodeCreator(ctx context.Context, arg SetNodeCreatorParams) error
 	SetSessionMFAVerified(ctx context.Context, arg SetSessionMFAVerifiedParams) error
 	// Backs M6: storage.LoadGuard calls this to deactivate a location whose
 	// root_path can't be resolved at startup (mount vanished) rather than

@@ -4616,6 +4616,23 @@ func TestAgentHandshake_Success_And_Auth(t *testing.T) {
 	}
 }
 
+// claimForTestDevice records the stub agent ("test-device") as the creator of
+// nodes a test seeded directly, since devices may only rebase nodes they created.
+func claimForTestDevice(t *testing.T, database *db.DB, nodeUUIDs ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, u := range nodeUUIDs {
+			if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: u, AgentID: "test-device"}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("claim nodes for test device: %v", err)
+	}
+}
+
 func TestAgentRebase_Known_And_Unknown_Nodes_And_Tier3_Safety(t *testing.T) {
 	srv, database, _, staging, exports, archive := serverWithGuard(t)
 	ctx := context.Background()
@@ -4670,6 +4687,7 @@ func TestAgentRebase_Known_And_Unknown_Nodes_And_Tier3_Safety(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed nodes & edge: %v", err)
 	}
+	claimForTestDevice(t, database, knownUUID, childUUID)
 
 	// 1. Rebase known node from staging to exports -> preserves node ID and edges
 	rebasedExportPath := filepath.Join(exports, "clip_final.mov")
@@ -4791,6 +4809,7 @@ func TestAgentRebase_Spec9Scenario_LocalStagingToCentralTier3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed node: %v", err)
 	}
+	claimForTestDevice(t, database, nodeUUID)
 
 	// The workstation agent has already copied the bytes into the archive.
 	tier3Path := filepath.Join(archive, "master.raw")
@@ -5803,6 +5822,7 @@ func TestAgentRebase_SetsIndexedFullWhenFullHashKnown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert known node: %v", err)
 	}
+	claimForTestDevice(t, database, knownUUID)
 
 	targetPath2 := filepath.Join(exports, "known_rebased_full.jpg")
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, map[string]any{
@@ -5849,5 +5869,102 @@ func TestAgentRebase_SetsIndexedFullWhenFullHashKnown(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("verify nodes: %v", err)
+	}
+}
+
+func agentRebaseRequest(t *testing.T, body map[string]any) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/rebase", bytesOfJSON(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	return req
+}
+
+func TestAgentRebase_RefusesNodeNotCreatedByThisDevice(t *testing.T) {
+	srv, database, _, staging, exports, _ := serverWithGuard(t)
+	ctx := context.Background()
+
+	// A server-scanned node: no creator row.
+	nodeUUID := "018f0000-0000-7000-8000-0000000000c1"
+	orig := filepath.Join(staging, "scanned.mov")
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: nodeUUID, StorageLocationID: 1, FilePath: orig, FileName: "scanned.mov",
+			LifecycleState: "ACTIVE", GraphStatus: "UNLINKED", IndexingStatus: "INDEXED_SHALLOW",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, agentRebaseRequest(t, map[string]any{
+		"nodeUuid": nodeUUID, "targetPath": filepath.Join(exports, "stolen.mov"),
+		"fullHash": strings.Repeat("c", 64),
+	}))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("rebase of a node the device did not create: status = %d, want 403, body = %s", rr.Code, rr.Body.String())
+	}
+	_ = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		n, err := q.GetMediaNodeByUUID(ctx, nodeUUID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.FilePath != orig {
+			t.Errorf("node was re-pointed to %q despite the 403", n.FilePath)
+		}
+		if n.FullHash != nil {
+			t.Errorf("node full_hash was set to %q despite the 403", *n.FullHash)
+		}
+		return nil
+	})
+}
+
+func TestAgentRebase_CannotReplaceExistingFullHash_ButMayRepeatIt(t *testing.T) {
+	srv, database, _, staging, exports, _ := serverWithGuard(t)
+	ctx := context.Background()
+
+	nodeUUID := "018f0000-0000-7000-8000-0000000000c2"
+	real := strings.Repeat("a", 64)
+	if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: nodeUUID, StorageLocationID: 1, FilePath: filepath.Join(staging, "h.mov"), FileName: "h.mov",
+			FullHash: &real, LifecycleState: "ACTIVE", GraphStatus: "UNLINKED", IndexingStatus: "INDEXED_FULL",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimForTestDevice(t, database, nodeUUID)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, agentRebaseRequest(t, map[string]any{
+		"nodeUuid": nodeUUID, "targetPath": filepath.Join(exports, "h1.mov"), "fullHash": strings.Repeat("b", 64),
+	}))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("forged hash: status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, agentRebaseRequest(t, map[string]any{
+		"nodeUuid": nodeUUID, "targetPath": filepath.Join(exports, "h2.mov"), "fullHash": real,
+	}))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("repeating the same hash: status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAgentRebase_RejectsMalformedNodeUUIDAndHash(t *testing.T) {
+	srv, _, _, _, exports, _ := serverWithGuard(t)
+	for name, body := range map[string]map[string]any{
+		"path traversal uuid": {"nodeUuid": "../../x", "targetPath": filepath.Join(exports, "a.mov")},
+		"short uuid":          {"nodeUuid": "uuid-1", "targetPath": filepath.Join(exports, "a.mov")},
+		"short hash":          {"nodeUuid": "018f0000-0000-7000-8000-0000000000c3", "targetPath": filepath.Join(exports, "a.mov"), "fullHash": "abc"},
+	} {
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, agentRebaseRequest(t, body))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400, body = %s", name, rr.Code, rr.Body.String())
+		}
 	}
 }

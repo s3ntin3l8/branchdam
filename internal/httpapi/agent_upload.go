@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
 type AgentUploadResponse struct {
@@ -90,6 +91,17 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeUploadError(w, err)
 		return
+	}
+
+	// Record the uploading device as the node's creator so it may later
+	// rebase / delete its own upload. A dedup hit points at somebody
+	// else's existing node and must not be claimed.
+	if !result.IsDedup && p.Kind == auth.KindMachine {
+		if err := s.db.InTx(r.Context(), func(q *sqlcgen.Queries) error {
+			return q.SetNodeCreator(r.Context(), sqlcgen.SetNodeCreatorParams{NodeUuid: result.NodeUUID, AgentID: p.Name})
+		}); err != nil {
+			s.log.Error("agent upload: record node creator", "nodeUuid", result.NodeUUID, "err", err)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
