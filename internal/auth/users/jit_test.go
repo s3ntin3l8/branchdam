@@ -104,16 +104,13 @@ func TestJITProvisioner_EmptyEmailAllowedWhenNotRequired(t *testing.T) {
 	assert.False(t, row.Email.Valid)
 }
 
-func TestJITProvisioner_UsernameClashReturnsExistingLocalUser(t *testing.T) {
+func TestJITProvisioner_UsernameClashDoesNotAdoptLocalUser(t *testing.T) {
 	svc := newJITTestService(t)
 	ctx := context.Background()
 	jit := JITProvisioner(svc, []string{"dam-admins"}, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	// Pre-create a non-admin LOCAL user with username "eve". When a
-	// forward-auth admin with the same username arrives (no email),
-	// the JIT path returns the local user's view verbatim -- the local
-	// user's existing is_admin (false here) wins, so this forward-auth
-	// user is NOT silently promoted to admin via JIT.
+	// A pre-existing LOCAL user "eve" must not be adopted by a forward-auth
+	// user who merely asserts the same username (no email to key on).
 	_, err := svc.CreateLocalUser(ctx, "eve", "", "password", false, time.Now().Unix(), "test")
 	require.NoError(t, err)
 
@@ -122,9 +119,8 @@ func TestJITProvisioner_UsernameClashReturnsExistingLocalUser(t *testing.T) {
 		Groups: []string{"dam-admins"}, Authenticated: true,
 	}
 	view, err := jit(ctx, merged, []string{"dam-admins"}, false)
-	require.NoError(t, err)
-	assert.NotZero(t, view.UserID, "JIT should return existing local user's view")
-	assert.False(t, view.IsAdmin, "local non-admin's is_admin must NOT be promoted by JIT")
+	assert.Error(t, err)
+	assert.Zero(t, view.UserID, "forward-auth user must not receive the local account's identity")
 }
 
 func TestJITProvisioner_NilMergedReturnsZero(t *testing.T) {

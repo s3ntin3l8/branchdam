@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
 // testSecretBase64 is 32 zero bytes encoded as base64 (44 chars).
@@ -242,4 +243,24 @@ func TestWriteLoginAudit_BestEffort(t *testing.T) {
 	user, err := svc.CreateLocalUser(ctx, "henry", "", "password", false, time.Now().Unix(), "setup")
 	require.NoError(t, err)
 	svc.WriteLoginAudit(ctx, sql.NullInt64{Int64: user.ID, Valid: true}, "henry", "local", "ok", "127.0.0.1", "test-agent", "{}")
+}
+
+// The boot-time system attribution user is not a login account; setup
+// must stay open until a real user exists.
+func TestCountUsers_ExcludesSystemUser(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.EnsureSystemUser(ctx)
+		return err
+	}))
+	n, err := svc.CountUsers(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	_, err = svc.CreateLocalUser(ctx, "admin", "", "correct horse battery staple", true, time.Now().Unix(), "test")
+	require.NoError(t, err)
+	n, err = svc.CountUsers(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n)
 }

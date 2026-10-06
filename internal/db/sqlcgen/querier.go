@@ -103,10 +103,10 @@ type Querier interface {
 	//
 	// All positional params use bare ?1/?2/?3 (not sqlc.arg(name)) per AGENTS.md's
 	// "SQL Syntax Traps" note.
-	// Returns the total number of users. /setup/status returns readyForSetup:
-	// (count == 0) so the SPA can branch between setup form and login form.
-	// Cheap (no WHERE), single indexed-ish scan; called on every unauthenticated
-	// request that hits the SPA shell, so kept O(1)-ish.
+	// Returns the number of real user accounts. /setup/status returns
+	// readyForSetup: (count == 0) so the SPA can branch between setup form and
+	// login form. The boot-provisioned 'system' attribution sentinel is not a
+	// login account and must not close first-run setup.
 	CountUsers(ctx context.Context) (int64, error)
 	// Lazy-provisioning insert. The caller resolves auth_provider +
 	// external_uid from the Principal; username/email/is_admin are

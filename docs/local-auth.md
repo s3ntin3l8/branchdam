@@ -32,6 +32,16 @@ account, without flipping the entire deployment. The collision rule
 (local wins on Name/Email) is deliberate — the interactive login is
 the source of truth for who someone is once they have a local account.
 
+**`both` requires `http.trustedProxies`.** In `both` mode the port is also
+reachable without ForwardAuth (local users log in directly), so the
+`X-Authentik-*` headers are only honoured when the TCP peer matches an
+**explicitly configured** `http.trustedProxies` entry (your Traefik's
+IP/CIDR). With the list empty or unset, forward identity is ignored and
+the server logs an error at startup; local login keeps working.
+Requests with neither a trusted forward identity nor a local session get
+no principal, so reads are refused as well as writes (in `forward` mode
+reads stay open by design: ForwardAuth is the gate).
+
 Empty / unset `auth.mode` is treated as `forward` (the default), so
 existing configs upgrade without modification.
 
@@ -203,7 +213,9 @@ The config knobs:
   JIT if the forward-auth asserted email is empty. A homelab Authentik
   deployment that doesn't surface email can set this to `false`; the
   JIT user is then keyed by username and the second forward-auth
-  request for the same username returns the same user row.
+  request for the same username returns the same user row. If a
+  non-JIT (e.g. local) account already has that username, JIT is
+  refused rather than adopting it.
 
 Username-clash behavior: if a forward-JIT request arrives with an email
 that matches an existing `source='local'` user, the local user wins on

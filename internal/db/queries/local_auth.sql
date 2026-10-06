@@ -7,11 +7,11 @@
 -- "SQL Syntax Traps" note.
 
 -- name: CountUsers :one
--- Returns the total number of users. /setup/status returns readyForSetup:
--- (count == 0) so the SPA can branch between setup form and login form.
--- Cheap (no WHERE), single indexed-ish scan; called on every unauthenticated
--- request that hits the SPA shell, so kept O(1)-ish.
-SELECT COUNT(*) FROM users;
+-- Returns the number of real user accounts. /setup/status returns
+-- readyForSetup: (count == 0) so the SPA can branch between setup form and
+-- login form. The boot-provisioned 'system' attribution sentinel is not a
+-- login account and must not close first-run setup.
+SELECT COUNT(*) FROM users WHERE auth_provider != 'system';
 
 -- name: GetUserByID :one
 SELECT id, username, email, password_hash, is_admin, source, created_at, created_by, disabled_at, auth_provider, external_uid, last_seen_at

@@ -82,7 +82,11 @@ func RouteWithConfig(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, 
 // Per-request construction would build a fresh in-memory ReplayCache
 // per call (AgentConfig.Cache defaults to nil -> NewReplayCache() inside
 // AgentChainWithConfig), defeating replay protection.
-func RouteWithConfigAndJIT(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, jit JITProvisioner, adminGroups []string, requireEmail bool, log *slog.Logger, next http.Handler) http.Handler {
+func RouteWithConfigAndJIT(cfg AgentConfig, mode AuthMode, localBuilder ChainBuilder, jit JITProvisioner, adminGroups []string, requireEmail bool, log *slog.Logger, next http.Handler, opts ...RouteOption) http.Handler {
+	var ro routeOptions
+	for _, o := range opts {
+		o(&ro)
+	}
 	agentHandler := AgentChainWithConfig(cfg, log)(next)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +105,13 @@ func RouteWithConfigAndJIT(cfg AgentConfig, mode AuthMode, localBuilder ChainBui
 		// the session middleware carries per-request state (the
 		// request's cookie) but NOT shared state across requests.
 		forwardBuilder := func(n http.Handler) http.Handler { return BrowserChain(n) }
-		forwardBuilder(captureHandler(fwdCap)).ServeHTTP(&blackholeRW{ResponseWriter: w}, r)
+		// In both mode the app is reachable without ForwardAuth (local
+		// users log in directly), so X-Authentik-* is attacker-controlled
+		// unless the request arrived from a trusted proxy. Skip the
+		// forward chain entirely for untrusted sources.
+		if mode != AuthModeBoth || ro.forwardTrust == nil || ro.forwardTrust(r) {
+			forwardBuilder(captureHandler(fwdCap)).ServeHTTP(&blackholeRW{ResponseWriter: w}, r)
+		}
 
 		if mode != AuthModeForward && localBuilder != nil {
 			localBuilder(captureHandler(localCap)).ServeHTTP(&blackholeRW{ResponseWriter: w}, r)
@@ -203,6 +213,13 @@ func mergePrincipals(fwd, local *Principal, mode AuthMode) *Principal {
 	case AuthModeLocal:
 		return local
 	case AuthModeBoth:
+		// A header-less forward Principal (Authenticated=false) is not an
+		// identity. Keeping it would let RequireAdmin's read-method
+		// bypass serve every GET to anonymous clients; local mode
+		// already yields nil here.
+		if fwd != nil && !fwd.Authenticated {
+			fwd = nil
+		}
 		if fwd == nil && local == nil {
 			return nil
 		}
@@ -265,4 +282,18 @@ func unionGroups(a, b []string) []string {
 		}
 	}
 	return out
+}
+
+// RouteOption tunes RouteWithConfigAndJIT.
+type RouteOption func(*routeOptions)
+
+type routeOptions struct {
+	forwardTrust func(*http.Request) bool
+}
+
+// WithForwardTrust installs a predicate deciding whether a request's
+// X-Authentik-* identity headers may be honoured in auth.mode "both".
+// Typically "the TCP peer is a configured trusted proxy".
+func WithForwardTrust(f func(*http.Request) bool) RouteOption {
+	return func(o *routeOptions) { o.forwardTrust = f }
 }

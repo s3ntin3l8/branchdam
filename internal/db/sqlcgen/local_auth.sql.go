@@ -12,7 +12,7 @@ import (
 
 const countUsers = `-- name: CountUsers :one
 
-SELECT COUNT(*) FROM users
+SELECT COUNT(*) FROM users WHERE auth_provider != 'system'
 `
 
 // Local auth queries. The handlers in internal/httpapi/local_auth.go
@@ -22,10 +22,10 @@ SELECT COUNT(*) FROM users
 //
 // All positional params use bare ?1/?2/?3 (not sqlc.arg(name)) per AGENTS.md's
 // "SQL Syntax Traps" note.
-// Returns the total number of users. /setup/status returns readyForSetup:
-// (count == 0) so the SPA can branch between setup form and login form.
-// Cheap (no WHERE), single indexed-ish scan; called on every unauthenticated
-// request that hits the SPA shell, so kept O(1)-ish.
+// Returns the number of real user accounts. /setup/status returns
+// readyForSetup: (count == 0) so the SPA can branch between setup form and
+// login form. The boot-provisioned 'system' attribution sentinel is not a
+// login account and must not close first-run setup.
 func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countUsers)
 	var count int64
