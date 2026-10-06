@@ -230,6 +230,33 @@ describe("CompanionPairingsPage", () => {
     expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
   });
 
+  it("renders the QR as an inert data-URL image and never as a non-branchdam link", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    pairingCredentialsMock.mockResolvedValue({
+      pairingId: 1,
+      agentId: "dev-abc12345",
+      friendlyLabel: "Björn's iPhone",
+      apiKey: "existingkey123456789012345678901234",
+      keyPreview: "1234",
+      pairingUrl: "javascript:alert(1)",
+      qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"><script>window.__pwned=1</script></svg>',
+      sealingEnabled: true,
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByText("Björn's iPhone"));
+    screen.getByRole("button", { name: /show credentials/i }).click();
+
+    const img = await screen.findByAltText("Pairing QR code");
+    expect(img.getAttribute("src")).toMatch(/^data:image\/svg\+xml/);
+    expect(document.querySelector("script")).toBeNull();
+    // No href at all for a non-branchdam: URL (an <a> without href is not a link).
+    expect(screen.queryByRole("link", { name: /pair with local agent/i })).toBeNull();
+    const anchor = document.querySelector('a[title="Opens the branchDAM agent on this computer"]');
+    expect(anchor).not.toBeNull();
+    expect(anchor).not.toHaveAttribute("href");
+  });
+
   it("re-fetches and shows credentials for an existing pairing", async () => {
     listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
     const pairingUrl = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=existingkey123456789012345678901234&agent=dev-abc12345";

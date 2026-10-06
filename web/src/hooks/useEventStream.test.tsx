@@ -82,6 +82,8 @@ describe("useEventStream", () => {
       ["audit-queue"],
       ["jobs"],
       ["storage-health"],
+      ["unlinked-count"],
+      ["asset-facets"],
       ["settings"],
       ["asset"],
       ["asset-lineage"],
@@ -118,8 +120,11 @@ describe("useEventStream", () => {
       vi.advanceTimersByTime(200);
     });
 
-    // Only 9 invalidation calls (one batch for the 9 query keys)
-    expect(spy).toHaveBeenCalledTimes(9);
+    // Only 11 invalidation calls (one batch for the 11 query keys)
+    expect(spy).toHaveBeenCalledTimes(11);
+    const keys = spy.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+    expect(keys).toContain(JSON.stringify(["unlinked-count"]));
+    expect(keys).toContain(JSON.stringify(["asset-facets"]));
   });
 
   it("tracks disconnected state on error and clears it on open or progress (#349)", () => {

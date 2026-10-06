@@ -120,9 +120,12 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 }
 
 function PairAgentButton({ pairingUrl }: { pairingUrl: string }) {
+  // The URL is server-built (branchdam://...); never let anything else
+  // (javascript:, data:) become an href.
+  const href = pairingUrl.startsWith("branchdam:") ? pairingUrl : undefined;
   return (
     <a
-      href={pairingUrl}
+      href={href}
       title="Opens the branchDAM agent on this computer"
       className="inline-flex items-center rounded border border-indigo-500/50 bg-indigo-600/20 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:bg-indigo-600/30"
     >
@@ -189,7 +192,13 @@ function CredentialsBody({
         Credentials for this pairing. Scan the QR with the branchDAM mobile app, or copy the URL.
       </p>
       <div className="flex justify-center rounded bg-white p-4">
-        <div className="h-64 w-64" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+        {/* Rendered as an inert <img>: an SVG in an <img> can't run script,
+            unlike innerHTML-injected markup. */}
+        <img
+          alt="Pairing QR code"
+          className="h-64 w-64"
+          src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg)}`}
+        />
       </div>
       <div className="rounded border border-neutral-700/60 bg-neutral-900/40 p-3 text-xs text-neutral-400">
         <strong className="text-neutral-300">Copy this key now.</strong> Credentials can be

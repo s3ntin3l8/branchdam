@@ -29,6 +29,16 @@ function renderWithClient() {
 }
 
 describe("LoginPage", () => {
+  it("shows a retryable error instead of 'Loading…' forever when setup-status fails", async () => {
+    vi.mocked(api.setupStatus).mockRejectedValueOnce(new Error("boom"));
+    renderWithClient();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/could not reach the server/i);
+
+    vi.mocked(api.setupStatus).mockResolvedValue({ readyForSetup: false, mode: "local" });
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
   it("renders the sign-in form for a local-mode deployment with users present", async () => {
     vi.mocked(api.setupStatus).mockResolvedValue({
       readyForSetup: false,

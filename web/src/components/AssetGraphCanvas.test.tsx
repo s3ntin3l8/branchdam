@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import AssetGraphCanvas from "./AssetGraphCanvas";
+import AssetGraphCanvas, { buildOneHopFlow } from "./AssetGraphCanvas";
+import type { Edge } from "../api/types";
 
 describe("AssetGraphCanvas", () => {
   it("shows an empty-state message when there are no edges", () => {
@@ -89,5 +90,28 @@ describe("AssetGraphCanvas", () => {
       </MemoryRouter>
     );
     expect(screen.queryByText(/no known lineage edges/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("buildOneHopFlow", () => {
+  const edge = (id: number, relationshipType: Edge["relationshipType"]): Edge => ({
+    id,
+    sourceNodeId: 2,
+    targetNodeId: 1,
+    relationshipType,
+    confidence: 0.9,
+    reviewState: "AUTO_ACCEPTED",
+    resolver: "test",
+  });
+
+  it("emits unique node ids when two edges join the same pair of nodes", () => {
+    const { nodes, edges } = buildOneHopFlow(1, {
+      parents: [edge(10, "DERIVED_FROM"), edge(11, "PROXY_OF")],
+      children: [],
+    });
+    const ids = nodes.map((n) => n.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Both edges are still drawn, each with its own id.
+    expect(edges.map((e) => e.id)).toEqual(["e-10", "e-11"]);
   });
 });

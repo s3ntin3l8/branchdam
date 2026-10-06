@@ -19,7 +19,11 @@ export default function LoginPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const { data: status } = useQuery({
+  const {
+    data: status,
+    isError: statusError,
+    refetch: refetchStatus,
+  } = useQuery({
     queryKey: ["setup-status"],
     queryFn: api.setupStatus,
     retry: false,
@@ -57,6 +61,21 @@ export default function LoginPage() {
   const resetRequestMutation = useMutation({
     mutationFn: api.requestPasswordReset,
   });
+
+  if (!status && statusError) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-neutral-950 text-neutral-300">
+        <p role="alert">Could not reach the server.</p>
+        <button
+          type="button"
+          onClick={() => void refetchStatus()}
+          className="rounded border border-neutral-600 px-3 py-1 text-sm hover:bg-neutral-800"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   if (!status) {
     return (

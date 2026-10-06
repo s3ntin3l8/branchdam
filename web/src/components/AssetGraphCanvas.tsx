@@ -195,7 +195,7 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
   return { nodes, edges, isEmpty: false };
 }
 
-function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[]; edges: FlowEdge[]; isEmpty: boolean } {
+export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[]; edges: FlowEdge[]; isEmpty: boolean } {
   if (graph.parents.length === 0 && graph.children.length === 0) {
     return { nodes: [], edges: [], isEmpty: true };
   }
@@ -210,13 +210,21 @@ function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[
   ];
   const edges: FlowEdge[] = [];
 
+  // Several edges (different relationship types) can join the same pair of
+  // nodes; React Flow needs unique node ids, so emit each neighbour once
+  // and let every edge keep its own id.
+  const seenNeighbours = new Set<string>();
   graph.parents.forEach((e, i) => {
-    nodes.push({
-      id: `parent-${e.sourceNodeId}`,
-      position: { x: -260, y: (i - (graph.parents.length - 1) / 2) * 90 },
-      data: { label: `Node ${e.sourceNodeId}` },
-      style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
-    });
+    const nodeId = `parent-${e.sourceNodeId}`;
+    if (!seenNeighbours.has(nodeId)) {
+      seenNeighbours.add(nodeId);
+      nodes.push({
+        id: `parent-${e.sourceNodeId}`,
+        position: { x: -260, y: (i - (graph.parents.length - 1) / 2) * 90 },
+        data: { label: `Node ${e.sourceNodeId}` },
+        style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
+      });
+    }
     edges.push({
       id: `e-${e.id}`,
       source: `parent-${e.sourceNodeId}`,
@@ -228,12 +236,16 @@ function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[
   });
 
   graph.children.forEach((e, i) => {
-    nodes.push({
-      id: `child-${e.targetNodeId}`,
-      position: { x: 260, y: (i - (graph.children.length - 1) / 2) * 90 },
-      data: { label: `Node ${e.targetNodeId}` },
-      style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
-    });
+    const nodeId = `child-${e.targetNodeId}`;
+    if (!seenNeighbours.has(nodeId)) {
+      seenNeighbours.add(nodeId);
+      nodes.push({
+        id: `child-${e.targetNodeId}`,
+        position: { x: 260, y: (i - (graph.children.length - 1) / 2) * 90 },
+        data: { label: `Node ${e.targetNodeId}` },
+        style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
+      });
+    }
     edges.push({
       id: `e-${e.id}`,
       source: String(assetId),

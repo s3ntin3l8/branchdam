@@ -71,6 +71,7 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
         ? proxyNode
         : null) ?? asset;
 
+  const version = activeAsset.fullHash ?? activeAsset.fastHash;
   const ext = activeAsset.fileExt.toLowerCase();
   const isVideo = VIDEO_EXTENSIONS.has(ext);
   const isImage = IMAGE_EXTENSIONS.has(ext);
@@ -123,18 +124,18 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
             key={activeAsset.id}
             controls
             preload="metadata"
-            poster={api.thumbnailUrl(activeAsset.id)}
+            poster={api.thumbnailUrl(activeAsset.id, version)}
             className="max-h-[500px] w-full object-contain"
             data-testid="asset-video-player"
           >
-            <source src={api.streamUrl(activeAsset.id)} type={getVideoMimeType(ext)} />
+            <source src={api.streamUrl(activeAsset.id, version)} type={getVideoMimeType(ext)} />
             Your browser does not support HTML5 video playback.
           </video>
         </div>
       ) : isImage ? (
         <div className="group relative flex max-h-[500px] min-h-[240px] items-center justify-center overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 p-2">
           <img
-            src={api.streamUrl(activeAsset.id)}
+            src={api.streamUrl(activeAsset.id, version)}
             alt={activeAsset.fileName}
             className="max-h-[480px] max-w-full cursor-pointer rounded object-contain transition hover:opacity-95"
             onClick={() => setIsLightboxOpen(true)}
@@ -156,7 +157,7 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
             controls
             className="w-full max-w-md"
             data-testid="asset-audio-player"
-            src={api.streamUrl(activeAsset.id)}
+            src={api.streamUrl(activeAsset.id, version)}
           >
             Your browser does not support audio playback.
           </audio>
@@ -169,6 +170,7 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
               assetId={activeAsset.id}
               thumbState={activeAsset.thumbState}
               alt={activeAsset.fileName}
+              version={version}
               className="max-h-[400px] max-w-full rounded object-contain"
             />
           </div>
@@ -206,7 +208,7 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
               </button>
             </div>
             <img
-              src={api.streamUrl(activeAsset.id)}
+              src={api.streamUrl(activeAsset.id, version)}
               alt={activeAsset.fileName}
               className="max-h-[90vh] max-w-[90vw] rounded object-contain shadow-2xl"
             />

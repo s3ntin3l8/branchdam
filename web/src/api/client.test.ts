@@ -325,3 +325,12 @@ describe("api client", () => {
     await expect(api.uploadFile(file, {}, undefined, controller.signal)).rejects.toThrow("Upload aborted");
   });
 });
+
+describe("asset media URLs", () => {
+  it("append an encoded cache-buster only when a version is given", async () => {
+    const { api } = await import("./client");
+    expect(api.thumbnailUrl(3)).toBe("/api/v1/assets/3/thumbnail");
+    expect(api.thumbnailUrl(3, "ab/cd")).toBe("/api/v1/assets/3/thumbnail?v=ab%2Fcd");
+    expect(api.streamUrl(3, "h")).toBe("/api/v1/assets/3/stream?v=h");
+  });
+});

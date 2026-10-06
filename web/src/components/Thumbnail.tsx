@@ -7,6 +7,8 @@ interface ThumbnailProps {
   thumbState: ThumbState;
   alt: string;
   className?: string;
+  // Content version (e.g. the asset hash) appended as a cache-buster.
+  version?: string;
 }
 
 // Thumbnail renders a node's cached JPEG (GET /api/v1/assets/{id}/thumbnail,
@@ -25,7 +27,7 @@ interface ThumbnailProps {
 //
 // When a thumbnail image fails to load (broken/corrupted preview), onError
 // gracefully falls back to the placeholder rather than displaying a broken img.
-export default function Thumbnail({ assetId, thumbState, alt, className }: ThumbnailProps) {
+export default function Thumbnail({ assetId, thumbState, alt, className, version }: ThumbnailProps) {
   const [hasError, setHasError] = useState(false);
   const [prevAssetId, setPrevAssetId] = useState(assetId);
   const [prevThumbState, setPrevThumbState] = useState(thumbState);
@@ -40,7 +42,7 @@ export default function Thumbnail({ assetId, thumbState, alt, className }: Thumb
   if (thumbState === "READY" && !hasError) {
     return (
       <img
-        src={api.thumbnailUrl(assetId)}
+        src={api.thumbnailUrl(assetId, version)}
         alt={alt}
         loading="lazy"
         className={base}

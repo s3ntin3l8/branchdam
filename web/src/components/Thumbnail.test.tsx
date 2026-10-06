@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { api } from "../api/client";
 import Thumbnail from "./Thumbnail";
 
 vi.mock("../api/client", () => ({
@@ -74,5 +75,12 @@ describe("Thumbnail", () => {
     const retriedImg = screen.getByAltText("photo.jpg");
     expect(retriedImg).toBeInTheDocument();
     expect(retriedImg).toHaveAttribute("src", "/api/v1/assets/7/thumbnail");
+  });
+});
+
+describe("Thumbnail cache busting", () => {
+  it("passes the content version through to the image URL", () => {
+    render(<Thumbnail assetId={5} thumbState="READY" alt="x" version="abc123" />);
+    expect(api.thumbnailUrl).toHaveBeenCalledWith(5, "abc123");
   });
 });

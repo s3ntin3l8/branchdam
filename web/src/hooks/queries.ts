@@ -1,5 +1,5 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 
 // The query key namespaces backing a single asset's detail page (useAsset,
 // useAssetGraph, useAssetLineage) -- "asset" (singular) is a DIFFERENT
@@ -17,13 +17,21 @@ export function useMe() {
 // pairing UI's "Owned by" selector, and the Users administration page.
 // /api/v1/users is admin-only and returns 503 in deployments without
 // attribution wired; the SPA tolerates that as "empty cache".
-export function useUsers(params: { limit?: number; offset?: number } = {}) {
+export function useUsers(
+  params: { limit?: number; offset?: number } = {},
+  options: { enabled?: boolean } = {}
+) {
   return useQuery({
     queryKey: ["users", params],
     queryFn: () => api.listUsers(params),
+    // Non-admins get 403 from this admin-only endpoint, and every 401/403
+    // raises the global "Access denied" banner -- callers that can't know
+    // the user is an admin must gate on useMe().isAdmin.
+    enabled: options.enabled ?? true,
     retry: (failureCount, error) => {
-      // 503 = feature disabled; don't retry, don't pollute the console.
-      if (error instanceof Error && /503/.test(error.message)) return false;
+      // 503 = feature disabled, 401/403 = not allowed: retrying can't help
+      // and only repeats the console noise / auth-error banner.
+      if (error instanceof ApiError && [401, 403, 503].includes(error.status)) return false;
       return failureCount < 2;
     },
   });
@@ -218,14 +226,26 @@ export function useAssetMetadata(id: number | undefined) {
   });
 }
 
+// A lifecycle change (trash/restore/delete) also changes the asset's
+// neighbours' lineage and graph, the unlinked badge, the list facets and
+// per-location health, none of which live under the "assets"/"asset" keys.
+function invalidateAssetLifecycleQueries(queryClient: QueryClient, id: number) {
+  void queryClient.invalidateQueries({ queryKey: ["assets"] });
+  void queryClient.invalidateQueries({ queryKey: ["asset", id] });
+  void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+  void queryClient.invalidateQueries({ queryKey: ["asset-lineage"] });
+  void queryClient.invalidateQueries({ queryKey: ["asset-graph"] });
+  void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
+  void queryClient.invalidateQueries({ queryKey: ["asset-facets"] });
+  void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+}
+
 export function useDeleteAsset() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.deleteAsset(id),
     onSuccess: (_data, id) => {
-      void queryClient.invalidateQueries({ queryKey: ["assets"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
-      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+      invalidateAssetLifecycleQueries(queryClient, id);
     },
   });
 }
@@ -236,9 +256,7 @@ export function useTrashAsset() {
     mutationFn: ({ id, keepExports }: { id: number; keepExports: boolean }) =>
       api.trashAsset(id, { keepExports }),
     onSuccess: (_data, vars) => {
-      void queryClient.invalidateQueries({ queryKey: ["assets"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset", vars.id] });
-      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", vars.id] });
+      invalidateAssetLifecycleQueries(queryClient, vars.id);
     },
   });
 }
@@ -248,9 +266,7 @@ export function useRestoreAsset() {
   return useMutation({
     mutationFn: (id: number) => api.restoreAsset(id),
     onSuccess: (_data, id) => {
-      void queryClient.invalidateQueries({ queryKey: ["assets"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset", id] });
-      void queryClient.invalidateQueries({ queryKey: ["asset-metadata", id] });
+      invalidateAssetLifecycleQueries(queryClient, id);
     },
   });
 }
@@ -315,6 +331,14 @@ function invalidateEdgeReviewQueries(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
 }
 
+// useInvalidateEdgeReviewQueries lets a batch caller (the audit queue's
+// bulk confirm/reject) run N edge writes and refresh once at the end,
+// instead of paying the full invalidation fan-out after every edge.
+export function useInvalidateEdgeReviewQueries() {
+  const queryClient = useQueryClient();
+  return () => invalidateEdgeReviewQueries(queryClient);
+}
+
 export function useConfirmEdge() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -349,6 +373,21 @@ export function useStartScan() {
   });
 }
 
+// A folder drop uploads hundreds of files back to back; refreshing the list,
+// badge and health after EACH one refetches them N times. Coalesce into one
+// trailing refresh once the burst goes quiet.
+const UPLOAD_REFRESH_DELAY_MS = 750;
+let uploadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleUploadRefresh(queryClient: QueryClient) {
+  if (uploadRefreshTimer) clearTimeout(uploadRefreshTimer);
+  uploadRefreshTimer = setTimeout(() => {
+    uploadRefreshTimer = null;
+    void queryClient.invalidateQueries({ queryKey: ["assets"] });
+    void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
+    void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
+  }, UPLOAD_REFRESH_DELAY_MS);
+}
+
 export function useUploadFile() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -363,11 +402,7 @@ export function useUploadFile() {
       onProgress?: (event: import("../api/types").UploadProgressEvent) => void;
       signal?: AbortSignal;
     }) => api.uploadFile(file, options, onProgress, signal),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["assets"] });
-      void queryClient.invalidateQueries({ queryKey: ["unlinked-count"] });
-      void queryClient.invalidateQueries({ queryKey: ["storage-health"] });
-    },
+    onSuccess: () => scheduleUploadRefresh(queryClient),
   });
 }
 
@@ -393,9 +428,10 @@ export function useStorageHealth() {
 // usePruneCache backs both the Storage Health page's location-level purge
 // control and AssetDetailPage's per-asset [Purge Cache] action -- same
 // endpoint, the caller decides dry-run vs. execute and whether to narrow
-// via nodeIds. Invalidated on success rather than relying on the SSE nudge
-// alone: useEventStream doesn't invalidate "storage-health", so a caller
-// that needs the fresh count right away shouldn't wait on that 10s poll.
+// via nodeIds. Invalidated on success rather than waiting for the next SSE
+// nudge (useEventStream also refreshes "storage-health", but only when the
+// server broadcasts one), so a caller that needs the fresh count right away
+// doesn't depend on that.
 export function usePruneCache() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -498,6 +534,7 @@ export function useRotatePairing() {
     onSuccess: (_data, vars) => {
       void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
       void queryClient.invalidateQueries({ queryKey: ["companion-pairing", vars.id] });
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairing-audit"] });
     },
   });
 }
@@ -509,6 +546,7 @@ export function useRevokePairing() {
     onSuccess: (_data, id) => {
       void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
       void queryClient.invalidateQueries({ queryKey: ["companion-pairing", id] });
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairing-audit"] });
     },
   });
 }
@@ -538,6 +576,7 @@ export function useRenamePairing() {
       input: import("../api/types").RenameCompanionPairingRequest;
     }) => api.renamePairing(id, input),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["companion-pairing-audit"] });
       void queryClient.invalidateQueries({ queryKey: ["companion-pairings"] });
     },
   });

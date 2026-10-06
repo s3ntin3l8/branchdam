@@ -21,11 +21,15 @@ export default function AssetListPage() {
 
   const cameraModel = searchParams.get("cameraModel") || "";
   const graphStatus = (searchParams.get("graphStatus") as Asset["graphStatus"]) || "";
-  const storageLocationId = searchParams.get("storageLocationId") ? Number(searchParams.get("storageLocationId")) : undefined;
+  const rawStorageLocationId = Number(searchParams.get("storageLocationId"));
+  // A malformed ?storageLocationId= must not reach the API as NaN.
+  const storageLocationId =
+    searchParams.get("storageLocationId") && Number.isFinite(rawStorageLocationId) ? rawStorageLocationId : undefined;
   const lifecycleState = (searchParams.get("lifecycleState") as Asset["lifecycleState"]) || "";
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
   const myUploads = searchParams.get("myUploads") === "true";
-  const page = Math.max(1, Number(searchParams.get("page") || "1"));
+  const parsedPage = Number(searchParams.get("page") || "1");
+  const page = Number.isFinite(parsedPage) ? Math.max(1, Math.floor(parsedPage)) : 1;
 
   const offset = (page - 1) * PAGE_SIZE;
 
@@ -44,7 +48,7 @@ export default function AssetListPage() {
   // matches the SPA's existing pattern for resolving location /
   // camera labels. Returns 503 in deployments without attribution
   // wired; the SPA tolerates that as "empty users cache".
-  const { data: usersData } = useUsers();
+  const { data: usersData } = useUsers({}, { enabled: meData?.isAdmin === true });
   const usersByID = new Map<number, string>();
   for (const u of usersData?.users ?? []) {
     usersByID.set(u.id, u.username);
@@ -465,7 +469,7 @@ export default function AssetListPage() {
                     />
                   </td>
                   <td className="py-2 pr-4">
-                    <Thumbnail assetId={a.id} thumbState={a.thumbState} alt={a.fileName} />
+                    <Thumbnail assetId={a.id} thumbState={a.thumbState} alt={a.fileName} version={a.fullHash ?? a.fastHash} />
                   </td>
                   <td className="py-2 pr-4">
                     <Link to={`/assets/${a.id}`} className="text-sky-400 hover:underline font-mono text-xs">

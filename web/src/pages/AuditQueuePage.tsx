@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { useAuditQueue, useConfirmEdge, useCreateEdge, useRejectEdge } from "../hooks/queries";
+import {
+  useAuditQueue,
+  useConfirmEdge,
+  useCreateEdge,
+  useInvalidateEdgeReviewQueries,
+  useRejectEdge,
+} from "../hooks/queries";
+import { api } from "../api/client";
 import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
 import type { EdgeAuditEntry } from "../api/types";
@@ -414,8 +421,10 @@ function BatchConfirmModal({
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
-  const confirmMutation = useConfirmEdge();
-  const rejectMutation = useRejectEdge();
+  // The batch calls the API directly and refreshes once at the end: going
+  // through useConfirmEdge/useRejectEdge would run the full invalidation
+  // fan-out (queue, list, 3 detail keys, unlinked count) after EVERY edge.
+  const invalidateEdgeReview = useInvalidateEdgeReviewQueries();
 
   useEffect(() => {
     if (!isOpen) return;
@@ -439,9 +448,9 @@ function BatchConfirmModal({
       for (const edge of edges) {
         try {
           if (action === "confirm") {
-            await confirmMutation.mutateAsync(edge.id);
+            await api.confirmEdge(edge.id);
           } else {
-            await rejectMutation.mutateAsync(edge.id);
+            await api.rejectEdge(edge.id);
           }
           succeeded++;
         } catch {
@@ -451,6 +460,7 @@ function BatchConfirmModal({
       }
     } finally {
       setRunning(false);
+      invalidateEdgeReview();
       if (failed > 0) {
         setErrorMsg(`${failed} of ${edges.length} edges failed to ${action}.`);
       } else {
