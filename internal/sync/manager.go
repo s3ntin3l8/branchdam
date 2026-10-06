@@ -178,15 +178,24 @@ func (m *Manager) ProcessPending(ctx context.Context, remote string, batchSize i
 		nodes[i] = Node{ID: id}
 	}
 
+	// The outcome write must survive the worker's own cancellation: a config
+	// reload or shutdown that cancels ctx mid-push is exactly when the push
+	// fails, and writing that failure with the SAME cancelled ctx failed too,
+	// stranding the claimed rows in PUSHING. Detach from cancellation but keep
+	// a deadline so a wedged DB can't hold shutdown forever. (Still on the
+	// worker goroutine, which shutdown joins before closing the database.)
+	statusCtx, cancelStatus := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelStatus()
+
 	if err := push(ctx, nodes); err != nil {
 		msg := err.Error()
-		if merr := m.setBatchStatus(ctx, claimed, remote, "PUSH_FAILED", "", &msg); merr != nil {
+		if merr := m.setBatchStatus(statusCtx, claimed, remote, "PUSH_FAILED", "", &msg); merr != nil {
 			m.log.Error("sync: mark batch failed", "err", merr)
 		}
 		return len(claimed), err
 	}
 
-	if err := m.setBatchStatus(ctx, claimed, remote, "PUSHED", "", nil); err != nil {
+	if err := m.setBatchStatus(statusCtx, claimed, remote, "PUSHED", "", nil); err != nil {
 		return len(claimed), fmt.Errorf("sync: mark batch pushed: %w", err)
 	}
 	return len(claimed), nil

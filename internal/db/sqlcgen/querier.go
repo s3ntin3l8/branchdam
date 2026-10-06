@@ -552,6 +552,11 @@ type Querier interface {
 	ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]MediaEdge, error)
 	ListEdgesForNodes(ctx context.Context, dollar_1 string) ([]ListEdgesForNodesRow, error)
 	ListKeysByPairing(ctx context.Context, pairingID int64) ([]DevicePairingKey, error)
+	// Live nodes whose file_path lies in the half-open range [?1, ?2). The watcher
+	// passes "<dir>/" and "<dir>0" ('0' sorts right after '/') to find everything
+	// under a directory that was removed or moved out. A range scan so it can use
+	// idx_media_nodes_file_path.
+	ListLiveNodeIDsUnderPrefix(ctx context.Context, arg ListLiveNodeIDsUnderPrefixParams) ([]int64, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).

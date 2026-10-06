@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pressly/goose/v3"
 
@@ -1094,5 +1095,38 @@ func TestMigration00035BackfillsNodeCreators(t *testing.T) {
 	}
 	if a := got[uuidC]; !a.Valid || a.String != "phone-2" {
 		t.Errorf("node C creator = %+v, want phone-2", a)
+	}
+}
+
+// A panic inside an InTx callback must not leak the writer's single
+// connection: with SetMaxOpenConns(1) a leaked transaction blocks every later
+// write forever. The panic itself still propagates; the next InTx works.
+func TestInTxPanicReleasesWriterConnection(t *testing.T) {
+	database, err := Open(context.Background(), filepath.Join(t.TempDir(), "panic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close() //nolint:errcheck // test
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic was swallowed; it must propagate to the caller")
+			}
+		}()
+		_ = database.InTx(context.Background(), func(*sqlcgen.Queries) error { panic("boom") })
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- database.InTx(context.Background(), func(*sqlcgen.Queries) error { return nil })
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("InTx after a panic: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("InTx blocked after a panic in an earlier callback: the writer connection leaked")
 	}
 }

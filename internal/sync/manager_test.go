@@ -911,3 +911,34 @@ func TestWorkerRetriesFailedPushes(t *testing.T) {
 		t.Errorf("after retry sync_status = %q, want PUSHED", row.SyncStatus)
 	}
 }
+
+// A push interrupted by cancellation (config reload, shutdown) fails with the
+// cancelled context -- and the status write that records the failure used the
+// SAME cancelled context, so it failed too and the rows stayed PUSHING until
+// the 5-minute stale recovery (which only runs at worker start).
+func TestProcessPendingCancelledPushStillRecordsFailure(t *testing.T) {
+	database := openTestDB(t)
+	mgr := NewManager(database, nil)
+	locID := seedLocation(t, database, "TIER2_EXPORTS", false)
+	node := seedNode(t, database, locID, "/exports/immich/cancel.jpg")
+	if err := mgr.Enqueue(context.Background(), Node{ID: node.ID, Checksum: "bbbbbbbbbbbbbbbb"}, RemoteImmich); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	push := func(pctx context.Context, _ []Node) error {
+		cancel() // the worker's context ends mid-push
+		return pctx.Err()
+	}
+	if _, err := mgr.ProcessPending(ctx, RemoteImmich, 10, push); err == nil {
+		t.Fatal("ProcessPending should propagate the push error")
+	}
+
+	row, err := database.Reader.GetRemoteSyncState(context.Background(), sqlcgen.GetRemoteSyncStateParams{NodeID: node.ID, Remote: RemoteImmich})
+	if err != nil {
+		t.Fatalf("GetRemoteSyncState: %v", err)
+	}
+	if row.SyncStatus != "PUSH_FAILED" {
+		t.Fatalf("sync_status = %q, want PUSH_FAILED (row stranded in PUSHING after a cancelled push)", row.SyncStatus)
+	}
+}

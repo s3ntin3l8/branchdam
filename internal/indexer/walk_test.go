@@ -179,3 +179,43 @@ func TestWalkSkipsDotFilesAndTrash(t *testing.T) {
 		}
 	}
 }
+
+// One unreadable subdirectory (lost+found, a root-owned @eaDir, a flaky NAS
+// folder) must not abort the whole walk: the readable files are still
+// reported and the walk completes.
+func TestWalkSkipsUnreadableSubdirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits are not enforced for root")
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, filepath.Join(root, "before.txt"), "x")
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, filepath.Join(locked, "hidden-from-us.txt"), "x")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	writeFixtureFile(t, filepath.Join(root, "zzz-after.txt"), "x")
+
+	var seen []string
+	err := Walk(context.Background(), root, func(r Record) error {
+		seen = append(seen, filepath.Base(r.Path))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk aborted on an unreadable subdirectory: %v", err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("seen = %v, want before.txt and zzz-after.txt", seen)
+	}
+}
+
+func TestWalkStillFailsWhenRootIsMissing(t *testing.T) {
+	err := Walk(context.Background(), filepath.Join(t.TempDir(), "does-not-exist"), func(Record) error { return nil })
+	if err == nil {
+		t.Fatal("Walk of a missing root must return an error, not silently report an empty tree")
+	}
+}

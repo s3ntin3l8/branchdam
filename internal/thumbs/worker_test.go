@@ -234,7 +234,12 @@ func TestWorkerProcessPendingUnsupported(t *testing.T) {
 	}
 }
 
-func TestWorkerProcessPendingFailedIncrementsAttempts(t *testing.T) {
+// A failed generation must be RETRIED up to the attempt bound, not become
+// terminal after one transient I/O error: the claim query only selects
+// PENDING rows, so a node parked in FAILED on its first failure never reached
+// the retry bound at all. Failures below the bound go back to PENDING with the
+// count incremented; only the bound-reaching failure is terminal FAILED.
+func TestWorkerProcessPendingFailedRetriesUntilBound(t *testing.T) {
 	database := openWorkerTestDB(t)
 	locDir := t.TempDir()
 	locationID := seedTestLocation(t, database, locDir)
@@ -248,23 +253,43 @@ func TestWorkerProcessPendingFailedIncrementsAttempts(t *testing.T) {
 	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
-	stats, err := w.ProcessPending(context.Background())
-	if err != nil {
-		t.Fatalf("ProcessPending: %v", err)
-	}
-	if stats.Failed != 1 {
-		t.Errorf("stats.Failed = %d, want 1", stats.Failed)
+	get := func() sqlcgen.MediaNode {
+		t.Helper()
+		got, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+		if err != nil {
+			t.Fatalf("GetMediaNodeByID: %v", err)
+		}
+		return got
 	}
 
-	got, err := database.Reader.GetMediaNodeByID(context.Background(), node.ID)
+	for attempt := 1; attempt < DefaultMaxAttempts; attempt++ {
+		stats, err := w.ProcessPending(context.Background())
+		if err != nil {
+			t.Fatalf("ProcessPending (attempt %d): %v", attempt, err)
+		}
+		if stats.Failed != 1 {
+			t.Fatalf("attempt %d: stats.Failed = %d, want 1", attempt, stats.Failed)
+		}
+		got := get()
+		if got.ThumbState != "PENDING" || got.ThumbAttempts != int64(attempt) {
+			t.Fatalf("after attempt %d: thumb_state=%q attempts=%d, want PENDING/%d (still retryable)", attempt, got.ThumbState, got.ThumbAttempts, attempt)
+		}
+	}
+
+	// The bound-reaching failure is terminal.
+	if _, err := w.ProcessPending(context.Background()); err != nil {
+		t.Fatalf("ProcessPending (final attempt): %v", err)
+	}
+	got := get()
+	if got.ThumbState != "FAILED" || got.ThumbAttempts != int64(DefaultMaxAttempts) {
+		t.Fatalf("after final attempt: thumb_state=%q attempts=%d, want FAILED/%d", got.ThumbState, got.ThumbAttempts, DefaultMaxAttempts)
+	}
+	stats, err := w.ProcessPending(context.Background())
 	if err != nil {
-		t.Fatalf("GetMediaNodeByID: %v", err)
+		t.Fatal(err)
 	}
-	if got.ThumbState != "FAILED" {
-		t.Errorf("thumb_state = %q, want FAILED", got.ThumbState)
-	}
-	if got.ThumbAttempts != 1 {
-		t.Errorf("thumb_attempts = %d, want 1 (incremented from 0)", got.ThumbAttempts)
+	if stats.Generated+stats.Unsupported+stats.Failed != 0 {
+		t.Fatalf("a terminally FAILED node was claimed again: %+v", stats)
 	}
 }
 

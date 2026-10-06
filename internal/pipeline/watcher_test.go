@@ -1023,3 +1023,58 @@ func TestWatchWorkEnqueueRaceWithClose(t *testing.T) {
 		}
 	}
 }
+
+// Moving a whole directory OUT of the watched tree yields ONE event for the
+// directory path (no per-file events); every file under it must still go
+// MISSING, not stay ACTIVE until a manual full scan.
+func TestWatchSupervisorDirectoryMovedOutMarksChildrenMissing(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := watchTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "watch-rmdir", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS"}
+
+	sctx, scancel := context.WithCancel(context.Background())
+	super := NewWatcherSupervisor(deps, nil)
+	super.Start(sctx, []storage.Location{loc}, 50*time.Millisecond)
+	defer super.Wait()
+	defer scancel()
+	time.Sleep(100 * time.Millisecond)
+
+	dir := filepath.Join(resolvedRoot, "album")
+	if err := os.MkdirAll(filepath.Join(dir, "day1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond) // let the new directories get their watches
+	files := []string{filepath.Join(dir, "a.txt"), filepath.Join(dir, "day1", "b.txt")}
+	for i, f := range files {
+		if err := os.WriteFile(f, []byte(fmt.Sprintf("content %d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range files {
+		f := f
+		waitFor(t, 5*time.Second, func() bool {
+			n, err := database.Reader.GetLiveNodeByPath(ctx, f)
+			return err == nil && n.LifecycleState == "ACTIVE"
+		})
+	}
+
+	elsewhere := filepath.Join(t.TempDir(), "album-moved")
+	if err := os.Rename(dir, elsewhere); err != nil {
+		t.Skipf("cross-directory rename unsupported here: %v", err)
+	}
+	for _, f := range files {
+		f := f
+		waitFor(t, 5*time.Second, func() bool {
+			n, err := database.Reader.GetLiveNodeByPath(ctx, f)
+			return err == nil && n.LifecycleState == "MISSING"
+		})
+	}
+}

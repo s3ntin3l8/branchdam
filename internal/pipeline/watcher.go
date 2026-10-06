@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -570,7 +572,11 @@ func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen
 	seen.Add(1)
 	node, err := w.deps.DB.Reader.GetLiveNodeByPath(ctx, path)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false // never indexed, or already rebound -- nothing changed
+		// Not a file we track. It may be a DIRECTORY that was removed or moved
+		// out of the watched tree: that produces a single event for the
+		// directory path, with no per-file events for what was inside. Mark
+		// everything that lived under it MISSING.
+		return w.handleDirectoryRemoval(ctx, path, failed)
 	}
 	if err != nil {
 		failed.Add(1)
@@ -587,6 +593,37 @@ func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen
 		w.log.Warn("pipeline: watch removal", "path", path, "err", err)
 		return false
 	}
+	return true
+}
+
+// handleDirectoryRemoval marks every live node under dir MISSING and reports
+// whether any changed. It is a no-op for a path nothing lives under.
+func (w *WatcherSupervisor) handleDirectoryRemoval(ctx context.Context, dir string, failed *atomic.Int32) bool {
+	prefix := strings.TrimRight(dir, string(filepath.Separator)) + string(filepath.Separator)
+	// Half-open range [dir/, dir0): '0' is the byte after '/'.
+	end := strings.TrimRight(dir, string(filepath.Separator)) + "0"
+	ids, err := w.deps.DB.Reader.ListLiveNodeIDsUnderPrefix(ctx, sqlcgen.ListLiveNodeIDsUnderPrefixParams{FilePath: prefix, FilePath_2: end})
+	if err != nil {
+		failed.Add(1)
+		w.log.Warn("pipeline: watch directory removal lookup", "dir", dir, "err", err)
+		return false
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	if err := w.deps.DB.InTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, id := range ids {
+			if err := q.MarkNodeMissing(ctx, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		failed.Add(1)
+		w.log.Warn("pipeline: watch directory removal", "dir", dir, "err", err)
+		return false
+	}
+	w.log.Info("pipeline: directory left the watched tree; marked its files MISSING", "dir", dir, "files", len(ids))
 	return true
 }
 

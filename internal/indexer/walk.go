@@ -9,6 +9,7 @@ package indexer
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 	"time"
 )
@@ -38,7 +39,20 @@ type Record struct {
 func Walk(ctx context.Context, root string, onFile func(Record) error) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// A problem with the root itself (missing, unreadable) is the
+			// caller's to know about. Anywhere below it, one unreadable
+			// directory or entry (lost+found, a root-owned @eaDir, a flaky
+			// NAS folder) must not abort the whole walk -- doing so failed
+			// the scan every time and skipped the MISSING sweep. Skip it,
+			// say so, and keep going.
+			if path == root {
+				return err
+			}
+			slog.Warn("indexer: skipping unreadable path", "path", path, "err", err)
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -59,7 +73,10 @@ func Walk(ctx context.Context, root string, onFile func(Record) error) error {
 
 		info, err := d.Info()
 		if err != nil {
-			return err
+			// Vanished between the directory read and the stat (or
+			// unreadable): not worth failing the walk over.
+			slog.Warn("indexer: skipping entry that could not be stat'ed", "path", path, "err", err)
+			return nil
 		}
 		return onFile(Record{
 			Path:      path,

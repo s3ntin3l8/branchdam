@@ -600,3 +600,12 @@ FROM media_nodes
 WHERE file_path = ?1
 ORDER BY id DESC
 LIMIT 1;
+
+-- name: ListLiveNodeIDsUnderPrefix :many
+-- Live nodes whose file_path lies in the half-open range [?1, ?2). The watcher
+-- passes "<dir>/" and "<dir>0" ('0' sorts right after '/') to find everything
+-- under a directory that was removed or moved out. A range scan so it can use
+-- idx_media_nodes_file_path.
+SELECT id FROM media_nodes
+WHERE file_path >= ?1 AND file_path < ?2
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN');
