@@ -184,6 +184,7 @@ Every migration after `00001_init.sql`, in order:
 | `00032_add_trashed_lifecycle_state.sql` | `lifecycle_state` CHECK expansion for `TRASHED` | Soft-delete trash buffer |
 | `00033_user_pats.sql` | Personal access tokens for admin tooling | See below |
 | `00034_pairing_url_sealed.sql` | `device_pairings.pairing_url TEXT` | Lets an operator re-open the full pairing credentials dialogue (QR + agent ID + API key + pairing URL + deep link) for an existing pairing without minting a new key. The column NEVER holds plaintext key material: sealed via `secrets.Box` when `BRANCHDAM_SECRET_KEY` is set, otherwise left NULL (never plaintext). `qr_svg` is sealed the same way by `pairing.Service`; boot-time `BackfillSealedCredentials` seals any legacy plaintext SVG rows |
+| `00035_node_creators.sql` | `node_creators(node_uuid PK -> media_nodes, agent_id, created_at)` | Records which paired device created a node through the agent API; the device-authenticated rebase / move / delete paths refuse nodes a device did not create. No row = not device-created (scan, web upload, or legacy). Backfilled from processed creation events |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.

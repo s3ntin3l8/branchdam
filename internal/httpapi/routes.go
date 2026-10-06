@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
+	"github.com/s3ntin3l8/branchdam/internal/agent"
 	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -2108,6 +2109,12 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	if in.Body.NodeUUID == "" {
 		return nil, huma.Error400BadRequest("nodeUuid is required", nil)
 	}
+	if !agent.ValidNodeUUID(in.Body.NodeUUID) {
+		return nil, huma.Error400BadRequest("nodeUuid must be a UUID", nil)
+	}
+	if in.Body.FullHash != nil && *in.Body.FullHash != "" && !agent.ValidFullHash(*in.Body.FullHash) {
+		return nil, huma.Error400BadRequest("fullHash must be 64 lowercase hex characters", nil)
+	}
 	if in.Body.TargetPath == "" {
 		return nil, huma.Error400BadRequest("targetPath is required", nil)
 	}
@@ -2154,7 +2161,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		mtime = time.Now().Unix()
 	}
 
-	var archivedNode bool
+	var archivedNode, notOwner, hashConflict bool
 	out := &AgentRebaseOutput{}
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, err := q.GetMediaNodeByUUID(ctx, in.Body.NodeUUID)
@@ -2168,6 +2175,31 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 				archivedNode = true
 				return nil
 			}
+			// A device may only rebase nodes it created itself; without
+			// this any paired device could re-point (or "verify") any
+			// node whose UUID it knows.
+			if ownErr := agent.RequireNodeOwner(ctx, q, p.Name, in.Body.NodeUUID); ownErr != nil {
+				if errors.Is(ownErr, agent.ErrNotNodeOwner) {
+					notOwner = true
+					return nil
+				}
+				return ownErr
+			}
+			// Decide on the hash BEFORE touching the row so a refused
+			// hash leaves the node exactly as it was. An existing
+			// full_hash is never replaced by a different agent value.
+			setHash := false
+			if in.Body.FullHash != nil && *in.Body.FullHash != "" {
+				var hashErr error
+				setHash, hashErr = agent.FullHashUpdate(existing.FullHash, *in.Body.FullHash)
+				if errors.Is(hashErr, agent.ErrHashConflict) {
+					hashConflict = true
+					return nil
+				}
+				if hashErr != nil {
+					return hashErr
+				}
+			}
 			// Known node: rebase path in place, preserving id, content hashes, and lineage edges.
 			// Note: Content hashes are not overwritten on path rebase; only location/path/mtime are updated.
 			if err := q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
@@ -2179,7 +2211,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			}); err != nil {
 				return err
 			}
-			if in.Body.FullHash != nil && *in.Body.FullHash != "" {
+			if setHash {
 				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 					ID:       existing.ID,
 					FullHash: in.Body.FullHash,
@@ -2243,6 +2275,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		if err != nil {
 			return err
 		}
+		if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: in.Body.NodeUUID, AgentID: p.Name}); err != nil {
+			return err
+		}
 
 		out.Body.ID = newNode.ID
 		out.Body.NodeUUID = newNode.NodeUuid
@@ -2256,6 +2291,12 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	}
 	if archivedNode {
 		return nil, huma.Error404NotFound("asset not found")
+	}
+	if notOwner {
+		return nil, huma.Error403Forbidden("node was not created by this device", nil)
+	}
+	if hashConflict {
+		return nil, huma.Error409Conflict("node already has a different fullHash", nil)
 	}
 
 	return out, nil

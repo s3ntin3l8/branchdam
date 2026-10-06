@@ -77,7 +77,16 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		capturedAtUnix, _ = strconv.ParseInt(capturedAtHeader, 10, 64)
 	}
 
+	// A new node created by this upload is recorded as the device's own
+	// (in the insert transaction); a dedup hit points at somebody else's
+	// node and is never claimed.
+	var creatorAgentID string
+	if p.Kind == auth.KindMachine {
+		creatorAgentID = p.Name
+	}
+
 	result, err := s.processUploadedStream(r.Context(), UploadParams{
+		CreatorAgentID:      creatorAgentID,
 		Filename:            filename,
 		Body:                r.Body,
 		ApplyNamingTemplate: true,

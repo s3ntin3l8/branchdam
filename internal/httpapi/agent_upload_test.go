@@ -69,6 +69,27 @@ func TestAgentUploadStreaming(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "INDEXED_SHALLOW", node.IndexingStatus)
 	assert.Equal(t, expectedHash, *node.FullHash)
+
+	// The uploading device becomes the node's recorded creator, so it can
+	// later rebase / delete its own upload.
+	creator, err := database.Reader.GetNodeCreator(context.Background(), resp.NodeUUID)
+	require.NoError(t, err)
+	assert.Equal(t, "test-device", creator)
+
+	// A second upload of identical bytes dedups onto the existing node; it
+	// must not hand that node to whichever device uploaded the duplicate.
+	_, err = database.ExecInTx(context.Background(), `UPDATE node_creators SET agent_id = 'someone-else' WHERE node_uuid = ?`, resp.NodeUUID)
+	require.NoError(t, err)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req2.Header.Set("X-API-Key", routeTestAgentKey)
+	req2.Header.Set("X-Filename", "PXL_20260829_001_copy.dng")
+	req2.Header.Set("X-Blake3-Hash", expectedHash)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	creator, err = database.Reader.GetNodeCreator(context.Background(), resp.NodeUUID)
+	require.NoError(t, err)
+	assert.Equal(t, "someone-else", creator, "dedup must not reassign the creator")
 }
 
 func TestAgentUploadNoWritableLocation(t *testing.T) {
@@ -595,4 +616,42 @@ func TestAgentUpload_AutoSelectOnlyTier3(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// If the creator can't be recorded the upload must FAIL (and clean up), not
+// report a fresh node the device could never rebase or delete.
+func TestAgentUploadFailsAndCleansUpWhenCreatorCannotBeRecorded(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+	archive := filepath.Join(t.TempDir(), "archive")
+	require.NoError(t, os.MkdirAll(archive, 0o755))
+	require.NoError(t, database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "MasterArchive", RootPath: archive, Tier: "TIER3_MASTER_ARCHIVE",
+		})
+		return err
+	}))
+	// Test-only fault injection on the creator insert.
+	_, err := database.ExecInTx(context.Background(), `CREATE TRIGGER fail_creator BEFORE INSERT ON node_creators
+BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
+	require.NoError(t, err)
+
+	data := []byte("bytes that must not be left behind")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "IMG_FAIL.JPG")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.GreaterOrEqual(t, rec.Code, 500, "body=%s", rec.Body.String())
+	var leftovers []string
+	_ = filepath.WalkDir(archive, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			leftovers = append(leftovers, p)
+		}
+		return nil
+	})
+	assert.Empty(t, leftovers, "the written file must be removed when the upload fails")
+	count, err := database.Reader.CountMediaNodes(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, count, "no node may be recorded for a failed upload")
 }

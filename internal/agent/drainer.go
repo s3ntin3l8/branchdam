@@ -263,6 +263,8 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			errors.Is(processErr, ErrWouldCreateCycle) ||
 			errors.Is(processErr, ErrVirtualPathNotVirtual) ||
 			errors.Is(processErr, ErrCrossAgentCollision) ||
+			errors.Is(processErr, ErrNotNodeOwner) ||
+			errors.Is(processErr, ErrHashConflict) ||
 			strings.Contains(processErr.Error(), "constraint failed")
 
 		attempts := int(ev.RetryCount) + 1
@@ -415,11 +417,14 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return 0, fmt.Errorf("%w: unmarshal node created: %v", ErrMalformedPayload, err)
 	}
-	if p.NodeUUID == "" {
-		return 0, fmt.Errorf("%w: missing nodeUuid in node created payload", ErrInvalidNodeUUID)
+	if !ValidNodeUUID(p.NodeUUID) {
+		return 0, fmt.Errorf("%w: missing or malformed nodeUuid in node created payload", ErrInvalidNodeUUID)
 	}
 	if p.FilePath == "" {
 		return 0, fmt.Errorf("%w: missing filePath in node created payload", ErrMalformedPayload)
+	}
+	if p.FullHash != nil && *p.FullHash != "" && !ValidFullHash(*p.FullHash) {
+		return 0, fmt.Errorf("%w: fullHash must be 64 lowercase hex characters", ErrMalformedPayload)
 	}
 
 	// Idempotency: if node already exists with this node_uuid, it's a no-op success.
@@ -570,6 +575,10 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 			}
 		}
 		return 0, err
+	}
+
+	if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: p.NodeUUID, AgentID: ev.AgentID}); err != nil {
+		return 0, fmt.Errorf("record node creator: %w", err)
 	}
 
 	// GPS is deliberately not a promoted media_nodes column (see
@@ -745,8 +754,8 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal node moved: %v", ErrMalformedPayload, err)
 	}
-	if p.NodeUUID == "" {
-		return fmt.Errorf("%w: missing nodeUuid in node moved payload", ErrInvalidNodeUUID)
+	if !ValidNodeUUID(p.NodeUUID) {
+		return fmt.Errorf("%w: missing or malformed nodeUuid in node moved payload", ErrInvalidNodeUUID)
 	}
 	if p.NewFilePath == "" {
 		return fmt.Errorf("%w: missing newFilePath in node moved payload", ErrMalformedPayload)
@@ -766,6 +775,10 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 	// otherwise). Refuse before that happens.
 	if node.LifecycleState == "ARCHIVED" {
 		return fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
+	}
+	// A device may only re-point nodes it created itself.
+	if err := RequireNodeOwner(ctx, q, ev.AgentID, p.NodeUUID); err != nil {
+		return err
 	}
 
 	// storage_location_id always comes from Guard.Resolve(NewFilePath),
@@ -805,8 +818,8 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal node deleted: %v", ErrMalformedPayload, err)
 	}
-	if p.NodeUUID == "" {
-		return fmt.Errorf("%w: missing nodeUuid in node deleted payload", ErrInvalidNodeUUID)
+	if !ValidNodeUUID(p.NodeUUID) {
+		return fmt.Errorf("%w: missing or malformed nodeUuid in node deleted payload", ErrInvalidNodeUUID)
 	}
 
 	node, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
@@ -815,6 +828,11 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 			return fmt.Errorf("%w: node uuid %s", ErrNodeNotFound, p.NodeUUID)
 		}
 		return fmt.Errorf("lookup node for deletion: %w", err)
+	}
+	// A device may only trash nodes it created itself: this physically
+	// moves the file into .trash and it is purged after the retention period.
+	if err := RequireNodeOwner(ctx, q, ev.AgentID, p.NodeUUID); err != nil {
+		return err
 	}
 
 	// EVENT_NODE_DELETED is a deliberate user-initiated delete from the
@@ -855,8 +873,8 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return 0, fmt.Errorf("%w: unmarshal path rebased: %v", ErrMalformedPayload, err)
 	}
-	if p.NodeUUID == "" {
-		return 0, fmt.Errorf("%w: missing nodeUuid in path rebased payload", ErrInvalidNodeUUID)
+	if !ValidNodeUUID(p.NodeUUID) {
+		return 0, fmt.Errorf("%w: missing or malformed nodeUuid in path rebased payload", ErrInvalidNodeUUID)
 	}
 	if p.TargetFilePath == "" {
 		return 0, fmt.Errorf("%w: missing targetFilePath in path rebased payload", ErrMalformedPayload)
@@ -893,6 +911,18 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		if existing.LifecycleState == "ARCHIVED" {
 			return 0, fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
 		}
+		if err := RequireNodeOwner(ctx, q, ev.AgentID, p.NodeUUID); err != nil {
+			return 0, err
+		}
+		// Decide on the hash BEFORE touching the row, so a refused hash
+		// leaves the node exactly as it was.
+		setHash := false
+		if p.FullHash != nil && *p.FullHash != "" {
+			var hashErr error
+			if setHash, hashErr = FullHashUpdate(existing.FullHash, *p.FullHash); hashErr != nil {
+				return 0, hashErr
+			}
+		}
 		if err := q.RebaseNodePathByUUID(ctx, sqlcgen.RebaseNodePathByUUIDParams{
 			NodeUuid:          p.NodeUUID,
 			FilePath:          p.TargetFilePath,
@@ -902,7 +932,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		}); err != nil {
 			return 0, err
 		}
-		if p.FullHash != nil && *p.FullHash != "" {
+		if setHash {
 			if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 				ID:       existing.ID,
 				FullHash: p.FullHash,
@@ -959,6 +989,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	})
 	if insertErr != nil {
 		return 0, insertErr
+	}
+	if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: p.NodeUUID, AgentID: ev.AgentID}); err != nil {
+		return 0, fmt.Errorf("record node creator: %w", err)
 	}
 	return inserted.ID, nil
 }
@@ -1029,8 +1062,8 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return 0, fmt.Errorf("%w: unmarshal virtual node created: %v", ErrMalformedPayload, err)
 	}
-	if p.NodeUUID == "" {
-		return 0, fmt.Errorf("%w: missing nodeUuid in virtual node created payload", ErrInvalidNodeUUID)
+	if !ValidNodeUUID(p.NodeUUID) {
+		return 0, fmt.Errorf("%w: missing or malformed nodeUuid in virtual node created payload", ErrInvalidNodeUUID)
 	}
 	if p.FilePath == "" {
 		return 0, fmt.Errorf("%w: missing filePath in virtual node created payload", ErrMalformedPayload)
@@ -1137,6 +1170,10 @@ func (d *Drainer) applyVirtualNodeCreated(ctx context.Context, q *sqlcgen.Querie
 			}
 		}
 		return 0, fmt.Errorf("insert virtual node: %w", err)
+	}
+
+	if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: p.NodeUUID, AgentID: ev.AgentID}); err != nil {
+		return 0, fmt.Errorf("record node creator: %w", err)
 	}
 
 	// Persist EvidenceJSON as node_metadata overflow if provided.
