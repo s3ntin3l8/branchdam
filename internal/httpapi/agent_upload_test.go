@@ -669,6 +669,7 @@ BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
 	count, err := database.Reader.CountMediaNodes(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, count, "no node may be recorded for a failed upload")
+}
 
 // A directory symlink planted inside the archive that points outside every
 // storage location must not let an upload write there. Guard refuses the
