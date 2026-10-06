@@ -146,7 +146,7 @@ session-cookie signing — that path is closed off entirely.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `retentionDays` | int | `30` | Number of days deleted files are safely preserved under `.trash/` in their storage location before permanent background prune. `0` disables automated unlinking. Editable live via web UI settings. |
+| `retentionDays` | int | `30` | Number of days deleted files are safely preserved under `.trash/` in their storage location before permanent background prune. `0` disables automated unlinking. Only writable locations are purged; a `readOnly` location is never touched. Editable live via web UI settings. |
 
 ## `immich`
 

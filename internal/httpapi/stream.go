@@ -43,6 +43,39 @@ func assetContentType(ext string) string {
 	return "application/octet-stream"
 }
 
+// scriptCapableContentType reports types a browser will render as a document
+// or execute when served from the app's own origin.
+func scriptCapableContentType(ct string) bool {
+	base, _, _ := strings.Cut(ct, ";")
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "text/html", "application/xhtml+xml", "text/xml", "application/xml",
+		"text/javascript", "application/javascript", "application/x-javascript",
+		"text/ecmascript", "application/ecmascript", "text/css", "application/wasm",
+		"application/x-shockwave-flash":
+		return true
+	}
+	return false
+}
+
+// inlineSafeContentType allowlists what may render inline: passive media.
+func inlineSafeContentType(ct string) bool {
+	base, _, _ := strings.Cut(ct, ";")
+	base = strings.ToLower(strings.TrimSpace(base))
+	return strings.HasPrefix(base, "image/") || strings.HasPrefix(base, "video/") || strings.HasPrefix(base, "audio/")
+}
+
+// dispositionFilename strips characters that could break out of the quoted
+// Content-Disposition filename or inject headers.
+func dispositionFilename(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '"', '\\', '\r', '\n', 0:
+			return -1
+		}
+		return r
+	}, name)
+}
+
 // handleAssetStream serves an asset file with full HTTP Range request support
 // (RFC 7233 byte ranges), allowing browser HTML5 video seeking, progressive streaming,
 // and full-resolution image inspection. Gated identically to GET /thumbnail: any
@@ -77,9 +110,23 @@ func (s *Server) handleAssetStream(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = f.Close() }()
 
 	contentType := assetContentType(node.FileExt)
+	disposition := ""
+	switch {
+	case scriptCapableContentType(contentType):
+		// Never hand the browser a type it will execute or render as a
+		// document from the app origin: an ingested x.html/x.js would
+		// otherwise run with the viewer's session. Opaque bytes + download.
+		contentType = "application/octet-stream"
+		disposition = "attachment"
+	case contentType == "image/svg+xml":
+		// SVG can carry script; keep its type but force a download.
+		disposition = "attachment"
+	case !inlineSafeContentType(contentType):
+		disposition = "attachment"
+	}
 	w.Header().Set("Content-Type", contentType)
-	if contentType == "image/svg+xml" {
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+node.FileName+"\"")
+	if disposition != "" {
+		w.Header().Set("Content-Disposition", disposition+"; filename=\""+dispositionFilename(node.FileName)+"\"")
 	}
 	w.Header().Set("ETag", `"`+node.NodeUuid+"-"+strconv.FormatInt(node.UpdatedAt, 10)+`"`)
 	w.Header().Set("Cache-Control", "private, max-age=3600")

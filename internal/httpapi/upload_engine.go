@@ -29,45 +29,34 @@ import (
 // DefaultMaxUploadSizeBytes defines the default upper limit for uploaded files (50 GiB).
 const DefaultMaxUploadSizeBytes int64 = 50 * 1024 * 1024 * 1024
 
+// errNoGuard is returned when an upload write is attempted without a
+// storage.Guard: every storage write must route through it (AGENTS.md
+// invariant 3), so there is no raw-os fallback.
+var errNoGuard = errors.New("storage guard unconfigured")
+
+// removeFile deletes path through the Guard. A path the Guard refuses
+// (unknown location, read-only tier) is an error, never a raw os.Remove:
+// "outside every configured location" is exactly what a symlink escape
+// looks like.
 func (s *Server) removeFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	if s.guard != nil {
-		err := s.guard.Remove(path)
-		if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		var unknownErr *storage.ErrUnknownLocation
-		if errors.As(err, &unknownErr) {
-			rmErr := os.Remove(path)
-			if rmErr != nil && (errors.Is(rmErr, os.ErrNotExist) || errors.Is(rmErr, fs.ErrNotExist)) {
-				return nil
-			}
-			return rmErr
-		}
-		return err
+	if s.guard == nil {
+		return errNoGuard
 	}
-	err := os.Remove(path)
-	if err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist)) {
+	err := s.guard.Remove(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
 }
 
 func (s *Server) mkdirAll(path string, perm os.FileMode) error {
-	if s.guard != nil {
-		err := s.guard.MkdirAll(path, perm)
-		if err == nil {
-			return nil
-		}
-		var unknownErr *storage.ErrUnknownLocation
-		if errors.As(err, &unknownErr) {
-			return os.MkdirAll(path, perm)
-		}
-		return err
+	if s.guard == nil {
+		return errNoGuard
 	}
-	return os.MkdirAll(path, perm)
+	return s.guard.MkdirAll(path, perm)
 }
 
 // UploadParams contains parameters for ingesting an uploaded file stream.
@@ -330,7 +319,10 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 
 	var outFile *os.File
 	for {
-		f, createErr := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+		if s.guard == nil {
+			return nil, errNoGuard
+		}
+		f, createErr := s.guard.CreateExcl(targetPath, 0o644)
 		if createErr == nil {
 			outFile = f
 			break
@@ -493,7 +485,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 						}
 					} else if _, statErr := os.Lstat(exportDest); statErr == nil {
 						// Destination already exists; skip inserting duplicate export node
-					} else if err := linkOrCopyFile(targetPath, exportDest); err != nil {
+					} else if err := s.linkOrCopyFile(targetPath, exportDest); err != nil {
 						if s.log != nil {
 							s.log.Warn("failed to create Immich export hardlink or copy", "err", sanitizeForLog(err.Error()))
 						}
@@ -667,33 +659,43 @@ func isStandaloneDisplayable(ext string) bool {
 	}
 }
 
-func linkOrCopyFile(src, dst string) error {
+func (s *Server) linkOrCopyFile(src, dst string) error {
+	if s.guard == nil {
+		return errNoGuard
+	}
 	cleanSrc := filepath.Clean(src)
 	cleanDst := filepath.Clean(dst)
 
-	linkErr := os.Link(cleanSrc, cleanDst)
+	linkErr := s.guard.Link(cleanSrc, cleanDst)
 	if linkErr == nil {
 		return nil
 	}
 	if errors.Is(linkErr, os.ErrExist) {
 		return linkErr
 	}
+	// A Guard refusal (read-only tier, path outside every location) is not a
+	// cross-device failure: don't fall back to copying into it.
+	var roErr *storage.ErrReadOnlyTier
+	var unknownErr *storage.ErrUnknownLocation
+	if errors.As(linkErr, &roErr) || errors.As(linkErr, &unknownErr) {
+		return linkErr
+	}
 
 	// Fallback to safe non-truncating copy on cross-device link failure
-	srcFile, err := os.Open(cleanSrc)
+	srcFile, err := s.guard.OpenRead(cleanSrc)
 	if err != nil {
 		return fmt.Errorf("link error: %w, open src error: %v", linkErr, err)
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	dstFile, err := os.OpenFile(cleanDst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	dstFile, err := s.guard.CreateExcl(cleanDst, 0o644)
 	if err != nil {
 		return fmt.Errorf("link error: %w, create dst error: %v", linkErr, err)
 	}
 	defer func() { _ = dstFile.Close() }()
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		_ = os.Remove(cleanDst)
+		_ = s.guard.Remove(cleanDst)
 		return fmt.Errorf("link error: %w, copy error: %v", linkErr, err)
 	}
 	return nil

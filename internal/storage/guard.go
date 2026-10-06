@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Location mirrors one row of storage_locations (internal/db). RootPath is
@@ -277,10 +278,74 @@ func (g *Guard) Remove(path string) error {
 	return os.Remove(path)
 }
 
-// OpenRead is os.Open. Reads are always permitted, including against Tier 3
-// -- the archive is read-only, not unreadable.
+// OpenRead opens path for reading. Reads are always permitted, including
+// against Tier 3 -- the archive is read-only, not unreadable -- but the file
+// must physically live inside a configured location: the path is resolved
+// through symlinks first and refused (*ErrUnknownLocation) if it lands
+// outside every location, so a symlink planted inside a library can't be
+// used to serve (or hash) files such as the server's own database. The
+// canonical, symlink-free path is what gets opened.
 func (g *Guard) OpenRead(path string) (*os.File, error) {
-	return os.Open(path)
+	loc, err := g.Resolve(path)
+	if err != nil {
+		var unknown *ErrUnknownLocation
+		if errors.As(err, &unknown) {
+			return nil, err
+		}
+		// Resolve fails with a plain error when no ancestor exists or a
+		// component is unreadable; report a missing file as such.
+		if _, statErr := os.Lstat(path); statErr != nil {
+			return nil, statErr
+		}
+		return nil, err
+	}
+	if loc.IsVirtual {
+		return os.Open(path)
+	}
+	canon, err := canonicalize(path)
+	if err != nil {
+		return nil, fmt.Errorf("storage: resolve %q: %w", path, err)
+	}
+	return os.Open(canon)
+}
+
+// CreateExcl creates path exclusively (O_CREATE|O_EXCL|O_RDWR), gated by
+// CheckWrite. It fails with os.ErrExist when the path is already present.
+func (g *Guard) CreateExcl(path string, perm fs.FileMode) (*os.File, error) {
+	if err := g.CheckWrite(path); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, perm)
+}
+
+// Link is os.Link with the DESTINATION gated by CheckWrite (the source is
+// only read). Falls under the same rule as every other write: nothing is
+// created on a read-only tier.
+func (g *Guard) Link(oldname, newname string) error {
+	if err := g.CheckWrite(newname); err != nil {
+		return err
+	}
+	return os.Link(oldname, newname)
+}
+
+// Rename is os.Rename with BOTH ends gated by CheckWrite: it removes the
+// source name and creates the destination name.
+func (g *Guard) Rename(oldpath, newpath string) error {
+	if err := g.CheckWrite(oldpath); err != nil {
+		return err
+	}
+	if err := g.CheckWrite(newpath); err != nil {
+		return err
+	}
+	return os.Rename(oldpath, newpath)
+}
+
+// Chtimes is os.Chtimes, gated by CheckWrite.
+func (g *Guard) Chtimes(path string, atime, mtime time.Time) error {
+	if err := g.CheckWrite(path); err != nil {
+		return err
+	}
+	return os.Chtimes(path, atime, mtime)
 }
 
 // Exists reports whether path is already present on disk (or false for

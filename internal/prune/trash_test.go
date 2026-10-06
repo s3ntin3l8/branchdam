@@ -13,6 +13,14 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
+// trashGuard returns a Guard with locRoot as a single writable location.
+func trashGuard(t *testing.T, locRoot string) *storage.Guard {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(locRoot)
+	require.NoError(t, err)
+	return storage.NewGuard([]storage.Location{{ID: 1, Name: "loc", RootPath: resolved, Tier: "TIER1_LOCAL_SCRATCH"}})
+}
+
 func TestPurgeTrash_Basic(t *testing.T) {
 	locRoot := t.TempDir()
 	trashDir := filepath.Join(locRoot, ".trash", "2026", "08")
@@ -31,7 +39,7 @@ func TestPurgeTrash_Basic(t *testing.T) {
 	require.NoError(t, os.Chtimes(oldFile, oldTime, oldTime))
 	require.NoError(t, os.Chtimes(newFile, newTime, newTime))
 
-	res, err := PurgeTrash(context.Background(), locRoot, 30, now)
+	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 30, now)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.FilesPurged)
 	assert.Equal(t, int64(len("old content")), res.BytesFreed)
@@ -59,14 +67,14 @@ func TestPurgeTrash_DisabledWhenZeroOrNegative(t *testing.T) {
 	require.NoError(t, os.Chtimes(oldFile, oldTime, oldTime))
 
 	// RetentionDays = 0 (disabled)
-	res, err := PurgeTrash(context.Background(), locRoot, 0, now)
+	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 0, now)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.FilesPurged)
 	_, err = os.Stat(oldFile)
 	assert.NoError(t, err, "file should not be purged when retentionDays is 0")
 
 	// RetentionDays = -1
-	res, err = PurgeTrash(context.Background(), locRoot, -1, now)
+	res, err = PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, -1, now)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.FilesPurged)
 	_, err = os.Stat(oldFile)
@@ -85,7 +93,7 @@ func TestPurgeTrash_CleansEmptySubdirectories(t *testing.T) {
 	oldTime := now.Add(-40 * 24 * time.Hour)
 	require.NoError(t, os.Chtimes(file, oldTime, oldTime))
 
-	res, err := PurgeTrash(context.Background(), locRoot, 30, now)
+	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 30, now)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.FilesPurged)
 
@@ -126,4 +134,44 @@ func TestPurgeAllTrash_MultipleLocations(t *testing.T) {
 	workerRes, err := worker.PurgeOnce(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, workerRes.FilesPurged, "already purged files should not be re-purged")
+}
+
+// A read-only location's .trash is never purged, even when physically
+// writable; a writable one is.
+func TestPurgeAllTrash_SkipsReadOnlyLocation(t *testing.T) {
+	tmpDir := t.TempDir()
+	ro := filepath.Join(tmpDir, "ro")
+	rw := filepath.Join(tmpDir, "rw")
+	require.NoError(t, os.MkdirAll(filepath.Join(ro, ".trash"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(rw, ".trash"), 0o755))
+	roFile := filepath.Join(ro, ".trash", "keep.jpg")
+	rwFile := filepath.Join(rw, ".trash", "purge.jpg")
+	now := time.Now().UTC()
+	old := now.Add(-45 * 24 * time.Hour)
+	for _, f := range []string{roFile, rwFile} {
+		require.NoError(t, os.WriteFile(f, []byte("x"), 0o644))
+		require.NoError(t, os.Chtimes(f, old, old))
+	}
+	guard := storage.NewGuard([]storage.Location{
+		{ID: 1, Name: "ro", RootPath: ro, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
+		{ID: 2, Name: "rw", RootPath: rw, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: false},
+	})
+
+	res, err := PurgeAllTrash(context.Background(), guard, 30, now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.FilesPurged)
+	assert.Empty(t, res.Errors)
+	_, err = os.Stat(roFile)
+	assert.NoError(t, err, "read-only location's trash must be left alone")
+	_, err = os.Stat(rwFile)
+	assert.True(t, os.IsNotExist(err))
+
+	// Calling PurgeTrash directly on the read-only root is refused by the
+	// Guard per file rather than unlinking.
+	res, err = PurgeTrash(context.Background(), guard, ro, 30, now)
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.FilesPurged)
+	assert.NotEmpty(t, res.Errors)
+	_, err = os.Stat(roFile)
+	assert.NoError(t, err)
 }

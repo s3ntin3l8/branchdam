@@ -469,3 +469,95 @@ func TestLoadGuardSkipsNonAbsoluteVirtualRoot(t *testing.T) {
 		t.Errorf("guard locations = %v, want empty", guard.Locations())
 	}
 }
+
+// OpenRead must not follow a symlink that leaves every configured location
+// (e.g. a planted link to the server's own database or environment).
+func TestOpenReadRefusesSymlinkEscapingLocations(t *testing.T) {
+	guard, tier2, _ := newTestGuard(t)
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tier2, "innocent.jpg")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	f, err := guard.OpenRead(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("OpenRead followed a symlink out of the storage locations")
+	}
+	var unk *ErrUnknownLocation
+	if !errors.As(err, &unk) {
+		t.Fatalf("error = %v (%T), want *ErrUnknownLocation", err, err)
+	}
+}
+
+func TestOpenReadAllowsFilesAndInLocationSymlinks(t *testing.T) {
+	guard, tier2, tier3 := newTestGuard(t)
+	real := filepath.Join(tier3, "master.raw")
+	if err := os.WriteFile(real, []byte("raw"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := guard.OpenRead(real) // reads are permitted on read-only tiers
+	if err != nil {
+		t.Fatalf("OpenRead tier3 file: %v", err)
+	}
+	_ = f.Close()
+
+	inside := filepath.Join(tier2, "alias.raw")
+	if err := os.Symlink(real, inside); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	f, err = guard.OpenRead(inside) // resolves to another configured location
+	if err != nil {
+		t.Fatalf("OpenRead in-location symlink: %v", err)
+	}
+	_ = f.Close()
+
+	if _, err := guard.OpenRead(filepath.Join(tier2, "missing.jpg")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file error = %v, want ErrNotExist", err)
+	}
+}
+
+func TestCreateExclAndLinkAndRenameAreGuarded(t *testing.T) {
+	guard, tier2, tier3 := newTestGuard(t)
+
+	// CreateExcl: refused on read-only, works on writable, fails on existing.
+	if f, err := guard.CreateExcl(filepath.Join(tier3, "x.bin"), 0o644); err == nil {
+		_ = f.Close()
+		t.Fatal("CreateExcl on read-only tier succeeded")
+	}
+	p := filepath.Join(tier2, "x.bin")
+	f, err := guard.CreateExcl(p, 0o644)
+	if err != nil {
+		t.Fatalf("CreateExcl writable: %v", err)
+	}
+	_ = f.Close()
+	if f, err := guard.CreateExcl(p, 0o644); !errors.Is(err, os.ErrExist) {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatalf("CreateExcl existing: err = %v, want ErrExist", err)
+	}
+
+	// Link: destination must be writable.
+	var roErr *ErrReadOnlyTier
+	if err := guard.Link(p, filepath.Join(tier3, "link.bin")); !errors.As(err, &roErr) {
+		t.Fatalf("Link into read-only tier: err = %v, want *ErrReadOnlyTier", err)
+	}
+	if err := guard.Link(p, filepath.Join(tier2, "link.bin")); err != nil {
+		t.Fatalf("Link writable: %v", err)
+	}
+
+	// Rename: both ends must be writable.
+	if err := guard.Rename(p, filepath.Join(tier3, "moved.bin")); !errors.As(err, &roErr) {
+		t.Fatalf("Rename into read-only tier: err = %v, want *ErrReadOnlyTier", err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("source disappeared after refused rename: %v", err)
+	}
+	if err := guard.Rename(p, filepath.Join(tier2, "renamed.bin")); err != nil {
+		t.Fatalf("Rename writable: %v", err)
+	}
+}

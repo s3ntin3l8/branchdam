@@ -85,11 +85,17 @@ func TrashAsset(
 	keepExports bool,
 ) (sqlcgen.MediaNode, error) {
 	var node sqlcgen.MediaNode
+	ml := &moveLog{}
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var innerErr error
-		node, innerErr = TrashAssetTx(ctx, q, guard, log, nodeID, keepExports)
+		node, innerErr = trashAssetTx(ctx, q, guard, log, nodeID, keepExports, ml)
 		return innerErr
 	})
+	if err != nil {
+		// The tx rolled back (a later step failed, or the commit itself
+		// did): put every moved file back so DB and disk agree again.
+		ml.undo(guard, log)
+	}
 	return node, err
 }
 
@@ -105,6 +111,25 @@ func TrashAssetTx(
 	log *slog.Logger,
 	nodeID int64,
 	keepExports bool,
+) (sqlcgen.MediaNode, error) {
+	ml := &moveLog{}
+	node, err := trashAssetTx(ctx, q, guard, log, nodeID, keepExports, ml)
+	if err != nil {
+		// Our own step failed after a file may already have moved: undo.
+		// (A failure of the CALLER's later commit is beyond this scope.)
+		ml.undo(guard, log)
+	}
+	return node, err
+}
+
+func trashAssetTx(
+	ctx context.Context,
+	q *sqlcgen.Queries,
+	guard *storage.Guard,
+	log *slog.Logger,
+	nodeID int64,
+	keepExports bool,
+	ml *moveLog,
 ) (sqlcgen.MediaNode, error) {
 	loaded, err := q.GetMediaNodeByID(ctx, nodeID)
 	if err != nil {
@@ -139,14 +164,14 @@ func TrashAssetTx(
 			log.Warn("trash: skipping physical move for read-only/tier3 master; row marked TRASHED logically only",
 				"nodeID", loaded.ID, "tier", loc.Tier, "path", loaded.FilePath)
 		default:
-			if err := moveToTrash(guard, loc.RootPath, loaded.FilePath, loaded.NodeUuid, log); err != nil {
+			if err := moveToTrashLogged(guard, loc.RootPath, loaded.FilePath, loaded.NodeUuid, log, ml); err != nil {
 				return sqlcgen.MediaNode{}, fmt.Errorf("move to trash: %w", err)
 			}
 		}
 	}
 
 	if !keepExports {
-		if err := purgeLinkedExports(ctx, q, guard, log, loaded.ID); err != nil {
+		if err := purgeLinkedExports(ctx, q, guard, log, loaded.ID, ml); err != nil {
 			return sqlcgen.MediaNode{}, fmt.Errorf("purge linked exports: %w", err)
 		}
 	}
@@ -244,6 +269,59 @@ func RestoreTrashedAssetTx(
 	return updated, nil
 }
 
+// trashPathFor returns the .trash/ location for a node's copy of relPath:
+// <root>/.trash/<stem>.<nodeUUID><ext>. The FULL uuid is embedded: the first
+// 8 hex chars of a UUIDv7 are the top of its millisecond timestamp (a ~65s
+// bucket), so two nodes trashing the same rel_path within that window used
+// to get the same name and the second os.Rename silently clobbered the first.
+func trashPathFor(rootPath, relPath, nodeUUID string) string {
+	ext := filepath.Ext(relPath)
+	return filepath.Join(rootPath, ".trash", strings.TrimSuffix(relPath, ext)+"."+nodeUUID+ext)
+}
+
+// legacyTrashPathFor is the pre-fix 8-char-suffix name. Files already in
+// .trash/ were written with it, so restore still honours it as a fallback.
+func legacyTrashPathFor(rootPath, relPath, nodeUUID string) string {
+	short := nodeUUID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	ext := filepath.Ext(relPath)
+	return filepath.Join(rootPath, ".trash", strings.TrimSuffix(relPath, ext)+"."+short+ext)
+}
+
+// moveLog records the file moves a trash operation has made so they can be
+// undone if the surrounding DB transaction fails: the moves are real
+// filesystem renames, but a rollback only reverts rows. Without this a
+// failed trash left the node ACTIVE in the DB with its file sitting in
+// .trash/ (later marked MISSING by the sweeper).
+type moveLog struct {
+	moves []trashMove
+}
+
+type trashMove struct{ from, to string }
+
+func (m *moveLog) record(from, to string) {
+	if m != nil {
+		m.moves = append(m.moves, trashMove{from: from, to: to})
+	}
+}
+
+// undo renames every recorded move back, newest first, best effort.
+func (m *moveLog) undo(guard *storage.Guard, log *slog.Logger) {
+	if m == nil {
+		return
+	}
+	for i := len(m.moves) - 1; i >= 0; i-- {
+		mv := m.moves[i]
+		if err := guard.Rename(mv.to, mv.from); err != nil {
+			log.Error("trash: failed to undo file move after rollback; file remains in .trash/",
+				"from", mv.to, "to", mv.from, "err", err)
+		}
+	}
+	m.moves = nil
+}
+
 // moveToTrash moves filePath to <rootPath>/.trash/<rel_path>.<nodeUUID>.<ext>,
 // creating the .trash/ directory tree as needed. The nodeUUID is embedded in
 // the filename so each trashed node's bytes are uniquely identifiable on disk
@@ -256,6 +334,12 @@ func RestoreTrashedAssetTx(
 // (or an upstream sync) may have already moved the file. Refusing the trash
 // in that case would leave the row in an ACTIVE/MISSING limbo forever.
 func moveToTrash(guard *storage.Guard, rootPath, filePath, nodeUUID string, log *slog.Logger) error {
+	return moveToTrashLogged(guard, rootPath, filePath, nodeUUID, log, nil)
+}
+
+// moveToTrashLogged is moveToTrash that also records the move in ml (may be
+// nil) so a failed transaction can put the file back.
+func moveToTrashLogged(guard *storage.Guard, rootPath, filePath, nodeUUID string, log *slog.Logger, ml *moveLog) error {
 	relPath, err := filepath.Rel(rootPath, filePath)
 	if err != nil || strings.HasPrefix(relPath, "..") {
 		return fmt.Errorf("compute rel path for %s under %s: %w", filePath, rootPath, err)
@@ -265,14 +349,7 @@ func moveToTrash(guard *storage.Guard, rootPath, filePath, nodeUUID string, log 
 	}
 	// Embed the node_uuid in the trash filename so the same rel_path can
 	// be trashed by N nodes with N distinct, recoverable copies.
-	ext := filepath.Ext(relPath)
-	stem := strings.TrimSuffix(relPath, ext)
-	uuidShort := nodeUUID
-	if len(uuidShort) > 8 {
-		uuidShort = uuidShort[:8]
-	}
-	trashRel := stem + "." + uuidShort + ext
-	trashPath := filepath.Join(rootPath, ".trash", trashRel)
+	trashPath := trashPathFor(rootPath, relPath, nodeUUID)
 	if err := guard.MkdirAll(filepath.Dir(trashPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir .trash parent: %w", err)
 	}
@@ -283,11 +360,12 @@ func moveToTrash(guard *storage.Guard, rootPath, filePath, nodeUUID string, log 
 		}
 		return fmt.Errorf("stat source %s: %w", filePath, statErr)
 	}
-	if err := os.Rename(filePath, trashPath); err != nil {
+	if err := guard.Rename(filePath, trashPath); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", filePath, trashPath, err)
 	}
+	ml.record(filePath, trashPath)
 	now := time.Now().UTC()
-	if chErr := os.Chtimes(trashPath, now, now); chErr != nil {
+	if chErr := guard.Chtimes(trashPath, now, now); chErr != nil {
 		log.Warn("stamp trash mtime", "path", trashPath, "err", chErr)
 	}
 	return nil
@@ -328,13 +406,15 @@ func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog
 		return fmt.Errorf("compute rel path for %s under %s: %w", filePath, loc.RootPath, err)
 	}
 
-	ext := filepath.Ext(relPath)
-	stem := strings.TrimSuffix(relPath, ext)
-	uuidShort := nodeUUID
-	if len(uuidShort) > 8 {
-		uuidShort = uuidShort[:8]
+	trashPath := trashPathFor(loc.RootPath, relPath, nodeUUID)
+	if _, statErr := os.Stat(trashPath); os.IsNotExist(statErr) {
+		// Copies trashed before the full-uuid naming change.
+		if legacy := legacyTrashPathFor(loc.RootPath, relPath, nodeUUID); legacy != trashPath {
+			if _, lerr := os.Stat(legacy); lerr == nil {
+				trashPath = legacy
+			}
+		}
 	}
-	trashPath := filepath.Join(loc.RootPath, ".trash", stem+"."+uuidShort+ext)
 
 	originalExists := false
 	if _, statErr := os.Stat(filePath); statErr == nil {
@@ -356,7 +436,7 @@ func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog
 		if err := guard.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 			return fmt.Errorf("mkdir restore parent: %w", err)
 		}
-		if err := os.Rename(trashPath, filePath); err != nil {
+		if err := guard.Rename(trashPath, filePath); err != nil {
 			return fmt.Errorf("rename %s -> %s: %w", trashPath, filePath, err)
 		}
 		log.Info("restored from trash", "from", trashPath, "to", filePath)
@@ -390,7 +470,7 @@ func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog
 // call. If a linked export's file is in a read-only tier (Immich's exports
 // can be on TIER2_EXPORTS which is read-write per the storage policy), the
 // guard refuses the Remove and the transaction rolls back.
-func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.Guard, log *slog.Logger, parentID int64) error {
+func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.Guard, log *slog.Logger, parentID int64, ml *moveLog) error {
 	edges, err := q.ListEdgesBySource(ctx, parentID)
 	if err != nil {
 		return fmt.Errorf("list edges by source: %w", err)
@@ -424,7 +504,7 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 					"exportID", exp.ID, "tier", expLoc.Tier, "path", exp.FilePath)
 				continue
 			}
-			if err := moveToTrash(guard, expLoc.RootPath, exp.FilePath, exp.NodeUuid, log); err != nil {
+			if err := moveToTrashLogged(guard, expLoc.RootPath, exp.FilePath, exp.NodeUuid, log, ml); err != nil {
 				return fmt.Errorf("move export to trash: %w", err)
 			}
 		}

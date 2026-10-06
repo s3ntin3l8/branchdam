@@ -61,6 +61,8 @@ func TestWebUpload_MultipartSuccess(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	syncGuardFromDB(t, srv, database)
+
 	handler := srv.Handler()
 	content := []byte("Camera RAW photo file content for web upload test")
 
@@ -120,6 +122,8 @@ func TestWebUpload_PreserveRelativePath(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	content := []byte("Video footage content")
@@ -196,6 +200,8 @@ func TestWebUpload_AdminGroupGating(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 
@@ -304,6 +310,8 @@ func TestWebUpload_CollisionHandling(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	syncGuardFromDB(t, srv, database)
+
 	handler := srv.Handler()
 
 	// Upload 1
@@ -351,6 +359,8 @@ func TestWebUpload_ContentDedup(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	payload := []byte("identical binary content for web dedup")
@@ -407,6 +417,8 @@ func TestWebUpload_ContentDedup_PreFlightHash(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	payload := []byte("distinct content for preflight dedup test")
@@ -552,6 +564,8 @@ func TestWebUpload_DedupRaceOrphanCleanup(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	payload := []byte("distinct payload for dedup race orphan cleanup test")

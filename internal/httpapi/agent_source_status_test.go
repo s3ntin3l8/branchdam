@@ -323,6 +323,7 @@ func TestAgentUpload_SourcePathHash(t *testing.T) {
 	req.Header.Set("X-Filename", "camera_shot.jpg")
 	req.Header.Set("X-Source-Path-Hash", sourceHash)
 	rec := httptest.NewRecorder()
+	syncGuardFromDB(t, srv, database)
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
