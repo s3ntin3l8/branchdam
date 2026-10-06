@@ -83,6 +83,10 @@ type UploadParams struct {
 	SourcePathHash      string
 	MaxBytes            int64 // Maximum allowed bytes (<= 0 defaults to DefaultMaxUploadSizeBytes)
 	UserID              int64 // attribution: caller's user ID; 0 -> NULL (no attribution)
+	// CreatorAgentID, when set, records the uploading paired device as the
+	// node's creator (node_creators) in the SAME transaction as the insert,
+	// so an upload can never succeed without its creator being recorded.
+	CreatorAgentID string
 }
 
 // UploadResult contains the result of a successful upload.
@@ -544,6 +548,11 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			return insErr
 		}
 		insertedNode = archiveNode
+		if params.CreatorAgentID != "" {
+			if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: nodeUUIDStr, AgentID: params.CreatorAgentID}); err != nil {
+				return fmt.Errorf("record node creator: %w", err)
+			}
+		}
 
 		// Persist FFProbe metadata if present
 		if ffprobeResult != nil {

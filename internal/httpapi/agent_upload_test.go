@@ -617,3 +617,41 @@ func TestAgentUpload_AutoSelectOnlyTier3(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
+
+// If the creator can't be recorded the upload must FAIL (and clean up), not
+// report a fresh node the device could never rebase or delete.
+func TestAgentUploadFailsAndCleansUpWhenCreatorCannotBeRecorded(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+	archive := filepath.Join(t.TempDir(), "archive")
+	require.NoError(t, os.MkdirAll(archive, 0o755))
+	require.NoError(t, database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "MasterArchive", RootPath: archive, Tier: "TIER3_MASTER_ARCHIVE",
+		})
+		return err
+	}))
+	// Test-only fault injection on the creator insert.
+	_, err := database.ExecInTx(context.Background(), `CREATE TRIGGER fail_creator BEFORE INSERT ON node_creators
+BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
+	require.NoError(t, err)
+
+	data := []byte("bytes that must not be left behind")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "IMG_FAIL.JPG")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.GreaterOrEqual(t, rec.Code, 500, "body=%s", rec.Body.String())
+	var leftovers []string
+	_ = filepath.WalkDir(archive, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			leftovers = append(leftovers, p)
+		}
+		return nil
+	})
+	assert.Empty(t, leftovers, "the written file must be removed when the upload fails")
+	count, err := database.Reader.CountMediaNodes(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, count, "no node may be recorded for a failed upload")
+}
