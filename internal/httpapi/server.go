@@ -369,7 +369,7 @@ func (s *Server) Handler() http.Handler {
 	// externally-reachable URL for QR-payload generation. The mux is
 	// wrapped AFTER the Huma routes register themselves on it, so
 	// every handler (Huma + direct) inherits the forwarded values.
-	wrappedMux := pairingForwardedMiddleware(mux)
+	wrappedMux := s.pairingForwardedMiddleware(mux)
 	_ = wrappedMux // referenced by auth.RouteWithConfig below
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -515,7 +515,8 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 
-	routed = pairingForwardedMiddleware(routed)
+	routed = s.crossSiteGuard(routed)
+	routed = s.pairingForwardedMiddleware(routed)
 
 	return recoverMiddleware(s.log, securityHeaders(logMiddleware(s.log, routed)))
 }

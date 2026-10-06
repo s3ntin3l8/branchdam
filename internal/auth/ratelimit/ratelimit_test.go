@@ -70,14 +70,39 @@ func TestRecordFailure_DifferentIPsAreIndependent(t *testing.T) {
 	assert.False(t, l.Check("10.0.0.1").Allowed)
 }
 
-func TestRecordSuccess_ClearsHistory(t *testing.T) {
+// A success must NOT wipe the IP's failure history: otherwise anyone
+// holding one valid account can interleave successful logins to reset
+// the counter and brute-force other accounts without limit.
+func TestRecordSuccess_DoesNotClearHistory(t *testing.T) {
 	l := newTestLimiter(t)
 	l.RecordFailure("10.0.0.1")
 	l.RecordFailure("10.0.0.1")
 	l.RecordSuccess("10.0.0.1")
-	assert.True(t, l.RecordFailure("10.0.0.1").Allowed, "1st post-success failure is below fast threshold")
-	assert.True(t, l.RecordFailure("10.0.0.1").Allowed, "2nd post-success failure is below fast threshold")
-	assert.False(t, l.RecordFailure("10.0.0.1").Allowed, "3rd post-success failure hits fast threshold")
+	assert.False(t, l.RecordFailure("10.0.0.1").Allowed, "3rd failure still hits the fast threshold despite the success")
+}
+
+// N concurrent attempts must not all pass the gate before any failure
+// is recorded: Begin reserves a slot per in-flight attempt.
+func TestBegin_LimitsConcurrentAttempts(t *testing.T) {
+	l := newTestLimiter(t) // MaxFailuresFast = 3
+	var releases []func()
+	allowed := 0
+	for i := 0; i < 50; i++ {
+		d, release := l.Begin("10.0.0.1")
+		if d.Allowed {
+			allowed++
+			releases = append(releases, release)
+		}
+	}
+	assert.Equal(t, 3, allowed, "only MaxFailuresFast attempts may be in flight at once")
+	for _, r := range releases {
+		r()
+	}
+	assert.True(t, l.Check("10.0.0.1").Allowed, "released slots free the IP again")
+	d, release := l.Begin("10.0.0.1")
+	assert.True(t, d.Allowed)
+	release()
+	release() // idempotent
 }
 
 func TestRecordFailure_CoolOffExpires(t *testing.T) {

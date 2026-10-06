@@ -21,7 +21,6 @@ package httpapi
 
 import (
 	"database/sql"
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -85,7 +84,7 @@ func (s *Server) handleMFAEnable(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -119,7 +118,9 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 	// have a single mental model for MFA endpoint throttling.
 	ip := clientIP(s, r)
 	if s.localAuth.mfaDisableLimiter != nil {
-		if d := s.localAuth.mfaDisableLimiter.Check(ip); !d.Allowed {
+		d, release := s.localAuth.mfaDisableLimiter.Begin(ip)
+		defer release()
+		if !d.Allowed {
 			w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 			writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 			return
@@ -134,7 +135,7 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Code     string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -173,7 +174,9 @@ func (s *Server) handleMFAChallenge(w http.ResponseWriter, r *http.Request) {
 	// time, and the handler records a failure on every wrong code.
 	ip := clientIP(s, r)
 	if s.localAuth.mfaChallengeLimiter != nil {
-		if d := s.localAuth.mfaChallengeLimiter.Check(ip); !d.Allowed {
+		d, release := s.localAuth.mfaChallengeLimiter.Begin(ip)
+		defer release()
+		if !d.Allowed {
 			w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 			writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 			return
@@ -192,7 +195,7 @@ func (s *Server) handleMFAChallenge(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

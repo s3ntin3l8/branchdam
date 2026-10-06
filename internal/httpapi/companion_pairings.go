@@ -257,6 +257,9 @@ func (s *Server) handleCreatePairing(ctx context.Context, in *CreatePairingInput
 }
 
 func (s *Server) handleListPairings(ctx context.Context, _ *struct{}) (*ListPairingsOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
 	svc, err := s.pairingSvc()
 	if err != nil {
 		return nil, err
@@ -295,6 +298,9 @@ func (s *Server) handleListPairings(ctx context.Context, _ *struct{}) (*ListPair
 }
 
 func (s *Server) handleGetPairing(ctx context.Context, in *GetPairingInput) (*GetPairingOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
 	svc, err := s.pairingSvc()
 	if err != nil {
 		return nil, err
@@ -524,6 +530,9 @@ func (s *Server) handleDeletePairing(ctx context.Context, in *DeletePairingInput
 }
 
 func (s *Server) handlePairingAudit(ctx context.Context, in *PairingAuditInput) (*PairingAuditOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
 	svc, err := s.pairingSvc()
 	if err != nil {
 		return nil, err
@@ -654,15 +663,20 @@ func (s *Server) qrPayloadFor(ctx context.Context) func(agentID, apiKey string) 
 // parser expects branchdam://?server=…&key=…&agent=… where the
 // server is reachable from the phone (Traefik's ForwardAuth normally
 // sets these headers in front of /api/v1/*).
-func pairingForwardedMiddleware(next http.Handler) http.Handler {
+//
+// The forwarded headers are honoured only from a trusted proxy (same rule
+// as requestOrigin): the host lands in the QR's server= value, so a forged
+// X-Forwarded-Host would make a device send its new key to the attacker.
+func (s *Server) pairingForwardedMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		trusted := isTrustedProxy(r.RemoteAddr, currentTrustedProxies(s))
+		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" && trusted {
 			ctx = context.WithValue(ctx, forwardedProtoKey{}, proto)
 		} else if r.TLS != nil {
 			ctx = context.WithValue(ctx, forwardedProtoKey{}, "https")
 		}
-		if host := r.Header.Get("X-Forwarded-Host"); host != "" {
+		if host := r.Header.Get("X-Forwarded-Host"); host != "" && trusted {
 			ctx = context.WithValue(ctx, forwardedHostKey{}, host)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))

@@ -96,6 +96,7 @@ func TestCompanionPairings_NotConfiguredReturns503(t *testing.T) {
 	// helper still works because Pairing is a zero-value nil here.
 	srv, _, _, _, _, _ := serverWithGuard(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/companion/pairings", nil)
+	req.Header.Set("X-Authentik-Username", "test-admin") // reads are admin-gated before the 503 check
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
@@ -384,7 +385,7 @@ func TestCompanionPairings_QRPayloadEncodedCorrectly(t *testing.T) {
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.Header.Set("X-Forwarded-Host", "dam.example.com")
 	var capturedCtx = req.Context()
-	wrapped := pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	wrapped := srv.pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		capturedCtx = r.Context()
 	}))
 	wrapped.ServeHTTP(httptest.NewRecorder(), req)
@@ -395,6 +396,26 @@ func TestCompanionPairings_QRPayloadEncodedCorrectly(t *testing.T) {
 	assert.Contains(t, payload, "server=https%3A%2F%2Fdam.example.com")
 	assert.Contains(t, payload, "key=secret-key-xyz")
 	assert.Contains(t, payload, "agent=iphone-abc")
+}
+
+// A forged X-Forwarded-Host from an untrusted peer must not reach the QR
+// server= value (a device would send its fresh key to that host).
+func TestCompanionPairings_QRPayloadIgnoresForwardedHostFromUntrustedPeer(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+	srv.cfg().HTTP.TrustedProxies = []string{"10.0.0.0/8"}
+	t.Cleanup(func() { srv.cfg().HTTP.TrustedProxies = nil })
+
+	req := httptest.NewRequest(http.MethodPost, "http://real.example.com/api/v1/companion/pairings", nil)
+	req.RemoteAddr = "203.0.113.9:5555"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "evil.example.org")
+	capturedCtx := req.Context()
+	srv.pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+	})).ServeHTTP(httptest.NewRecorder(), req)
+
+	payload := string(srv.qrPayloadFor(capturedCtx)("a", "k"))
+	assert.NotContains(t, payload, "evil.example.org")
 }
 
 // TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser pins
@@ -411,7 +432,7 @@ func TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser(t *testing.
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.Header.Set("X-Forwarded-Host", "dam.example.com:8443")
 	var capturedCtx context.Context
-	wrapped := pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	wrapped := srv.pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		capturedCtx = r.Context()
 	}))
 	wrapped.ServeHTTP(httptest.NewRecorder(), req)
@@ -767,6 +788,41 @@ func TestPairingCredentialError(t *testing.T) {
 			var statusErr huma.StatusError
 			require.ErrorAs(t, got, &statusErr)
 			assert.Equal(t, tc.status, statusErr.GetStatus())
+		})
+	}
+}
+
+// TestCompanionPairings_ReadRoutesRequireAdmin: list/detail/audit expose
+// agent ids, key previews and creator names. RequireAdmin's GET bypass
+// used to leave them readable by any non-admin (or header-less) caller.
+func TestCompanionPairings_ReadRoutesRequireAdmin(t *testing.T) {
+	srv, _, pairSvc := newPairingTestServer(t)
+	p, _, err := pairSvc.CreatePairing(context.Background(), "Gated", "test", 0, func(agentID, apiKey string) []byte {
+		return []byte("branchdam://server=http://test&key=" + apiKey + "&agent=" + agentID)
+	})
+	require.NoError(t, err)
+	base := "/api/v1/companion/pairings"
+	paths := []string{base, base + "/" + pairingIDStr(p.ID), base + "/" + pairingIDStr(p.ID) + "/audit"}
+
+	srv.cfg().Authz.Groups = []string{"dam-admins"}
+	t.Cleanup(func() { srv.cfg().Authz.Groups = nil })
+
+	for _, path := range paths {
+		t.Run("non-admin forbidden "+path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("X-Authentik-Username", "alice")
+			req.Header.Set("X-Authentik-Groups", "dam-users")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+		})
+		t.Run("admin allowed "+path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("X-Authentik-Username", "test-admin")
+			req.Header.Set("X-Authentik-Groups", "dam-admins")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
 		})
 	}
 }

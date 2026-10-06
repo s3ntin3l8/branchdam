@@ -114,9 +114,12 @@ recover; a CLI bootstrap would lock that recovery behind shell access.
 
 `SameSite=Lax` is the same posture as the rest of the SPA: top-level
 navigations from external links carry the cookie, but cross-site `POST`s
-do not. CSRF on the mutating endpoints is gated by the `auth.AuthMode`
-middleware chain; the cookie attribute is defense-in-depth, not the
-primary defense.
+do not. `SameSite=Lax` still treats a sibling subdomain as same-site, so
+the server additionally refuses state-changing requests (`POST`/`PUT`/
+`PATCH`/`DELETE`, except machine `/agent/` routes) that the browser marks
+`Sec-Fetch-Site: same-site|cross-site`, or whose `Origin` host differs
+from the request host. Requests carrying neither header (curl, PAT
+tooling, the native companion app) are unaffected.
 
 The `Secure` attribute is conditional on the request's transport —
 a plain-HTTP request from `make dev-api` (loopback) is intentionally
@@ -173,10 +176,14 @@ window (in `internal/auth/ratelimit`). Two thresholds:
 | Window   | Default failures | Default cool-off | Rationale                                |
 |----------|------------------|------------------|------------------------------------------|
 | Fast     | 5 within 5 min   | 60 s             | Stop a focused brute force               |
-| Slow     | 5 within 5 min (defaults to fast window) | 5 min | Stop a slow, persistent attacker |
+| Slow     | 10 within the slow window (defaults to the fast window, 5 min) | 5 min | Stop a slow, persistent attacker |
 
-Both windows are per-**source IP** (using `http.trustedProxies` to
-identify the real client behind a reverse proxy), not per-account. This
+Both windows are per-**source IP**, not per-account. Behind a reverse
+proxy the client IP comes from `X-Forwarded-For` only when the peer
+matches `http.trustedProxies`, and is taken from the **right**: hops that
+are explicitly listed proxies are skipped and the first remaining entry
+wins, so a client-supplied leftmost entry can't be used to dodge the
+limit. This
 is deliberate: a per-account limiter can be defeated by trying every
 account, while a per-IP limiter is shared across the whole /24 (or /48)
 that the attacker controls. The trade-off is shared-fate during
@@ -187,8 +194,15 @@ unbounded enumeration.
 The fast cool-off (60s) is short enough that a fat-fingered user
 recovers within a minute. The slow cool-off (5min) is a hard floor for
 continued abuse; an operator who needs to allow a known-bad IP
-momentarily can `make restart-api` to flush the limiter (it's an
+momentarily can restart the process to flush the limiter (it's an
 in-process map, not persisted to SQLite).
+
+A successful login does **not** reset an IP's failure count (failures
+age out of the window by themselves); otherwise anyone with one valid
+account could interleave successful logins to brute-force others
+indefinitely. Concurrent attempts each reserve a slot while in flight, so
+a burst of parallel guesses can't all pass before the first failure is
+recorded. Every `POST /password-reset/request` counts as an attempt.
 
 When the limiter trips, the response is `429 Too Many Requests` with a
 `Retry-After` header (in seconds) and a JSON body of the form

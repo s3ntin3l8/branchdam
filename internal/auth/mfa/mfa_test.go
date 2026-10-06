@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -381,4 +383,38 @@ func splitPairs(s string) []string {
 	}
 	result = append(result, s[start:])
 	return result
+}
+
+// Two concurrent requests presenting the same fresh code must not both be
+// accepted: the read-then-update on last_used_step has to be atomic.
+func TestValidateTOTPCode_ConcurrentReplayAcceptsOnce(t *testing.T) {
+	svc, database := newTestService(t)
+	userID := createTestUser(t, database, "mara")
+
+	setupResult, err := svc.Setup(context.Background(), userID, "mara")
+	require.NoError(t, err)
+	secret := extractSecret(setupResult.OtpauthURI)
+	step := time.Now().Unix() / int64(DefaultTOTPPeriod)
+	_, err = svc.Enable(context.Background(), userID, computeTOTP(secret, step))
+	require.NoError(t, err)
+
+	code := computeTOTP(secret, time.Now().Unix()/int64(DefaultTOTPPeriod)+1)
+	const n = 12
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, err := svc.ValidateTOTPCode(context.Background(), userID, code)
+			if err == nil && ok {
+				accepted.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	assert.EqualValues(t, 1, accepted.Load(), "a TOTP code must be accepted exactly once")
 }

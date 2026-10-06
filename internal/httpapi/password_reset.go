@@ -22,7 +22,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -63,16 +62,22 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ip := clientIP(s, r)
-	if d := s.localAuth.resetLimiter.Check(ip); !d.Allowed {
+	d, release := s.localAuth.resetLimiter.Begin(ip)
+	defer release()
+	if !d.Allowed {
 		w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
 	}
+	// Every request counts as an attempt: each one mints a token row and
+	// can send an email, so an unauthenticated caller must not be able to
+	// loop on it (mail bombing / token-table growth).
+	s.localAuth.resetLimiter.RecordFailure(ip)
 
 	var body struct {
 		Email string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -216,7 +221,9 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ip := clientIP(s, r)
-	if d := s.localAuth.resetLimiter.Check(ip); !d.Allowed {
+	d, release := s.localAuth.resetLimiter.Begin(ip)
+	defer release()
+	if !d.Allowed {
 		w.Header().Set("Retry-After", formatRetryAfter(d.RetryAfter))
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
@@ -226,7 +233,7 @@ func (s *Server) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Reque
 		Token       string `json:"token"`
 		NewPassword string `json:"newPassword"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeSmallJSON(w, r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

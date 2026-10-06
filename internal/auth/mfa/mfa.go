@@ -302,13 +302,21 @@ func (s *Service) ValidateTOTPCode(ctx context.Context, userID int64, code strin
 		return false, nil
 	}
 
-	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	// Compare-and-set the step on the writer: the read above came from
+	// the reader pool, so two concurrent requests can both see the old
+	// step. Only the one that actually advances it is accepted. A failed
+	// update fails closed rather than accepting an unrecorded code.
+	advanced, err := s.db.InTxResult(ctx, func(q *sqlcgen.Queries) (int64, error) {
 		return q.UpdateLastUsedStep(ctx, sqlcgen.UpdateLastUsedStepParams{
 			UserID:       userID,
 			LastUsedStep: acceptedStep,
 		})
-	}); err != nil {
-		s.log.Warn("failed to update last_used_step", "userID", userID, "error", err)
+	})
+	if err != nil {
+		return false, fmt.Errorf("record totp step: %w", err)
+	}
+	if advanced == 0 {
+		return false, nil
 	}
 
 	return true, nil
