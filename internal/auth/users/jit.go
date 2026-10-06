@@ -3,6 +3,7 @@ package users
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"time"
@@ -100,6 +101,9 @@ func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username
 	}
 	existing, err := svc.GetUserByUsername(ctx, username)
 	if err == nil {
+		if existing.Source != "forward-jit" {
+			return sqlcgen.GetUserByUsernameRow{}, fmt.Errorf("auth: forward-JIT username %q collides with an existing %s account; refusing to adopt it", username, existing.Source)
+		}
 		return existing, nil
 	}
 	if !errors.Is(err, ErrUserNotFound) {
@@ -108,7 +112,7 @@ func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username
 	created, err := svc.CreateForwardJITUser(ctx, username, "", true, time.Now().Unix(), "forward:"+username)
 	if err != nil {
 		existing2, lookupErr := svc.GetUserByUsername(ctx, username)
-		if lookupErr == nil {
+		if lookupErr == nil && existing2.Source == "forward-jit" {
 			return existing2, nil
 		}
 		return sqlcgen.GetUserByUsernameRow{}, err

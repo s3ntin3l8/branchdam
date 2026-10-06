@@ -272,3 +272,66 @@ func TestRouteWithConfig_BothMode_JITDoesNotOverwriteLocalView(t *testing.T) {
 		t.Errorf("Principal.Name = %q, want %q", observedPrincipal.Name, "alice-local")
 	}
 }
+
+// observePrincipal runs h and returns the Principal the inner handler saw.
+func observePrincipal(t *testing.T, build func(next http.Handler) http.Handler, r *http.Request) *Principal {
+	t.Helper()
+	var observed *Principal
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if p, ok := From(r.Context()); ok {
+			observed = &p
+		}
+	})
+	build(inner).ServeHTTP(httptest.NewRecorder(), r)
+	return observed
+}
+
+// In both mode a request with no identity headers and no session must
+// reach the inner handler with NO Principal, so RequireAdmin's
+// "authentication required" branch fires for reads too.
+func TestRouteWithConfig_BothMode_AnonymousGetsNoPrincipal(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/assets", nil)
+	localChain := fakeChain(Principal{}) // no session
+	got := observePrincipal(t, func(n http.Handler) http.Handler {
+		return RouteWithConfig(AgentConfig{}, AuthModeBoth, localChain, testLogger(), n)
+	}, r)
+	assert.Nil(t, got, "anonymous request must not receive a Principal in both mode")
+}
+
+// Forward mode keeps its documented behavior (#164): the header-less
+// Principal is attached; RequireAdmin gates writes only.
+func TestRouteWithConfig_ForwardMode_AnonymousStillGetsPrincipal(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/assets", nil)
+	got := observePrincipal(t, func(n http.Handler) http.Handler {
+		return RouteWithConfig(AgentConfig{}, AuthModeForward, nil, testLogger(), n)
+	}, r)
+	assert.NotNil(t, got)
+	assert.False(t, got.Authenticated)
+}
+
+// In both mode, X-Authentik-* from an untrusted source must be ignored.
+func TestRouteWithConfig_BothMode_UntrustedSourceHeadersIgnored(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/assets", nil)
+	r.Header.Set("X-Authentik-Username", "mallory")
+	r.Header.Set("X-Authentik-Groups", "dam-admins")
+	localChain := fakeChain(Principal{})
+	got := observePrincipal(t, func(n http.Handler) http.Handler {
+		return RouteWithConfigAndJIT(AgentConfig{}, AuthModeBoth, localChain, nil, nil, false, testLogger(), n,
+			WithForwardTrust(func(*http.Request) bool { return false }))
+	}, r)
+	assert.Nil(t, got, "forged identity headers from an untrusted source must not authenticate")
+}
+
+func TestRouteWithConfig_BothMode_TrustedSourceHeadersAccepted(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/assets", nil)
+	r.Header.Set("X-Authentik-Username", "alice")
+	localChain := fakeChain(Principal{})
+	got := observePrincipal(t, func(n http.Handler) http.Handler {
+		return RouteWithConfigAndJIT(AgentConfig{}, AuthModeBoth, localChain, nil, nil, false, testLogger(), n,
+			WithForwardTrust(func(*http.Request) bool { return true }))
+	}, r)
+	if assert.NotNil(t, got) {
+		assert.Equal(t, "alice", got.Name)
+		assert.True(t, got.Authenticated)
+	}
+}

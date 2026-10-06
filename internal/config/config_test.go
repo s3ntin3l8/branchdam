@@ -325,3 +325,32 @@ metadata:
 		t.Errorf("Metadata.AutoInherit = true, want false")
 	}
 }
+
+func TestBootstrapPATUnresolvedVarDisablesBootstrap(t *testing.T) {
+	// `bootstrapPAT: ${ADMIN_BOOTSTRAP_PAT}` is the documented off-switch
+	// shape. With the variable unset the literal "${...}" text must NOT
+	// survive as a non-empty value, or startup would mint a wildcard admin
+	// PAT from it.
+	t.Setenv("BRANCHDAM_TEST_BOOTSTRAP_UNSET", "")
+	os.Unsetenv("BRANCHDAM_TEST_BOOTSTRAP_UNSET") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "admin:\n  bootstrapPAT: \"${BRANCHDAM_TEST_BOOTSTRAP_UNSET}\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Admin.BootstrapPAT != "" {
+		t.Errorf("Admin.BootstrapPAT = %q, want empty (unresolved var disables bootstrap)", cfg.Admin.BootstrapPAT)
+	}
+}
+
+func TestBootstrapPATResolvedVarKept(t *testing.T) {
+	t.Setenv("BRANCHDAM_TEST_BOOTSTRAP_SET", "s3cret-value")
+	path := writeConfig(t, "admin:\n  bootstrapPAT: \"${BRANCHDAM_TEST_BOOTSTRAP_SET}\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Admin.BootstrapPAT != "s3cret-value" {
+		t.Errorf("Admin.BootstrapPAT = %q, want s3cret-value", cfg.Admin.BootstrapPAT)
+	}
+}

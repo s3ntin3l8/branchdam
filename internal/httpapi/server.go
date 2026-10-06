@@ -282,6 +282,9 @@ func New(d Deps) *Server {
 	if cfg := cfgProvider.Effective(); cfg != nil {
 		if len(cfg.HTTP.TrustedProxies) == 0 {
 			log.Warn("http: trustedProxies is empty -- X-Forwarded-* headers are trusted from any source (backward-compat default). Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
+			if cfg.Auth.Mode == "both" {
+				log.Error("auth: mode \"both\" with empty http.trustedProxies -- forward-auth identity headers are IGNORED (forward-auth login disabled; local login still works). Set http.trustedProxies to your ForwardAuth proxy's IP/CIDR to enable forward identity.")
+			}
 		}
 	}
 	s := &Server{
@@ -457,7 +460,8 @@ func (s *Server) Handler() http.Handler {
 		adminGroups = cfg.Auth.Forward.AdminGroups
 		requireEmailForJIT = cfg.Auth.Forward.RequireEmailForJIT
 	}
-	routed := auth.RouteWithConfigAndJIT(agentCfg, authMode, localBuilder, jit, adminGroups, requireEmailForJIT, s.log, authzHandler)
+	routed := auth.RouteWithConfigAndJIT(agentCfg, authMode, localBuilder, jit, adminGroups, requireEmailForJIT, s.log, authzHandler,
+		auth.WithForwardTrust(s.forwardIdentityTrusted))
 
 	// Admin PATs (issue #453 PR E): a request carrying a bdam_pat_
 	// Bearer token is authenticated by the PAT middleware and handed
@@ -778,6 +782,20 @@ func readSPABuildID(spa fs.FS) string {
 		id = strings.ToValidUTF8(id[:128], "")
 	}
 	return id
+}
+
+// forwardIdentityTrusted reports whether forward-auth identity headers
+// may be honoured for r in auth.mode "both". Unlike X-Forwarded-*, where an
+// unset trustedProxies list means "trust all" for backward compatibility,
+// identity headers need an explicitly configured proxy allowlist: in both
+// mode the port is reachable directly, so trust-all would let any client
+// assert an admin identity.
+func (s *Server) forwardIdentityTrusted(r *http.Request) bool {
+	cfg := s.cfg()
+	if cfg == nil || len(cfg.HTTP.TrustedProxies) == 0 {
+		return false
+	}
+	return isTrustedProxy(r.RemoteAddr, cfg.HTTP.TrustedProxies)
 }
 
 // isTrustedProxy checks whether remoteAddr belongs to a trusted proxy range.

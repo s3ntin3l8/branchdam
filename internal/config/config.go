@@ -477,6 +477,14 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 
+	// An unresolved ${VAR} in admin.bootstrapPAT is the documented
+	// "bootstrap off" shape (the variable simply isn't set). Treat it as
+	// empty rather than letting the literal "${...}" text count as a
+	// secret and mint a wildcard admin PAT from it.
+	if unresolvedVarRe.MatchString(cfg.Admin.BootstrapPAT) {
+		cfg.Admin.BootstrapPAT = ""
+	}
+
 	if err := validateSecretExpansion(cfg); err != nil {
 		return cfg, fmt.Errorf("config validation: %w", err)
 	}
