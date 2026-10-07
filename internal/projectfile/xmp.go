@@ -29,7 +29,7 @@ func (p *XMPParser) Parse(ctx context.Context, r io.Reader) ([]Reference, error)
 		return nil, errors.New("projectfile: reader is nil")
 	}
 
-	data, err := io.ReadAll(r)
+	data, err := readBounded(r)
 	if err != nil {
 		return nil, fmt.Errorf("projectfile: read xmp: %w", err)
 	}

@@ -104,7 +104,7 @@ func (c *Cache) Generate(ctx context.Context, filePath string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("thumbs: open source: %w", err)
 	}
-	img, _, decodeErr := image.Decode(f)
+	img, _, decodeErr := probe.DecodeBounded(f)
 	_ = f.Close()
 
 	if decodeErr != nil {

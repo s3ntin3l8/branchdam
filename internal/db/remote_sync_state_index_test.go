@@ -181,3 +181,76 @@ func TestRemoteSyncStateQueriesUseIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoredMediaNodeIndexes(t *testing.T) {
+	database := openTestDB(t)
+	for _, name := range []string{"ix_media_nodes_camera_time", "ix_media_nodes_uploader"} {
+		var got string
+		if err := database.reader.QueryRow(
+			"SELECT name FROM sqlite_master WHERE type='index' AND name=?", name,
+		).Scan(&got); err != nil {
+			t.Fatalf("%s missing: %v", name, err)
+		}
+	}
+	rows, err := database.reader.Query(
+		"EXPLAIN QUERY PLAN SELECT id FROM media_nodes WHERE camera_serial = 'x' AND captured_at_unix BETWEEN 1 AND 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan strings.Builder
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(detail + "\n")
+	}
+	if !strings.Contains(plan.String(), "ix_media_nodes_camera_time") {
+		t.Fatalf("camera lookup does not use the index:\n%s", plan.String())
+	}
+}
+
+func TestListLiveNodesForSyncPrefixIsLiteralRange(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+	paths := map[string]string{
+		"/mnt/ex_port/a.jpg":  "ACTIVE",  // inside root with '_'
+		"/mnt/exXport/b.jpg":  "ACTIVE",  // '_' must NOT match 'X'
+		"/mnt/ex_portal/c.jp": "ACTIVE",  // sibling sharing the prefix
+		"/mnt/ex_port/d.jpg":  "MISSING", // not live
+	}
+	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		sl, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
+			Name: "prefix_loc", RootPath: "/mnt", Tier: "PROJECTS",
+		})
+		if err != nil {
+			return err
+		}
+		i := 0
+		for p, st := range paths {
+			if _, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+				NodeUuid: uuidForIndex(i % 4), StorageLocationID: sl.ID, FilePath: p,
+				FileName: "f", FileExt: "jpg", SizeBytes: 1, MtimeUnix: 1,
+				IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: st,
+			}); err != nil {
+				return err
+			}
+			i++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Reader.ListLiveNodesForSync(ctx, sqlcgen.ListLiveNodesForSyncParams{
+		Remote: "IMMICH", FilePath: "/mnt/ex_port", Limit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].FilePath != "/mnt/ex_port/a.jpg" {
+		t.Fatalf("got %+v, want only /mnt/ex_port/a.jpg", rows)
+	}
+}

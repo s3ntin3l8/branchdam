@@ -35,7 +35,7 @@ func (p *FCPXMLParser) Parse(ctx context.Context, r io.Reader) ([]Reference, err
 		return nil, fmt.Errorf("%w: reader is nil", ErrMalformedFCPXML)
 	}
 
-	data, err := io.ReadAll(r)
+	data, err := readBounded(r)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read failed: %v", ErrMalformedFCPXML, err)
 	}
