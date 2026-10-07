@@ -211,6 +211,7 @@ type Server struct {
 	engine        *graph.Engine
 	hub           *sse.Hub
 	sseSlot       *limiter
+	ssePerKey     *keyedLimiter
 	sseCache      ssePayloadCache
 	spa           fs.FS
 	version       string
@@ -298,6 +299,7 @@ func New(d Deps) *Server {
 		engine:         d.Engine,
 		hub:            d.Hub,
 		sseSlot:        newLimiter(maxSSEClients),
+		ssePerKey:      newKeyedLimiter(maxSSEClientsPerPrincipal),
 		spa:            d.SPA,
 		version:        version,
 		tracker:        d.Tracker,

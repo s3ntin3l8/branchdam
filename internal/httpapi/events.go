@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 )
 
 type ssePayloadCache struct {
@@ -64,6 +67,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.sseSlot.release()
+	key := ssePrincipalKey(r)
+	if !s.ssePerKey.acquire(key) {
+		http.Error(w, "too many streaming clients for this account", http.StatusTooManyRequests)
+		return
+	}
+	defer s.ssePerKey.release(key)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -169,4 +178,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// ssePrincipalKey identifies who an SSE connection counts against: the
+// authenticated principal, else the client IP.
+func ssePrincipalKey(r *http.Request) string {
+	if p, ok := auth.From(r.Context()); ok && p.Authenticated && p.Name != "" {
+		return "p:" + p.AuthProvider + ":" + p.Name
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return "ip:" + host
 }

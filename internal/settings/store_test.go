@@ -423,3 +423,32 @@ func TestStoreSecretsAvailable(t *testing.T) {
 		t.Error("SecretsAvailable without box = true, want false")
 	}
 }
+
+func TestStoreApplyRequiresApiKeyWhenImmichUrlChanges(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(ctx, testDB(t), config.Config{}, testBox(t), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Apply(ctx, map[string]any{
+		"immich.apiUrl": "https://old.example", "immich.apiKey": "k",
+	}, nil, "tester"); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	err = store.Apply(ctx, map[string]any{"immich.apiUrl": "https://evil.example"}, nil, "tester")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("url change without key: err = %v, want ErrInvalidInput", err)
+	}
+	if got := store.Effective().Immich.APIURL; got != "https://old.example" {
+		t.Errorf("rejected Apply still changed APIURL to %q", got)
+	}
+	if err := store.Apply(ctx, map[string]any{
+		"immich.apiUrl": "https://new.example", "immich.apiKey": "k2",
+	}, nil, "tester"); err != nil {
+		t.Fatalf("url change with key: %v", err)
+	}
+	// Re-submitting the unchanged URL alone stays fine.
+	if err := store.Apply(ctx, map[string]any{"immich.apiUrl": "https://new.example"}, nil, "tester"); err != nil {
+		t.Fatalf("unchanged url: %v", err)
+	}
+}
