@@ -277,12 +277,15 @@ func New(d Deps) *Server {
 	}
 	// Surface the trust-all-proxy default at startup so a security-minded
 	// operator notices they're running with the backward-compat branch
-	// of isTrustedProxy. The check below mirrors isTrustedProxy's nil =>
-	// true behavior: nil or empty list means "trust all". An explicit
-	// non-empty list (even just "*") means the operator has opted in.
+	// of isTrustedProxy. isTrustedProxy trusts all only for a nil list
+	// (key unset); an explicit empty list ("[]") parses to a non-nil
+	// empty slice and denies every X-Forwarded-* source. An explicit
+	// non-empty list (even just "*") also means the operator has opted in.
+	// The warning below fires for both nil and empty and its text covers
+	// both cases; forward-auth identity (mode "both") needs a non-empty list.
 	if cfg := cfgProvider.Effective(); cfg != nil {
 		if len(cfg.HTTP.TrustedProxies) == 0 {
-			log.Warn("http: trustedProxies is empty -- X-Forwarded-* headers are trusted from any source (backward-compat default). Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
+			log.Warn("http: trustedProxies is empty -- if unset, X-Forwarded-* headers are trusted from any source (backward-compat default); an explicit [] denies all forwarded headers. Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
 			if cfg.Auth.Mode == "both" {
 				log.Error("auth: mode \"both\" with empty http.trustedProxies -- forward-auth identity headers are IGNORED (forward-auth login disabled; local login still works). Set http.trustedProxies to your ForwardAuth proxy's IP/CIDR to enable forward identity.")
 			}

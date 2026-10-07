@@ -41,8 +41,10 @@ Be precise about what each of these does and doesn't cover:
 
 - `make lint` is `pre-commit run --all-files` -- it only runs the `pre-commit`-staged hooks
   (gofmt, go vet, go mod tidy, sqlc-diff), **not** `go test` or `govulncheck` (those are
-  `pre-push`-staged), and **not** `golangci-lint`. `make check` covers all of these; `make lint`
-  alone does not. Note `make lint`'s pre-commit hooks (`trailing-whitespace`,
+  `pre-push`-staged), and **not** `golangci-lint`. `make check` covers everything but
+  `govulncheck` (`lint` + `test` + `build` + `golangci-lint`); `make lint` alone does not.
+  `govulncheck` runs only from the `pre-push` hook or manually via `make vulncheck` (both
+  install `govulncheck@latest`). Note `make lint`'s pre-commit hooks (`trailing-whitespace`,
   `end-of-file-fixer`, `mixed-line-ending`, `gofmt`) rewrite files in your working tree.
 - `sqlc-diff` is a no-op if the `sqlc` binary isn't installed on your machine. If you changed
   `internal/db/migrations/*.sql` or `internal/db/queries/*.sql`, run `sqlc generate` yourself

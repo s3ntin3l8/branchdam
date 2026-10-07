@@ -107,7 +107,9 @@ type AgentConfig struct {
 
 // AgentChainWithConfig builds the agent auth middleware using the supplied AgentConfig.
 // When SignedRequests is true, it verifies X-Timestamp, X-Nonce, and X-Signature
-// (HMAC-SHA256 over method\npath\nnonce\ntimestamp\nbody) within the replay window.
+// (HMAC-SHA256 over method\nrequestURI\nnonce\ntimestamp\nbody, where requestURI
+// is path plus raw query, keyed by the per-device signing key) within the replay
+// window. Paths in SkipSignaturePaths bypass the signature check (not the API key).
 //
 // Issue #453 PR F removed the historical env-bootstrap / shared-secret
 // fallback (`cfg.Agent.APIKey`, env var BRANCHDAM_AGENT_API_KEY): with

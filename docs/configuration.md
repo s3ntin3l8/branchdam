@@ -8,8 +8,14 @@ to forget because they don't appear in the example at all.
 
 All string values may reference the environment as `${VAR}`, expanded at load time
 (`config.Load` → `expandEnv`). **An unset variable is left as the literal `${VAR}` text**, not
-emptied — a typo'd variable name fails loudly (as an invalid tier string, an empty-looking-but-not
-API URL, etc.) rather than silently producing an empty value.
+emptied — a typo'd variable name fails loudly (as an invalid tier string, etc.) rather than
+silently producing an empty value. Two exceptions are handled explicitly by `config.Load`:
+
+- An unresolved `${VAR}` in `immich.apiKey` or `immich.apiUrl` is a **fatal load error**
+  (`validateSecretExpansion`: "unresolved environment variables in security-sensitive fields").
+  A variable that is *set but empty* (as in `.env.example`) is fine and leaves Immich disabled.
+- An unresolved `${VAR}` in `admin.bootstrapPAT` is treated as **empty** (bootstrap off), so the
+  literal `${...}` text never becomes a wildcard admin PAT secret.
 
 ## Precedence: `.env`/`config.yaml` vs. the settings UI
 
@@ -23,8 +29,9 @@ wins, regardless of what it holds.
 
 For a handful of fields whose own "empty" value already means "not configured" — `immich.apiUrl`
 and `immich.libraryId`, where the sync worker already treats either as its off-switch — a literal,
-never-expanded `${VAR}` left over from an unset environment variable is treated identically to an
-empty base value when there is no override. This does **not** apply to most fields: the general
+never-expanded `${VAR}` (e.g. one that reaches the sync supervisor through the settings layer
+rather than `config.Load`'s fatal check) is treated identically to an empty value by the worker
+(`internal/sync.Supervisor` checks for `${`). This does **not** apply to most fields: the general
 "fails loudly on a typo'd variable name" behavior described above is unchanged everywhere else.
 
 `GET`/`PUT /api/v1/settings` (gated to an authenticated admin user, same `authz.groups`
@@ -38,6 +45,16 @@ One domain is intentionally excluded from the registry, not just left for later:
 - **`authz.groups` is display-only** (`applyMode: "never"`, `editable: false`) — it gates the
   settings route itself, so a UI edit that locked the operator out of every admin group would have
   no recovery path. Change it only via `config.yaml`/`.env`.
+
+`applyMode` per registered field (authoritative: `internal/settings/registry.go`):
+
+- `live`: `immich.apiUrl`, `immich.apiKey`, `immich.libraryId`, `immich.exportPath`,
+  `pruning.enabled`, `pathRewrites`, `ingest.namingTemplate`, `trash.retentionDays`,
+  `metadata.autoInherit`.
+- `restart`: `logLevel`, `workers.*`, `thumbnails.*`, `http.readTimeoutSecs`,
+  `http.writeTimeoutSecs`, `http.exposeOpenAPI`, `http.trustedProxies`, `agent.signedRequests`,
+  `agent.replayWindowSecs`, `agent.signedMaxBodyBytes`, `agent.skipSignaturePaths`.
+- `never` (display-only): `listenAddr`, `database.path`, `authz.groups`.
 
 Operator Path Rewrites (`pathRewrites`) are registered with `applyMode: "live"` and `editable: true` — UI overrides take effect immediately for subsequent project file introspection. Reverting the override restores the rules from `config.yaml`.
 
@@ -67,6 +84,7 @@ implications and what happens if that key is absent or lost.
 |---|---|---|---|
 | `readTimeoutSecs` | int | 15 | `http.Server.ReadTimeout`. |
 | `writeTimeoutSecs` | int | 15 | `http.Server.WriteTimeout`. |
+| `trustedProxies` | list of string | unset | IPs / CIDRs (or `"*"`) from which `X-Forwarded-*` headers are honored. **Unset trusts every source** (backward-compat; logs a startup WARN). **An explicit empty list `[]` denies all forwarded headers.** In `auth.mode: both` forward-auth identity headers are honored only from a non-empty list; with it unset/empty, forward login is disabled (local login still works). Restart to change. |
 | `exposeOpenAPI` | bool | `false` | Serves `/openapi.json`, `/openapi.yaml`, and `/docs`. **Recommended `true` for a test deploy**: the route is already behind Authentik like everything else, and a live, always-current API reference beats a hand-written one that drifts. Leave `false` once you're not actively poking at the API. |
 
 ## `workers`
@@ -83,9 +101,10 @@ implications and what happens if that key is absent or lost.
 |---|---|---|---|
 | `signedRequests` | bool | `false` | Require HMAC-SHA256 signatures and replay protection on agent endpoints. |
 | `replayWindowSecs` | int | `300` | Maximum allowed clock drift / nonce replay window in seconds. |
-| `maxSignedBodyBytes` | int | `1048576` | Body cap for signed JSON agent endpoints. The upload endpoint streams binary and is exempt. |
+| `signedMaxBodyBytes` | int | `16777216` (16 MiB; `0` = default) | Max body the signature validator buffers on signed JSON agent endpoints; over-limit requests get `413`. |
+| `skipSignaturePaths` | list of string | `[/api/v1/agent/upload]` | Paths that bypass signature validation (the API key check still runs). Entries ending in `/` match as a prefix, others exactly. Unset uses the default (the streaming upload route); an explicit empty list exempts nothing. |
 
-Agent authentication is per-device pairing only — no shared `apiKey` field exists. Each paired device gets its own key via `POST /api/v1/agent/handshake/pair` (see [`agent-api.md`](agent-api.md)).
+Agent authentication is per-device pairing only — no shared `apiKey` field exists. Each paired device gets its own key via `POST /api/v1/companion/pairings` (see [`agent-api.md`](agent-api.md)).
 
 ## `authz`
 
@@ -115,9 +134,10 @@ the only one most operators ever touch; the rest have safe defaults.
 | `local.rateLimit.maxFailuresFast` | int | `5` | Fast-window failure threshold (per source IP). |
 | `local.rateLimit.fastWindow` | duration | `5m` | Sliding window for the fast threshold. |
 | `local.rateLimit.coolOffFast` | duration | `60s` | Cool-off applied when the fast threshold trips. |
-| `local.rateLimit.maxFailuresSlow` | int | `5` | Slow-window failure threshold. |
-| `local.rateLimit.slowWindow` | duration | `5m` (defaults to fast window) | Sliding window for the slow threshold. |
+| `local.rateLimit.maxFailuresSlow` | int | `10` | Slow-window failure threshold. |
+| `local.rateLimit.slowWindow` | duration | `5m` (defaults to the fast window; never smaller than it) | Sliding window for the slow threshold. |
 | `local.rateLimit.coolOffSlow` | duration | `5m` | Cool-off applied when the slow threshold trips. |
+| `local.passwordReset.tokenTTL` | duration | `24h` | Lifetime of a self-service password-reset token. Blank or non-positive uses `24h`; a malformed value refuses to boot. |
 | `forward.adminGroups` | list of string | empty | Forward-auth asserted group names that trigger JIT provisioning of a local `is_admin=1` account. Only meaningful when `auth.mode='both'`. Empty list disables JIT entirely. |
 | `forward.requireEmailForJIT` | bool | `true` | When true, refuse JIT provisioning if the forward-auth asserted email is empty. A homelab Authentik deployment that doesn't surface email can set this to `false`; the JIT user is then keyed by username. |
 | `email.provider` | string | `log` | Outbound-email backend. `log` (default) prints would-be-sent messages to slog — the password-reset handler still mints tokens either way, but the rendered preview (and the `smtp` send) both require `email.baseURL` to be set; see below. `smtp` delivers via `auth.email.host:port`. |
@@ -141,6 +161,35 @@ session-cookie signing — that path is closed off entirely.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `namingTemplate` | string | `{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}` | Path and filename pattern evaluated by server when ingesting media (`POST /api/v1/agent/upload`). Available tokens: `{yyyy}`, `{mm}`, `{dd}`, `{camera_model}`, `{original_name}`, `{stem}`, `{ext}`. Editable live via web UI settings. |
+
+## `pruning`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `enabled` | bool | `true` | Global kill-switch for `POST /api/v1/prune`; when `false` the endpoint answers `409` ("pruning is disabled by server configuration"). Per-location eligibility (`prunable`, `cacheTtlHours`) is under `storageLocations`. Live-editable via the settings API. |
+
+## `metadata`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `autoInherit` | bool | `true` | Automated EXIF/XMP identity-metadata inheritance from the winning parent edge to the child on edge confirmation or auto-acceptance. Live-editable via the settings API. |
+
+## `admin`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `bootstrapPAT` | string | empty | When non-empty, the first boot mints a one-shot wildcard admin PAT and writes the plaintext to `<dir of database.path>/bootstrap-pat.txt` (mode 0600); later boots refuse to mint while that file exists. Empty disables bootstrap. An unresolved `${VAR}` is treated as empty. See [`admin-pats.md`](admin-pats.md). |
+
+## Environment variables and CLI flags
+
+| Name | Effect |
+|---|---|
+| `BRANCHDAM_CONFIG` | Default for the `-config` flag (`config.yaml` if unset). |
+| `BRANCHDAM_DEBUG` | Non-empty enables debug logging (same as `-debug`). |
+| `BRANCHDAM_SECRET_KEY` | Base64-encoded 32-byte key for sealing secret settings and signing session cookies; required for `auth.mode` `local`/`both`. |
+
+`-healthcheck` probes the local `/healthz` and exits (used by the container `HEALTHCHECK`).
+Any other `${VAR}` is whatever your `config.yaml` references (e.g. `IMMICH_API_URL`).
 
 ## `trash`
 

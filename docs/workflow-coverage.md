@@ -114,7 +114,7 @@ gates purely on `lifecycle_state = 'ACTIVE'` plus a matching `(mtime, size)` —
 that way forever under a differential-only maintenance routine; only a full scan's
 `needsFullHash(policy, tierReadOnly=true, ...)` computes it. This matters beyond integrity
 verification: `ListPrunableNodes` requires a non-NULL, 64-length `full_hash` on the live Tier-3
-ancestor before a Tier-1 cache copy is purge-eligible (see [`operations.md#cache-pruning-runbook`](operations.md#cache-pruning-runbook)), so
+ancestor before a Tier-1 cache copy is purge-eligible (see [`operations.md#pruning`](operations.md#pruning)), so
 an archive maintained exclusively via `differential: true` passes can silently block Tier-1
 pruning for any node whose hash was never computed. A periodic full (non-differential) scan is
 still what verifies integrity and keeps Tier-1 pruning eligibility current — differential is a

@@ -205,14 +205,12 @@ type AuthEmail struct {
 	// TLS selects the TLS mode: "starttls" (default), "implicit", or "none".
 	TLS string `yaml:"tls"`
 	// BaseURL is the public-facing base URL used to build password-reset
-	// links in outbound email, e.g. "https://branchdam.example.com". When
-	// set, the link is derived from this value (NOT from the inbound
-	// request's Host header, which is attacker-controlled in a header-
-	// poisoning attack). When empty, the password-reset handler logs a
-	// WARN and falls back to the inbound request's scheme+Host -- safe in
-	// a single-host deployment behind a trusted reverse proxy, unsafe in
-	// any multi-tenant or direct-internet-exposed setup. Operators should
-	// set this explicitly in production.
+	// links in outbound email, e.g. "https://branchdam.example.com". The
+	// link is derived from this value only, NOT from the inbound request's
+	// Host header (attacker-controlled in a header-poisoning attack). When
+	// empty, the password-reset handler logs a WARN and skips email
+	// delivery for that request (including the provider=log preview)
+	// rather than embed an untrusted host. Required for reset emails.
 	BaseURL string `yaml:"baseURL"`
 }
 

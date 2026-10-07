@@ -101,7 +101,7 @@ string and fails the build if anything else references it.
 ## 3. branchDAM: agent key and trust configuration
 
 Agent routes authenticate via per-device pairing only — each paired device
-gets its own key via `POST /api/v1/agent/handshake/pair` (see
+gets its own key via `POST /api/v1/companion/pairings` (see
 [`agent-api.md`](agent-api.md)). There is no shared server-wide key to
 configure or rotate.
 

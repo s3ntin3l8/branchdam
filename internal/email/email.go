@@ -39,8 +39,9 @@ type Config struct {
 	TLS      string `yaml:"tls"`      // "starttls" (default) | "implicit" | "none"
 	// BaseURL is the public-facing base URL used to build links in
 	// outbound email (e.g. password-reset links). When empty, the caller
-	// is expected to fall back to deriving it from the request -- which
-	// trusts the Host header. See config.AuthEmail.BaseURL.
+	// must not derive one from the request (the Host header is
+	// attacker-controlled); the password-reset handler skips delivery
+	// instead. See config.AuthEmail.BaseURL.
 	BaseURL string `yaml:"baseURL"`
 }
 

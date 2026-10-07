@@ -38,7 +38,7 @@ thumbnails:
 
 agent:
   # Per-device pairing is the only auth path for /api/v1/agent/* routes.
-  # Pair a device via POST /api/v1/agent/handshake/pair (see docs/agent-api.md)
+  # Pair a device via POST /api/v1/companion/pairings (see docs/agent-api.md)
   # if you need agent routes locally.
 
 authz:
