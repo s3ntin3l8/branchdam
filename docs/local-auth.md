@@ -326,3 +326,20 @@ backup, not via FK behavior.
 For changes to the auth surface, run `make check` and `make check-web`
 before pushing; both gates must be green. For new env vars, update
 `config.example.yaml` and `docs/configuration.md` in the same PR.
+
+## 10. TOTP multi-factor authentication
+
+Local users can enroll a TOTP authenticator (`internal/httpapi/mfa_handlers.go`). All four
+endpoints are `POST`, need a local session, and return `503` when local auth isn't configured:
+
+| Endpoint | Body | Effect |
+|---|---|---|
+| `/api/v1/mfa/setup` | none | Stores a pending secret and returns `otpauthURI` + `asciiQR`. `409` if MFA is already enabled. |
+| `/api/v1/mfa/enable` | `{"code"}` | Verifies a code from the authenticator, activates MFA and returns `recoveryCodes` once (never shown again). |
+| `/api/v1/mfa/disable` | `{"password","code"}` | Requires the current password and a valid code; rate-limited per IP (`429` + `Retry-After`). |
+| `/api/v1/mfa/challenge` | `{"code"}` | Completes login for a half-authenticated session with a TOTP **or** recovery code; rate-limited per IP; `401` on a bad code, `400` if already verified. |
+
+For a user with MFA enrolled, a password login yields a half-authenticated session: every
+`/api/v1/*` route outside the MFA allowlist (the four endpoints above, `GET /api/v1/me`,
+`DELETE /api/v1/session`) answers `403` with `"mfaChallengeRequired": true` until
+`/mfa/challenge` succeeds. MFA outcomes are recorded in the login audit log (section 8).

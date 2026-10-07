@@ -88,7 +88,7 @@ only authentication path for agent routes as of
 [#453](https://github.com/s3ntin3l8/branchdam/issues/453). The shared
 `agent.apiKey` field and its `BRANCHDAM_AGENT_API_KEY` env var were
 removed in PR F — every agent request must present a per-device key
-obtained via `POST /api/v1/agent/handshake/pair` (see
+obtained via `POST /api/v1/companion/pairings` (see
 [`agent-api.md`](agent-api.md)). A `503` means no pairing service is wired
 (nil `LookupKey`); a `401` means the presented key matches no paired device.
 

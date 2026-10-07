@@ -25,6 +25,8 @@ the migration.
    `indexing_status` (how much we know about the bytes), `graph_status` (how much we know about
    lineage), and `lifecycle_state` (does the row currently exist / is it current) — with the
    sync axis living only in `remote_sync_state`, where the spec already had it.
+   `lifecycle_state` values: `ACTIVE`, `MISSING` (scan-detected disappearance), `ARCHIVED`
+   (superseded version), `HIDDEN`, `TRASHED` (user-initiated soft delete, added in `00032`).
 3. **`file_path UNIQUE` makes the spec's own version-collision rule impossible.** §5 says
    re-exporting over a filename creates a *new* node and archives the old; both rows would then
    share a `file_path`, which `UNIQUE` forbids. **Fix:** partial unique index
@@ -159,7 +161,7 @@ Every migration after `00001_init.sql`, in order:
 | `00007_media_nodes_thumb_state.sql` | `media_nodes.thumb_state` (`PENDING`/`READY`/`UNSUPPORTED`/`FAILED`, default `PENDING`), `.thumb_attempts`; partial index `idx_media_nodes_thumb_pending ON media_nodes(id) WHERE thumb_state = 'PENDING'` | Thumbnail cache work — every existing row defaults to `PENDING`, so `internal/thumbs.Worker` backfills the whole library on first start after the upgrade; no data-correction migration needed, unlike `00006` |
 | `00008_storage_locations_cache_ttl.sql` | `storage_locations.cache_ttl_hours` | Persists TTL on the database row instead of relying solely on config joins |
 | `00009_storage_locations_drop_name_unique.sql` | Drops UNIQUE constraint on `storage_locations.name` | Permits changing root paths across runs without crashing on unchanged display names |
-| `00010_app_settings.sql` | `app_settings` table (`key`, `value`, `updated_at`) | Backs UI-configurable runtime overrides on top of `config.yaml` / `.env` without restart |
+| `00010_app_settings.sql` | `app_settings` table (`key`, `value`, `is_secret` 0/1, `updated_at`, `updated_by`) | Backs UI-configurable runtime overrides on top of `config.yaml` / `.env` without restart. `is_secret = 1` rows hold the value sealed by `secrets.Box` (`v1:<base64>`), never plaintext |
 | `00011_agent_scratch_telemetry.sql` | `agent_scratch_telemetry` table | Stores workstation scratch capacity breakdowns and prune stats for dashboard cards |
 | `00012_storage_locations_allow_writable_archive.sql` | Removes `read_only = 1` CHECK constraint on `TIER3_MASTER_ARCHIVE` | Allows Tier 3 archive storage locations to be writable for server-governed ingest |
 | `00013_dedup_existing_hashes.sql` | Data cleanup migration | Archives duplicate `full_hash` rows prior to applying unique partial index |
@@ -172,19 +174,20 @@ Every migration after `00001_init.sql`, in order:
 | `00020_users_and_audit.sql` | `actor_audit` table; attribution FKs on nodes (`uploaded_by_user_id`), scan jobs (`started_by_user_id`), and pairings (`user_id`) | First-class multi-user attribution and administrative audit trail |
 | `00021_login_audit_password_reset_source.sql` | Extends `login_audit.source` CHECK constraint | Integrates password-reset events into the unified login audit log |
 | `00022_storage_locations_is_virtual.sql` | `storage_locations.is_virtual` column | Virtual storage namespaces for agent offline staging locations |
-| `00023_media_nodes_file_path_idx.sql` | `ix_media_nodes_file_path` index | Efficient file path lookups for `Guard.Resolve` and `RebaseNodePathByUUID` |
+| `00023_media_nodes_file_path_idx.sql` | `idx_media_nodes_file_path ON media_nodes(file_path, id DESC)` index | Efficient file path lookups for `Guard.Resolve` and `RebaseNodePathByUUID` |
 | `00024_virtual_node_and_event.sql` | `event_queue` CHECK expansion (+`EVENT_VIRTUAL_NODE_CREATED`) | Agent integration events for virtual project nodes (Resolve timelines, Premiere sequences). Virtual storage location is config-driven (`resolve-virtual`), not migration-seeded |
 | `00025_expand_node_metadata_source.sql` | `node_metadata.source` CHECK expansion (allows `LIKE '%_evidence'`) | Persist per-integration virtual-node evidence (e.g. `resolve_project_evidence`, `premiere_project_evidence`) without enumerating each |
-| `00026_resolve_snapshot.sql` | Resolve timeline/scope tables for agent snapshot reconciliation | See below |
+| `00026_resolve_snapshot.sql` | `media_edges.is_active` (inactive edges are retained for audit and excluded from `v_media_edges_resolved`), `resolve_timeline_scopes` + `ix_resolve_timeline_scopes_node` | Resolve snapshot reconciliation (`POST /api/v1/agent/resolve-snapshot`); the down migration refuses to run while any inactive edge exists |
 | `00027_backfill_device_pairing_user_id.sql` | Backfills `device_pairings.user_id` for existing pairings | Attribution for pre-migration rows |
-| `00028_fix_local_auth_provider.sql` | Local-auth provider normalization | See below |
-| `00029_mfa.sql` | MFA tables/columns | See below |
-| `00030_mfa_pending_and_session.sql` | MFA pending-verification session state | See below |
-| `00031_mfa_hardening.sql` | MFA hardening constraints | See below |
-| `00032_add_trashed_lifecycle_state.sql` | `lifecycle_state` CHECK expansion for `TRASHED` | Soft-delete trash buffer |
-| `00033_user_pats.sql` | Personal access tokens for admin tooling | See below |
+| `00028_fix_local_auth_provider.sql` | Backfills `users.auth_provider='local'` and `external_uid=username` for pre-00020 local users that got the `authentik` default | Keeps `ix_users_auth_provider_external_uid` keys correct for local accounts |
+| `00029_mfa.sql` | `mfa_credentials`, `mfa_recovery_codes` (+ unique-unused and per-user indexes); `login_audit` rebuilt for MFA sources | TOTP MFA (secret sealed via `secrets.Box`, `last_used_step` blocks replay) -- see [`local-auth.md`](local-auth.md) sec. 10 |
+| `00030_mfa_pending_and_session.sql` | `sessions.mfa_verified_at`, `users.mfa_pending_secret` | Half-authenticated sessions and the pending enrollment secret |
+| `00031_mfa_hardening.sql` | `users.mfa_pending_secret_created_at`, `mfa_credentials.recovery_code_salt` | Pending-secret TTL enforcement; salted recovery-code hashes |
+| `00032_add_trashed_lifecycle_state.sql` | `media_nodes` rebuilt to widen the `lifecycle_state` CHECK to `ACTIVE`/`MISSING`/`ARCHIVED`/`HIDDEN`/`TRASHED` | Soft-delete trash buffer: `TRASHED` is user-initiated deletion (file moved to `.trash/`); `MISSING` stays reserved for scan-detected disappearance. The rebuild silently dropped two indexes, restored by `00036` |
+| `00033_user_pats.sql` | `user_pats` (HMAC-SHA256 token hashes, `scopes_json`) | Admin PATs for unattended tooling -- see [`admin-pats.md`](admin-pats.md) |
 | `00034_pairing_url_sealed.sql` | `device_pairings.pairing_url TEXT` | Lets an operator re-open the full pairing credentials dialogue (QR + agent ID + API key + pairing URL + deep link) for an existing pairing without minting a new key. The column NEVER holds plaintext key material: sealed via `secrets.Box` when `BRANCHDAM_SECRET_KEY` is set, otherwise left NULL (never plaintext). `qr_svg` is sealed the same way by `pairing.Service`; boot-time `BackfillSealedCredentials` seals any legacy plaintext SVG rows |
 | `00035_node_creators.sql` | `node_creators(node_uuid PK -> media_nodes, agent_id, created_at)` | Records which paired device created a node through the agent API; the device-authenticated rebase / move / delete paths refuse nodes a device did not create. No row = not device-created (scan, web upload, or legacy). Backfilled from processed creation events |
+| `00036_restore_dropped_indexes.sql` | Re-creates `ix_media_nodes_camera_time` (from `00002`) and `ix_media_nodes_uploader ON media_nodes(uploaded_by_user_id) WHERE uploaded_by_user_id IS NOT NULL` (from `00020`) with `IF NOT EXISTS` | `00032`'s table rebuild re-created only some indexes; camera-serial lookups and per-uploader filters had degraded to full table scans |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.

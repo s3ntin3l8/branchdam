@@ -19,9 +19,14 @@ companion app that shares this wire format, see [`mobile.md`](mobile.md).
 {
   "agentId": "workstation-macbook-01",
   "clientVersion": "0.1.0",
-  "lastProcessedEventUuid": "018f2345-6789-7abc-def0-123456789abc"
+  "lastProcessedEventUuid": "018f2345-6789-7abc-def0-123456789abc",
+  "currentKeyId": 3
 }
 ```
+
+`agentId` is required and must equal the agent id of the paired device that authenticated the
+request (`403 agent id mismatch` otherwise). `currentKeyId` is optional: when supplied and a newer
+active key exists for the device, the response carries `pendingRotation`.
 
 **Response (`AgentHandshakeOutput`):**
 ```json
@@ -30,9 +35,15 @@ companion app that shares this wire format, see [`mobile.md`](mobile.md).
   "serverVersion": "dev",
   "serverTimeUnix": 1723985000,
   "acknowledgedEventUuid": "018f2345-6789-7abc-def0-123456789abc",
-  "pendingEventsCount": 0
+  "pendingEventsCount": 0,
+  "namingTemplate": "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}",
+  "pendingRotation": {"keyId": 4, "apiKey": "", "previousKeyExpiresAtUnix": 0}
 }
 ```
+
+`namingTemplate` is the effective `ingest.namingTemplate`. `pendingRotation` is omitted unless the
+caller's `currentKeyId` is not the newest active key; it currently carries only `keyId` (the
+plaintext `apiKey` is blank -- the device must re-pair), so treat it as a hint.
 
 **Not a resume mechanism, despite the request fields' names.** `lastProcessedEventUuid` and
 `clientVersion` are accepted and parsed but never read by the handler
@@ -153,7 +164,7 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 
 ---
 
-## 3. The Five Event Payloads (`payload` JSON)
+## 3. Event Payloads (`payload` JSON)
 
 > **`storageLocationId` / `newStorageLocationId` / `targetStorageLocationId` are advisory and
 > ignored.** `storage.Guard` exposes no lookup-by-ID, so a payload-supplied location ID is
@@ -323,7 +334,7 @@ server's Master Archive without intermediate staging mounts.
 
 **Request Body:** Raw binary octet stream.
 
-**Response (`AgentUploadResponse` - Status 201 Created):**
+**Response (`AgentUploadResponse` - Status 201 Created, or `200 OK` on a content dedup):**
 ```json
 {
   "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
@@ -334,6 +345,11 @@ server's Master Archive without intermediate staging mounts.
 }
 ```
 
+When the uploaded bytes match an existing node by content, the server stores nothing new and
+returns `200 OK` with `status: "DEDUPLICATED"` (and an `X-Dedup: true` header) pointing at the
+existing node; that node is not claimed by the uploader. The optional `X-Source-Path-Hash`
+header is also read.
+
 ---
 
 ## 5. Path Rebase Endpoint (`POST /api/v1/agent/rebase`)
@@ -342,12 +358,19 @@ server's Master Archive without intermediate staging mounts.
 > already exists there.** This is the required `LOCAL_STAGING → CENTRAL_TIER3` scenario,
 > resolved in issue #167: the workstation agent copies the bytes into the archive itself, then
 > calls this endpoint (or sends `EVENT_NODE_MOVED`/`EVENT_PATH_REBASED`) purely to update
-> `media_nodes.file_path`/`storage_location_id`. branchDAM never performs the copy and never
-> writes, renames, or deletes anything under Tier 3 -- the existence check is a stat
-> (`storage.Guard.Exists`), never a write. A Tier 3 target whose file is not yet present is
+> `media_nodes.file_path`/`storage_location_id`. This endpoint never performs the copy and never
+> writes to the archive -- the existence check is a stat (`storage.Guard.Exists`), never a write.
+> (Tier 3 itself is writable by default for server-governed ingest -- `POST /api/v1/agent/upload`
+> and the `.trash/` buffer write there -- so this is about what *rebase* does, not a read-only
+> archive guarantee.) A Tier 3 target whose file is not yet present is
 > refused with `400 Bad Request` (HTTP) / the event marked `FAILED` (queue), so the agent must
 > finish copying before calling this. Any other read-only tier has no such exemption and is
 > always refused.
+
+Errors: `400` for an invalid `nodeUuid`/`fullHash`/target path or a refused read-only/missing
+Tier-3 target; `403` if the node was not created by the calling device; `404` for an `ARCHIVED`
+node; `409` if the node already has a different `fullHash`. The response `status` is `REBASED`
+for an existing node or `CREATED` when an unknown `nodeUuid` was inserted.
 
 **Request (`AgentRebaseInput`):**
 ```json
@@ -386,7 +409,7 @@ server's Master Archive without intermediate staging mounts.
 > decide whether it's safe to delete its local-edit mirror of a file it already durably archived:
 > only once the server reports the node `ACTIVE`/`HIDDEN` and hash-verified.
 
-**Request (`AgentNodeStatusInput`)**, capped at 200 UUIDs per call:
+**Request (`AgentNodeStatusInput`)**, must be non-empty and capped at 400 UUIDs per call (`400 Bad Request` otherwise):
 ```json
 {
   "nodeUuids": ["018f2345-6789-7abc-def0-123456789abc", "018f2345-6789-7abc-def0-123456789abd"]

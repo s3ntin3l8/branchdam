@@ -47,6 +47,21 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/sync` | `remote_sync_state` machine, Immich library scan trigger worker |
 | `internal/prune` | TTL cache pruning engine with strict TOCTOU disk checks |
 | `internal/httpapi` | Huma v2 routes, middleware chain, SSE handler |
+| `internal/agent` | Server side of the agent contract: `event_queue` draining, handshake support, path rebasing |
+| `internal/audit` | `actor_audit` log writes/reads for admin actions (scan, settings, prune, restart, pairing lifecycle) |
+| `internal/djisrt` | Parses a DJI `.srt` flight-telemetry sidecar down to one representative GPS point |
+| `internal/email` | Outbound email `Notifier` (`smtp` or `log` provider) for password-reset links |
+| `internal/immich` | Minimal Immich HTTP client for the external-library scan trigger; no DB access |
+| `internal/metadata` | Pure planning of which EXIF/XMP identity tags a child inherits from its parent |
+| `internal/naming` | Filename-stem normalization and the ingest naming template, shared by pipeline and graph |
+| `internal/pairing` | Per-device API key mint/rotate/revoke for agent auth; QR credential sealing |
+| `internal/projectfile` | Tier-1 project-file parsers (`.dam.json`, `.drp`, `.fcpxml`, `.edl`, `.prproj`) |
+| `internal/qr` | SVG QR rendering for companion pairing |
+| `internal/secrets` | `BRANCHDAM_SECRET_KEY`-based encryption of secret settings values (`secrets.Box`) |
+| `internal/settings` | `app_settings` UI overrides on top of `config.yaml`; field registry and live/restart apply modes |
+| `internal/sse` | Server-Sent Events hub ("something changed, re-fetch") |
+| `internal/thumbs` | JPEG thumbnail cache and background generation worker (outside `storage.Guard`, on the `/data` volume) |
+| `internal/users` | Multi-user attribution: lazy `users` provisioning keyed on `(auth_provider, external_uid)` and the system user |
 | `web/` | React 19 + Vite SPA (`@xyflow/react` graph, TanStack Query, Tailwind) |
 
 ## Key Invariants
