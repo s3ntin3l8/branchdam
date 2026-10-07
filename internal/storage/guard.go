@@ -302,7 +302,9 @@ func (g *Guard) OpenRead(path string) (*os.File, error) {
 			return nil, err
 		}
 		// Resolve fails with a plain error when no ancestor exists or a
-		// component is unreadable; report a missing file as such.
+		// component is unreadable; report a missing file as such. The
+		// ORIGINAL path is Lstat'd on purpose: canonicalization failed, so
+		// there is no canonical form, and only existence is being probed.
 		if _, statErr := os.Lstat(path); statErr != nil {
 			return nil, statErr
 		}

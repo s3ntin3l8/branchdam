@@ -72,7 +72,7 @@ func inlineSafeContentType(ct string) bool {
 func dispositionFilename(name string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
-		case '"', '\\', '\r', '\n', 0:
+		case '"', '\\', ';', '\r', '\n', 0:
 			return -1
 		}
 		return r
