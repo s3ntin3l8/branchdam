@@ -134,6 +134,14 @@ scan observed it (aborts `ErrFileChangedSincePlan`, checked via an immediate `Ls
 `(mtime, size)` `Plan` recorded). Purged nodes are marked `MISSING`, never deleted from the
 database — matching the "rows are never deleted" invariant everywhere else in the schema.
 
+The on-disk checks run twice per candidate: first as a lock-free reject (so a dead NFS/SMB mount
+can't hold the database's single writer connection), then again inside the delete transaction,
+immediately before `Guard.Remove` — only that second pass is authoritative.
+
+A scan or watch event that finds a file whose size/mtime changed *while it was being hashed* (a
+copy still in flight) skips it without counting a failure; the next scan, or the writer's next
+filesystem event, indexes it once it has settled.
+
 ## Storage location safe-field overrides
 
 The Storage Health page's inline **Edit** control lets an operator override six fields per
