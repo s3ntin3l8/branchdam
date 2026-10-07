@@ -447,61 +447,6 @@ func (q *Queries) GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (Medi
 	return i, err
 }
 
-const getMissingNodeByFastHash = `-- name: GetMissingNodeByFastHash :one
-SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
-       size_bytes, mtime_unix, fast_hash, full_hash, phash,
-       indexing_status, graph_status, lifecycle_state, superseded_by,
-       original_document_id, document_id, derived_from_id,
-       captured_at_unix, camera_model, filename_stem,
-       first_seen_at, last_seen_at, created_at, updated_at,
-       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
-       uploaded_by_user_id
-FROM media_nodes
-WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
-LIMIT 1
-`
-
-// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
-// a new file elsewhere hashes the same -- likely the same file, moved.
-func (q *Queries) GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error) {
-	row := q.db.QueryRowContext(ctx, getMissingNodeByFastHash, fastHash)
-	var i MediaNode
-	err := row.Scan(
-		&i.ID,
-		&i.NodeUuid,
-		&i.StorageLocationID,
-		&i.FilePath,
-		&i.FileName,
-		&i.FileExt,
-		&i.SizeBytes,
-		&i.MtimeUnix,
-		&i.FastHash,
-		&i.FullHash,
-		&i.Phash,
-		&i.IndexingStatus,
-		&i.GraphStatus,
-		&i.LifecycleState,
-		&i.SupersededBy,
-		&i.OriginalDocumentID,
-		&i.DocumentID,
-		&i.DerivedFromID,
-		&i.CapturedAtUnix,
-		&i.CameraModel,
-		&i.FilenameStem,
-		&i.FirstSeenAt,
-		&i.LastSeenAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.CameraSerial,
-		&i.LensModel,
-		&i.ThumbState,
-		&i.ThumbAttempts,
-		&i.SourcePathHash,
-		&i.UploadedByUserID,
-	)
-	return i, err
-}
-
 const insertMediaNode = `-- name: InsertMediaNode :one
 INSERT INTO media_nodes (
     node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -1227,6 +1172,81 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 	return items, nil
 }
 
+const listMissingNodesByFastHash = `-- name: ListMissingNodesByFastHash :many
+SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
+       size_bytes, mtime_unix, fast_hash, full_hash, phash,
+       indexing_status, graph_status, lifecycle_state, superseded_by,
+       original_document_id, document_id, derived_from_id,
+       captured_at_unix, camera_model, filename_stem,
+       first_seen_at, last_seen_at, created_at, updated_at,
+       camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
+       uploaded_by_user_id
+FROM media_nodes
+WHERE fast_hash = ?1 AND lifecycle_state = 'MISSING'
+ORDER BY id
+LIMIT 8
+`
+
+// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
+// a new file elsewhere hashes the same -- likely the same file, moved.
+// Returns a few candidates (oldest first); the caller decides which one is
+// plausibly the same file (same location, or matching full_hash) -- a fast
+// hash alone must not steal a node from an unrelated location.
+func (q *Queries) ListMissingNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listMissingNodesByFastHash, fastHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MediaNode{}
+	for rows.Next() {
+		var i MediaNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeUuid,
+			&i.StorageLocationID,
+			&i.FilePath,
+			&i.FileName,
+			&i.FileExt,
+			&i.SizeBytes,
+			&i.MtimeUnix,
+			&i.FastHash,
+			&i.FullHash,
+			&i.Phash,
+			&i.IndexingStatus,
+			&i.GraphStatus,
+			&i.LifecycleState,
+			&i.SupersededBy,
+			&i.OriginalDocumentID,
+			&i.DocumentID,
+			&i.DerivedFromID,
+			&i.CapturedAtUnix,
+			&i.CameraModel,
+			&i.FilenameStem,
+			&i.FirstSeenAt,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CameraSerial,
+			&i.LensModel,
+			&i.ThumbState,
+			&i.ThumbAttempts,
+			&i.SourcePathHash,
+			&i.UploadedByUserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingThumbnails = `-- name: ListPendingThumbnails :many
 SELECT n.id, n.node_uuid, n.file_path, n.thumb_attempts
 FROM media_nodes n
@@ -1312,7 +1332,7 @@ WITH RECURSIVE lineage(root, id) AS (
     FROM media_edges e
     JOIN lineage l ON e.target_node_id = l.id
     JOIN media_nodes a ON a.id = e.source_node_id
-    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state IN ('CONFIRMED', 'AUTO_ACCEPTED')
       AND a.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
@@ -1358,7 +1378,9 @@ type ListPrunableNodesRow struct {
 // ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 // vanished (MISSING) or archived Tier-3 master can never authorize a purge.
 // Ancestor, not "same full_hash": walks media_edges target->source
-// (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
+// (only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is an
+// unreviewed guess and must never authorise deleting a file -- and each walked
+// node must itself be non-ARCHIVED),
 // mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
 // exclusion exactly -- a chain that only connects through a superseded
 // version doesn't represent the file currently on disk.
@@ -1493,9 +1515,13 @@ func (q *Queries) ListTier3Candidates(ctx context.Context, arg ListTier3Candidat
 }
 
 const markNodeMissing = `-- name: MarkNodeMissing :exec
-UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch() WHERE id = ?1
+UPDATE media_nodes SET lifecycle_state = 'MISSING', updated_at = unixepoch()
+WHERE id = ?1 AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 `
 
+// Only live nodes go MISSING. A caller's earlier read (reader pool) can be
+// stale by the time this write runs; without the guard a node that was
+// trashed or archived in between was silently flipped to MISSING.
 func (q *Queries) MarkNodeMissing(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, markNodeMissing, id)
 	return err
@@ -1558,7 +1584,7 @@ UPDATE media_nodes
 SET file_path = ?2, file_name = ?3, storage_location_id = ?4,
     lifecycle_state = 'ACTIVE', mtime_unix = ?5,
     last_seen_at = unixepoch(), updated_at = unixepoch()
-WHERE id = ?1
+WHERE id = ?1 AND lifecycle_state NOT IN ('ARCHIVED', 'TRASHED')
 `
 
 type RebaseMissingNodePathParams struct {
@@ -1572,6 +1598,8 @@ type RebaseMissingNodePathParams struct {
 // Pillar 5 move detection, applied: the id and node_uuid never change, so
 // every edge referencing this node (as parent or child) survives the move
 // untouched -- no CASCADE, no rewrite needed.
+// Refuses ARCHIVED/TRASHED rows: they are retired states, and a stale
+// earlier read must not resurrect them by rebasing.
 func (q *Queries) RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error {
 	_, err := q.db.ExecContext(ctx, rebaseMissingNodePath,
 		arg.ID,

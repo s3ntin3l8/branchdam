@@ -7,6 +7,7 @@ package workers
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Job is one unit of work. Key identifies it for in-flight deduplication --
@@ -180,21 +181,64 @@ func (p *Pool[K]) runJob(ctx context.Context, job Job[K]) {
 // `closed` under the lock, which left a window where Submit could enqueue a
 // job after every worker had already given up on draining it.
 func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
+	ok, _ := p.trySubmit(ctx, job)
+	return ok
+}
+
+// submitWaitPoll is how often SubmitWait re-checks a full queue. 5ms is far
+// below a worker task's duration yet costs negligible CPU while idle.
+const submitWaitPoll = 5 * time.Millisecond
+
+// SubmitWait is Submit with backpressure: when the queue is merely full it
+// waits for room instead of refusing, until ctx is done or the Pool shuts
+// down. A duplicate in-flight key, an already-cancelled context and a closed
+// Pool still return false immediately -- retrying cannot help any of them.
+//
+// This is for producers that are strictly faster than the workers (a
+// directory walk feeding hashing). With plain Submit such a producer
+// overran the 1024-slot queue and counted every refused file as failed.
+func (p *Pool[K]) SubmitWait(ctx context.Context, job Job[K]) bool {
+	for {
+		ok, retry := p.trySubmit(ctx, job)
+		if ok {
+			return true
+		}
+		if !retry {
+			return false
+		}
+		var pool <-chan struct{}
+		if p.ctx != nil {
+			pool = p.ctx.Done()
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-pool:
+			return false
+		case <-time.After(submitWaitPoll):
+		}
+	}
+}
+
+// trySubmit is one non-blocking enqueue attempt. retry is true only when the
+// attempt failed because the queue was full (the one condition that can
+// clear on its own).
+func (p *Pool[K]) trySubmit(ctx context.Context, job Job[K]) (ok, retry bool) {
 	if ctx.Err() != nil {
-		return false
+		return false, false
 	}
 	if p.ctx != nil && p.ctx.Err() != nil {
-		return false
+		return false, false
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.closed {
-		return false
+		return false, false
 	}
 	if _, dup := p.inflight[job.Key]; dup {
-		return false
+		return false, false
 	}
 	// Non-blocking send while holding p.mu is safe: it either succeeds
 	// immediately (room in the buffer) or falls through to default
@@ -203,9 +247,9 @@ func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 	select {
 	case p.jobs <- job:
 		p.inflight[job.Key] = struct{}{}
-		return true
+		return true, false
 	default:
-		return false
+		return false, true
 	}
 }
 

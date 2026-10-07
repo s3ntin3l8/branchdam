@@ -1281,19 +1281,15 @@ func TestScanFinishesWhenPoolShutsDownMidWalk(t *testing.T) {
 	}
 }
 
-// TestQueueFullBackpressureStillCompletes is #99's discriminator: ordinary
-// backpressure (a tiny pool's queue filling up under real, non-shutdown
-// load) must still terminalize COMPLETED, not CANCELLED, even though it
-// produces the exact same observable symptom the shutdown case does --
-// files_failed > 0. What must NOT happen is treating every lossy scan as
-// shutdown-interrupted. The pool's Run context here is never cancelled and
-// deps.Shutdown is never set, so runScan's `interrupted` flag is
-// architecturally unreachable (only OnAbandon and the jobCtx.Done() results
-// race can set it, and neither can fire without the pool's ctx being done) --
-// this test's assertion holds regardless of whether the deliberately tiny
-// pool (workerCount=1, queueDepth=1) actually observes a refusal, but a
-// generous file count over real disk I/O makes that refusal happen in
-// practice, giving the test real signal rather than a vacuous pass.
+// TestQueueFullBackpressureStillCompletes: a tiny pool (1 worker, queue of 1)
+// fed by a walk that is far faster than hashing must apply backpressure --
+// the walk waits for queue room (Pool.SubmitWait) -- so EVERY file is indexed
+// and files_failed stays 0. (This test used to assert files_failed > 0: the
+// walk used non-blocking Submit and counted each queue-full refusal as a
+// failed file, so a large first scan silently indexed only the first
+// ~queue-depth files and still reported COMPLETED -- see #99 for the
+// shutdown-vs-backpressure distinction, which still holds.) The pool's Run
+// context is never cancelled and deps.Shutdown is never set.
 func TestQueueFullBackpressureStillCompletes(t *testing.T) {
 	const fileCount = 40 // real disk I/O per file vs. an in-memory Submit loop: backpressure is all but certain
 
@@ -1355,8 +1351,15 @@ func TestQueueFullBackpressureStillCompletes(t *testing.T) {
 	if job.State != "COMPLETED" {
 		t.Fatalf("scan job state = %q, want COMPLETED (backpressure without shutdown must never be CANCELLED, last_error=%v)", job.State, job.LastError)
 	}
-	if job.FilesFailed == 0 {
-		t.Fatalf("FilesFailed = 0 -- this pool never actually refused a submit, so the test exercised the trivial success path, not backpressure; the COMPLETED assertion above is real but this test proves nothing about the shutdown-vs-backpressure distinction without a genuine refusal")
+	if job.FilesFailed != 0 {
+		t.Fatalf("FilesFailed = %d, want 0: queue-full must make the walk wait, not drop files", job.FilesFailed)
+	}
+	indexed, err := database.Reader.CountMediaNodes(ctx)
+	if err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if indexed != fileCount {
+		t.Fatalf("indexed %d of %d files; the rest were silently skipped", indexed, fileCount)
 	}
 }
 
@@ -2304,5 +2307,62 @@ func TestReverseLineageRescanOnMasterIngest(t *testing.T) {
 	}
 	if edges[0].RelationshipType != "FINAL_EXPORT" {
 		t.Errorf("relationship = %q, want FINAL_EXPORT", edges[0].RelationshipType)
+	}
+}
+
+// A FULL_SCAN used to re-read every byte of every Tier-3 file just to throw
+// the result away on the touched branch. With a stored full_hash and an
+// unchanged size+mtime the BLAKE3 pass is skipped; a changed mtime still
+// recomputes it.
+func TestProcessFileSkipsFullHashForUnchangedNodeWithStoredHash(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(resolvedRoot, "master.raw")
+	writeFile(t, path, "master bytes for full hash skipping")
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	deps.FullHashPolicy = "tier3_and_collision"
+	location := storage.Location{ID: locationID, Name: "t3", RootPath: resolvedRoot, Tier: "TIER3_MASTER_ARCHIVE"}
+	rec := indexer.Record{Path: path, Size: info.Size(), ModTime: info.ModTime()}
+
+	// First pass: nothing indexed yet -> the full hash is computed.
+	first, err := processFile(ctx, deps, location, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FullHash == "" {
+		t.Fatal("first pass did not compute a full hash for a Tier-3 file")
+	}
+	if _, err := Commit(ctx, database, locationID, []Result{*first}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second pass: node has a full hash and size+mtime are unchanged.
+	second, err := processFile(ctx, deps, location, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.FullHash != "" {
+		t.Fatalf("unchanged file was re-hashed (FullHash=%q); the stored hash is still valid", second.FullHash)
+	}
+
+	// mtime moved: recompute.
+	rec.ModTime = rec.ModTime.Add(time.Hour)
+	third, err := processFile(ctx, deps, location, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.FullHash == "" {
+		t.Fatal("file with a changed mtime must be re-hashed")
 	}
 }

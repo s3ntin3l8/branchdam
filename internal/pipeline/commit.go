@@ -84,6 +84,23 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			}); err != nil {
 				return err
 			}
+			// A full hash computed this pass for a node that has none (it was
+			// indexed before the hash could be computed, or a later in-place
+			// write cleared it) is kept: dropping it left the node's Tier-1
+			// caches permanently un-prunable. Never replaces an existing one,
+			// and is skipped if another live node already owns that content.
+			if r.FullHash != "" && (existing.FullHash == nil || *existing.FullHash == "") {
+				if skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log); err != nil {
+					return err
+				} else if !skip {
+					if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
+						ID:       existing.ID,
+						FullHash: &r.FullHash,
+					}); err != nil {
+						return err
+					}
+				}
+			}
 			// A node seen unchanged still backfills metadata: one indexed
 			// while exiftool/ffprobe were absent from PATH would otherwise
 			// stay permanently metadata-less, since its fast_hash never
@@ -95,6 +112,11 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			// way -- the branch is what keeps a freshly-written
 			// XMP-xmpMM:DerivedFrom from getting stuck invisible in the DB.
 			return reconcileAllMetadata(ctx, q, existing, r, stats, log)
+		}
+		// Defensive: only matters when another writer raced a live node with
+		// this hash in; do not remove as "unreachable".
+		if skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log); skip || err != nil {
+			return err
 		}
 		return commitVersionCollision(ctx, q, locationID, existing, r, stats, uploadedByUserID, log)
 
@@ -139,6 +161,9 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 		// File content changed at this path: insert new successor and link superseded_by.
 		// Preserves archive delete intent on successor so file touch or tool metadata
 		// rewrites do not silently resurrect a user-deleted asset into active lineage.
+		if skip, err := skipDuplicateContent(ctx, q, r, 0, stats, log); skip || err != nil {
+			return err
+		}
 		newNode, err := insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
 		if err != nil {
 			return fmt.Errorf("insert successor node: %w", err)
@@ -154,13 +179,35 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 		}
 		stats.Inserted++
 		return nil
+	} else if err == nil && latest.LifecycleState == "TRASHED" &&
+		(r.FastHash == "" || (latest.FastHash != nil && *latest.FastHash == r.FastHash)) {
+		// Logical-only trash (Tier 3 / read-only: the bytes were never moved)
+		// leaves the file where it was, so every later scan sees it again.
+		// Unchanged bytes at a TRASHED path are the user's trash, not new
+		// content: don't index them as a fresh node beside the TRASHED row
+		// (that undid the trash and made a later restore collide). Changed
+		// content still falls through and is indexed as a new ACTIVE node:
+		// unlike ARCHIVED (an explicit "keep this deleted" intent that the
+		// successor inherits), a trashed path whose bytes were replaced is
+		// new content the user did not delete, so it is deliberately not
+		// linked via superseded_by nor archived.
+		return nil
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("get latest node by path: %w", err)
 	}
 
 	if r.FastHash != "" {
-		missing, err := q.GetMissingNodeByFastHash(ctx, &r.FastHash)
-		if err == nil {
+		candidates, err := q.ListMissingNodesByFastHash(ctx, &r.FastHash)
+		if err != nil {
+			return fmt.Errorf("list missing nodes by fast_hash: %w", err)
+		}
+		for _, missing := range candidates {
+			if !movePlausible(missing.StorageLocationID, missing.FullHash, locationID, r.FullHash) {
+				continue
+			}
+			if skip, err := skipDuplicateContent(ctx, q, r, missing.ID, stats, log); skip || err != nil {
+				return err
+			}
 			stats.Moved++
 			if err := q.RebaseMissingNodePath(ctx, sqlcgen.RebaseMissingNodePathParams{
 				ID:                missing.ID,
@@ -190,14 +237,60 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 			// does -- see the touched branch above, #86, and #105.
 			return reconcileAllMetadata(ctx, q, missing, r, stats, log)
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("get missing node by fast_hash: %w", err)
-		}
 	}
 
+	if skip, err := skipDuplicateContent(ctx, q, r, 0, stats, log); skip || err != nil {
+		return err
+	}
 	stats.Inserted++
 	_, err = insertNewNode(ctx, q, locationID, r, uploadedByUserID, log)
 	return err
+}
+
+// movePlausible decides whether a vanished node (nodeLocID, nodeFull) is
+// plausibly the same file as a newly seen one (locID, newFull) when their
+// 64-bit fast hashes match. A fast hash alone is not evidence of identity:
+//   - both full hashes present: they must be equal, and then the file may
+//     legitimately have moved across storage locations;
+//   - otherwise: only a move within the SAME location counts, so a copy
+//     dropped into one tier cannot steal a node (with its edges and
+//     lineage) from an unrelated location -- e.g. a Tier-3 master whose
+//     NAS path reads as missing because the mount is down.
+func movePlausible(nodeLocID int64, nodeFull *string, locID int64, newFull string) bool {
+	if nodeFull != nil && *nodeFull != "" && newFull != "" {
+		return *nodeFull == newFull
+	}
+	return nodeLocID == locID
+}
+
+// skipDuplicateContent reports whether r's content (full_hash) is already
+// held by a DIFFERENT live (ACTIVE/HIDDEN) node -- the exact predicate of the
+// unique index ux_media_nodes_live_full_hash. Inserting or rebasing onto it
+// would violate that index, and because Commit runs a whole batch in one
+// transaction the violation used to roll back every other file in the batch
+// -- on every scan, since the duplicate never goes away. A byte-identical
+// copy at a second path is counted and left unindexed instead. selfID is the
+// node that would receive the hash (0 for a brand-new node), whose own
+// ownership of the hash is not a duplicate. Only meaningful when a full hash
+// was computed for this pass (Tier 3, or a fast-hash collision).
+func skipDuplicateContent(ctx context.Context, q *sqlcgen.Queries, r Result, selfID int64, stats *Stats, log *slog.Logger) (bool, error) {
+	if r.FullHash == "" {
+		return false, nil
+	}
+	existing, err := q.GetMediaNodeByFullHash(ctx, &r.FullHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check duplicate full_hash: %w", err)
+	}
+	if existing.ID == selfID {
+		return false, nil
+	}
+	stats.Duplicates++
+	log.Debug("pipeline: identical content already indexed at another path; not indexing this copy",
+		"path", r.Path, "existingNodeID", existing.ID, "existingPath", existing.FilePath)
+	return true, nil
 }
 
 func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, uploadedByUserID int64, log *slog.Logger) (sqlcgen.MediaNode, error) {

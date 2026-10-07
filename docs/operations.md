@@ -124,7 +124,7 @@ before ever letting it delete real files.
 A Tier-1 node is eligible only if **all** of:
 - it's `ACTIVE` on a `prunable: true` (Tier-1-only) storage location,
 - its `mtime_unix` is older than that location's `cacheTtlHours`,
-- it has a *live* ancestor (`ACTIVE` or `HIDDEN`, walked through non-`REJECTED` edges) on a
+- it has a *live* ancestor (`ACTIVE` or `HIDDEN`, walked through `CONFIRMED` or `AUTO_ACCEPTED` edges only) on a
   `TIER3_MASTER_ARCHIVE` location with a verified, non-`NULL`, 64-character `full_hash`.
 
 `Execute` re-verifies eligibility twice more, immediately before deleting, to close two TOCTOU

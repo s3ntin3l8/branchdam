@@ -130,8 +130,9 @@ WITH RECURSIVE ancestors(id) AS (
 SELECT ancestors.id FROM ancestors;
 
 -- name: ListVerifiedTier3Ancestors :many
--- Walks ancestor lineage target->source for node ?1 (REJECTED edges and
--- ARCHIVED nodes excluded) and returns every live ancestor on a
+-- Walks ancestor lineage target->source for node ?1 (only CONFIRMED and
+-- AUTO_ACCEPTED edges are followed -- NEEDS_REVIEW/REJECTED never authorise a
+-- purge; ARCHIVED/TRASHED nodes excluded) and returns every live ancestor on a
 -- TIER3_MASTER_ARCHIVE location with a verified full_hash.
 -- Used by internal/prune.Execute to re-verify the ancestor file on disk (via
 -- os.Lstat) immediately before deleting the candidate (#246, #352).
@@ -142,7 +143,7 @@ WITH RECURSIVE ancestors(ancestor_id) AS (
     FROM media_edges e
     JOIN ancestors a ON e.target_node_id = a.ancestor_id
     JOIN media_nodes n ON e.source_node_id = n.id
-    WHERE e.is_active = 1 AND e.review_state <> 'REJECTED'
+    WHERE e.is_active = 1 AND e.review_state IN ('CONFIRMED', 'AUTO_ACCEPTED')
       AND n.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 )
 SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id,

@@ -349,9 +349,6 @@ type Querier interface {
 	// many. See docs/schema.md's sqlc risk note for the json_each(CAST(...))
 	// spelling this needs to stay within SQLite's bound-parameter limit.
 	GetMediaNodesByUUIDs(ctx context.Context, nodeUuids string) ([]GetMediaNodesByUUIDsRow, error)
-	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
-	// a new file elsewhere hashes the same -- likely the same file, moved.
-	GetMissingNodeByFastHash(ctx context.Context, fastHash *string) (MediaNode, error)
 	GetNodeCreator(ctx context.Context, nodeUuid string) (string, error)
 	// Confirm-time lookup: scan the active-token index for a specific
 	// token_hash. The active-partial unique index keeps the candidate
@@ -604,6 +601,12 @@ type Querier interface {
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
 	// makes it fall back to interface{} for every param.
 	ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodesFilteredParams) ([]MediaNode, error)
+	// Pillar 5 move detection: a file vanished (lifecycle_state='MISSING') and
+	// a new file elsewhere hashes the same -- likely the same file, moved.
+	// Returns a few candidates (oldest first); the caller decides which one is
+	// plausibly the same file (same location, or matching full_hash) -- a fast
+	// hash alone must not steal a node from an unrelated location.
+	ListMissingNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error)
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
@@ -652,7 +655,9 @@ type Querier interface {
 	// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 	// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
 	// Ancestor, not "same full_hash": walks media_edges target->source
-	// (REJECTED edges excluded, and each walked node must itself be non-ARCHIVED),
+	// (only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is an
+	// unreviewed guess and must never authorise deleting a file -- and each walked
+	// node must itself be non-ARCHIVED),
 	// mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
 	// exclusion exactly -- a chain that only connects through a superseded
 	// version doesn't represent the file currently on disk.
@@ -694,8 +699,9 @@ type Querier interface {
 	// Paginated user list for the admin UI. Order by id ASC so paging is
 	// stable across inserts (new users go to the END, not the middle).
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
-	// Walks ancestor lineage target->source for node ?1 (REJECTED edges and
-	// ARCHIVED nodes excluded) and returns every live ancestor on a
+	// Walks ancestor lineage target->source for node ?1 (only CONFIRMED and
+	// AUTO_ACCEPTED edges are followed -- NEEDS_REVIEW/REJECTED never authorise a
+	// purge; ARCHIVED/TRASHED nodes excluded) and returns every live ancestor on a
 	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
 	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
 	// os.Lstat) immediately before deleting the candidate (#246, #352).
@@ -720,6 +726,9 @@ type Querier interface {
 	ManualRetryRemoteSyncState(ctx context.Context, arg ManualRetryRemoteSyncStateParams) error
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
+	// Only live nodes go MISSING. A caller's earlier read (reader pool) can be
+	// stale by the time this write runs; without the guard a node that was
+	// trashed or archived in between was silently flipped to MISSING.
 	MarkNodeMissing(ctx context.Context, id int64) error
 	// pipeline.TrashAsset calls this on the master node and on every linked
 	// FINAL_EXPORT/immich_export edge target (when keepExports=false). The
@@ -799,11 +808,14 @@ type Querier interface {
 	// caller whose semantics include it). Idempotent.
 	PromoteUserToAdmin(ctx context.Context, id int64) error
 	// Phase 1 (#89): remove node_metadata rows whose owning media_nodes row is
-	// ARCHIVED. ARCHIVED nodes are superseded versions that no longer participate
-	// in the live graph; their metadata is write-once historical data that grows
-	// monotonically with editing activity. Pruning these rows bounds table size
-	// without deleting media_nodes rows themselves (the "rows are never deleted"
-	// invariant for media_nodes stands).
+	// a SUPERSEDED version (ARCHIVED with superseded_by set). Superseded versions
+	// no longer participate in the live graph; their metadata is write-once
+	// historical data that grows monotonically with editing activity. Pruning
+	// these rows bounds table size without deleting media_nodes rows themselves
+	// (the "rows are never deleted" invariant for media_nodes stands).
+	// An ARCHIVED node WITHOUT a successor is a user soft-delete that can be
+	// restored, and agent-supplied *_evidence rows cannot be re-derived from
+	// disk, so those keep their metadata.
 	PruneArchivedNodeMetadata(ctx context.Context) (int64, error)
 	// Prunes historical CANCELLED or FAILED WATCH jobs that saw zero files and
 	// are older than the cutoff timestamp, preventing unbounded table accumulation
@@ -812,6 +824,8 @@ type Querier interface {
 	// Pillar 5 move detection, applied: the id and node_uuid never change, so
 	// every edge referencing this node (as parent or child) survives the move
 	// untouched -- no CASCADE, no rewrite needed.
+	// Refuses ARCHIVED/TRASHED rows: they are retired states, and a stale
+	// earlier read must not resurrect them by rebasing.
 	RebaseMissingNodePath(ctx context.Context, arg RebaseMissingNodePathParams) error
 	RebaseNodePathByUUID(ctx context.Context, arg RebaseNodePathByUUIDParams) error
 	// Realigns external_uid AND auth_provider on an existing user row.
