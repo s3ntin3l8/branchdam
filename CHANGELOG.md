@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.26.3](https://github.com/s3ntin3l8/branchdam/compare/v0.26.2...v0.26.3) (2026-10-07)
+
+
+### Bug Fixes
+
+* **agent:** scope device actions to nodes the device created ([#503](https://github.com/s3ntin3l8/branchdam/issues/503)) ([a2817bc](https://github.com/s3ntin3l8/branchdam/commit/a2817bcd6c7f45a4d4289747038997bdfb36cf47))
+* **agent:** undo trash/restore file moves when the enclosing tx rolls back ([#517](https://github.com/s3ntin3l8/branchdam/issues/517)) ([927de20](https://github.com/s3ntin3l8/branchdam/commit/927de209eb6cd72203b64616077efb5c20ea4a39)), closes [#509](https://github.com/s3ntin3l8/branchdam/issues/509)
+* **auth:** close anonymous-read and forged-identity paths in both mode ([#499](https://github.com/s3ntin3l8/branchdam/issues/499)) ([b528d42](https://github.com/s3ntin3l8/branchdam/commit/b528d42e8c946e595d7e61ccc4e373d6a7438b4b))
+* **auth:** harden rate limiting, CSRF, TOTP replay and pairing reads ([#501](https://github.com/s3ntin3l8/branchdam/issues/501)) ([d5deec8](https://github.com/s3ntin3l8/branchdam/commit/d5deec875d47d9b64885c703c7a42790882c3e2d))
+* cap SSE streams per principal and require apiKey when Immich apiUrl changes ([#512](https://github.com/s3ntin3l8/branchdam/issues/512)) ([6fa8506](https://github.com/s3ntin3l8/branchdam/commit/6fa85063c94721f0149d01817956f2f7eba9b0bb))
+* **indexer:** watcher/walk robustness, thumb retry, sync and tx safety ([#508](https://github.com/s3ntin3l8/branchdam/issues/508)) ([15f1751](https://github.com/s3ntin3l8/branchdam/commit/15f1751466014d3a55a09da205b208d0d2b7bda3))
+* **pipeline:** scan correctness, prune safety and lifecycle races ([#507](https://github.com/s3ntin3l8/branchdam/issues/507)) ([6cd68e4](https://github.com/s3ntin3l8/branchdam/commit/6cd68e4d464694785d1f53dc890b38d52b47e6b4))
+* **storage:** route all storage writes through Guard; contain reads ([#506](https://github.com/s3ntin3l8/branchdam/issues/506)) ([bbf42f0](https://github.com/s3ntin3l8/branchdam/commit/bbf42f0f7129231ce34b805c009eb1ea1382a073))
+* **web:** stop non-admin 403 banner, stale caches and upload-queue bugs ([#502](https://github.com/s3ntin3l8/branchdam/issues/502)) ([15d845f](https://github.com/s3ntin3l8/branchdam/commit/15d845ffa96c0cd9ad5811bb445de8bc6a1067aa))
+
+
+### Performance Improvements
+
+* **db:** restore dropped indexes, range-scan sync prefix, bound parser/decoder input ([#511](https://github.com/s3ntin3l8/branchdam/issues/511)) ([dc7c3be](https://github.com/s3ntin3l8/branchdam/commit/dc7c3be8e6efa9c9e44868e1fb9f2706fc8ab2da))
+* keep IO and reads off the writer lock, batch reverse lineage, guard unstable files ([#519](https://github.com/s3ntin3l8/branchdam/issues/519)) ([03da59c](https://github.com/s3ntin3l8/branchdam/commit/03da59c9712bbf0483adbf9feaea1da76b41ffbb))
+
 ## [0.26.2](https://github.com/s3ntin3l8/branchdam/compare/v0.26.1...v0.26.2) (2026-09-26)
 
 
