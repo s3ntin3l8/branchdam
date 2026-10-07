@@ -264,6 +264,16 @@ func (s *Store) Apply(ctx context.Context, set map[string]any, unset []string, a
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 
+	// Re-pointing Immich at a different host must not silently ship the
+	// stored API key there: require the key to be re-entered in the same
+	// request whenever apiUrl changes while a key is configured.
+	if newURL, ok := set["immich.apiUrl"].(string); ok {
+		eff := s.Effective()
+		if _, rekeyed := set["immich.apiKey"]; !rekeyed && eff.Immich.APIKey != "" && newURL != eff.Immich.APIURL {
+			return fmt.Errorf("%w: changing immich.apiUrl requires re-entering immich.apiKey", ErrInvalidInput)
+		}
+	}
+
 	type write struct {
 		key      string
 		value    string
