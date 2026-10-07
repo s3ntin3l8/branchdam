@@ -1994,7 +1994,7 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 
 	var pendingCount int64
 	var ackUUID string
-	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := s.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		pendingCount, err = q.CountPendingAgentEvents(ctx)
 		if err != nil {
@@ -2919,7 +2919,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 	var rawAgents []sqlcgen.AgentScratchTelemetry
 	var runningJobs int64
 
-	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := s.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		locations, err = q.ListStorageLocations(ctx)
 		if err != nil {

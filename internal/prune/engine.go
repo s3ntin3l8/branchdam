@@ -184,52 +184,35 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 			results = append(results, Result{Candidate: c, Purged: false, Err: err})
 			continue
 		}
+		// Cheap reject BEFORE taking the single writer connection: the
+		// ancestor + candidate Lstats can be slow on NFS/SMB mounts, and a
+		// candidate that fails them never needs the write lock. This is only
+		// an optimization -- the authoritative re-verification (invariant 7)
+		// still runs inside the transaction immediately before Guard.Remove.
+		if !eligibleMap[c.NodeID] {
+			results = append(results, Result{Candidate: c, Purged: false, Err: ErrNoLongerEligible})
+			continue
+		}
+		if ancestors, aerr := database.Reader.ListVerifiedTier3Ancestors(ctx, c.NodeID); aerr == nil {
+			if _, verr := verifyOnDisk(c, ancestors); verr != nil {
+				results = append(results, Result{Candidate: c, Purged: false, Err: verr})
+				continue
+			}
+		}
+		// (A reader error just falls through to the authoritative in-tx check.)
 		err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 			if !eligibleMap[c.NodeID] {
 				return ErrNoLongerEligible
 			}
-
-			// Pre-delete re-verification of the Tier-3 ancestor's file on disk (#246, #352):
-			// stat every verified Tier-3 ancestor. If any ancestor is unreachable or has changed
-			// (mtime/size mismatch against stored DB row), refuse to delete the Tier-1 candidate.
-			// Re-verifying mtime and size ensures the on-disk master hasn't been rewritten or
-			// replaced since its verified full_hash was recorded; if it was modified, the
-			// stored full_hash cannot be trusted to represent the current file on disk, so we
-			// treat it as an unverified/unreachable master and skip deletion.
 			ancestors, err := q.ListVerifiedTier3Ancestors(ctx, c.NodeID)
 			if err != nil {
 				return err
 			}
-			if len(ancestors) == 0 {
-				return ErrNoLongerEligible
+			gone, err := verifyOnDisk(c, ancestors)
+			if err != nil {
+				return err
 			}
-			for _, a := range ancestors {
-				aInfo, statErr := os.Lstat(a.FilePath)
-				if statErr != nil {
-					return ErrAncestorUnreachable
-				}
-				if aInfo.ModTime().Unix() != a.MtimeUnix || aInfo.Size() != a.SizeBytes {
-					// Second-granularity check matching mtime_unix's column type.
-					// A modified ancestor means the DB's verified full_hash is stale
-					// relative to the on-disk master file.
-					return ErrAncestorUnreachable
-				}
-			}
-
-			info, statErr := os.Lstat(c.FilePath)
-			switch {
-			case errors.Is(statErr, fs.ErrNotExist):
-				// Already gone on its own -- nothing for Guard to remove,
-				// but the node's record is stale either way.
-			case statErr != nil:
-				return statErr
-			case info.ModTime().Unix() != c.MtimeUnix || info.Size() != c.SizeBytes:
-				// Second-granularity, matching mtime_unix's own column type: a
-				// same-size rewrite landing within the same Unix second as the
-				// original would not be caught here. Inherent to the schema,
-				// not a gap introduced by this check.
-				return ErrFileChangedSincePlan
-			default:
+			if !gone {
 				if err := guard.Remove(c.FilePath); err != nil {
 					return err
 				}
@@ -243,4 +226,38 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 		results = append(results, Result{Candidate: c, Purged: true})
 	}
 	return results
+}
+
+// verifyOnDisk is the pre-delete re-verification (#246, #352): every verified
+// Tier-3 ancestor must still exist on disk with the mtime/size recorded when
+// its full_hash was verified (a rewritten master's stored hash cannot be
+// trusted), and the candidate itself must be unchanged since Plan. gone
+// reports that the candidate already vanished on its own, so there is nothing
+// for Guard to remove but the node's record is stale either way.
+//
+// Second-granularity mtime, matching mtime_unix's column type: a same-size
+// rewrite within the same Unix second is not caught. Inherent to the schema.
+func verifyOnDisk(c Candidate, ancestors []sqlcgen.ListVerifiedTier3AncestorsRow) (gone bool, err error) {
+	if len(ancestors) == 0 {
+		return false, ErrNoLongerEligible
+	}
+	for _, a := range ancestors {
+		aInfo, statErr := os.Lstat(a.FilePath)
+		if statErr != nil {
+			return false, ErrAncestorUnreachable
+		}
+		if aInfo.ModTime().Unix() != a.MtimeUnix || aInfo.Size() != a.SizeBytes {
+			return false, ErrAncestorUnreachable
+		}
+	}
+	info, statErr := os.Lstat(c.FilePath)
+	switch {
+	case errors.Is(statErr, fs.ErrNotExist):
+		return true, nil
+	case statErr != nil:
+		return false, statErr
+	case info.ModTime().Unix() != c.MtimeUnix || info.Size() != c.SizeBytes:
+		return false, ErrFileChangedSincePlan
+	}
+	return false, nil
 }

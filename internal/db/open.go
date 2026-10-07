@@ -190,6 +190,19 @@ func (d *DB) InTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	return nil
 }
 
+// ReadTx runs fn inside one deferred read transaction on the reader pool:
+// every query in fn sees the same WAL snapshot (a page and its count stay
+// consistent) without taking the single writer connection or its write lock.
+// The reader pool is query_only, so fn cannot write. Always rolled back.
+func (d *DB) ReadTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
+	tx, err := d.reader.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin read transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return fn(sqlcgen.New(tx))
+}
+
 // InTxResult is the value-returning variant of InTx: callers that
 // need the closure's int64 (typically a sqlc :execrows rows-affected
 // count for a conditional UPDATE) use this. Mirrors InTx's contract:

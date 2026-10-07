@@ -1130,3 +1130,36 @@ func TestInTxPanicReleasesWriterConnection(t *testing.T) {
 		t.Fatal("InTx blocked after a panic in an earlier callback: the writer connection leaked")
 	}
 }
+
+func TestReadTxDoesNotNeedWriterAndCannotWrite(t *testing.T) {
+	database := openTestDB(t)
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = database.InTx(context.Background(), func(*sqlcgen.Queries) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer func() { close(release); <-done }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := database.ReadTx(ctx, func(q *sqlcgen.Queries) error {
+		_, err := q.CountPendingAgentEvents(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("ReadTx blocked or failed while the writer was busy: %v", err)
+	}
+	if err := database.ReadTx(ctx, func(*sqlcgen.Queries) error {
+		_, err := database.reader.ExecContext(ctx, "CREATE TABLE should_fail (x INTEGER)")
+		return err
+	}); err == nil {
+		t.Fatal("reader pool accepted a write")
+	}
+}
