@@ -42,6 +42,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -692,7 +693,7 @@ func (p *Prober) decodeFileAndHash(path string) (*int64, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	img, _, err := image.Decode(f)
+	img, _, err := DecodeBounded(f)
 	if err != nil {
 		return nil, err
 	}
@@ -701,4 +702,31 @@ func (p *Prober) decodeFileAndHash(path string) (*int64, error) {
 		return nil, err
 	}
 	return &hash, nil
+}
+
+// MaxDecodePixels caps the decoded size of an image the server will
+// rasterize (~150 megapixels; a 100MP medium-format RAW-derived JPEG fits).
+// A tiny file can declare enormous dimensions, and image.Decode would
+// allocate width*height*4 bytes for it.
+const MaxDecodePixels = 150_000_000
+
+// ErrImageTooLarge is returned by DecodeBounded when the declared dimensions
+// exceed MaxDecodePixels.
+var ErrImageTooLarge = errors.New("probe: image dimensions exceed decode limit")
+
+// DecodeBounded is image.Decode that first reads only the header
+// (image.DecodeConfig) and refuses images over MaxDecodePixels, so a
+// decompression bomb never reaches the allocating decode.
+func DecodeBounded(r io.ReadSeeker) (image.Image, string, error) {
+	cfg, _, err := image.DecodeConfig(r)
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > MaxDecodePixels {
+		return nil, "", ErrImageTooLarge
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, "", err
+	}
+	return image.Decode(r)
 }

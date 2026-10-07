@@ -34,7 +34,7 @@ func (p *EDLParser) Parse(ctx context.Context, r io.Reader) ([]Reference, error)
 		return nil, fmt.Errorf("%w: reader is nil", ErrMalformedEDL)
 	}
 
-	data, err := io.ReadAll(r)
+	data, err := readBounded(r)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read failed: %v", ErrMalformedEDL, err)
 	}

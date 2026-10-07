@@ -80,3 +80,18 @@ func TestEDLParser_Parse_Malformed(t *testing.T) {
 		}
 	})
 }
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'a'
+	}
+	return len(p), nil
+}
+
+func TestTextParsersRejectOversizedInput(t *testing.T) {
+	if _, err := (&projectfile.EDLParser{}).Parse(context.Background(), zeroReader{}); err == nil {
+		t.Fatal("EDL parser buffered an unbounded input")
+	}
+}
