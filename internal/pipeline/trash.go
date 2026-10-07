@@ -112,14 +112,14 @@ func TrashAssetTx(
 	nodeID int64,
 	keepExports bool,
 ) (sqlcgen.MediaNode, error) {
-	// Standalone entry point: it owns its own move log and undoes it on
-	// failure. TrashAsset does NOT go through here -- it calls trashAssetTx
-	// directly with ITS move log, so it can also undo when the commit fails.
-	ml := &moveLog{}
+	// Without a caller-supplied MoveLog (WithMoveLog) this owns its own and
+	// undoes it when ITS steps fail. With one, the caller undoes it when its
+	// enclosing transaction fails -- including AFTER this returned nil (a
+	// later step or the commit failing), which this cannot see.
+	// TrashAsset does NOT go through here -- it calls trashAssetTx directly.
+	ml, owned := moveLogFrom(ctx)
 	node, err := trashAssetTx(ctx, q, guard, log, nodeID, keepExports, ml)
-	if err != nil {
-		// Our own step failed after a file may already have moved: undo.
-		// (A failure of the CALLER's later commit is beyond this scope.)
+	if err != nil && owned {
 		ml.undo(guard, log)
 	}
 	return node, err
@@ -200,11 +200,6 @@ func trashAssetTx(
 	return updated, nil
 }
 
-// TODO(audit): unlike trash, a restore does not undo its rename if a later DB
-// step fails (the file ends up at the original path while the row is still
-// TRASHED). Symmetric to the moveLog fix above; rarer path, tracked in the
-// audit follow-ups.
-//
 // RestoreTrashedAsset moves the file back from .trash/<rel> to the original
 // path, sets lifecycle_state back to ACTIVE, and (when linked exports were
 // also trashed by a keepExports=false TrashAsset call) restores them too.
@@ -220,22 +215,48 @@ func RestoreTrashedAsset(
 	nodeID int64,
 ) (sqlcgen.MediaNode, error) {
 	var node sqlcgen.MediaNode
+	// A rolled-back tx (a later DB step, or the commit) must also put the
+	// restored file back into .trash/, or the row stays TRASHED with its
+	// bytes at the original path.
+	ml := &moveLog{}
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var innerErr error
-		node, innerErr = RestoreTrashedAssetTx(ctx, q, guard, log, nodeID)
+		node, innerErr = restoreTrashedAssetTx(ctx, q, guard, log, nodeID, ml)
 		return innerErr
 	})
+	if err != nil {
+		ml.undo(guard, log)
+	}
 	return node, err
 }
 
 // RestoreTrashedAssetTx is the inner transactional body of RestoreTrashedAsset.
 // See TrashAssetTx's doc comment for why this exists.
+//
+// A caller that attaches a MoveLog via WithMoveLog owns undoing it when ITS
+// enclosing transaction fails; otherwise this undoes its own moves on error.
 func RestoreTrashedAssetTx(
 	ctx context.Context,
 	q *sqlcgen.Queries,
 	guard *storage.Guard,
 	log *slog.Logger,
 	nodeID int64,
+) (sqlcgen.MediaNode, error) {
+	ml, owned := moveLogFrom(ctx)
+	node, err := restoreTrashedAssetTx(ctx, q, guard, log, nodeID, ml)
+	if err != nil && owned {
+		ml.undo(guard, log)
+	}
+	return node, err
+}
+
+func restoreTrashedAssetTx(
+	ctx context.Context,
+	q *sqlcgen.Queries,
+	guard *storage.Guard,
+	log *slog.Logger,
+	nodeID int64,
+	ml *moveLog,
 ) (sqlcgen.MediaNode, error) {
 	loaded, err := q.GetMediaNodeByID(ctx, nodeID)
 	if err != nil {
@@ -257,7 +278,7 @@ func RestoreTrashedAssetTx(
 	}
 
 	if guard != nil && loaded.FilePath != "" {
-		if err := restoreFromTrash(guard, loaded.FilePath, loaded.NodeUuid, log); err != nil {
+		if err := restoreFromTrash(guard, loaded.FilePath, loaded.NodeUuid, log, ml); err != nil {
 			return sqlcgen.MediaNode{}, err
 		}
 	}
@@ -266,7 +287,7 @@ func RestoreTrashedAssetTx(
 		return sqlcgen.MediaNode{}, fmt.Errorf("untrash node: %w", err)
 	}
 
-	if err := restoreLinkedExports(ctx, q, guard, log, loaded.ID); err != nil {
+	if err := restoreLinkedExports(ctx, q, guard, log, loaded.ID, ml); err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("restore linked exports: %w", err)
 	}
 
@@ -296,6 +317,33 @@ func legacyTrashPathFor(rootPath, relPath, nodeUUID string) string {
 	}
 	ext := filepath.Ext(relPath)
 	return filepath.Join(rootPath, ".trash", strings.TrimSuffix(relPath, ext)+"."+short+ext)
+}
+
+// MoveLog is the exported handle for a caller that runs TrashAssetTx /
+// RestoreTrashedAssetTx inside its own transaction and must undo the file
+// moves if that transaction rolls back.
+type MoveLog = moveLog
+
+type moveLogKey struct{}
+
+// WithMoveLog returns ctx carrying a fresh MoveLog. Pass it to TrashAssetTx /
+// RestoreTrashedAssetTx, and call Undo on the returned log if the enclosing
+// transaction fails.
+func WithMoveLog(ctx context.Context) (context.Context, *MoveLog) {
+	ml := &moveLog{}
+	return context.WithValue(ctx, moveLogKey{}, ml), ml
+}
+
+// Undo renames every recorded move back (newest first, best effort).
+func (m *moveLog) Undo(guard *storage.Guard, log *slog.Logger) { m.undo(guard, log) }
+
+// moveLogFrom returns the caller-supplied log, or a fresh one this call owns
+// (owned == true => this call is responsible for undoing it on failure).
+func moveLogFrom(ctx context.Context) (ml *moveLog, owned bool) {
+	if v, ok := ctx.Value(moveLogKey{}).(*moveLog); ok && v != nil {
+		return v, false
+	}
+	return &moveLog{}, true
 }
 
 // moveLog records the file moves a trash operation has made so they can be
@@ -398,7 +446,7 @@ func moveToTrashLogged(guard *storage.Guard, rootPath, filePath, nodeUUID string
 //     caller (HTTP layer / drainer) to surface the conflict to the user
 //     instead of silently overwriting one copy with the other. Same shape
 //     as the live-path collision check earlier in the restore pipeline.
-func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog.Logger) error {
+func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog.Logger, ml *moveLog) error {
 	loc, err := guard.Resolve(filePath)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", filePath, err)
@@ -447,6 +495,7 @@ func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog
 		if err := guard.Rename(trashPath, filePath); err != nil {
 			return fmt.Errorf("rename %s -> %s: %w", trashPath, filePath, err)
 		}
+		ml.record(trashPath, filePath)
 		log.Info("restored from trash", "from", trashPath, "to", filePath)
 		return nil
 
@@ -550,7 +599,7 @@ func purgeRemoteSyncStateForLinkedExports(ctx context.Context, q *sqlcgen.Querie
 // moved into .trash/ in the first place): in those cases the export's
 // lifecycle_state still flips back to ACTIVE so the master's restore succeeds
 // as a whole, and a warning is logged. The user can re-export if needed.
-func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.Guard, log *slog.Logger, parentID int64) error {
+func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.Guard, log *slog.Logger, parentID int64, ml *moveLog) error {
 	edges, err := q.ListEdgesBySource(ctx, parentID)
 	if err != nil {
 		return fmt.Errorf("list edges by source: %w", err)
@@ -568,7 +617,7 @@ func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storag
 			continue
 		}
 		if guard != nil && exp.FilePath != "" {
-			if err := restoreFromTrash(guard, exp.FilePath, exp.NodeUuid, log); err != nil {
+			if err := restoreFromTrash(guard, exp.FilePath, exp.NodeUuid, log, ml); err != nil {
 				if errors.Is(err, ErrAssetTrashFileMissing) {
 					log.Warn("trash copy for export is missing (TTL expired or never moved); export restored logically only -- re-export may be needed",
 						"exportID", exp.ID, "filePath", exp.FilePath)

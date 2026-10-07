@@ -213,14 +213,29 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		}
 
 		var resolveNodeID int64
-		processErr := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-			id, err := d.applyEvent(ctx, q, ev)
+		// Per-event move log + post-commit hooks: file moves made while
+		// applying the event (trash) are real renames a rollback cannot
+		// revert, and external side effects (Immich rescan) must not fire
+		// for an event whose transaction did not commit.
+		evCtx, moves := pipeline.WithMoveLog(ctx)
+		hooks := &afterCommitHooks{}
+		evCtx = context.WithValue(evCtx, afterCommitKey{}, hooks)
+		processErr := d.db.InTx(evCtx, func(q *sqlcgen.Queries) error {
+			id, err := d.applyEvent(evCtx, q, ev)
 			if err != nil {
 				return err
 			}
 			resolveNodeID = id
-			return q.MarkAgentEventProcessed(ctx, ev.ID)
+			return q.MarkAgentEventProcessed(evCtx, ev.ID)
 		})
+		if processErr != nil {
+			// The tx rolled back (an apply step, MarkAgentEventProcessed or the
+			// commit itself failed): put any trashed files back so disk and DB
+			// agree again.
+			moves.Undo(d.guard, d.log)
+		} else {
+			hooks.run(ctx)
+		}
 
 		if processErr == nil {
 			stats.Processed++
@@ -855,14 +870,40 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		}
 	}
 
-	// If Immich client is wired, trigger external library rescan
+	// If Immich client is wired, trigger an external library rescan -- but
+	// only once the event's transaction has committed.
 	if d.immichScanner != nil {
-		if scanErr := d.immichScanner.TriggerScan(ctx); scanErr != nil {
-			d.log.Warn("agent: trigger immich scan after node deletion", "nodeID", node.ID, "err", scanErr)
-		}
+		nodeID := node.ID
+		addAfterCommit(ctx, func(c context.Context) {
+			if scanErr := d.immichScanner.TriggerScan(c); scanErr != nil {
+				d.log.Warn("agent: trigger immich scan after node deletion", "nodeID", nodeID, "err", scanErr)
+			}
+		})
 	}
 
 	return nil
+}
+
+type afterCommitKey struct{}
+
+// afterCommitHooks collects side effects to run after the event's
+// transaction commits.
+type afterCommitHooks struct{ fns []func(context.Context) }
+
+func (h *afterCommitHooks) run(ctx context.Context) {
+	for _, fn := range h.fns {
+		fn(ctx)
+	}
+}
+
+// addAfterCommit registers fn to run after the current event commits. With no
+// hooks collector on ctx (a direct apply* call) it runs immediately.
+func addAfterCommit(ctx context.Context, fn func(context.Context)) {
+	if h, ok := ctx.Value(afterCommitKey{}).(*afterCommitHooks); ok && h != nil {
+		h.fns = append(h.fns, fn)
+		return
+	}
+	fn(ctx)
 }
 
 // applyPathRebased returns the freshly inserted node's ID when NodeUUID was

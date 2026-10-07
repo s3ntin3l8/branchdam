@@ -122,7 +122,7 @@ func TestRestoreFromTrash_RestoresCorrectNodeFromUUIDSuffix(t *testing.T) {
 	origB := filepath.Join(root, "2026", "08", "IMG_9999.JPG")
 	require.NoError(t, os.MkdirAll(filepath.Dir(origB), 0o755))
 
-	require.NoError(t, restoreFromTrash(guard, origB, uuidB, testLogger()))
+	require.NoError(t, restoreFromTrash(guard, origB, uuidB, testLogger(), nil))
 
 	// B's bytes are at the original path.
 	got, err := os.ReadFile(origB)
@@ -141,7 +141,7 @@ func TestRestoreFromTrash_MissingFileReturnsErrAssetTrashFileMissing(t *testing.
 
 	// No trash copy at all; original path missing too.
 	orig := filepath.Join(root, "2026", "08", "IMG_MISSING.JPG")
-	err := restoreFromTrash(guard, orig, "018d3b2f-7630-7e50-9844-3d96e9592499", testLogger())
+	err := restoreFromTrash(guard, orig, "018d3b2f-7630-7e50-9844-3d96e9592499", testLogger(), nil)
 	require.ErrorIs(t, err, ErrAssetTrashFileMissing)
 }
 
@@ -176,7 +176,7 @@ func TestRestoreFromTrash_LogicalOnlyTrashIsNoop(t *testing.T) {
 	require.NoError(t, os.WriteFile(orig, []byte("tier3 protected bytes"), 0o644))
 
 	// No trash copy on disk -- logical-only trash scenario.
-	err := restoreFromTrash(guard, orig, "018d3b2f-7630-7e50-9844-3d96e95924aa", testLogger())
+	err := restoreFromTrash(guard, orig, "018d3b2f-7630-7e50-9844-3d96e95924aa", testLogger(), nil)
 	require.NoError(t, err)
 
 	// Original is untouched.
@@ -202,7 +202,7 @@ func TestRestoreFromTrash_BothCopiesExistReturnsErrAssetAlreadyExists(t *testing
 	require.NoError(t, os.MkdirAll(filepath.Dir(trashPath), 0o755))
 	require.NoError(t, os.WriteFile(trashPath, []byte("trashed bytes"), 0o644))
 
-	err := restoreFromTrash(guard, orig, "cafef00d-1234-5678-9abc-def012345678", testLogger())
+	err := restoreFromTrash(guard, orig, "cafef00d-1234-5678-9abc-def012345678", testLogger(), nil)
 	require.ErrorIs(t, err, ErrAssetAlreadyExists)
 
 	// Neither copy is clobbered.
@@ -251,7 +251,7 @@ func TestRestoreFromTrash_FindsLegacyShortSuffixCopy(t *testing.T) {
 	orig := filepath.Join(root, "2026", "IMG.JPG")
 	require.NoError(t, os.MkdirAll(filepath.Dir(orig), 0o755))
 
-	require.NoError(t, restoreFromTrash(guard, orig, u, testLogger()))
+	require.NoError(t, restoreFromTrash(guard, orig, u, testLogger(), nil))
 	got, err := os.ReadFile(orig)
 	require.NoError(t, err)
 	require.Equal(t, []byte("old-format"), got)
@@ -295,4 +295,44 @@ WHEN NEW.lifecycle_state = 'TRASHED' BEGIN SELECT RAISE(ABORT, 'injected failure
 	require.Equal(t, []byte("clip bytes"), got)
 	entries, _ := os.ReadDir(filepath.Join(root, ".trash", "2026"))
 	require.Empty(t, entries, "nothing may be left stranded in .trash/")
+}
+
+// A restore whose later DB step fails must put the file back into .trash/:
+// the row is still TRASHED, so its bytes belong there.
+func TestRestoreTrashedAsset_FailureAfterMoveReturnsFileToTrash(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+	root := t.TempDir()
+	guard := newTrashTestGuard(t, root)
+
+	var nodeID int64
+	path := filepath.Join(root, "2026", "clip.mov")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("clip bytes"), 0o644))
+	require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{Name: "staging", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH"})
+		if err != nil {
+			return err
+		}
+		n, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "018d3b2f-7630-7e50-9844-3d96e9592491", StorageLocationID: loc.ID, FilePath: path, FileName: "clip.mov",
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		nodeID = n.ID
+		return err
+	}))
+	_, err := TrashAsset(ctx, database, guard, testLogger(), nodeID, false)
+	require.NoError(t, err)
+
+	_, err = database.ExecInTx(ctx, `CREATE TRIGGER fail_untrash BEFORE UPDATE OF lifecycle_state ON media_nodes
+WHEN NEW.lifecycle_state = 'ACTIVE' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
+	require.NoError(t, err)
+
+	_, err = RestoreTrashedAsset(ctx, database, guard, testLogger(), nodeID)
+	require.Error(t, err)
+
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "restored file must be moved back into .trash/ when the restore rolls back")
+	entries, _ := os.ReadDir(filepath.Join(root, ".trash", "2026"))
+	require.Len(t, entries, 1)
 }
