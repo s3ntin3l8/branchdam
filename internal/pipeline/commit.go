@@ -184,7 +184,11 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 		// Unchanged bytes at a TRASHED path are the user's trash, not new
 		// content: don't index them as a fresh node beside the TRASHED row
 		// (that undid the trash and made a later restore collide). Changed
-		// content still falls through and is indexed as a new version.
+		// content still falls through and is indexed as a new ACTIVE node:
+		// unlike ARCHIVED (an explicit "keep this deleted" intent that the
+		// successor inherits), a trashed path whose bytes were replaced is
+		// new content the user did not delete, so it is deliberately not
+		// linked via superseded_by nor archived.
 		return nil
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("get latest node by path: %w", err)
