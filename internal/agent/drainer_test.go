@@ -1419,12 +1419,8 @@ func TestDrainer_NodeDeleted_MovesToTrashAndUnlinksImmichExport(t *testing.T) {
 	_, statErr := os.Stat(masterFile)
 	require.True(t, os.IsNotExist(statErr), "original master file should no longer exist at original path")
 
-	// 2. Master file moved to .trash/<relPath>.<nodeUUID-short>.<ext>
-	masterUUIDShort := masterUUID
-	if len(masterUUIDShort) > 8 {
-		masterUUIDShort = masterUUIDShort[:8]
-	}
-	trashPath := filepath.Join(env.staging, ".trash", "2026", "08", "IMG_0042."+masterUUIDShort+".JPG")
+	// 2. Master file moved to .trash/<relPath>.<nodeUUID>.<ext>
+	trashPath := filepath.Join(env.staging, ".trash", "2026", "08", "IMG_0042."+masterUUID+".JPG")
 	trashData, err := os.ReadFile(trashPath)
 	require.NoError(t, err, "master file must be safely moved into .trash buffer")
 	require.Equal(t, []byte("master image bytes"), trashData)
@@ -1502,11 +1498,7 @@ func TestDrainer_NodeDeleted_AvoidsOverwritingExistingTrashFile(t *testing.T) {
 
 	// The new node's trash copy lives at .trash/<rel>.<uuid>.<ext>, distinct
 	// from any other node that might have trashed the same rel path.
-	uuidShort := masterUUID
-	if len(uuidShort) > 8 {
-		uuidShort = uuidShort[:8]
-	}
-	uuidTrashPath := filepath.Join(env.staging, ".trash", "IMG_9999."+uuidShort+".JPG")
+	uuidTrashPath := filepath.Join(env.staging, ".trash", "IMG_9999."+masterUUID+".JPG")
 	uuidData, err := os.ReadFile(uuidTrashPath)
 	require.NoError(t, err, "second deleted file should be saved under uuid-suffixed name")
 	require.Equal(t, []byte("second deleted version"), uuidData)

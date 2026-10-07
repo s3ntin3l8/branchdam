@@ -26,7 +26,10 @@ type TrashPruneResult struct {
 // PurgeTrash permanently removes files from the .trash/ directory under locRootPath
 // that were modified before cutoff (determined by retentionDays relative to now).
 // If retentionDays <= 0, PurgeTrash is a no-op (automated purge disabled).
-func PurgeTrash(ctx context.Context, locRootPath string, retentionDays int, now time.Time) (TrashPruneResult, error) {
+//
+// Every unlink goes through guard (AGENTS.md invariant 3): a location marked
+// read-only is never purged, even if its .trash/ is physically writable.
+func PurgeTrash(ctx context.Context, guard *storage.Guard, locRootPath string, retentionDays int, now time.Time) (TrashPruneResult, error) {
 	if retentionDays <= 0 {
 		return TrashPruneResult{}, nil
 	}
@@ -58,7 +61,7 @@ func PurgeTrash(ctx context.Context, locRootPath string, retentionDays int, now 
 
 		if info.ModTime().Before(cutoff) {
 			size := info.Size()
-			if err := os.Remove(path); err != nil {
+			if err := guard.Remove(path); err != nil {
 				res.Errors = append(res.Errors, err)
 			} else {
 				res.FilesPurged++
@@ -73,12 +76,12 @@ func PurgeTrash(ctx context.Context, locRootPath string, retentionDays int, now 
 	}
 
 	// Clean up empty directories under .trash/
-	cleanEmptyDirs(trashRoot)
+	cleanEmptyDirs(guard, trashRoot)
 
 	return res, nil
 }
 
-func cleanEmptyDirs(dir string) {
+func cleanEmptyDirs(guard *storage.Guard, dir string) {
 	// Post-order walk from deepest directories up
 	var dirs []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
@@ -91,7 +94,7 @@ func cleanEmptyDirs(dir string) {
 
 	// Iterate in reverse to remove innermost empty subdirectories first
 	for i := len(dirs) - 1; i >= 0; i-- {
-		_ = os.Remove(dirs[i]) // os.Remove fails non-fatally if directory is non-empty
+		_ = guard.Remove(dirs[i]) // fails non-fatally if the directory is non-empty
 	}
 }
 
@@ -103,7 +106,12 @@ func PurgeAllTrash(ctx context.Context, guard *storage.Guard, retentionDays int,
 
 	var totalRes TrashPruneResult
 	for _, loc := range guard.Locations() {
-		res, err := PurgeTrash(ctx, loc.RootPath, retentionDays, now)
+		// Read-only and virtual locations are never written to; skip them
+		// up front rather than counting a refusal per file.
+		if loc.ReadOnly || loc.IsVirtual {
+			continue
+		}
+		res, err := PurgeTrash(ctx, guard, loc.RootPath, retentionDays, now)
 		totalRes.FilesPurged += res.FilesPurged
 		totalRes.BytesFreed += res.BytesFreed
 		totalRes.Errors = append(totalRes.Errors, res.Errors...)

@@ -11,6 +11,7 @@
 package pipeline
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -54,8 +56,8 @@ func TestMoveToTrash_EmbedsNodeUUIDInFilename(t *testing.T) {
 	_, err := os.Stat(src)
 	require.True(t, os.IsNotExist(err), "source file must be moved out of its original location")
 
-	// Trash file is at .trash/2026/08/IMG_0001.<uuidA-short>.JPG.
-	expected := filepath.Join(root, ".trash", "2026", "08", "IMG_0001."+uuidA[:8]+".JPG")
+	// Trash file is at .trash/2026/08/IMG_0001.<full uuidA>.JPG.
+	expected := filepath.Join(root, ".trash", "2026", "08", "IMG_0001."+uuidA+".JPG")
 	got, err := os.ReadFile(expected)
 	require.NoError(t, err)
 	require.Equal(t, []byte("bytes-A"), got)
@@ -90,7 +92,7 @@ func TestMoveToTrash_TwoNodesSameRelPathDoNotClobberEachOther(t *testing.T) {
 	require.Equal(t, []byte("node-A bytes"), aData, "pre-existing trash copy must not be clobbered")
 
 	// B is at its uuid-suffixed path.
-	bPath := filepath.Join(trashRoot, "IMG_9999."+uuidB[:8]+".JPG")
+	bPath := filepath.Join(trashRoot, "IMG_9999."+uuidB+".JPG")
 	bData, err := os.ReadFile(bPath)
 	require.NoError(t, err)
 	require.Equal(t, []byte("node-B bytes"), bData)
@@ -210,4 +212,87 @@ func TestRestoreFromTrash_BothCopiesExistReturnsErrAssetAlreadyExists(t *testing
 	trashData, err := os.ReadFile(trashPath)
 	require.NoError(t, err)
 	require.Equal(t, []byte("trashed bytes"), trashData)
+}
+
+// UUIDv7s minted within the same ~65s window share their first 8 hex chars.
+// The old 8-char suffix gave both nodes the same trash name, so the second
+// rename silently overwrote the first node's bytes.
+func TestMoveToTrash_UUIDsSharingEightCharPrefixDoNotClobber(t *testing.T) {
+	root := t.TempDir()
+	guard := newTrashTestGuard(t, root)
+	const uuidA = "018d3b2f-7630-7e50-9844-3d96e9592491"
+	const uuidB = "018d3b2f-aaaa-7e50-9844-3d96e95924bb" // same first 8 chars
+
+	dir := filepath.Join(root, "2026")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	src := filepath.Join(dir, "IMG.JPG")
+
+	require.NoError(t, os.WriteFile(src, []byte("A"), 0o644))
+	require.NoError(t, moveToTrash(guard, root, src, uuidA, testLogger()))
+	require.NoError(t, os.WriteFile(src, []byte("B"), 0o644)) // re-ingested at the same path
+	require.NoError(t, moveToTrash(guard, root, src, uuidB, testLogger()))
+
+	a, err := os.ReadFile(filepath.Join(root, ".trash", "2026", "IMG."+uuidA+".JPG"))
+	require.NoError(t, err)
+	b, err := os.ReadFile(filepath.Join(root, ".trash", "2026", "IMG."+uuidB+".JPG"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("A"), a, "first node's trash copy must survive")
+	require.Equal(t, []byte("B"), b)
+}
+
+// Restoring a node trashed under the legacy 8-char naming still works.
+func TestRestoreFromTrash_FindsLegacyShortSuffixCopy(t *testing.T) {
+	root := t.TempDir()
+	guard := newTrashTestGuard(t, root)
+	const u = "018d3b2f-7630-7e50-9844-3d96e9592491"
+	legacy := filepath.Join(root, ".trash", "2026", "IMG."+u[:8]+".JPG")
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
+	require.NoError(t, os.WriteFile(legacy, []byte("old-format"), 0o644))
+	orig := filepath.Join(root, "2026", "IMG.JPG")
+	require.NoError(t, os.MkdirAll(filepath.Dir(orig), 0o755))
+
+	require.NoError(t, restoreFromTrash(guard, orig, u, testLogger()))
+	got, err := os.ReadFile(orig)
+	require.NoError(t, err)
+	require.Equal(t, []byte("old-format"), got)
+}
+
+// When a later step of TrashAsset fails, the transaction rolls back the row
+// changes -- the file move must be undone too, or the node stays ACTIVE in
+// the DB with its bytes stranded in .trash/.
+func TestTrashAsset_FailureAfterMoveRestoresFile(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+	root := t.TempDir()
+	guard := newTrashTestGuard(t, root)
+
+	var nodeID int64
+	path := filepath.Join(root, "2026", "clip.mov")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("clip bytes"), 0o644))
+	require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{Name: "staging", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH"})
+		if err != nil {
+			return err
+		}
+		n, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "018d3b2f-7630-7e50-9844-3d96e9592491", StorageLocationID: loc.ID, FilePath: path, FileName: "clip.mov",
+			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		nodeID = n.ID
+		return err
+	}))
+	// Test-only fault injection: make the final MarkNodeTrashed step fail.
+	_, err := database.ExecInTx(ctx, `CREATE TRIGGER fail_trash BEFORE UPDATE OF lifecycle_state ON media_nodes
+WHEN NEW.lifecycle_state = 'TRASHED' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
+	require.NoError(t, err)
+
+	_, err = TrashAsset(ctx, database, guard, testLogger(), nodeID, false)
+	require.Error(t, err)
+
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr, "the file must be back at its original path after the failed trash")
+	require.Equal(t, []byte("clip bytes"), got)
+	entries, _ := os.ReadDir(filepath.Join(root, ".trash", "2026"))
+	require.Empty(t, entries, "nothing may be left stranded in .trash/")
 }

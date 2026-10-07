@@ -14,7 +14,6 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
-	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
 func openWorkerTestDB(t *testing.T) *db.DB {
@@ -103,7 +102,7 @@ func TestWorkerProcessPendingGeneratesReady(t *testing.T) {
 	writeWorkerTestPNG(t, imgPath)
 	node := seedTestNode(t, database, locationID, "01", imgPath)
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
 	stats, err := w.ProcessPending(context.Background())
@@ -152,7 +151,7 @@ func TestWorkerProcessPendingSkipsTier0LocalStaging(t *testing.T) {
 	writeWorkerTestPNG(t, activeImgPath)
 	activeNode := seedTestNode(t, database, activeLocationID, "07", activeImgPath)
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
 	stats, err := w.ProcessPending(context.Background())
@@ -214,7 +213,7 @@ func TestWorkerProcessPendingUnsupported(t *testing.T) {
 	}
 	node := seedTestNode(t, database, locationID, "02", textPath)
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
 	stats, err := w.ProcessPending(context.Background())
@@ -250,7 +249,7 @@ func TestWorkerProcessPendingFailedRetriesUntilBound(t *testing.T) {
 	missingPath := filepath.Join(locDir, "vanished.png")
 	node := seedTestNode(t, database, locationID, "03", missingPath)
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
 	get := func() sqlcgen.MediaNode {
@@ -311,7 +310,7 @@ func TestWorkerProcessPendingRespectsMaxAttempts(t *testing.T) {
 		t.Fatalf("pre-set thumb_attempts: %v", err)
 	}
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
 	stats, err := w.ProcessPending(context.Background())
@@ -343,7 +342,7 @@ func TestWorkerProcessPendingBatchConcurrent(t *testing.T) {
 		seedTestNode(t, database, locationID, fmt.Sprintf("%02d", 10+i), imgPath)
 	}
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	// Deliberately fewer goroutines than nodes, so the semaphore actually
 	// bounds concurrency rather than every node running at once.
 	w := NewWorker(database, cache, nil, WithConcurrency(3), WithBatchSize(n))
@@ -366,7 +365,7 @@ func TestWorkerNudgeCalledOnChange(t *testing.T) {
 	writeWorkerTestPNG(t, imgPath)
 	seedTestNode(t, database, locationID, "05", imgPath)
 
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	nudged := false
 	w := NewWorker(database, cache, nil, WithNudge(func() { nudged = true }))
 
@@ -380,7 +379,7 @@ func TestWorkerNudgeCalledOnChange(t *testing.T) {
 
 func TestWorkerNudgeNotCalledWhenNothingPending(t *testing.T) {
 	database := openWorkerTestDB(t)
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	nudged := false
 	w := NewWorker(database, cache, nil, WithNudge(func() { nudged = true }))
 
@@ -394,7 +393,7 @@ func TestWorkerNudgeNotCalledWhenNothingPending(t *testing.T) {
 
 func TestWorkerStartWait(t *testing.T) {
 	database := openWorkerTestDB(t)
-	cache := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	cache := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	w := NewWorker(database, cache, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())

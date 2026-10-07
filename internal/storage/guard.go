@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Location mirrors one row of storage_locations (internal/db). RootPath is
@@ -195,9 +196,18 @@ func LoadGuard(ctx context.Context, lister locationLister, log *slog.Logger) (*G
 // virtual location takes precedence and writes under it will be refused. Distinct,
 // non-overlapping root paths should be configured.
 func (g *Guard) Resolve(path string) (Location, error) {
+	loc, _, err := g.resolveCanonical(path)
+	return loc, err
+}
+
+// resolveCanonical is Resolve that also returns the canonical (symlink-free)
+// path it matched against, so a caller that goes on to open the file does not
+// walk the symlinks a second time. canon is "" for virtual locations, which
+// match lexically and have no on-disk path.
+func (g *Guard) resolveCanonical(path string) (Location, string, error) {
 	cleanPath := filepath.Clean(path)
 	if !filepath.IsAbs(cleanPath) {
-		return Location{}, fmt.Errorf("storage: resolve %q: path must be absolute", path)
+		return Location{}, "", fmt.Errorf("storage: resolve %q: path must be absolute", path)
 	}
 
 	g.mu.RLock()
@@ -206,24 +216,24 @@ func (g *Guard) Resolve(path string) (Location, error) {
 	for _, loc := range g.locs {
 		if loc.IsVirtual {
 			if cleanPath == loc.RootPath || strings.HasPrefix(cleanPath, loc.RootPath+string(filepath.Separator)) {
-				return loc, nil
+				return loc, "", nil
 			}
 		}
 	}
 
 	canon, err := canonicalize(cleanPath)
 	if err != nil {
-		return Location{}, fmt.Errorf("storage: resolve %q: %w", path, err)
+		return Location{}, "", fmt.Errorf("storage: resolve %q: %w", path, err)
 	}
 
 	for _, loc := range g.locs {
 		if !loc.IsVirtual {
 			if canon == loc.RootPath || strings.HasPrefix(canon, loc.RootPath+string(filepath.Separator)) {
-				return loc, nil
+				return loc, canon, nil
 			}
 		}
 	}
-	return Location{}, &ErrUnknownLocation{Path: path}
+	return Location{}, "", &ErrUnknownLocation{Path: path}
 }
 
 // CheckWrite returns *ErrReadOnlyTier if path resolves to a read-only
@@ -277,10 +287,82 @@ func (g *Guard) Remove(path string) error {
 	return os.Remove(path)
 }
 
-// OpenRead is os.Open. Reads are always permitted, including against Tier 3
-// -- the archive is read-only, not unreadable.
+// OpenRead opens path for reading. Reads are always permitted, including
+// against Tier 3 -- the archive is read-only, not unreadable -- but the file
+// must physically live inside a configured location: the path is resolved
+// through symlinks first and refused (*ErrUnknownLocation) if it lands
+// outside every location, so a symlink planted inside a library can't be
+// used to serve (or hash) files such as the server's own database. The
+// canonical, symlink-free path is what gets opened.
 func (g *Guard) OpenRead(path string) (*os.File, error) {
-	return os.Open(path)
+	loc, canon, err := g.resolveCanonical(path)
+	if err != nil {
+		var unknown *ErrUnknownLocation
+		if errors.As(err, &unknown) {
+			return nil, err
+		}
+		// Resolve fails with a plain error when no ancestor exists or a
+		// component is unreadable; report a missing file as such. The
+		// ORIGINAL path is Lstat'd on purpose: canonicalization failed, so
+		// there is no canonical form, and only existence is being probed.
+		if _, statErr := os.Lstat(path); statErr != nil {
+			return nil, statErr
+		}
+		return nil, err
+	}
+	if loc.IsVirtual {
+		// A virtual location is a lexical namespace with no bytes behind it
+		// (Exists reports false for the same reason). Opening a path under
+		// it could only ever follow a planted symlink, so refuse.
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return os.Open(canon)
+}
+
+// CreateExcl creates path exclusively (O_CREATE|O_EXCL|O_RDWR), gated by
+// CheckWrite. It fails with os.ErrExist when the path is already present.
+func (g *Guard) CreateExcl(path string, perm fs.FileMode) (*os.File, error) {
+	if err := g.CheckWrite(path); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, perm)
+}
+
+// Link is os.Link with the DESTINATION gated by CheckWrite (the source is
+// only read). Falls under the same rule as every other write: nothing is
+// created on a read-only tier. The source must also resolve inside a
+// registered location (symlinks contained), so an untrusted oldname cannot
+// hardlink a file from outside every tier into a writable one.
+func (g *Guard) Link(oldname, newname string) error {
+	if err := g.CheckWrite(newname); err != nil {
+		return err
+	}
+	src, err := g.OpenRead(oldname)
+	if err != nil {
+		return err
+	}
+	_ = src.Close()
+	return os.Link(oldname, newname)
+}
+
+// Rename is os.Rename with BOTH ends gated by CheckWrite: it removes the
+// source name and creates the destination name.
+func (g *Guard) Rename(oldpath, newpath string) error {
+	if err := g.CheckWrite(oldpath); err != nil {
+		return err
+	}
+	if err := g.CheckWrite(newpath); err != nil {
+		return err
+	}
+	return os.Rename(oldpath, newpath)
+}
+
+// Chtimes is os.Chtimes, gated by CheckWrite.
+func (g *Guard) Chtimes(path string, atime, mtime time.Time) error {
+	if err := g.CheckWrite(path); err != nil {
+		return err
+	}
+	return os.Chtimes(path, atime, mtime)
 }
 
 // Exists reports whether path is already present on disk (or false for

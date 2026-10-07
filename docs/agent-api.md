@@ -254,8 +254,10 @@ Processing `EVENT_NODE_DELETED` triggers a safe, multi-step soft delete:
 - Sets `media_nodes.lifecycle_state = 'TRASHED'` (user-initiated; `MISSING` is reserved for
   scan-detected disappearance) and purges `remote_sync_state`. Only the device that created the
   node may do this.
-- Safely relocates the master file to `.trash/<rel_path>` in the storage location, retaining
-  it for 30 days (`trash.retentionDays`) before automated prune unlinks it.
+- Safely relocates the master file to `.trash/<rel_path-stem>.<node-uuid><ext>` in the storage
+  location (the full node UUID keeps two nodes that trashed the same path distinct; copies
+  trashed before this naming still restore), retaining it for 30 days (`trash.retentionDays`)
+  before automated prune unlinks it.
 - Purges linked Tier 2 Immich exports immediately (unlinking export files and deleting sync
   state) and triggers an Immich library rescan so the asset disappears from galleries right away.
 

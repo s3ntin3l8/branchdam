@@ -38,6 +38,8 @@ func TestAgentUploadStreaming(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	syncGuardFromDB(t, srv, database)
+
 	handler := srv.Handler()
 
 	data := []byte("Hello, branchDAM streaming agent upload test bytes!")
@@ -127,6 +129,8 @@ func TestAgentUploadChecksumMismatch(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	syncGuardFromDB(t, srv, database)
+
 	handler := srv.Handler()
 
 	data := []byte("sample payload")
@@ -190,6 +194,8 @@ func TestAgentUploadMasterArchiveAndHardlink(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 
@@ -304,6 +310,8 @@ func TestAgentUploadConcurrentSameFilenameNoTOCTOU(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	syncGuardFromDB(t, srv, database)
+
 	handler := srv.Handler()
 
 	type result struct {
@@ -369,6 +377,8 @@ func TestAgentUploadContentDedup(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	data := []byte("identical upload bytes for dedup test")
@@ -444,6 +454,8 @@ func TestAgentUploadContentDedup_AllowsReingestAfterMissing(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	data := []byte("content for missing node re-ingest test")
@@ -534,6 +546,8 @@ func TestAgentUpload_DedupRaceOrphanCleanup(t *testing.T) {
 		return err
 	})
 	require.NoError(t, err)
+
+	syncGuardFromDB(t, srv, database)
 
 	handler := srv.Handler()
 	data := []byte("agent upload bytes for orphan cleanup test")
@@ -630,6 +644,7 @@ func TestAgentUploadFailsAndCleansUpWhenCreatorCannotBeRecorded(t *testing.T) {
 		})
 		return err
 	}))
+	syncGuardFromDB(t, srv, database)
 	// Test-only fault injection on the creator insert.
 	_, err := database.ExecInTx(context.Background(), `CREATE TRIGGER fail_creator BEFORE INSERT ON node_creators
 BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
@@ -654,4 +669,47 @@ BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
 	count, err := database.Reader.CountMediaNodes(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, count, "no node may be recorded for a failed upload")
+}
+
+// A directory symlink planted inside the archive that points outside every
+// storage location must not let an upload write there. Guard refuses the
+// path (it canonicalises outside all locations); the engine used to treat
+// that refusal as "not a managed path" and fall back to raw os calls.
+func TestAgentUploadRefusesSymlinkEscapeFromArchive(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	tmpDir := t.TempDir()
+	archiveDir := filepath.Join(tmpDir, "archive")
+	outside := filepath.Join(tmpDir, "outside")
+	require.NoError(t, os.MkdirAll(archiveDir, 0o755))
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		_, err := q.CreateStorageLocation(context.Background(), sqlcgen.CreateStorageLocationParams{
+			Name: "MasterArchive", RootPath: archiveDir, Tier: "TIER3_MASTER_ARCHIVE",
+		})
+		return err
+	}))
+	// 1787998200 is 2026-08-29: the naming template's year directory.
+	if err := os.Symlink(outside, filepath.Join(archiveDir, "2026")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	data := []byte("payload that must not escape the archive")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/upload", bytes.NewReader(data))
+	req.Header.Set("X-API-Key", routeTestAgentKey)
+	req.Header.Set("X-Filename", "IMG_ESCAPE.JPG")
+	req.Header.Set("X-Camera-Model", "Pixel 9 Pro")
+	req.Header.Set("X-Capture-Timestamp", "1787998200")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	var written []string
+	_ = filepath.WalkDir(outside, func(p string, d os.DirEntry, err error) error {
+		if err == nil && p != outside {
+			written = append(written, p)
+		}
+		return nil
+	})
+	assert.Empty(t, written, "upload wrote outside the configured storage locations: %v", written)
+	assert.NotEqual(t, http.StatusCreated, rec.Code, "upload through an escaping symlink must be refused, body=%s", rec.Body.String())
 }

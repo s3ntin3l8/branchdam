@@ -64,6 +64,18 @@ func writeTestPNG(t *testing.T, path string, w, h int) {
 	}
 }
 
+// tempDirGuard builds a Guard whose only location is the OS temp dir, where
+// every test's fixture files live. Guard.OpenRead refuses files outside all
+// configured locations, so an empty Guard can no longer read test inputs.
+func tempDirGuard(t *testing.T) *storage.Guard {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return storage.NewGuard([]storage.Location{{ID: 1, Name: "tmp", RootPath: root, Tier: "TIER2_EXPORTS"}})
+}
+
 func TestScaleToMaxEdgeDownscalesLandscape(t *testing.T) {
 	t.Parallel()
 	img := image.NewRGBA(image.Rect(0, 0, 2000, 1000))
@@ -102,7 +114,7 @@ func TestScaleToMaxEdgeNeverUpscales(t *testing.T) {
 
 func TestCachePathIsSharded(t *testing.T) {
 	t.Parallel()
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	uuid := "0198abcd-1234-7000-8000-000000000001"
 	got := c.Path(uuid)
 	want := filepath.Join(c.root, "01", "98", uuid+".jpg")
@@ -113,7 +125,7 @@ func TestCachePathIsSharded(t *testing.T) {
 
 func TestCachePathShortUUIDFallback(t *testing.T) {
 	t.Parallel()
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	got := c.Path("ab")
 	want := filepath.Join(c.root, "short", "ab.jpg")
 	if got != want {
@@ -123,7 +135,7 @@ func TestCachePathShortUUIDFallback(t *testing.T) {
 
 func TestCacheWriteThenPathReadable(t *testing.T) {
 	t.Parallel()
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	uuid := "0198abcd-1234-7000-8000-000000000002"
 	data := []byte("fake jpeg bytes")
 
@@ -151,7 +163,7 @@ func TestCacheWriteThenPathReadable(t *testing.T) {
 
 func TestCacheDeleteMissingIsNotError(t *testing.T) {
 	t.Parallel()
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	if err := c.Delete("0198abcd-1234-7000-8000-000000000003"); err != nil {
 		t.Errorf("Delete on a never-written thumbnail returned an error: %v", err)
 	}
@@ -159,7 +171,7 @@ func TestCacheDeleteMissingIsNotError(t *testing.T) {
 
 func TestCacheDeleteThenPathGone(t *testing.T) {
 	t.Parallel()
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	uuid := "0198abcd-1234-7000-8000-000000000004"
 	if err := c.Write(uuid, []byte("data")); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -178,7 +190,7 @@ func TestCacheGenerateDirectImage(t *testing.T) {
 	path := filepath.Join(dir, "photo.png")
 	writeTestPNG(t, path, 1200, 800)
 
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 500)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -204,7 +216,7 @@ func TestCacheGenerateUnsupportedFile(t *testing.T) {
 		t.Fatalf("write text file: %v", err)
 	}
 
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -216,7 +228,7 @@ func TestCacheGenerateUnsupportedFile(t *testing.T) {
 
 func TestCacheGenerateMissingFile(t *testing.T) {
 	t.Parallel()
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 0)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -239,7 +251,7 @@ func TestCacheGenerateVideoPoster(t *testing.T) {
 	dir := t.TempDir()
 	path := makeFixtureMP4(t, dir)
 
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 500)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -283,7 +295,7 @@ func TestCacheGenerateVideoExtensionGate(t *testing.T) {
 		t.Fatalf("write renamed fixture: %v", err)
 	}
 
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 500)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -303,7 +315,7 @@ func TestCacheGenerateVideoPosterContextCancellation(t *testing.T) {
 	dir := t.TempDir()
 	path := makeFixtureMP4(t, dir)
 
-	c := New(t.TempDir(), storage.NewGuard(nil), probe.New(), 500)
+	c := New(t.TempDir(), tempDirGuard(t), probe.New(), 500)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()
 	time.Sleep(time.Millisecond) // ensure the deadline has actually passed

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -296,5 +297,90 @@ func TestStreamAssetSVGContentDisposition(t *testing.T) {
 	wantCD := "attachment; filename=\"graphic.svg\""
 	if cd := rr.Header().Get("Content-Disposition"); cd != wantCD {
 		t.Errorf("Content-Disposition = %q, want %q", cd, wantCD)
+	}
+}
+
+// Files that a browser would render or execute from the app origin (HTML,
+// JS, XML...) must never be served inline with a script-capable type: an
+// ingested x.html opened from the SPA would otherwise run with the admin's
+// session. They are downloads, typed as opaque bytes.
+func TestStreamAssetActiveContentIsAttachmentOctetStream(t *testing.T) {
+	cases := []struct {
+		name, ext, content string
+	}{
+		{"page.html", "html", "<script>window.pwned=1</script>"},
+		{"app.js", "js", "alert(1)"},
+		{"feed.xml", "xml", "<x/>"},
+		{"doc.xhtml", "xhtml", "<html/>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ext, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, tc.name)
+			if err := os.WriteFile(filePath, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			srv, database, locID := streamTestServer(t, dir)
+			var node sqlcgen.MediaNode
+			if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+				var err error
+				node, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+					NodeUuid: "0198abcd-0000-7000-8000-0000000000a" + tc.ext[:1], StorageLocationID: locID,
+					FilePath: filePath, FileName: tc.name, FileExt: tc.ext,
+					IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+				})
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/stream", node.ID), nil))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d", rr.Code)
+			}
+			if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
+				t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+			}
+			if cd := rr.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+				t.Errorf("Content-Disposition = %q, want attachment", cd)
+			}
+			if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Errorf("missing nosniff")
+			}
+		})
+	}
+}
+
+func TestStreamAssetMediaStaysInlineAndFilenameCannotInjectHeaders(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(filePath, []byte("jpegbytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, database, locID := streamTestServer(t, dir)
+	var node sqlcgen.MediaNode
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		var err error
+		node, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "0198abcd-0000-7000-8000-0000000000b1", StorageLocationID: locID,
+			FilePath: filePath, FileName: "photo.jpg", FileExt: "jpg",
+			IndexingStatus: "INDEXED_FULL", GraphStatus: "LINKED", LifecycleState: "ACTIVE",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/assets/%d/stream", node.ID), nil))
+	if ct := rr.Header().Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("Content-Type = %q, want image/jpeg", ct)
+	}
+	if cd := rr.Header().Get("Content-Disposition"); cd != "" {
+		t.Errorf("images must stay inline, got Content-Disposition %q", cd)
+	}
+
+	if got := dispositionFilename("evil\"\r\nX-Injected: 1.svg"); strings.ContainsAny(got, "\"\r\n\\") {
+		t.Errorf("dispositionFilename left unsafe characters: %q", got)
 	}
 }
