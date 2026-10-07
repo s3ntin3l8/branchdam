@@ -328,11 +328,18 @@ func (g *Guard) CreateExcl(path string, perm fs.FileMode) (*os.File, error) {
 
 // Link is os.Link with the DESTINATION gated by CheckWrite (the source is
 // only read). Falls under the same rule as every other write: nothing is
-// created on a read-only tier.
+// created on a read-only tier. The source must also resolve inside a
+// registered location (symlinks contained), so an untrusted oldname cannot
+// hardlink a file from outside every tier into a writable one.
 func (g *Guard) Link(oldname, newname string) error {
 	if err := g.CheckWrite(newname); err != nil {
 		return err
 	}
+	src, err := g.OpenRead(oldname)
+	if err != nil {
+		return err
+	}
+	_ = src.Close()
 	return os.Link(oldname, newname)
 }
 

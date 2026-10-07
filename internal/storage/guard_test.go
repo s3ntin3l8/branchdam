@@ -610,3 +610,16 @@ func TestOpenReadRefusesVirtualLocation(t *testing.T) {
 		t.Fatalf("error = %v, want ErrNotExist", err)
 	}
 }
+
+func TestGuardLinkRefusesSourceOutsideLocations(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	src := filepath.Join(outside, "secret")
+	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGuard([]Location{{ID: 1, Name: "t2", RootPath: root, Tier: "TIER2_EXPORTS"}})
+	if err := g.Link(src, filepath.Join(root, "l")); err == nil {
+		t.Fatal("Link accepted a source outside every location")
+	}
+}
