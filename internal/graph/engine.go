@@ -85,6 +85,21 @@ func (e *Engine) ResolveAndCommit(ctx context.Context, child Node) ([]sqlcgen.Me
 
 	merged := mergeCandidates(all)
 
+	// Candidates below the floor are skipped inside the transaction; if none
+	// reach it there is nothing to write, so don't take the single writer
+	// connection at all (every full scan re-resolves every node, and most
+	// resolve to nothing).
+	eligible := false
+	for _, c := range merged {
+		if c.Confidence >= NeedsReviewFloor {
+			eligible = true
+			break
+		}
+	}
+	if !eligible {
+		return nil, 0, nil
+	}
+
 	var committed []sqlcgen.MediaEdge
 	var created int
 	err := e.db.InTx(ctx, func(q *sqlcgen.Queries) error {

@@ -246,7 +246,7 @@ func (s *Service) ListActivity(ctx context.Context, f Filter, limit, offset int6
 	}
 	var entries []Entry
 	var total int64
-	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := s.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 		params := sqlcgen.ListActorAuditParams{
 			ActorUserID:  nullableToInterface(f.ActorUserID),
 			ActorKind:    emptyToNil(f.ActorKind),

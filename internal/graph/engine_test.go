@@ -2140,3 +2140,42 @@ func TestWeakExtraCandidateDoesNotDowngradeLinkedNode(t *testing.T) {
 		t.Fatalf("graph_status = %q after a weak extra candidate; a node with a strong edge must stay LINKED", got.GraphStatus)
 	}
 }
+
+type noCandidateResolver struct{}
+
+func (noCandidateResolver) Name() string { return "none" }
+func (noCandidateResolver) Tier() int    { return 3 }
+func (noCandidateResolver) Resolve(context.Context, Node, Lookup) ([]Candidate, error) {
+	return nil, nil
+}
+
+// A pass that produces no above-floor candidates writes nothing, so it must
+// not take the single writer connection (every full scan re-resolves every
+// node and most resolve to nothing).
+func TestResolveAndCommitWithoutCandidatesSkipsWriter(t *testing.T) {
+	database := openTestDB(t)
+	loc := seedLocation(t, database)
+	node := seedNode(t, database, loc, nodeFixture{Path: "/x/solo.jpg", FileName: "solo.jpg", FileExt: ".jpg"})
+	eng := NewEngine(database, nil, noCandidateResolver{})
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = database.InTx(context.Background(), func(*sqlcgen.Queries) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer func() { close(release); <-done }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	edges, created, err := eng.ResolveAndCommit(ctx, asGraphNode(node))
+	if err != nil || len(edges) != 0 || created != 0 {
+		t.Fatalf("ResolveAndCommit = (%v, %d, %v), want empty result without waiting for the writer", edges, created, err)
+	}
+}

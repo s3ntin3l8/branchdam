@@ -188,7 +188,7 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 	var stats DrainStats
 
 	var events []sqlcgen.ListPendingAgentEventsRow
-	err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := d.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		events, err = q.ListPendingAgentEvents(ctx, int64(batchSize))
 		return err
@@ -340,7 +340,7 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 		}
 
 		var pendingCount int64
-		err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		err := d.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 			var err error
 			pendingCount, err = q.CountPendingAgentEvents(ctx)
 			return err

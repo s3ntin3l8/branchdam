@@ -940,3 +940,48 @@ func TestPlanRequiresConfirmedOrAutoAcceptedEdge(t *testing.T) {
 		})
 	}
 }
+
+// A candidate that fails the on-disk checks (here: unreachable Tier-3 master)
+// must be rejected without ever waiting for the single writer connection, so
+// slow stat calls on a dead mount never queue behind / hold the write lock.
+func TestExecuteRejectsOnDiskFailuresWithoutWriterLock(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache.jpg")
+	if err := os.WriteFile(filePath, []byte("cache content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileInfo, _ := os.Lstat(filePath)
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	tier3Root := t.TempDir()
+	tier3ID := seedLocation(t, database, "t3", tier3Root, "TIER3_MASTER_ARCHIVE", true, false)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH"}})
+	master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: filepath.Join(tier3Root, "gone.jpg"), mtimeUnix: oldMtime, fullHash: hash64("gone")})
+	node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
+
+	// Occupy the only writer connection for the whole Execute call.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = database.InTx(context.Background(), func(*sqlcgen.Queries) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer func() { close(release); <-done }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	results := Execute(ctx, database, guard, []Candidate{{
+		NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID,
+		MtimeUnix: fileInfo.ModTime().Unix(), SizeBytes: fileInfo.Size(),
+	}}, cutoffUnix)
+	if len(results) != 1 || !errors.Is(results[0].Err, ErrAncestorUnreachable) {
+		t.Fatalf("results = %+v, want ErrAncestorUnreachable without touching the writer", results)
+	}
+}

@@ -450,6 +450,12 @@ func (w *WatcherSupervisor) handleWatchItem(ctx context.Context, loc storage.Loc
 	}
 	seen.Add(1)
 	result, err := processFile(ctx, w.deps, loc, item.rec)
+	if errors.Is(err, ErrFileChangedDuringHash) {
+		// Still being written: the writer's next fsnotify event re-triggers
+		// the path once it settles, so this is not a failure.
+		w.log.Debug("pipeline: watch file changed while hashing; waiting for it to settle", "path", item.rec.Path)
+		return false
+	}
 	if err != nil {
 		failed.Add(1)
 		w.log.Warn("pipeline: watch process file", "path", item.rec.Path, "err", err)

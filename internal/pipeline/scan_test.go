@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2356,13 +2358,101 @@ func TestProcessFileSkipsFullHashForUnchangedNodeWithStoredHash(t *testing.T) {
 		t.Fatalf("unchanged file was re-hashed (FullHash=%q); the stored hash is still valid", second.FullHash)
 	}
 
-	// mtime moved: recompute.
+	// mtime moved (on disk, and in the fresh record): recompute.
 	rec.ModTime = rec.ModTime.Add(time.Hour)
+	if err := os.Chtimes(path, rec.ModTime, rec.ModTime); err != nil {
+		t.Fatal(err)
+	}
 	third, err := processFile(ctx, deps, location, rec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if third.FullHash == "" {
 		t.Fatal("file with a changed mtime must be re-hashed")
+	}
+}
+
+type countingResolver struct {
+	mu    sync.Mutex
+	calls map[int64]int
+}
+
+func (r *countingResolver) Name() string { return "counting" }
+func (r *countingResolver) Tier() int    { return 3 }
+func (r *countingResolver) Resolve(_ context.Context, child graph.Node, _ graph.Lookup) ([]graph.Candidate, error) {
+	r.mu.Lock()
+	r.calls[child.ID]++
+	r.mu.Unlock()
+	return nil, nil
+}
+
+// The reverse-lineage pass used to re-resolve every UNLINKED stem sibling once
+// per batch member (S files => S resolutions each). Each sibling must now be
+// revisited at most once per batch: its own resolution plus one revisit.
+func TestReverseLineageRevisitsEachSiblingOncePerBatch(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := openTestDB(t)
+	ctx := context.Background()
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	counter := &countingResolver{calls: map[int64]int{}}
+	deps.Engine = graph.NewEngine(database, nil, counter)
+	var buf []Result
+	for i, name := range []string{"grp.jpg", "grp.png", "grp.tif", "grp.heic", "grp.webp"} {
+		buf = append(buf, Result{
+			Path: filepath.Join(resolvedRoot, name), FileName: name, FileExt: filepath.Ext(name)[1:],
+			Size: 5, ModTime: time.Now(), FastHash: fmt.Sprintf("%016x", i+1),
+		})
+	}
+	if _, err := Commit(ctx, database, locationID, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	resolveEdgesForBatch(ctx, deps, buf, slog.New(slog.DiscardHandler))
+
+	counter.mu.Lock()
+	defer counter.mu.Unlock()
+	if len(counter.calls) != 5 {
+		t.Fatalf("resolved %d distinct nodes, want 5: %v", len(counter.calls), counter.calls)
+	}
+	for id, n := range counter.calls {
+		if n > 2 {
+			t.Errorf("node %d resolved %d times, want <= 2 (own pass + one revisit)", id, n)
+		}
+	}
+}
+
+// A file that grew (or was rewritten) after the walk/watch recorded its
+// size+mtime is still being written: its hashes would be for stale bytes, so
+// processFile must refuse rather than index them.
+func TestProcessFileRefusesFileChangedSinceRecord(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(resolvedRoot, "growing.mov")
+	writeFile(t, path, "first chunk")
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := indexer.Record{Path: path, Size: info.Size(), ModTime: info.ModTime()}
+
+	database := openTestDB(t)
+	locationID := seedPipelineLocation(t, database, resolvedRoot)
+	deps := scanTestDeps(t, database, resolvedRoot, locationID)
+	loc := storage.Location{ID: locationID, Name: "grow", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS"}
+
+	if _, err := processFile(context.Background(), deps, loc, rec); err != nil {
+		t.Fatalf("stable file: %v", err)
+	}
+	// The copy continues after the record was taken.
+	writeFile(t, path, "first chunk plus a lot more bytes")
+	if _, err := processFile(context.Background(), deps, loc, rec); !errors.Is(err, ErrFileChangedDuringHash) {
+		t.Fatalf("grown file: err = %v, want ErrFileChangedDuringHash", err)
 	}
 }

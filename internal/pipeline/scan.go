@@ -444,6 +444,14 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 				Run: func(jobCtx context.Context) error {
 					defer wg.Done()
 					result, err := processFile(jobCtx, deps, location, rec)
+					if errors.Is(err, ErrFileChangedDuringHash) {
+						// Still being written: skip (not a failure) and keep it
+						// out of the MISSING sweep; the next scan or the
+						// watcher's event for the finished write indexes it.
+						uncertain.add(rec.Path)
+						log.Info("pipeline: file changed while hashing, skipping until it settles", "path", rec.Path)
+						return nil
+					}
 					if err != nil {
 						uncertain.add(rec.Path)
 						filesFailed.Add(1)
@@ -563,7 +571,7 @@ func runScan(ctx context.Context, deps ScanDeps, location storage.Location, jobI
 	if deps.Engine != nil && len(sidecarPaths) > 0 {
 		var retryCreated int
 		for _, p := range sidecarPaths {
-			retryCreated += resolveNodeEdges(ctx, deps, p, log)
+			retryCreated += resolveNodeEdges(ctx, deps, p, log, nil)
 		}
 		if retryCreated > 0 {
 			// CompleteScanJob below only ever writes state/finished_at -- it
@@ -869,11 +877,15 @@ func drainAndCommit(ctx context.Context, deps ScanDeps, locationID, jobID int64,
 // actually closes the race; resolveEdgesForBatch itself only collects the
 // candidates for that retry.
 func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log *slog.Logger) (created int, sidecarPaths []string) {
+	// One shared set per batch: a stem group of S files used to re-resolve
+	// every still-UNLINKED sibling once per member (O(S^2) resolver runs and
+	// writer transactions); now each sibling is revisited at most once.
+	revisited := make(map[int64]struct{})
 	for _, r := range buf {
 		if _, ok := projectfile.GetParser(r.Path); ok {
 			sidecarPaths = append(sidecarPaths, r.Path)
 		}
-		created += resolveNodeEdges(ctx, deps, r.Path, log)
+		created += resolveNodeEdges(ctx, deps, r.Path, log, revisited)
 	}
 	return created, sidecarPaths
 }
@@ -883,7 +895,11 @@ func resolveEdgesForBatch(ctx context.Context, deps ScanDeps, buf []Result, log 
 // newly created. Shared by resolveEdgesForBatch (the ordinary per-batch
 // path) and runScan's end-of-scan sidecar retry (#169) so both go through
 // the identical re-fetch-then-resolve sequence.
-func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog.Logger) int {
+//
+// revisited (may be nil) records siblings already re-resolved by the reverse
+// lineage pass so a caller looping over many nodes of one stem group does not
+// repeat that work for each of them.
+func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog.Logger, revisited map[int64]struct{}) int {
 	node, err := deps.DB.Reader.GetLiveNodeByPath(ctx, path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -929,6 +945,12 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 					continue
 				}
 				if sib.GraphStatus == "UNLINKED" {
+					if revisited != nil {
+						if _, done := revisited[sib.ID]; done {
+							continue
+						}
+						revisited[sib.ID] = struct{}{}
+					}
 					_, sibCreated, sibErr := deps.Engine.ResolveAndCommit(ctx, toGraphNode(sib))
 					if sibErr != nil {
 						deps.logOrDiscard().Warn("pipeline.scan: reverse lineage resolve failed", "sibling_id", sib.ID, "parent_id", node.ID, "err", sibErr)
@@ -988,6 +1010,12 @@ func needsFullHash(policy string, tier string, hasCollision bool) bool {
 // under the same probeTimeout budget; a video-heavy scan can pause progress
 // for long stretches between batch commits. Runs entirely on a workers.Pool
 // goroutine, never inside a database transaction.
+// ErrFileChangedDuringHash means the file's size or mtime no longer matched
+// the walk/watch record once hashing finished: it was still being written (or
+// replaced), so any hash computed from it is for bytes that are already
+// stale. Not a failure -- the writer's further events/next scan pick it up.
+var ErrFileChangedDuringHash = errors.New("pipeline: file changed while being hashed")
+
 func processFile(ctx context.Context, deps ScanDeps, location storage.Location, rec indexer.Record) (*Result, error) {
 	f, err := deps.Guard.OpenRead(rec.Path)
 	if err != nil {
@@ -1020,6 +1048,15 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 				}
 			}
 		}
+	}
+
+	// A copy still in flight (stalled SMB/NFS write, preallocated file, queue
+	// latency past the watcher's settle window) can change under us while we
+	// hash. Re-stat the open handle: if it moved, the hashes above are for
+	// stale bytes -- do not index them.
+	if fi, statErr := f.Stat(); statErr == nil &&
+		(fi.Size() != rec.Size || fi.ModTime().Unix() != rec.ModTime.Unix()) {
+		return nil, fmt.Errorf("%w: %s", ErrFileChangedDuringHash, rec.Path)
 	}
 
 	// fullHashStillValid costs one extra reader query per file, but only on

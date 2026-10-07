@@ -174,7 +174,7 @@ func (w *Worker) ProcessPending(ctx context.Context) (Stats, error) {
 	var stats Stats
 
 	var nodes []sqlcgen.ListPendingThumbnailsRow
-	err := w.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+	err := w.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
 		nodes, err = q.ListPendingThumbnails(ctx, sqlcgen.ListPendingThumbnailsParams{
 			ThumbAttempts: int64(w.maxAttempts),
