@@ -320,27 +320,28 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 		return nil, nil, err
 	}
 
-	return &Pairing{
-			ID:            pRow.ID,
-			AgentID:       pRow.AgentID,
-			FriendlyLabel: pRow.FriendlyLabel,
-			CreatedAt:     pRow.CreatedAt,
-			CreatedBy:     pRow.CreatedBy,
-			RevokedAt:     pRow.RevokedAt,
-			UserID:        pRow.UserID,
-		}, &Key{
-			ID:         keyRow.ID,
-			PairingID:  keyRow.PairingID,
-			Plaintext:  plaintext,
-			LookupHash: keyRow.KeyLookupHash,
-			Preview:    keyRow.KeyPreview,
-			CreatedAt:  keyRow.CreatedAt,
-			ExpiresAt:  keyRow.ExpiresAt,
-			RevokedAt:  keyRow.RevokedAt,
-			QRSVG:      svg,
-			PayloadURL: payloadStr,
-		}, nil
-
+	pairing := &Pairing{
+		ID:            pRow.ID,
+		AgentID:       pRow.AgentID,
+		FriendlyLabel: pRow.FriendlyLabel,
+		CreatedAt:     pRow.CreatedAt,
+		CreatedBy:     pRow.CreatedBy,
+		RevokedAt:     pRow.RevokedAt,
+		UserID:        pRow.UserID,
+	}
+	key := &Key{
+		ID:         keyRow.ID,
+		PairingID:  keyRow.PairingID,
+		Plaintext:  plaintext,
+		LookupHash: keyRow.KeyLookupHash,
+		Preview:    keyRow.KeyPreview,
+		CreatedAt:  keyRow.CreatedAt,
+		ExpiresAt:  keyRow.ExpiresAt,
+		RevokedAt:  keyRow.RevokedAt,
+		QRSVG:      svg,
+		PayloadURL: payloadStr,
+	}
+	return pairing, key, nil
 }
 
 // KeyLookup resolves an X-API-Key header value to the agent_id of the

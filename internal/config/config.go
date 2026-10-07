@@ -37,7 +37,6 @@ func validateSecretExpansion(cfg Config) error {
 		val  string
 	}{
 		{"immich.apiKey", cfg.Immich.APIKey},
-		{"immich.apiUrl", cfg.Immich.APIURL},
 	}
 	var unresolved []string
 	for _, f := range sensitiveFields {
@@ -481,6 +480,19 @@ func Load(path string) (Config, error) {
 	// secret and mint a wildcard admin PAT from it.
 	if unresolvedVarRe.MatchString(cfg.Admin.BootstrapPAT) {
 		cfg.Admin.BootstrapPAT = ""
+	}
+
+	// An unresolved ${VAR} in immich.apiUrl (e.g. IMMICH_API_URL unset)
+	// means "no Immich": treat it as empty so the sync worker stays off
+	// instead of failing startup. immich.apiKey stays fatal-when-unresolved
+	// only while an apiUrl is set (see validateSecretExpansion).
+	if unresolvedVarRe.MatchString(cfg.Immich.APIURL) {
+		slog.Warn("immich.apiUrl references an unset environment variable; Immich sync disabled",
+			"value", cfg.Immich.APIURL)
+		cfg.Immich.APIURL = ""
+	}
+	if cfg.Immich.APIURL == "" && unresolvedVarRe.MatchString(cfg.Immich.APIKey) {
+		cfg.Immich.APIKey = ""
 	}
 
 	if err := validateSecretExpansion(cfg); err != nil {

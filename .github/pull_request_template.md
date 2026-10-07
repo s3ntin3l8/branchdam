@@ -17,7 +17,7 @@
 - [ ] `make lint` (pre-commit: gofmt, go vet, go mod tidy, sqlc-diff)
 - [ ] `make test` — `go test -race ./...`
 - [ ] `make build`
-- [ ] golangci-lint (v2.x — `.golangci.yml` is `version: "2"`; CI pins v2.12.2 — see CONTRIBUTING.md)
+- [ ] golangci-lint (v2.x — `.golangci.yml` is `version: "2"`; CI pins v2.14.0 — see CONTRIBUTING.md)
 - [ ] Frontend changes: `cd web && npm run lint && npm run typecheck && npm run test && npm run build`
 - [ ] Migrations/queries (`internal/db/migrations/*.sql`, `internal/db/queries/*.sql`):
       ran `sqlc generate` and committed `internal/db/sqlcgen/` in this PR

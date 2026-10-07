@@ -11,9 +11,12 @@ All string values may reference the environment as `${VAR}`, expanded at load ti
 emptied — a typo'd variable name fails loudly (as an invalid tier string, etc.) rather than
 silently producing an empty value. Two exceptions are handled explicitly by `config.Load`:
 
-- An unresolved `${VAR}` in `immich.apiKey` or `immich.apiUrl` is a **fatal load error**
-  (`validateSecretExpansion`: "unresolved environment variables in security-sensitive fields").
-  A variable that is *set but empty* (as in `.env.example`) is fine and leaves Immich disabled.
+- An unresolved `${VAR}` in `immich.apiUrl` (e.g. `IMMICH_API_URL` unset) is treated as **empty**
+  and logs a warning: Immich sync is disabled. An unresolved `${VAR}` in `immich.apiKey` is a
+  **fatal load error** (`validateSecretExpansion`: "unresolved environment variables in
+  security-sensitive fields") only when `immich.apiUrl` is non-empty after that step; with no URL
+  the key is ignored. A variable that is *set but empty* (as in `.env.example`) is also fine and
+  leaves Immich disabled.
 - An unresolved `${VAR}` in `admin.bootstrapPAT` is treated as **empty** (bootstrap off), so the
   literal `${...}` text never becomes a wildcard admin PAT secret.
 
@@ -30,7 +33,7 @@ wins, regardless of what it holds.
 For a handful of fields whose own "empty" value already means "not configured" — `immich.apiUrl`
 and `immich.libraryId`, where the sync worker already treats either as its off-switch — a literal,
 never-expanded `${VAR}` (e.g. one that reaches the sync supervisor through the settings layer
-rather than `config.Load`'s fatal check) is treated identically to an empty value by the worker
+rather than through `config.Load`, which already blanks an unresolved `immich.apiUrl`) is treated identically to an empty value by the worker
 (`internal/sync.Supervisor` checks for `${`). This does **not** apply to most fields: the general
 "fails loudly on a typo'd variable name" behavior described above is unchanged everywhere else.
 
@@ -214,7 +217,7 @@ worker. No restart of the branchDAM process itself is needed for an Immich chang
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `apiUrl` | string | — | **Empty, or containing an unresolved `${VAR}`, disables the sync worker entirely** (`internal/sync.Supervisor`). This is a deliberate off-switch, not a misconfiguration — no Immich instance is required to run branchDAM. |
-| `apiKey` | string | — | Immich API key. |
+| `apiKey` | string | — | Immich API key. An unresolved `${VAR}` here is a fatal load error only when `apiUrl` is set; with no `apiUrl` it is ignored. |
 | `libraryId` | string | — | Immich external-library ID to trigger scans against. **Also disables the worker if empty or unresolved** — an empty library ID would otherwise call `POST /api/libraries//scan` and 404 forever, retrying until the per-row retry bound trips and the row is stuck `PUSH_FAILED` with no recovery short of a config fix. branchDAM refuses to start the worker rather than run one that can only fail. |
 | `exportPath` | string | `/storage/exports/immich` | Container path where Immich's external-library mount indexes; the worker enqueues live nodes under this path. |
 

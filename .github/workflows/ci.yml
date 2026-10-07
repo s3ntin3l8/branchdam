@@ -74,7 +74,7 @@ jobs:
           # .golangci.yml declares `version: "2"`, which requires a v2.x
           # binary -- pin explicitly rather than floating to "latest" so a
           # future v3 release doesn't silently change what this job enforces.
-          version: v2.12.2
+          version: v2.14.0
 
   frontend:
     name: Web (typecheck · build)
@@ -86,7 +86,7 @@ jobs:
     if: needs.detect.outputs.has_web == 'true'
     uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
     with:
-      node-version: '24'
+      node-version: '26'
       working-directory: web
       cache-dependency-path: web/package-lock.json
       test-script: test:coverage
