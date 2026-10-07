@@ -1,6 +1,6 @@
 module github.com/s3ntin3l8/branchdam
 
-go 1.26.6
+go 1.27.1
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0

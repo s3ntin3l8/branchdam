@@ -34,7 +34,7 @@ RUN npm run build
 FROM mwader/static-ffmpeg@sha256:028fb402231d4f5f2223c67fca5d0abc04f5a38cffcbadf9844f06985e2259b8 AS ffprobe
 
 # --- Stage 3: build the Go binary (with embedded dist) ---
-# golang:1.26-bookworm, NOT -alpine: CGO_ENABLED=1 (mattn/go-sqlite3, see
+# golang:1.27-bookworm, NOT -alpine: CGO_ENABLED=1 (mattn/go-sqlite3, see
 # docs/schema.md) needs a glibc builder to match the glibc runtime below --
 # an alpine (musl) build here would not run on debian-slim. CI builds each
 # platform on a native runner (docker-publish.yml), so CGO's usual

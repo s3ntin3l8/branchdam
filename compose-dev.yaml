@@ -3,7 +3,7 @@
 # UI:   http://localhost:5173  (proxies /api to the backend)
 services:
   backend:
-    image: golang:1.26-bookworm
+    image: golang:1.27-bookworm
     working_dir: /src
     # web/dist is gitignored and only exists after `npm run build` or (as
     # here) .github/ci-prebuild.sh's stub -- a fresh checkout has neither,

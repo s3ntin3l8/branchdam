@@ -31,7 +31,7 @@ make check
 ```
 
 which is exactly `make lint && make test && make build && make golangci-lint` --
-`golangci-lint` is `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run`
+`golangci-lint` is `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run`
 (see the Makefile's `GOLANGCI_LINT_VERSION`). The `/v2` module path and the version pin both
 matter -- `.golangci.yml` declares `version: "2"`, and a floating `@latest` install could
 resolve v3+ and fail against a v2 config. CI pins the same version via

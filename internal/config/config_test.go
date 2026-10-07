@@ -231,19 +231,40 @@ func TestLoadRejectsUnresolvedSecretEnvVars(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsMultipleUnresolvedSecrets(t *testing.T) {
-	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_A") //nolint:errcheck // intentional: test needs var unset
-	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_B") //nolint:errcheck // intentional: test needs var unset
-	path := writeConfig(t, "immich:\n  apiUrl: \"${BRANCHDAM_UNDEFINED_VAR_A}\"\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_B}\"\n")
+func TestLoadUnresolvedImmichURLDisablesSync(t *testing.T) {
+	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_URL") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "immich:\n  apiUrl: \"${BRANCHDAM_UNDEFINED_VAR_URL}\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Immich.APIURL != "" {
+		t.Errorf("Immich.APIURL = %q, want empty (unresolved var disables sync)", cfg.Immich.APIURL)
+	}
+}
+
+func TestLoadUnresolvedImmichKeyWithURLSetIsFatal(t *testing.T) {
+	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_KEY") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "immich:\n  apiUrl: \"http://immich:2283\"\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_KEY}\"\n")
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("Load with multiple unresolved secrets: want error, got nil")
-	}
-	if !strings.Contains(err.Error(), "immich.apiUrl") {
-		t.Errorf("error = %q, want it to mention immich.apiUrl", err.Error())
+		t.Fatal("Load: want error for unresolved apiKey with apiUrl set, got nil")
 	}
 	if !strings.Contains(err.Error(), "immich.apiKey") {
 		t.Errorf("error = %q, want it to mention immich.apiKey", err.Error())
+	}
+}
+
+func TestLoadBothImmichVarsUnresolvedLoads(t *testing.T) {
+	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_A") //nolint:errcheck // intentional: test needs var unset
+	os.Unsetenv("BRANCHDAM_UNDEFINED_VAR_B") //nolint:errcheck // intentional: test needs var unset
+	path := writeConfig(t, "immich:\n  apiUrl: \"${BRANCHDAM_UNDEFINED_VAR_A}\"\n  apiKey: \"${BRANCHDAM_UNDEFINED_VAR_B}\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Immich.APIURL != "" || cfg.Immich.APIKey != "" {
+		t.Errorf("Immich = %+v, want empty URL and key", cfg.Immich)
 	}
 }
 
