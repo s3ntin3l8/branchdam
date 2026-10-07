@@ -922,7 +922,7 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 			Limit:        graph.FilenameStemCandidateCap,
 		})
 		if err != nil {
-			deps.Log.Warn("pipeline.scan: reverse lineage stem lookup failed", "node_id", node.ID, "stem", node.FilenameStem.String, "err", err)
+			deps.logOrDiscard().Warn("pipeline.scan: reverse lineage stem lookup failed", "node_id", node.ID, "stem", node.FilenameStem.String, "err", err)
 		} else {
 			for _, sib := range siblings {
 				if sib.ID == node.ID || sib.StorageLocationID != node.StorageLocationID {
@@ -931,7 +931,7 @@ func resolveNodeEdges(ctx context.Context, deps ScanDeps, path string, log *slog
 				if sib.GraphStatus == "UNLINKED" {
 					_, sibCreated, sibErr := deps.Engine.ResolveAndCommit(ctx, toGraphNode(sib))
 					if sibErr != nil {
-						deps.Log.Warn("pipeline.scan: reverse lineage resolve failed", "sibling_id", sib.ID, "parent_id", node.ID, "err", sibErr)
+						deps.logOrDiscard().Warn("pipeline.scan: reverse lineage resolve failed", "sibling_id", sib.ID, "parent_id", node.ID, "err", sibErr)
 					} else {
 						created += sibCreated
 					}

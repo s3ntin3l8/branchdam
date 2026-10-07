@@ -276,3 +276,133 @@ func TestDebouncerStopAllPreventsPendingCallbacks(t *testing.T) {
 		t.Errorf("callback was executed on closed debouncer")
 	}
 }
+
+// A watch root whose own path contains a hidden component (e.g.
+// /home/u/.local/share/dam, /mnt/.snapshots/x) must still deliver events:
+// the hidden-path filter applies to the part below the root, not the root.
+func TestWatchWorksWhenRootPathHasHiddenComponent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".hidden-parent", "library")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var seen []string
+	go func() {
+		_ = Watch(ctx, root, 20*time.Millisecond, testLogger(), func(r Record) error {
+			mu.Lock()
+			seen = append(seen, r.Path)
+			mu.Unlock()
+			return nil
+		}, noRemovals(t))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	target := filepath.Join(root, "photo.jpg")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, p := range seen {
+			if p == target {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// A directory that appears already populated (moved/copied in) must report
+// the files it carries: only the directory itself used to produce an event,
+// which was ignored, so its contents stayed unindexed until a manual scan.
+func TestWatchReportsFilesInsideMovedInDirectory(t *testing.T) {
+	root := t.TempDir()
+	staging := t.TempDir() // outside the watch root, same filesystem
+	populated := filepath.Join(staging, "trip")
+	if err := os.MkdirAll(filepath.Join(populated, "day1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"a.jpg", filepath.Join("day1", "b.jpg")} {
+		if err := os.WriteFile(filepath.Join(populated, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	go func() {
+		_ = Watch(ctx, root, 20*time.Millisecond, testLogger(), func(r Record) error {
+			mu.Lock()
+			seen[r.Path] = true
+			mu.Unlock()
+			return nil
+		}, noRemovals(t))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	dst := filepath.Join(root, "trip")
+	if err := os.Rename(populated, dst); err != nil {
+		t.Skipf("cross-dir rename unsupported here: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen[filepath.Join(dst, "a.jpg")] && seen[filepath.Join(dst, "day1", "b.jpg")]
+	})
+}
+
+// A file that is still growing when the debounce fires (a large copy that
+// paused for longer than the debounce) must not be reported half-written:
+// hashing a partial file would index a wrong hash and later archive that node
+// as a spurious "version collision". It is reported once, after it settles.
+func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var sizes []int64
+	go func() {
+		_ = Watch(ctx, root, 40*time.Millisecond, testLogger(), func(r Record) error {
+			mu.Lock()
+			sizes = append(sizes, r.Size)
+			mu.Unlock()
+			return nil
+		}, noRemovals(t))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	target := filepath.Join(root, "big.mov")
+	f, err := os.Create(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Append in chunks with pauses LONGER than the debounce but shorter than
+	// the settle window, so a naive debounce would fire mid-copy.
+	var total int64
+	for i := 0; i < 4; i++ {
+		n, _ := f.WriteString(strings.Repeat("x", 1000))
+		total += int64(n)
+		_ = f.Sync()
+		time.Sleep(70 * time.Millisecond)
+	}
+	_ = f.Close()
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(sizes) > 0 && sizes[len(sizes)-1] == total
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for _, sz := range sizes {
+		if sz != total {
+			t.Fatalf("reported a partially written file (size %d of %d); all reports: %v", sz, total, sizes)
+		}
+	}
+}

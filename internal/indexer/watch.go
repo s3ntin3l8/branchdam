@@ -34,7 +34,7 @@ func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.L
 	}
 	defer func() { _ = watcher.Close() }()
 
-	if err := addRecursive(watcher, root); err != nil {
+	if err := addRecursive(watcher, root, log); err != nil {
 		return fmt.Errorf("indexer: watch %q: %w", root, err)
 	}
 
@@ -50,7 +50,7 @@ func Watch(ctx context.Context, root string, debounce time.Duration, log *slog.L
 			if !ok {
 				return nil
 			}
-			handleEvent(watcher, event, deb, log, onEvent, onRemove)
+			handleEvent(watcher, root, event, deb, log, onEvent, onRemove)
 
 		case werr, ok := <-watcher.Errors:
 			if !ok {
@@ -81,30 +81,84 @@ func logWatcherError(log *slog.Logger, werr error) {
 	log.Warn("indexer: watcher error", "err", werr)
 }
 
-func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer, log *slog.Logger, onEvent func(Record) error, onRemove func(path string) error) {
+// isHiddenBelow reports whether path (which must be root or below it) has a
+// hidden or .trash component BELOW root. Components of root itself don't
+// count: a library living under /home/u/.local/share/... or /mnt/.snapshots/...
+// must not have every event silently dropped.
+func isHiddenBelow(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." {
+		return false
+	}
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == ".trash" || (len(part) > 0 && part[0] == '.') {
+			return true
+		}
+	}
+	return false
+}
+
+func handleEvent(watcher *fsnotify.Watcher, root string, event fsnotify.Event, deb *debouncer, log *slog.Logger, onEvent func(Record) error, onRemove func(path string) error) {
 	// Skip .trash and hidden paths from being watched or processed
-	base := filepath.Base(event.Name)
-	if base == ".trash" || (len(base) > 0 && base[0] == '.') || strings.Contains(event.Name, string(filepath.Separator)+".") {
+	if isHiddenBelow(root, event.Name) {
 		return
 	}
 
 	// A newly created directory needs its own watch, and needs it added
 	// promptly (not after the debounce delay) or files created inside it
-	// in the same burst would be missed entirely.
+	// in the same burst would be missed entirely. A directory that arrives
+	// already populated (moved or copied in) produces no events for the
+	// files it carries, so walk it and report them too -- otherwise they
+	// stay unindexed until a manual full scan.
 	if event.Has(fsnotify.Create) {
 		if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
-			if err := addRecursive(watcher, event.Name); err != nil && log != nil {
+			if err := addRecursive(watcher, event.Name, log); err != nil && log != nil {
 				log.Warn("indexer: watch new directory", "err", err)
 			}
+			_ = filepath.WalkDir(event.Name, func(p string, d fs.DirEntry, werr error) error {
+				if werr != nil {
+					return nil
+				}
+				if d.IsDir() {
+					if p != event.Name && isHiddenBelow(root, p) {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if !isHiddenBelow(root, p) {
+					triggerPath(deb, log, p, onEvent, onRemove)
+				}
+				return nil
+			})
 		}
 	}
 
-	deb.trigger(event.Name, func() {
-		info, err := os.Lstat(event.Name)
+	triggerPath(deb, log, event.Name, onEvent, onRemove)
+}
+
+// triggerPath debounces one path and, once quiet, reports it: onEvent for a
+// present file, onRemove for a path that no longer exists.
+func triggerPath(deb *debouncer, log *slog.Logger, path string, onEvent func(Record) error, onRemove func(path string) error) {
+	deb.trigger(path, func() {
+		info, err := os.Lstat(path)
+		if err == nil && !info.IsDir() {
+			// A debounce only says "no event for a while", not "the writer is
+			// done": a multi-GB copy over SMB pauses longer than the debounce
+			// and would be hashed half-written, indexing a wrong hash that
+			// later archives the node as a spurious version collision. Sample
+			// the file again one debounce later; if it moved, re-arm and wait.
+			time.Sleep(deb.delay)
+			again, aerr := os.Lstat(path)
+			if aerr == nil && (again.Size() != info.Size() || !again.ModTime().Equal(info.ModTime())) {
+				triggerPath(deb, log, path, onEvent, onRemove)
+				return
+			}
+			info, err = again, aerr
+		}
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) && onRemove != nil {
-				if rerr := onRemove(event.Name); rerr != nil && log != nil {
-					log.Warn("indexer: onRemove", "path", event.Name, "err", rerr)
+				if rerr := onRemove(path); rerr != nil && log != nil {
+					log.Warn("indexer: onRemove", "path", path, "err", rerr)
 				}
 			}
 			return
@@ -113,13 +167,13 @@ func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer
 			return
 		}
 		if err := onEvent(Record{
-			Path:      event.Name,
+			Path:      path,
 			Size:      info.Size(),
 			ModTime:   info.ModTime(),
 			IsDir:     false,
 			IsSymlink: info.Mode()&fs.ModeSymlink != 0,
 		}); err != nil && log != nil {
-			log.Warn("indexer: onEvent", "path", event.Name, "err", err)
+			log.Warn("indexer: onEvent", "path", path, "err", err)
 		}
 	})
 }
@@ -129,10 +183,24 @@ func handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event, deb *debouncer
 // IsDir() is always false, even when it points at a directory), so a
 // symlinked directory is naturally never watched here -- following one is a
 // storage.Guard-mediated decision, not this package's.
-func addRecursive(watcher *fsnotify.Watcher, root string) error {
+//
+// A failure at the root itself is returned; below it, an unreadable
+// subdirectory or a failed watch add (e.g. the inotify watch limit) is
+// logged and skipped so one bad directory can't stop the watcher from
+// starting. Directories skipped this way are covered by the next full scan.
+func addRecursive(watcher *fsnotify.Watcher, root string, log *slog.Logger) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if path == root {
+				return err
+			}
+			if log != nil {
+				log.Warn("indexer: not watching unreadable path", "path", path, "err", err)
+			}
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !d.IsDir() {
 			return nil
@@ -140,7 +208,15 @@ func addRecursive(watcher *fsnotify.Watcher, root string) error {
 		if path != root && (d.Name() == ".trash" || d.Name()[0] == '.') {
 			return filepath.SkipDir
 		}
-		return watcher.Add(path)
+		if addErr := watcher.Add(path); addErr != nil {
+			if path == root {
+				return addErr
+			}
+			if log != nil {
+				log.Warn("indexer: could not watch directory (inotify limit?); run a full scan to cover it", "path", path, "err", addErr)
+			}
+		}
+		return nil
 	})
 }
 

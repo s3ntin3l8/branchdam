@@ -676,6 +676,44 @@ func (q *Queries) ListCameraModelFacets(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
+const listLiveNodeIDsUnderPrefix = `-- name: ListLiveNodeIDsUnderPrefix :many
+SELECT id FROM media_nodes
+WHERE file_path >= ?1 AND file_path < ?2
+  AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+`
+
+type ListLiveNodeIDsUnderPrefixParams struct {
+	FilePath   string
+	FilePath_2 string
+}
+
+// Live nodes whose file_path lies in the half-open range [?1, ?2). The watcher
+// passes "<dir>/" and "<dir>0" ('0' sorts right after '/') to find everything
+// under a directory that was removed or moved out. A range scan so it can use
+// idx_media_nodes_file_path.
+func (q *Queries) ListLiveNodeIDsUnderPrefix(ctx context.Context, arg ListLiveNodeIDsUnderPrefixParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodeIDsUnderPrefix, arg.FilePath, arg.FilePath_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveNodesByDocumentID = `-- name: ListLiveNodesByDocumentID :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,

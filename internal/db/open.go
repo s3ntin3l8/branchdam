@@ -171,6 +171,11 @@ func (d *DB) InTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
+	// Safety net for a panic in fn (or anything else that skips the paths
+	// below): an unreleased transaction would hold the writer's ONE
+	// connection forever and wedge every later write. Rollback after a
+	// completed Commit/Rollback just returns sql.ErrTxDone, which is ignored.
+	defer func() { _ = tx.Rollback() }()
 
 	if err := fn(sqlcgen.New(tx)); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
@@ -196,6 +201,7 @@ func (d *DB) InTxResult(ctx context.Context, fn func(*sqlcgen.Queries) (int64, e
 	if err != nil {
 		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }() // panic safety net, see InTx
 
 	res, err := fn(sqlcgen.New(tx))
 	if err != nil {

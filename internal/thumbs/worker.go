@@ -24,6 +24,9 @@ const DefaultInterval = 5 * time.Second
 // remote_sync_state's retry_count bound (internal/sync).
 const DefaultMaxAttempts = 5
 
+// generateTimeout bounds a single node's thumbnail generation.
+const generateTimeout = 2 * time.Minute
+
 // DefaultBatchSize is how many PENDING nodes ListPendingThumbnails claims
 // per pass.
 const DefaultBatchSize = 20
@@ -249,7 +252,11 @@ func (w *Worker) ProcessPending(ctx context.Context) (Stats, error) {
 // write itself failed (logged; not counted in Stats, since the node's
 // thumb_state may not have actually changed).
 func (w *Worker) processOne(ctx context.Context, node sqlcgen.ListPendingThumbnailsRow) string {
-	data, genErr := w.cache.Generate(ctx, node.FilePath)
+	// Bound one node's generation: a hung exiftool/ffmpeg on a stale NFS
+	// mount must not park the whole batch (and Wait() at shutdown) forever.
+	genCtx, cancel := context.WithTimeout(ctx, generateTimeout)
+	defer cancel()
+	data, genErr := w.cache.Generate(genCtx, node.FilePath)
 	if genErr == nil {
 		if writeErr := w.cache.Write(node.NodeUuid, data); writeErr != nil {
 			genErr = fmt.Errorf("write cached thumbnail: %w", writeErr)
@@ -279,8 +286,17 @@ func (w *Worker) processOne(ctx context.Context, node sqlcgen.ListPendingThumbna
 		attempts := node.ThumbAttempts + 1
 		w.log.Warn("thumbs: generate failed", "nodeID", node.ID, "filePath", node.FilePath,
 			"attempts", attempts, "maxAttempts", w.maxAttempts, "err", genErr)
-		if err := w.setState(ctx, node.ID, "FAILED", attempts); err != nil {
-			w.log.Error("thumbs: mark FAILED in db", "nodeID", node.ID, "err", err)
+		// ListPendingThumbnails only claims PENDING rows, so a failure below
+		// the retry bound must go back to PENDING (with the count) to be tried
+		// again; parking it in FAILED made one transient I/O error terminal
+		// and the attempt bound unreachable. Only the failure that reaches the
+		// bound is terminal FAILED.
+		state := "PENDING"
+		if attempts >= int64(w.maxAttempts) {
+			state = "FAILED"
+		}
+		if err := w.setState(ctx, node.ID, state, attempts); err != nil {
+			w.log.Error("thumbs: record failed attempt in db", "nodeID", node.ID, "err", err)
 			return ""
 		}
 		return "FAILED"
