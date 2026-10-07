@@ -200,6 +200,10 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 			}
 		}
 		// (A reader error just falls through to the authoritative in-tx check.)
+		// The reject reads a reader snapshot, so a row changed since can make it
+		// a false negative (skipping a candidate the in-tx check would pass):
+		// a harmless pessimization, never a correctness issue -- do not infer
+		// perfect parity with the in-tx check.
 		err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 			if !eligibleMap[c.NodeID] {
 				return ErrNoLongerEligible
