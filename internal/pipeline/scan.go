@@ -1022,6 +1022,8 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		}
 	}
 
+	// fullHashStillValid costs one extra reader query per file, but only on
+	// the Tier-3/collision/always path; keep it out of the cheap touch branch.
 	if needsFullHash(deps.FullHashPolicy, location.Tier, hasCollision) && (deps.FullHashPolicy == "always" || !fullHashStillValid(ctx, deps, rec)) {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek for full hash: %w", err)

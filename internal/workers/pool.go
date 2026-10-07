@@ -185,7 +185,8 @@ func (p *Pool[K]) Submit(ctx context.Context, job Job[K]) bool {
 	return ok
 }
 
-// submitWaitPoll is how often SubmitWait re-checks a full queue.
+// submitWaitPoll is how often SubmitWait re-checks a full queue. 5ms is far
+// below a worker task's duration yet costs negligible CPU while idle.
 const submitWaitPoll = 5 * time.Millisecond
 
 // SubmitWait is Submit with backpressure: when the queue is merely full it

@@ -113,6 +113,8 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			// XMP-xmpMM:DerivedFrom from getting stuck invisible in the DB.
 			return reconcileAllMetadata(ctx, q, existing, r, stats, log)
 		}
+		// Defensive: only matters when another writer raced a live node with
+		// this hash in; do not remove as "unreachable".
 		if skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log); skip || err != nil {
 			return err
 		}
@@ -286,7 +288,7 @@ func skipDuplicateContent(ctx context.Context, q *sqlcgen.Queries, r Result, sel
 		return false, nil
 	}
 	stats.Duplicates++
-	log.Warn("pipeline: identical content already indexed at another path; not indexing this copy",
+	log.Debug("pipeline: identical content already indexed at another path; not indexing this copy",
 		"path", r.Path, "existingNodeID", existing.ID, "existingPath", existing.FilePath)
 	return true, nil
 }
