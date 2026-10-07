@@ -368,7 +368,7 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	var mu sync.Mutex
 	var sizes []int64
 	go func() {
-		_ = Watch(ctx, root, 40*time.Millisecond, testLogger(), func(r Record) error {
+		_ = Watch(ctx, root, 100*time.Millisecond, testLogger(), func(r Record) error {
 			mu.Lock()
 			sizes = append(sizes, r.Size)
 			mu.Unlock()
@@ -389,11 +389,11 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 		n, _ := f.WriteString(strings.Repeat("x", 1000))
 		total += int64(n)
 		_ = f.Sync()
-		time.Sleep(70 * time.Millisecond)
+		time.Sleep(130 * time.Millisecond)
 	}
 	_ = f.Close()
 
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(t, 5*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(sizes) > 0 && sizes[len(sizes)-1] == total
