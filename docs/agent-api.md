@@ -12,6 +12,44 @@ companion app that shares this wire format, see [`mobile.md`](mobile.md).
 
 ---
 
+## Request signing (`agent.signedRequests`)
+
+Every `/api/v1/agent/*` request authenticates with the device's paired API key in `X-API-Key`.
+When `agent.signedRequests` is `true`, each request must also carry:
+
+| Header | Value |
+|---|---|
+| `X-Timestamp` | Request time as Unix **nanoseconds**, base 10. Must be within `agent.replayWindowSecs` (default 300 s) of server time. |
+| `X-Nonce` | A fresh random value per request (the clients send 16 random bytes, hex). A nonce seen again inside the replay window is rejected. |
+| `X-Signature` | Lowercase hex HMAC-SHA256, as below. |
+
+The signature is:
+
+```
+key       = the raw API key bytes (the exact X-API-Key value)
+canonical = METHOD + "\n" + requestURI + "\n" + nonce + "\n" + timestamp + "\n"
+signature = hex(HMAC-SHA256(key, canonical || body))
+```
+
+`requestURI` is the path plus `?` and the raw query string exactly as sent (for example
+`/api/v1/agent/check-content?fastHash=0123456789abcdef`), and `body` is the raw request body
+bytes (empty for a GET or a body-less POST). This is byte-for-byte what `branchdam-agent`'s and
+`branchdam-mobile`'s `Client.signRequest` compute; the server's side is
+`internal/auth.SigningKeyForAPIKey` plus `AgentChainWithConfig`.
+
+Earlier servers verified against `HMAC-SHA256(pepper, "sign:" + apiKey)`, which no client can
+compute, so turning `signedRequests` on rejected every device. Servers from this fix on verify
+with the raw key. Keying with the raw API key exposes nothing new: the key is already sent in
+`X-API-Key` on the same request, and the signature protects the request against replay and
+tampering, not the key's secrecy (use TLS for that).
+
+Paths in `agent.skipSignaturePaths` (default: `/api/v1/agent/upload`, whose body is the binary
+stream) skip the signature check; the API key check always runs. A missing, stale, replayed or
+mismatched signature returns `401 invalid or missing signature`; a signed body over
+`agent.signedMaxBodyBytes` returns `413`.
+
+---
+
 ## 1. Handshake (`POST /api/v1/agent/handshake`)
 
 **Request (`AgentHandshakeInput`):**

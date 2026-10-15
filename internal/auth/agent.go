@@ -33,14 +33,31 @@ import (
 type KeyLookupResult struct {
 	AgentID string
 	// SigningKey is the HMAC-SHA256 key bytes the validator uses to
-	// verify X-Signature from this device. Derived per-lookup in
-	// internal/pairing.Service.signingKeyFor from the presented
-	// plaintext (HMAC-SHA256(pepper, "sign:" + plaintext) -- distinct
-	// label from the lookup hash so the two outputs can't collide
-	// under the same pepper). Never persisted: only the device_pairing_keys
-	// row holds the lookup hash, so a database-only compromise can't
-	// reconstruct the signing key without the pepper.
+	// verify X-Signature from this device. Always
+	// SigningKeyForAPIKey(presented): the raw bytes of the API key the
+	// device presented in X-API-Key, which is exactly the key both
+	// shipped clients (branchdam-agent and branchdam-mobile) sign with.
+	// Never persisted: only the device_pairing_keys row's lookup hash is
+	// stored, so a database-only compromise can't reconstruct it.
 	SigningKey []byte
+}
+
+// SigningKeyForAPIKey returns the HMAC-SHA256 key that X-Signature is
+// verified against for a request authenticated by the API key
+// presented: the raw bytes of that key. This is the single definition
+// of the signing-key contract shared with every client --
+// branchdam-agent's and branchdam-mobile's Client.signRequest both key
+// HMAC-SHA256 with []byte(apiKey) over
+// method\nrequestURI\nnonce\ntimestamp\n followed by the body.
+//
+// An earlier server derived HMAC-SHA256(pepper, "sign:"+apiKey)
+// instead. No client could compute that (the pepper never leaves the
+// server), so agent.signedRequests=true rejected every real device.
+// Using the raw key adds no exposure: the key already travels in the
+// X-API-Key header of the same request, and the signature's job is
+// replay/tamper protection of the request, not secrecy of the key.
+func SigningKeyForAPIKey(presented string) []byte {
+	return []byte(presented)
 }
 
 // defaultSignedMaxBodyBytes caps the request body the signature validator is
@@ -108,7 +125,8 @@ type AgentConfig struct {
 // AgentChainWithConfig builds the agent auth middleware using the supplied AgentConfig.
 // When SignedRequests is true, it verifies X-Timestamp, X-Nonce, and X-Signature
 // (HMAC-SHA256 over method\nrequestURI\nnonce\ntimestamp\nbody, where requestURI
-// is path plus raw query, keyed by the per-device signing key) within the replay
+// is path plus raw query, keyed by the per-device signing key -- the raw
+// presented API key, see SigningKeyForAPIKey) within the replay
 // window. Paths in SkipSignaturePaths bypass the signature check (not the API key).
 //
 // Issue #453 PR F removed the historical env-bootstrap / shared-secret
@@ -162,10 +180,10 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				return
 			}
 			// Companion Pairing is the only authentication path.
-			// The callback returns the agent_id AND a per-device HMAC
-			// signing key derived from the presented plaintext
-			// (issue #453 PR C). A non-nil error is a genuine DB
-			// failure and propagates as 500.
+			// The callback returns the agent_id AND the per-device HMAC
+			// signing key for the presented plaintext
+			// (SigningKeyForAPIKey; issue #453 PR C). A non-nil error
+			// is a genuine DB failure and propagates as 500.
 			result, lookupErr := cfg.LookupKey(r.Context(), provided)
 			if lookupErr != nil {
 				log.Error("auth: agent key lookup failed", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", lookupErr.Error())

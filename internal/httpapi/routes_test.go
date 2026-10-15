@@ -32,7 +32,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/workers"
 )
 
-const routeTestAgentKey = "01234567890123456789012345678901" // 33 chars
+const routeTestAgentKey = "01234567890123456789012345678901" // 32 chars
 
 // fullTestServer builds a Server with a live worker pool and a real,
 // running goroutine set -- unlike testServer(t) in server_test.go, which

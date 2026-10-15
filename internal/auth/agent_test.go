@@ -21,15 +21,15 @@ const testAgentID = "test-device"
 // that issue #453 PR F removed. Returns an AgentChainWithConfig whose
 // LookupKey stub accepts the canonical testKey and reports the supplied
 // agent_id and signing key, so the post-PR-F chain still authenticates
-// the same X-API-Key tests have always used. The signing key is
-// []byte(testKey) so HMAC verification continues to compute against the
-// same secret the pre-PR-F env-bootstrap path did, preserving every
-// signature-mismatch assertion in TestAgentChainSignedRequests.
+// the same X-API-Key tests have always used. The signing key is the
+// production SigningKeyForAPIKey(testKey) -- the raw key bytes, which is
+// what real clients sign with -- preserving every signature-mismatch
+// assertion in TestAgentChainSignedRequests.
 func chainWithTestKey() func(http.Handler) http.Handler {
 	return AgentChainWithConfig(AgentConfig{
 		LookupKey: func(_ context.Context, presented string) (KeyLookupResult, error) {
 			if presented == testKey {
-				return KeyLookupResult{AgentID: testAgentID, SigningKey: []byte(testKey)}, nil
+				return KeyLookupResult{AgentID: testAgentID, SigningKey: SigningKeyForAPIKey(presented)}, nil
 			}
 			return KeyLookupResult{}, nil
 		},
@@ -38,13 +38,13 @@ func chainWithTestKey() func(http.Handler) http.Handler {
 
 // chainWithTestKeyAndSigning wires the same LookupKey stub but allows
 // the caller to override SignedRequests / ReplayWindow / Now / Cache
-// for the signed-request test suite. The LookupKey stub still uses
-// []byte(testKey) so the HMAC inputs match exactly what the production
-// signing path sees.
+// for the signed-request test suite. The LookupKey stub uses the
+// production SigningKeyForAPIKey so the HMAC inputs match exactly what
+// the production signing path sees.
 func chainWithTestKeyAndSigning(extra AgentConfig) func(http.Handler) http.Handler {
 	extra.LookupKey = func(_ context.Context, presented string) (KeyLookupResult, error) {
 		if presented == testKey {
-			return KeyLookupResult{AgentID: testAgentID, SigningKey: []byte(testKey)}, nil
+			return KeyLookupResult{AgentID: testAgentID, SigningKey: SigningKeyForAPIKey(presented)}, nil
 		}
 		return KeyLookupResult{}, nil
 	}

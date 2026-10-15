@@ -8,7 +8,9 @@ import (
 
 // NewStubAgentKeyLookup returns a LookupKey that recognises every
 // plaintext in the acceptedKeys slice, returning the matching agentID
-// with a 32-byte HMAC signing key derived from the presented plaintext.
+// with the production signing key for the presented plaintext
+// (auth.SigningKeyForAPIKey -- the same function
+// internal/pairing.Service.KeyLookup uses).
 //
 // Test-only helper used after issue #453 PR F retired the shared-
 // secret apiKey fallback: pre-PR-F, tests authenticated agent routes
@@ -18,13 +20,13 @@ import (
 // working without setting up a full pairing service + paired-device
 // row.
 //
-// The signingKey is `HMAC-SHA256(pepper?, "x:"+plaintext)` truncated to
-// 32 bytes; tests that pre-computed HMAC over a specific plaintext
-// should pass that plaintext in and rely on the test's own computeSignature
-// helper (or assert that the request was authenticated at all). For
-// the common case where a test sends X-API-Key = routeTestAgentKey
-// and only needs the chain to accept it, this returns a stable 32-byte
-// key that's deterministic per-plaintext.
+// The signing key deliberately comes from the production derivation
+// rather than a test-local one: an earlier stub padded the plaintext to
+// 32 bytes, which for the 32-character routeTestAgentKey happened to
+// equal the raw key the tests signed with, and so hid that production
+// derived a pepper-keyed value no client could compute. See
+// agent_signing_e2e_test.go for the end-to-end check against the real
+// pairing service.
 //
 // Production code never sees this helper.
 func NewStubAgentKeyLookup(acceptedKeys map[string]string) func(ctx context.Context, presented string) (auth.KeyLookupResult, error) {
@@ -33,16 +35,7 @@ func NewStubAgentKeyLookup(acceptedKeys map[string]string) func(ctx context.Cont
 		if !ok {
 			return auth.KeyLookupResult{}, nil
 		}
-		// Deterministic 32-byte signing key derived from the
-		// presented plaintext. Tests that exercise the HMAC path
-		// (TestAgentChainSignedRequests et al.) compute their own
-		// signature with the same plaintext, so this matches what
-		// they expect.
-		signingKey := make([]byte, 32)
-		for i := 0; i < len(signingKey); i++ {
-			signingKey[i] = presented[i%len(presented)]
-		}
-		return auth.KeyLookupResult{AgentID: agentID, SigningKey: signingKey}, nil
+		return auth.KeyLookupResult{AgentID: agentID, SigningKey: auth.SigningKeyForAPIKey(presented)}, nil
 	}
 }
 
