@@ -10,6 +10,31 @@ proxies, and exported JPEG/MP4 hang off it as child nodes joined by
 confidence-weighted lineage edges. Runs behind Traefik v3 + Authentik
 ForwardAuth, on SQLite in WAL mode.
 
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/asset-graph.png"><img src="docs/screenshots/asset-graph.png" alt="Lineage graph of a RAW with its camera JPEG, graded export, EDL project and proxy" /></a></td>
+<td width="50%"><a href="docs/screenshots/audit-queue.png"><img src="docs/screenshots/audit-queue.png" alt="Audit queue with medium-confidence link candidates" /></a></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Lineage graph</b>: the RAW root and every derivative, with relationship and confidence <a href="docs/screenshots/asset-graph-light.png">(light)</a></sub></td>
+<td align="center"><sub><b>Audit queue</b>: links below the auto-accept threshold wait for a human <a href="docs/screenshots/audit-queue-light.png">(light)</a></sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/assets.png"><img src="docs/screenshots/assets.png" alt="Asset list with thumbnails, camera model and graph status" /></a></td>
+<td width="50%"><a href="docs/screenshots/storage-health.png"><img src="docs/screenshots/storage-health.png" alt="Storage health across tiers" /></a></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Assets</b> <a href="docs/screenshots/assets-light.png">(light)</a></sub></td>
+<td align="center"><sub><b>Storage health</b> per tier <a href="docs/screenshots/storage-health-light.png">(light)</a></sub></td>
+</tr>
+</table>
+
+All media in these captures is synthetic: `make screenshots` renders it with
+ffmpeg and exiftool, ingests it into a throwaway demo instance, and captures the
+UI (see [Development](#development--contributing)).
+
 ---
 
 ## Key Capabilities
@@ -102,6 +127,15 @@ For detailed bring-up instructions and reverse proxy configurations, see [`docs/
 ## Development & Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local development setup, prerequisites, automated verification commands (`make check`, `make check-web`), and pull request guidelines.
+
+`make demo` starts a throwaway instance with synthetic media and a populated
+version graph on `127.0.0.1:3975`. It writes its own config, database and
+storage roots under `/tmp/branchdam-demo` (never the checkout's `config.yaml`),
+runs with a clean environment, keeps Immich and metadata write-back off, and
+deletes everything on Ctrl-C. `scripts/demo/env.mjs` enforces that, and
+`make test-demo` tests it. `make screenshots` regenerates `docs/screenshots/`
+from that demo; `make screenshots-landing OUT=<dir>` writes 2x stills plus a
+short loop. Both need `ffmpeg` and `exiftool`.
 
 ---
 

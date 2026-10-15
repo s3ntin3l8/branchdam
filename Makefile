@@ -1,5 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help install-hooks web-stub web-ensure dev dev-api dev-web dev-all dev-config \
+	demo screenshots screenshots-landing test-demo \
 	test test-coverage lint fmt vet tidy vulncheck build build-embed golangci-lint \
 	web-lint web-typecheck web-build web-test check check-web sqlc-generate sqlc-diff clean
 
@@ -75,6 +76,18 @@ dev-all: web-ensure dev-config web/node_modules ## Run API + Vite together in on
 	(cd web && npm run dev) & \
 	wait
 
+demo: web/node_modules ## Throwaway demo with synthetic media + lineage (scratch config/DB/storage, clean env, 127.0.0.1:3975); Ctrl-C deletes it
+	node scripts/demo/instance.mjs
+
+screenshots: web/node_modules ## Regenerate docs/screenshots (dark + light) from the demo; needs ffmpeg + exiftool
+	node scripts/demo/capture.mjs
+
+screenshots-landing: web/node_modules ## Landing-page stills + loop into OUT (default ./landing-shots)
+	node scripts/demo/capture.mjs --profile landing --out "$(or $(OUT),landing-shots)"
+
+test-demo: ## Tests for the demo's isolation guard
+	node --test scripts/demo/*.test.mjs
+
 test: web-stub ## Run tests with race detector
 	go test -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
 
@@ -118,7 +131,7 @@ web-build: web/node_modules ## Typecheck + production build web/ -> web/dist/
 web-test: web/node_modules ## Run vitest on web/
 	cd web && npm run test
 
-check: lint test build golangci-lint ## Backend pre-PR gate (NOTE: lint/gofmt hooks rewrite files in the working tree)
+check: lint test test-demo build golangci-lint ## Backend pre-PR gate (NOTE: lint/gofmt hooks rewrite files in the working tree)
 check-web: web-lint web-typecheck web-test web-build ## Frontend pre-PR gate
 
 sqlc-generate: ## Regenerate internal/db/sqlcgen from internal/db/queries

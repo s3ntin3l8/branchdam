@@ -71,3 +71,4 @@ compose.override.yml
 
 # Developer worktrees (per AGENTS.md make wt convention; existing .worktrees/ line untouched)
 .wt/
+landing-shots/

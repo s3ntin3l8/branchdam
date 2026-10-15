@@ -92,6 +92,17 @@ jobs:
       test-script: test:coverage
     secrets: inherit
 
+  demo-guard:
+    name: Demo isolation guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+      - run: node --test scripts/demo/*.test.mjs
+
   docker:
     name: Docker image build
     needs: [detect, backend, frontend]
