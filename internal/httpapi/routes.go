@@ -2330,6 +2330,11 @@ type AgentNodeStatusEntry struct {
 	// (BLAKE3-256) -- the same predicate ListPrunableNodes uses to decide a
 	// Tier-3 ancestor authorizes a purge. False whenever Found is false.
 	Verified bool `json:"verified"`
+	// FullHash is the node's stored BLAKE3-256 full_hash, so a client about
+	// to reclaim its local copy can compare it with the hash it computed
+	// itself instead of trusting Verified alone. Omitted when the node is
+	// not found or has no full hash.
+	FullHash string `json:"fullHash,omitempty"`
 }
 
 type AgentNodeStatusOutput struct {
@@ -2377,12 +2382,17 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 		lifecycleState string
 		tier           string
 		verified       bool
+		fullHash       string
 	}
 	byUUID := make(map[string]nodeInfo, len(rows))
 	for _, row := range rows {
 		var tier string
 		if row.Tier.Valid {
 			tier = row.Tier.String
+		}
+		var fullHash string
+		if row.FullHash != nil {
+			fullHash = *row.FullHash
 		}
 		byUUID[row.NodeUuid] = nodeInfo{
 			lifecycleState: row.LifecycleState,
@@ -2394,6 +2404,7 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 			// so a caller can't observe a divergence between the two. Low residual risk:
 			// hashing.FullHash (the only writer) always emits lowercase hex.
 			verified: row.FullHash != nil && len(*row.FullHash) == 64,
+			fullHash: fullHash,
 		}
 	}
 
@@ -2406,6 +2417,7 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 			entry.LifecycleState = info.lifecycleState
 			entry.Tier = info.tier
 			entry.Verified = info.verified
+			entry.FullHash = info.fullHash
 		}
 		out.Body.Statuses = append(out.Body.Statuses, entry)
 	}
@@ -2415,13 +2427,33 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 
 // --- /api/v1/agent/check-content ---
 
+// AgentCheckContentInput is the check-content query. Two modes:
+//
+//   - fullHash given: the definitive lookup, unchanged from before -- a live
+//     node with that BLAKE3-256 hash is reported with its identity. fastHash
+//     and sizeBytes may accompany it and are format-checked but ignored.
+//   - fastHash only (optionally with sizeBytes): a pre-screen for clients
+//     that hash the card in a single pass and want to know, before copying,
+//     whether a full-hash confirmation is worth it. Answers possibleMatch
+//     only, never which node matched: a 64-bit fast hash is not proof of
+//     content, so it must not disclose another node's path or UUID.
+//
+// Neither hash is a 400.
 type AgentCheckContentInput struct {
-	FastHash string `query:"fastHash" doc:"Optional xxHash64 hex (16 chars) fast pre-screen" pattern:"^[0-9a-fA-F]{16}$"`
-	FullHash string `query:"fullHash" doc:"BLAKE3-256 hex (64 chars) definitive content hash" pattern:"^[0-9a-fA-F]{64}$"`
+	FastHash  string `query:"fastHash" doc:"xxHash64 hex (16 chars). Alone (no fullHash) it runs the fast pre-screen and the response carries only possibleMatch" pattern:"^[0-9a-fA-F]{16}$"`
+	FullHash  string `query:"fullHash" doc:"BLAKE3-256 hex (64 chars) definitive content hash; takes precedence over fastHash" pattern:"^[0-9a-fA-F]{64}$"`
+	SizeBytes int64  `query:"sizeBytes" doc:"Optional file size narrowing the fastHash pre-screen; 0 or absent means unknown" minimum:"0"`
 }
 
 type AgentCheckContentResult struct {
-	Found          bool   `json:"found"`
+	// Found is true only for a definitive full-hash match; a fast-only
+	// request always reports false here.
+	Found bool `json:"found"`
+	// PossibleMatch is true when a live (ACTIVE or HIDDEN) node may hold the
+	// same content: a fast-hash (and, if supplied, size) hit for a fast-only
+	// request, or the same value as Found for a full-hash request. A client
+	// seeing possibleMatch without found must confirm with fullHash.
+	PossibleMatch  bool   `json:"possibleMatch"`
 	NodeUUID       string `json:"nodeUuid,omitempty"`
 	FilePath       string `json:"filePath,omitempty"`
 	LifecycleState string `json:"lifecycleState,omitempty"`
@@ -2442,17 +2474,35 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 	}
 
 	fullHash := strings.ToLower(strings.TrimSpace(in.FullHash))
-	if !isHexChars(fullHash, 64) {
+	fastHash := strings.ToLower(strings.TrimSpace(in.FastHash))
+	if fullHash == "" && fastHash == "" {
+		return nil, huma.Error400BadRequest("fullHash or fastHash is required", nil)
+	}
+	if fullHash != "" && !isHexChars(fullHash, 64) {
 		return nil, huma.Error400BadRequest("fullHash must be 64 hexadecimal characters", nil)
 	}
-
-	fastHash := strings.ToLower(strings.TrimSpace(in.FastHash))
 	if fastHash != "" && !isHexChars(fastHash, 16) {
 		return nil, huma.Error400BadRequest("fastHash must be 16 hexadecimal characters", nil)
+	}
+	if in.SizeBytes < 0 {
+		return nil, huma.Error400BadRequest("sizeBytes must not be negative", nil)
 	}
 
 	if s.db == nil {
 		return nil, huma.Error500InternalServerError("database not available", nil)
+	}
+
+	if fullHash == "" {
+		possible, err := s.db.Reader.HasLiveNodeByFastHash(ctx, sqlcgen.HasLiveNodeByFastHashParams{
+			FastHash:  &fastHash,
+			SizeBytes: in.SizeBytes,
+		})
+		if err != nil {
+			return nil, huma.Error500InternalServerError("fast hash query failed", err)
+		}
+		return &AgentCheckContentOutput{
+			Body: AgentCheckContentResult{Found: false, PossibleMatch: possible},
+		}, nil
 	}
 
 	node, err := s.db.Reader.GetMediaNodeByFullHash(ctx, &fullHash)
@@ -2468,6 +2518,7 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 	return &AgentCheckContentOutput{
 		Body: AgentCheckContentResult{
 			Found:          true,
+			PossibleMatch:  true,
 			NodeUUID:       node.NodeUuid,
 			FilePath:       node.FilePath,
 			LifecycleState: node.LifecycleState,

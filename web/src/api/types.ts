@@ -640,6 +640,8 @@ export interface PostRestartResponse {
 
 export interface CheckContentResult {
   found: boolean;
+  /** True when a live node may hold the same content (fast-hash pre-screen hit, or a full-hash match). */
+  possibleMatch?: boolean;
   nodeUuid?: string;
   filePath?: string;
   lifecycleState?: string;

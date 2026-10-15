@@ -465,7 +465,8 @@ for an existing node or `CREATED` when an unknown `nodeUuid` was inserted.
       "found": true,
       "lifecycleState": "ACTIVE",
       "tier": "TIER3_MASTER_ARCHIVE",
-      "verified": true
+      "verified": true,
+      "fullHash": "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a"
     },
     {
       "nodeUuid": "018f2345-6789-7abc-def0-123456789abd",
@@ -477,8 +478,11 @@ for an existing node or `CREATED` when an unknown `nodeUuid` was inserted.
 ```
 
 `verified` mirrors `ListPrunableNodes`' own eligibility predicate exactly: `full_hash` non-NULL
-and 64 hex characters (BLAKE3-256). `found: false` is not an error -- it just means no
-`media_nodes` row currently has that `node_uuid`.
+and 64 hex characters (BLAKE3-256). `fullHash` is the node's stored BLAKE3-256 `full_hash`, so a
+client about to delete its local copy can compare it with the hash it computed itself rather than
+trusting `verified` alone; it is omitted when the node is not found or has no full hash (added
+alongside the existing fields -- older clients simply ignore it). `found: false` is not an error
+-- it just means no `media_nodes` row currently has that `node_uuid`.
 
 ---
 
@@ -556,29 +560,67 @@ A lightweight connectivity and version check endpoint for agent clients. Does no
 
 ## 9. Content Verification Pre-Flight (`GET /api/v1/agent/check-content`)
 
-Allows companion applications and workstation agents to perform a pre-flight content hash check before streaming multi-gigabyte uploads. If a file with the identical BLAKE3-256 hash already exists as an active or hidden node (excludes ARCHIVED and MISSING), the agent can skip the upload entirely.
+Lets companion apps and workstation agents ask, before copying or uploading a file, whether its
+content is already in the library as a live node (`ACTIVE` or `HIDDEN`; `ARCHIVED`, `MISSING` and
+`TRASHED` nodes don't count). It has two modes, chosen by which hash is sent.
 
 **Authentication:** Requires an Agent Machine Principal.
 
 **Query Parameters:**
-- `fullHash` (required): 64-character lowercase hex BLAKE3-256 digest of the candidate file content.
-- `fastHash` (optional): 16-character lowercase hex xxHash64 digest (accepted and format-validated for forward compatibility, but currently ignored; lookup is performed solely by `fullHash`).
+- `fullHash` (optional): 64-character hex BLAKE3-256 digest of the file. When present, the server
+  does the definitive lookup and `fastHash`/`sizeBytes` are format-checked but otherwise ignored.
+- `fastHash` (optional): 16-character hex xxHash64 `FastHash` (the sampled hash of
+  `internal/hashing.FastHash`). Sent **without** `fullHash`, it runs the fast pre-screen.
+- `sizeBytes` (optional, `>= 0`): file size in bytes, narrowing the fast pre-screen. `0` or absent
+  means "unknown"; a stored node whose `size_bytes` is `0` (an event that omitted the size) is also
+  treated as unknown and can still match.
+
+At least one of `fullHash` and `fastHash` is required (`400 Bad Request` otherwise). Hex is
+accepted in either case.
+
+### Fast pre-screen (`fastHash` without `fullHash`)
+
+Answers whether a live node *may* have the same content -- a fast-hash hit, and a size hit when
+both sides know the size -- using the `ix_media_nodes_fast_hash` index. It never says which node
+matched: no `nodeUuid`, `filePath`, `lifecycleState` or `indexingStatus`, because a 64-bit fast
+hash is not proof of identical content and the endpoint must not disclose other devices' paths on
+the strength of one. `found` is always `false` in this mode.
+
+```json
+{
+  "found": false,
+  "possibleMatch": true
+}
+```
+
+On `possibleMatch: true` the client computes the full hash (ideally while it streams the file,
+so the source is read only once) and confirms with a `fullHash` request. On
+`possibleMatch: false` there is no live node with that content and the client can proceed.
+
+### Full-hash lookup (`fullHash` present)
+
+Unchanged from earlier servers apart from the added `possibleMatch` field, which mirrors `found`.
 
 **Response When Found (Status 200 OK):**
 ```json
 {
   "found": true,
+  "possibleMatch": true,
   "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
-  "filePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
+  "filePath": "/storage/archive/2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
   "lifecycleState": "ACTIVE",
-  "indexingStatus": "INDEXED"
+  "indexingStatus": "INDEXED_FULL"
 }
 ```
+
+`filePath` is the node's absolute server-side path (`media_nodes.file_path`). `indexingStatus` is
+one of `PENDING`, `INDEXED_SHALLOW`, `INDEXED_FULL` or `INDEX_FAILED`.
 
 **Response When Not Found (Status 200 OK):**
 ```json
 {
-  "found": false
+  "found": false,
+  "possibleMatch": false
 }
 ```
 
@@ -599,8 +641,8 @@ Determines whether a local file path on a workstation or mobile device has alrea
 {
   "tracked": true,
   "nodeUuid": "018f2345-6789-7abc-def0-123456789abc",
-  "filePath": "2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
-  "indexingStatus": "INDEXED",
+  "filePath": "/storage/archive/2026/2026-08-29_Pixel-9-Pro/PXL_20260829_120000.jpg",
+  "indexingStatus": "INDEXED_FULL",
   "lifecycleState": "ACTIVE"
 }
 ```

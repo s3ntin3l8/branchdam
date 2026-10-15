@@ -603,6 +603,25 @@ WHERE fast_hash = ?1
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
 LIMIT 1;
 
+-- name: HasLiveNodeByFastHash :one
+-- Backs the fast-only pre-screen of GET /api/v1/agent/check-content:
+-- does any live (ACTIVE or HIDDEN) node carry this xxHash64 fast_hash
+-- (served by the partial index ix_media_nodes_fast_hash)? size_bytes = 0
+-- means "unknown" on either side: a caller passes 0 when it has no size,
+-- and a stored 0 (an agent event that omitted sizeBytes) is not allowed
+-- to hide a candidate. Returns only a boolean -- never the node's identity
+-- or path -- because a fast hash is not proof of content; the caller must
+-- confirm with the full hash.
+SELECT EXISTS(
+    SELECT 1
+    FROM media_nodes
+    WHERE fast_hash = sqlc.arg(fast_hash)
+      AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+      AND (CAST(sqlc.arg(size_bytes) AS INTEGER) = 0
+           OR size_bytes = 0
+           OR size_bytes = CAST(sqlc.arg(size_bytes) AS INTEGER))
+) AS possible_match;
+
 -- name: GetMediaNodeBySourcePathHash :one
 -- Agent dedup: find an active or hidden node with the given SHA-256 source_path_hash.
 -- Excludes ARCHIVED and MISSING nodes so re-ingesting removed content creates a fresh node.

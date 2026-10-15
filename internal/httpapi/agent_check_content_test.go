@@ -40,7 +40,7 @@ func TestAgentCheckContent_Auth(t *testing.T) {
 func TestAgentCheckContent_Validation(t *testing.T) {
 	srv, _, _, _, _, _ := serverWithGuard(t)
 
-	// 1. Missing fullHash query param -> 400
+	// 1. Neither fullHash nor fastHash -> 400
 	reqMissing := httptest.NewRequest(http.MethodGet, "/api/v1/agent/check-content", nil)
 	reqMissing.Header.Set("X-API-Key", routeTestAgentKey)
 	recMissing := httptest.NewRecorder()
