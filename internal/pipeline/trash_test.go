@@ -32,9 +32,11 @@ func testLogger() *slog.Logger {
 func newTrashTestGuard(t *testing.T, root string) *storage.Guard {
 	t.Helper()
 	guard := storage.NewGuard(nil)
-	guard.ReloadLocations([]storage.Location{
+	if err := guard.ReloadLocations([]storage.Location{
 		{ID: 1, Name: "staging", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false},
-	})
+	}); err != nil {
+		t.Fatalf("ReloadLocations: %v", err)
+	}
 	return guard
 }
 

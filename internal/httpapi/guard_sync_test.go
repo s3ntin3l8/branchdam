@@ -29,5 +29,7 @@ func syncGuardFromDB(t *testing.T, srv *Server, database *db.DB) {
 		}
 		locs = append(locs, storage.Location{ID: r.ID, Name: r.Name, RootPath: filepath.Clean(root), Tier: r.Tier, ReadOnly: r.ReadOnly != 0})
 	}
-	srv.guard.ReloadLocations(locs)
+	if err := srv.guard.ReloadLocations(locs); err != nil {
+		t.Fatalf("reload guard: %v", err)
+	}
 }

@@ -525,6 +525,10 @@ func TestReloadGuardLocationsPicksUpOverrides(t *testing.T) {
 		t.Fatalf("settings.NewStore: %v", err)
 	}
 	srv := New(Deps{Settings: store, DB: database, Hub: sse.New(), Guard: guard, Version: "test", agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	// main.go seeds a storage_locations row for every config entry before
+	// the Guard is built; reloadGuardLocations takes each location's id
+	// from that row.
+	seedTestStorageLocation(t, srv, "scratch", root, "TIER1_LOCAL_SCRATCH", false)
 
 	// Initial reload: Guard has the base location.
 	if err := srv.reloadGuardLocations(context.Background()); err != nil {

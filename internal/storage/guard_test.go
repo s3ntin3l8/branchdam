@@ -368,9 +368,11 @@ func TestGuardReloadLocations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve new root: %v", err)
 	}
-	guard.ReloadLocations([]Location{
+	if err := guard.ReloadLocations([]Location{
 		{ID: 3, Name: "new", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false},
-	})
+	}); err != nil {
+		t.Fatalf("ReloadLocations: %v", err)
+	}
 
 	// Old locations must no longer resolve.
 	if _, err := guard.Resolve(filepath.Join(tier2, "x.txt")); err == nil {
@@ -383,6 +385,43 @@ func TestGuardReloadLocations(t *testing.T) {
 	// New location must resolve.
 	if _, err := guard.Resolve(filepath.Join(resolved, "y.txt")); err != nil {
 		t.Errorf("Resolve under new location failed after reload: %v", err)
+	}
+}
+
+// TestGuardReloadLocationsRejectsMissingID proves ReloadLocations refuses a
+// location without its storage_locations id and keeps the previous set.
+// Resolve(path).ID is written as media_nodes.storage_location_id by the agent
+// drainer and the rebase route, so a reload that zeroed the ids (as the
+// storage-location PUT once did) made every later agent insert fail its FK
+// check.
+func TestGuardReloadLocationsRejectsMissingID(t *testing.T) {
+	guard, tier2, _ := newTestGuard(t)
+	before, err := guard.Resolve(filepath.Join(tier2, "x.txt"))
+	if err != nil {
+		t.Fatalf("Resolve before reload: %v", err)
+	}
+
+	newRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve new root: %v", err)
+	}
+	err = guard.ReloadLocations([]Location{
+		{ID: 7, Name: "ok", RootPath: tier2, Tier: "TIER2_EXPORTS"},
+		{ID: 0, Name: "no-id", RootPath: newRoot, Tier: "TIER2_EXPORTS"},
+	})
+	if err == nil {
+		t.Fatal("ReloadLocations accepted a location with ID 0, want error")
+	}
+
+	after, err := guard.Resolve(filepath.Join(tier2, "x.txt"))
+	if err != nil {
+		t.Fatalf("Resolve after rejected reload: %v", err)
+	}
+	if after.ID != before.ID {
+		t.Errorf("location id after rejected reload = %d, want unchanged %d", after.ID, before.ID)
+	}
+	if _, err := guard.Resolve(filepath.Join(newRoot, "y.txt")); err == nil {
+		t.Error("rejected reload still installed the new location")
 	}
 }
 
@@ -400,9 +439,12 @@ func TestGuardReloadLocationsConcurrent(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < 100; i++ {
-			guard.ReloadLocations([]Location{
+			if err := guard.ReloadLocations([]Location{
 				{ID: 3, Name: "new", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: false},
-			})
+			}); err != nil {
+				t.Errorf("ReloadLocations: %v", err)
+				return
+			}
 		}
 	}()
 
