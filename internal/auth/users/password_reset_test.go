@@ -87,7 +87,9 @@ func TestRequestPasswordReset_HappyPath_MintsToken(t *testing.T) {
 
 func TestRequestPasswordReset_DisabledUser_SilentlyIgnored(t *testing.T) {
 	svc, reset, _ := newPasswordResetService(t, time.Hour)
-	id := makeLocalUser(t, svc, "alice", "alice@example.com", "correct horse battery staple", true)
+	// Non-admin: disabling the only (admin) account is refused by the
+	// last-local-admin guard, which is not what this test is about.
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "correct horse battery staple", false)
 	require.NoError(t, svc.DisableUser(context.Background(), id, time.Now()))
 	issue, ok, err := reset.RequestPasswordReset(context.Background(), "alice@example.com", "127.0.0.1", "test")
 	require.NoError(t, err)

@@ -75,12 +75,13 @@ func FromUser(ctx context.Context) (LocalUserView, bool) {
 // to at least one group in allowedGroups.
 //
 // Read methods (GET, HEAD, OPTIONS) and machine principals (agent path) are permitted unconditionally
-// for any authenticated principal. If allowedGroups is empty, all authenticated users have write access,
-// and a WARN log naming authz.groups is emitted upon middleware creation.
+// for any authenticated principal. If allowedGroups is empty, all authenticated forward-auth users have
+// write access, and a WARN log naming authz.groups is emitted upon middleware creation. Local-session users
+// are always decided by users.is_admin (see IsAdmin), whatever allowedGroups holds.
 func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) http.Handler {
 	allowedGroups = slices.Clone(allowedGroups)
 	if len(allowedGroups) == 0 && log != nil {
-		log.Warn("authz.groups is empty: all authenticated users have admin access", "key", "authz.groups")
+		log.Warn("authz.groups is empty: all authenticated forward-auth users have admin access (local users still need is_admin)", "key", "authz.groups")
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -133,6 +134,18 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 // default: every authenticated user is admin), or p is a member of at
 // least one allowedGroup.
 //
+// A locally-authenticated principal (AuthProvider == AuthProviderLocal,
+// i.e. a session-cookie login) is decided by localView.IsAdmin ALONE:
+// neither the empty-groups fallback nor the group check applies. The
+// groups policy describes forward-auth identities asserted by a trusted
+// proxy; a local login carries no groups of its own, so before this rule
+// the empty-groups default made every local account an admin regardless
+// of users.is_admin (a non-admin could reset the admin's password). In
+// auth.mode "both" a request with both a local session and forward-auth
+// headers merges to AuthProvider "local" -- the local account is the
+// acting identity, so its is_admin column decides there too. Forward-auth
+// principals (including forward-JIT ones) keep the group policy unchanged.
+//
 // This does NOT reproduce RequireAdmin's GET/HEAD/OPTIONS bypass or its
 // unconditional pass for KindMachine -- those are properties of *which
 // requests* RequireAdmin's middleware gates at all, not of what "admin"
@@ -146,6 +159,9 @@ func IsAdmin(p Principal, allowedGroups []string, localView LocalUserView) bool 
 	}
 	if localView.IsAdmin {
 		return true
+	}
+	if p.AuthProvider == AuthProviderLocal {
+		return false
 	}
 	if len(allowedGroups) == 0 {
 		return true

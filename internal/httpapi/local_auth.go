@@ -487,6 +487,10 @@ func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) 
 	}
 	now := time.Now()
 	if err := s.localAuth.users.DisableUser(r.Context(), id, now); err != nil {
+		if errors.Is(err, users.ErrLastLocalAdmin) {
+			writeJSONError(w, http.StatusConflict, "cannot disable the last active local admin")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "disable user: "+err.Error())
 		return
 	}
@@ -555,6 +559,10 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		newAdmin := *body.IsAdmin
 		if (user.IsAdmin != 0) != newAdmin {
 			if err := s.localAuth.users.SetAdmin(r.Context(), id, newAdmin); err != nil {
+				if errors.Is(err, users.ErrLastLocalAdmin) {
+					writeJSONError(w, http.StatusConflict, "cannot demote the last active local admin")
+					return
+				}
 				writeJSONError(w, http.StatusInternalServerError, "set admin: "+err.Error())
 				return
 			}

@@ -177,7 +177,10 @@ func TestMFAGate_NoMFAEnrolled_AllowsAllAPIPaths(t *testing.T) {
 	req := withSessionCookie(http.MethodGet, "/api/v1/users", cookieValue, nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
-	assert.NotEqual(t, http.StatusForbidden, rr.Code, "no MFA enrolled -> gate must NOT 403; response was %d body=%s", rr.Code, rr.Body.String())
+	// bob is a non-admin local user, so /api/v1/users' own admin gate may
+	// 403 him (local users are decided by users.is_admin alone); what
+	// this test pins is that the MFA gate did not intercept the request.
+	assert.NotContains(t, rr.Body.String(), "mfaChallengeRequired", "no MFA enrolled -> MFA gate must NOT 403; response was %d body=%s", rr.Code, rr.Body.String())
 }
 
 // TestMeExposesMFAState verifies that GET /api/v1/me exposes

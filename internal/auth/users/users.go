@@ -91,6 +91,13 @@ var ErrUserNotFound = errors.New("users: not found")
 // ErrSessionNotFound is returned by GetSessionByCookieID on a miss.
 var ErrSessionNotFound = errors.New("users: session not found")
 
+// ErrLastLocalAdmin is returned by DisableUser and SetAdmin(false) when
+// the change would leave no enabled source='local' admin. Without that
+// account nobody can sign in with a password to administer the instance
+// (forward-auth admins depend on a proxy that may not be deployed), and
+// recovery would need direct SQLite access. The HTTP layer maps it to 409.
+var ErrLastLocalAdmin = errors.New("users: refusing to remove the last active local admin")
+
 // CookieKey derives the HMAC-SHA256 key used to tag session cookies from
 // BRANCHDAM_SECRET_KEY-derived material. The cookie value itself is
 // opaque (32 random bytes hex-encoded); the HMAC exists so a tampered
@@ -313,9 +320,14 @@ func (s *Service) GetUserByEmailSource(ctx context.Context, email, source string
 	return row, nil
 }
 
-// DisableUser sets disabled_at. Idempotent.
+// DisableUser sets disabled_at. Idempotent. Returns ErrLastLocalAdmin
+// (and changes nothing) when id is the last enabled source='local'
+// admin.
 func (s *Service) DisableUser(ctx context.Context, id int64, when time.Time) error {
 	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
+		if err := guardLastLocalAdmin(ctx, q, id); err != nil {
+			return err
+		}
 		return q.DisableUser(ctx, sqlcgen.DisableUserParams{
 			ID:         id,
 			DisabledAt: sql.NullInt64{Int64: when.Unix(), Valid: true},
@@ -528,18 +540,52 @@ func (s *Service) ReenableUser(ctx context.Context, id int64) error {
 	})
 }
 
-// SetAdmin toggles the is_admin flag.
+// SetAdmin toggles the is_admin flag. Demoting the last enabled
+// source='local' admin returns ErrLastLocalAdmin and changes nothing.
 func (s *Service) SetAdmin(ctx context.Context, id int64, isAdmin bool) error {
 	val := 0
 	if isAdmin {
 		val = 1
 	}
 	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
+		if !isAdmin {
+			if err := guardLastLocalAdmin(ctx, q, id); err != nil {
+				return err
+			}
+		}
 		return q.SetAdmin(ctx, sqlcgen.SetAdminParams{
 			ID:      id,
 			IsAdmin: int64(val),
 		})
 	})
+}
+
+// guardLastLocalAdmin returns ErrLastLocalAdmin when id is currently an
+// enabled source='local' admin and no other such account exists. It runs
+// on the writer transaction that performs the disable/demote, so the
+// check and the write are one atomic unit on the single-connection writer
+// pool (AGENTS.md invariant #2): two admins demoting each other
+// concurrently cannot both pass. A missing row passes through so the
+// caller's UPDATE stays a no-op, as before.
+func guardLastLocalAdmin(ctx context.Context, q *sqlcgen.Queries, id int64) error {
+	row, err := q.GetUserByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("last-admin guard: get user: %w", err)
+	}
+	if row.Source != "local" || row.IsAdmin == 0 || row.DisabledAt.Valid {
+		return nil
+	}
+	others, err := q.CountOtherActiveLocalAdmins(ctx, id)
+	if err != nil {
+		return fmt.Errorf("last-admin guard: count admins: %w", err)
+	}
+	if others == 0 {
+		return ErrLastLocalAdmin
+	}
+	return nil
 }
 
 // WriteLoginAudit appends a login_audit row. Best-effort: a transient DB

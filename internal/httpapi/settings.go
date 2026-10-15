@@ -15,8 +15,10 @@ import (
 )
 
 // requireSettingsAdmin gates both GET and PUT on the same policy: a real,
-// authenticated user principal who is a member of an allowed admin group
-// (or every allowed group is empty, the solo-homelab default). This is
+// authenticated user principal who passes auth.IsAdmin: a local-session
+// user with users.is_admin set, or a forward-auth user in an allowed admin
+// group (or any forward-auth user when the list is empty, the
+// solo-homelab default). This is
 // deliberately stricter than the global auth.RequireAdmin middleware every
 // other route runs under, in two ways: RequireAdmin passes ANY browser
 // principal (even unauthenticated) on GET, and passes a machine principal

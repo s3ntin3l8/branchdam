@@ -269,3 +269,47 @@ func TestIsAdmin(t *testing.T) {
 		})
 	}
 }
+
+// TestIsAdmin_LocalPrincipalIgnoresGroupsPolicy is the regression for
+// the "every local user is an admin" bug: with authz.groups empty (the
+// default), IsAdmin returned true for ANY authenticated principal before
+// it ever looked at the local users.is_admin flag, so a non-admin local
+// account could reset the admin's password, write settings and restart
+// the server. A local-session principal is now decided by
+// LocalUserView.IsAdmin alone; forward-auth principals keep the groups
+// policy (empty groups => everyone).
+func TestIsAdmin_LocalPrincipalIgnoresGroupsPolicy(t *testing.T) {
+	local := Principal{Kind: KindUser, Authenticated: true, Name: "bob", ExternalUID: "bob", AuthProvider: AuthProviderLocal}
+	forward := Principal{Kind: KindUser, Authenticated: true, Name: "alice", ExternalUID: "uid-alice"}
+	// auth.mode "both": local session + trusted forward headers merge to
+	// AuthProvider "local" with the forward groups unioned in.
+	mergedLocal := Principal{Kind: KindUser, Authenticated: true, Name: "bob", AuthProvider: AuthProviderLocal, Groups: []string{"dam-admins"}}
+
+	tests := []struct {
+		name          string
+		p             Principal
+		allowedGroups []string
+		view          LocalUserView
+		want          bool
+	}{
+		{"local non-admin, empty groups", local, nil, LocalUserView{UserID: 2}, false},
+		{"local non-admin, no view attached", local, nil, LocalUserView{}, false},
+		{"local admin, empty groups", local, nil, LocalUserView{UserID: 1, IsAdmin: true}, true},
+		{"local admin, non-empty groups", local, []string{"dam-admins"}, LocalUserView{UserID: 1, IsAdmin: true}, true},
+		{"local non-admin, merged forward admin group", mergedLocal, []string{"dam-admins"}, LocalUserView{UserID: 2}, false},
+		{"forward, empty groups (unchanged)", forward, nil, LocalUserView{}, true},
+		{"forward-JIT non-admin row, empty groups (unchanged)", forward, nil, LocalUserView{UserID: 7}, true},
+		{"forward, matching group (unchanged)", Principal{Kind: KindUser, Authenticated: true, Groups: []string{"dam-admins"}}, []string{"dam-admins"}, LocalUserView{}, true},
+		// PAT principals carry no AuthProvider; RequirePAT attaches
+		// IsAdmin=true only after GetUserPATByHash proved the owner is a
+		// live admin, so the localView override is what admits them.
+		{"PAT principal with admin owner view", Principal{Kind: KindUser, Authenticated: true, Name: "pat:1"}, []string{"dam-admins"}, LocalUserView{UserID: 1, IsAdmin: true, MFAVerified: true}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsAdmin(tt.p, tt.allowedGroups, tt.view); got != tt.want {
+				t.Errorf("IsAdmin() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

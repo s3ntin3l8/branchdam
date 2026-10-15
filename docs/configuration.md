@@ -113,7 +113,7 @@ Agent authentication is per-device pairing only — no shared `apiKey` field exi
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `groups` | list of string | empty | Groups permitted write (mutating-method) access on browser-routed endpoints, matched against `X-Authentik-Groups`. **Empty means every authenticated user has write access** — the solo-homelab default — and logs a startup WARN naming `authz.groups` so the choice isn't silent. Must match the Authentik group name exactly; there's no validation against Authentik's own group list. |
+| `groups` | list of string | empty | Groups permitted write (mutating-method) access on browser-routed endpoints, matched against `X-Authentik-Groups`. **Empty means every authenticated forward-auth user has write access** — the solo-homelab default — and logs a startup WARN naming `authz.groups` so the choice isn't silent. Local-session users (`auth.mode` `local`/`both`) are never covered by this list or its empty default: their admin status is the `users.is_admin` column alone, and a non-admin local user is read-only apart from their own MFA enrolment. Must match the Authentik group name exactly; there's no validation against Authentik's own group list. |
 
 ## `auth`
 

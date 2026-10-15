@@ -67,6 +67,13 @@ type Querier interface {
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
 	// makes it fall back to interface{} for every param.
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
+	// Last-admin guard for DisableUser / SetAdmin(false): the number of
+	// enabled source='local' admins other than ?1. Only source='local' rows
+	// count -- they are the accounts that can log in with a password and
+	// recover the instance; forward-jit/forward-link rows depend on a proxy
+	// that may not exist. Read inside the same writer transaction as the
+	// UPDATE so two concurrent demotions cannot both see "one other admin".
+	CountOtherActiveLocalAdmins(ctx context.Context, id int64) (int64, error)
 	CountPairingAudit(ctx context.Context, pairingID int64) (int64, error)
 	CountPendingAgentEvents(ctx context.Context) (int64, error)
 	// Used by tests to assert mfa_recovery_codes rows are gone after

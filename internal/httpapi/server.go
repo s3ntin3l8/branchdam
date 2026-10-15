@@ -543,6 +543,36 @@ var noAuthLocalAuthPaths = map[string]struct{}{
 	"POST /api/v1/password-reset/confirm": {},
 }
 
+// localSelfServicePaths are mutating endpoints that act only on the
+// caller's own local account (each handler resolves the target from the
+// session's LocalUserView, never from the request). They skip
+// requireAdmin for an authenticated local-session principal: since a
+// local principal's admin status comes from users.is_admin alone (see
+// auth.IsAdmin), a non-admin local user would otherwise be unable to
+// enrol MFA or -- worse -- answer the TOTP challenge at login, locking
+// out every non-admin account with MFA enrolled. MFAGate still runs
+// first, so a half-authed session reaches only its allowlisted subset.
+var localSelfServicePaths = map[string]struct{}{
+	"POST /api/v1/mfa/setup":     {},
+	"POST /api/v1/mfa/enable":    {},
+	"POST /api/v1/mfa/disable":   {},
+	"POST /api/v1/mfa/challenge": {},
+}
+
+// isLocalSelfService reports whether r is a self-service request from an
+// authenticated local-session user (see localSelfServicePaths).
+func isLocalSelfService(r *http.Request, key string) bool {
+	if _, ok := localSelfServicePaths[key]; !ok {
+		return false
+	}
+	p, ok := auth.From(r.Context())
+	if !ok || p.Kind != auth.KindUser || !p.Authenticated || p.AuthProvider != auth.AuthProviderLocal {
+		return false
+	}
+	view, ok := auth.FromUser(r.Context())
+	return ok && view.UserID != 0
+}
+
 func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Logger, next http.Handler) http.Handler {
 	requireAdmin := auth.RequireAdmin(allowedGroups, log)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +587,10 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Log
 		// no-op without a cookie).
 		key := r.Method + " " + path
 		if _, ok := noAuthLocalAuthPaths[key]; ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isLocalSelfService(r, key) {
 			next.ServeHTTP(w, r)
 			return
 		}
