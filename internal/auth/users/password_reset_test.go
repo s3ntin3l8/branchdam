@@ -398,13 +398,13 @@ func TestAdminResetPassword_ClearsMFACredentials(t *testing.T) {
 	assert.Equal(t, int64(0), count, "mfa_recovery_codes rows must be cleared by admin reset")
 }
 
-// TestConfirmPasswordReset_ClearsMFACredentials pins the same property
-// for the self-service confirm path: an attacker who has access to the
-// user's email (to mint a token) AND the user's password (to log in
-// immediately) would otherwise walk straight in via /mfa/challenge.
-// Clearing MFA on confirm forces re-enrollment, which requires the
-// legitimate user to physically re-add their authenticator.
-func TestConfirmPasswordReset_ClearsMFACredentials(t *testing.T) {
+// TestConfirmPasswordReset_KeepsMFACredentials pins the opposite of the
+// admin path: the self-service confirm must NOT clear MFA. The token is
+// delivered out of band (email), so whoever holds it controls the
+// mailbox, not necessarily the account; clearing MFA here turned mailbox
+// access into a full account takeover (mint token, set password, log in
+// with no second factor).
+func TestConfirmPasswordReset_KeepsMFACredentials(t *testing.T) {
 	svc, reset, database := newPasswordResetService(t, time.Hour)
 	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", true)
 
@@ -427,9 +427,9 @@ func TestConfirmPasswordReset_ClearsMFACredentials(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = database.Reader.GetMFACredentials(context.Background(), id)
-	assert.ErrorIs(t, err, sql.ErrNoRows, "mfa_credentials row must be cleared by self-service reset confirm")
+	assert.NoError(t, err, "mfa_credentials row must survive a self-service reset confirm")
 
 	count, err := database.Reader.CountRecoveryCodesForUser(context.Background(), id)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), count, "mfa_recovery_codes rows must be cleared by self-service reset confirm")
+	assert.Equal(t, int64(1), count, "mfa_recovery_codes rows must survive a self-service reset confirm")
 }

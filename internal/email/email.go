@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -65,6 +66,19 @@ type logSender struct {
 	log *slog.Logger
 }
 
+// tokenParamRE matches a token=<value> query parameter (or any
+// "token=" key/value run) so its value can be redacted from logged
+// previews.
+var tokenParamRE = regexp.MustCompile(`(?i)(token=)[^\s&"'<>]+`)
+
+// redactTokens replaces the value of every token= parameter in s with
+// [REDACTED]. The password-reset body carries the reset link, and the
+// 200-rune preview used to include most of its single-use token -- a
+// credential that then sat in the server log for anyone with log access.
+func redactTokens(s string) string {
+	return tokenParamRE.ReplaceAllString(s, "${1}[REDACTED]")
+}
+
 // Send is the log-only delivery path. The to/subject/body fields are
 // user- or admin-derived (a stored user email address for `to`, an
 // operator-localized template for `subject`, a rendered HTML/text
@@ -79,7 +93,7 @@ func (s *logSender) Send(_ context.Context, to, subject, htmlBody, textBody stri
 	s.log.Info("email: not sent (log-only mode)",
 		slog.String("to", sanitizeControlChars(to)),
 		slog.String("subject", sanitizeControlChars(subject)),
-		slog.String("body_preview", sanitizeControlChars(truncate(textBody, 200))),
+		slog.String("body_preview", sanitizeControlChars(truncate(redactTokens(textBody), 200))),
 	)
 	// htmlBody is unused by design: the dev-mode preview is the
 	// plain-text part, which is shorter and easier to eyeball than
@@ -151,17 +165,24 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 	// Build the raw MIME message.
 	msg := buildMessage(s.cfg.From, to, subject, htmlBody, textBody)
 
-	// Dial with context-aware timeout.
+	// Dial honoring both ctx and the computed deadline. The implicit-TLS
+	// path used tls.DialWithDialer with a zero net.Dialer, which ignores
+	// ctx and has no timeout at all -- a server that accepted TCP but
+	// never completed the handshake hung the send goroutine forever
+	// (SetDeadline below only applies after the dial returns).
+	// tls.Dialer.DialContext bounds the TCP connect AND the handshake.
 	var conn net.Conn
-	dialer := net.Dialer{}
+	netDialer := &net.Dialer{Deadline: deadline}
 
 	if s.cfg.TLS == "implicit" {
 		// Implicit TLS (port 465): wrap with TLS first.
-		conn, err = tls.DialWithDialer(&dialer, "tcp", addr, &tls.Config{
-			ServerName: s.cfg.Host,
-		})
+		tlsDialer := &tls.Dialer{
+			NetDialer: netDialer,
+			Config:    &tls.Config{ServerName: s.cfg.Host},
+		}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", addr)
 	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
+		conn, err = netDialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
 		return fmt.Errorf("email: dial %s: %w", addr, err)

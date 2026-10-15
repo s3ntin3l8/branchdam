@@ -47,6 +47,7 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -74,6 +75,10 @@ const (
 	PendingSecretTTL      = 15 * time.Minute
 	recoveryCodeSaltBytes = 16
 )
+
+// ErrInvalidTOTP is returned by Disable when the presented code is wrong
+// or was already consumed (replay).
+var ErrInvalidTOTP = errors.New("invalid TOTP code")
 
 type Service struct {
 	db  *db.DB
@@ -261,11 +266,30 @@ func (s *Service) Disable(ctx context.Context, userID int64, verifyPassword func
 	}
 	now := time.Now().Unix()
 	step := now / int64(creds.Period)
-	if !validateTOTP(secret, code, step) {
-		return fmt.Errorf("invalid TOTP code")
+	// Same replay protection as ValidateTOTPCode: a code whose step was
+	// already consumed (e.g. the one just used for the login challenge,
+	// observed over the user's shoulder or in a proxy log) must not be
+	// accepted again within its 30s window to strip MFA off the account.
+	acceptedStep, ok := acceptTOTP(secret, code, step, creds.LastUsedStep)
+	if !ok {
+		return ErrInvalidTOTP
 	}
 
 	return s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// Compare-and-set the step on the writer before deleting: the
+		// read above came from the reader pool, so a concurrent
+		// challenge/disable may have consumed this step since. Zero rows
+		// advanced means replay; fail closed and leave MFA in place.
+		advanced, err := q.UpdateLastUsedStep(ctx, sqlcgen.UpdateLastUsedStepParams{
+			UserID:       userID,
+			LastUsedStep: acceptedStep,
+		})
+		if err != nil {
+			return fmt.Errorf("record totp step: %w", err)
+		}
+		if advanced == 0 {
+			return ErrInvalidTOTP
+		}
 		if err := q.DeleteMFACredentials(ctx, userID); err != nil {
 			return fmt.Errorf("delete mfa credentials: %w", err)
 		}
@@ -383,9 +407,9 @@ func generateSecret(length int) (string, error) {
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf), nil
 }
 
-// validateTOTP is the pure check used at setup/disable time, where
-// there's no prior last_used_step to defend against. ValidateTOTPCode
-// is the per-session entry point that adds replay protection.
+// validateTOTP is the pure check used at enable time, where there's no
+// prior last_used_step to defend against. ValidateTOTPCode and Disable
+// use acceptTOTP instead, which adds replay protection.
 func validateTOTP(secret, code string, step int64) bool {
 	for i := -DriftTolerance; i <= DriftTolerance; i++ {
 		candidateStep := step + int64(i)

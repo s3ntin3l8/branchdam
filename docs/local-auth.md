@@ -203,6 +203,9 @@ account could interleave successful logins to brute-force others
 indefinitely. Concurrent attempts each reserve a slot while in flight, so
 a burst of parallel guesses can't all pass before the first failure is
 recorded. Every `POST /password-reset/request` counts as an attempt.
+A login to a disabled account answers the same `401 invalid credentials`
+as a wrong password and counts as a failure, so it doesn't reveal that
+the guessed password was right.
 
 When the limiter trips, the response is `429 Too Many Requests` with a
 `Retry-After` header (in seconds) and a JSON body of the form
@@ -343,3 +346,8 @@ For a user with MFA enrolled, a password login yields a half-authenticated sessi
 `/api/v1/*` route outside the MFA allowlist (the four endpoints above, `GET /api/v1/me`,
 `DELETE /api/v1/session`) answers `403` with `"mfaChallengeRequired": true` until
 `/mfa/challenge` succeeds. MFA outcomes are recorded in the login audit log (section 8).
+
+A self-service password reset (`/password-reset/confirm`) keeps MFA enrolled, so a reset link
+alone (mailbox access) is not enough to take over an MFA-protected account. An admin reset
+(`/admin/users/{id}/reset-password`) clears MFA and recovery codes; that is the recovery path for
+a user who lost both their authenticator and their recovery codes.

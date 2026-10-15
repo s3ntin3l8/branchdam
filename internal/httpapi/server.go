@@ -331,6 +331,7 @@ func New(d Deps) *Server {
 			log:                 log,
 			authMode:            d.LocalAuth.AuthMode,
 			jit:                 d.LocalAuth.JIT,
+			resetSlots:          make(chan struct{}, resetJobSlots),
 		}
 	}
 	return s

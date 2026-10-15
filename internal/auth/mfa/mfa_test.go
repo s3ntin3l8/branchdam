@@ -262,6 +262,40 @@ func TestValidateTOTPCode_RejectsReplay(t *testing.T) {
 	assert.False(t, valid, "replay of an accepted code must be rejected")
 }
 
+// TestDisable_RejectsReplayedCode: Disable used the replay-blind
+// validateTOTP, so a code already consumed by the login challenge (seen
+// over the shoulder, in a proxy log, ...) could be replayed within its
+// window -- together with the password -- to strip MFA off the account.
+// Disable now goes through acceptTOTP + the last_used_step CAS.
+func TestDisable_RejectsReplayedCode(t *testing.T) {
+	svc, database := newTestService(t)
+	userID := createTestUser(t, database, "lena")
+
+	setupResult, err := svc.Setup(context.Background(), userID, "lena")
+	require.NoError(t, err)
+	secret := extractSecret(setupResult.OtpauthURI)
+	step := time.Now().Unix() / int64(DefaultTOTPPeriod)
+	_, err = svc.Enable(context.Background(), userID, computeTOTP(secret, step))
+	require.NoError(t, err)
+
+	// The login challenge consumes a code (advances last_used_step).
+	step = time.Now().Unix() / int64(DefaultTOTPPeriod)
+	usedCode := computeTOTP(secret, step+1)
+	valid, err := svc.ValidateTOTPCode(context.Background(), userID, usedCode)
+	require.NoError(t, err)
+	require.True(t, valid)
+
+	passwordOK := func(string) error { return nil }
+	err = svc.Disable(context.Background(), userID, passwordOK, usedCode)
+	require.ErrorIs(t, err, ErrInvalidTOTP, "a consumed code must not disable MFA")
+	assert.True(t, svc.HasMFA(context.Background(), userID), "MFA must stay enrolled after a replayed disable")
+
+	// The refused disable left the credential (and its step) untouched.
+	creds, err := database.Reader.GetMFACredentials(context.Background(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, step+1, creds.LastUsedStep)
+}
+
 // TestEnable_RejectsExpiredPendingSecret pins Issue 7's TTL enforcement:
 // a pending secret older than PendingSecretTTL is refused at Enable
 // time. The test sets up a user, manually rewinds the
