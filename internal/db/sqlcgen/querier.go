@@ -33,6 +33,10 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	ClearMFAPendingSecret(ctx context.Context, id int64) error
+	// Marks every open cascade row for export ?1 restored. Called whenever the
+	// export leaves TRASHED (restored with its master, or restored on its own),
+	// so a stale row can never resurrect a later, independent trash of it.
+	CloseTrashCascadesForExport(ctx context.Context, exportNodeID int64) error
 	CompleteScanJob(ctx context.Context, id int64) error
 	// #225: used when the MISSING sweep is skipped because the walk saw zero
 	// files. The scan itself still completed cleanly -- state stays COMPLETED,
@@ -621,6 +625,10 @@ type Querier interface {
 	// source_path_hash, added by 00015_source_path_hash.sql) so sqlc maps this
 	// to the shared MediaNode struct instead of minting a one-off Row type.
 	ListNodesByIDs(ctx context.Context, dollar_1 string) ([]MediaNode, error)
+	// Exports cascade-trashed with master ?1 that have not been restored since.
+	// pipeline.RestoreTrashedAsset restores only these, so an export the user
+	// trashed on its own stays in the trash when its master comes back.
+	ListOpenTrashCascadeExports(ctx context.Context, parentNodeID int64) ([]int64, error)
 	// Offset pagination. Audit log for a single pairing is bounded (a few
 	// hundred events over the lifetime of a device, never tens of thousands),
 	// so offset drift isn't a concern the way it is for the unbounded
@@ -661,13 +669,27 @@ type Querier interface {
 	// "live" matches v_media_edges_resolved's own parent_alive definition --
 	// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 	// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
-	// Ancestor, not "same full_hash": walks media_edges target->source
-	// (only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is an
-	// unreviewed guess and must never authorise deleting a file -- and each walked
-	// node must itself be non-ARCHIVED),
-	// mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
-	// exclusion exactly -- a chain that only connects through a superseded
-	// version doesn't represent the file currently on disk.
+	// Ancestor, not "same full_hash": walks media_edges target->source,
+	// mirroring ListAncestors' direction convention, but stricter on three
+	// counts:
+	//   * only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is
+	//     an unreviewed guess and must never authorise deleting a file;
+	//   * only cache relationships count: PROXY_OF, DERIVED_FROM and
+	//     DUPLICATE_OF, i.e. a copy or rendition of the master's bytes.
+	//     PROJECT_SIDECAR (a project file or .xmp is the CHILD of the media it
+	//     references, at 1.00) and FINAL_EXPORT (finished work, not
+	//     reproducible from the master alone) never make a node prunable, so a
+	//     verified Tier-3 master can't authorise deleting the edit decisions
+	//     or exports hanging off it;
+	//   * every node on the walk must be live (ACTIVE or HIDDEN), the same
+	//     definition the Tier-3 ancestor itself must meet -- a chain that only
+	//     connects through a MISSING, ARCHIVED or TRASHED node doesn't
+	//     describe the file currently on disk.
+	// Project files (.drp, .fcpxml, .edl, .prproj, .dam.json -- the
+	// internal/projectfile registry) and .xmp sidecars are never candidates,
+	// whatever edge links them: they hold edit decisions, not cached media.
+	// Matched on file_name, not file_ext, because scans store file_ext
+	// lowercase without the dot while agent events store it as sent.
 	// Tier-1-only and prunable-only are already schema-enforced
 	// (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
 	// not re-checked here; the caller only invokes this against a location it
@@ -706,10 +728,12 @@ type Querier interface {
 	// Paginated user list for the admin UI. Order by id ASC so paging is
 	// stable across inserts (new users go to the END, not the middle).
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
-	// Walks ancestor lineage target->source for node ?1 (only CONFIRMED and
-	// AUTO_ACCEPTED edges are followed -- NEEDS_REVIEW/REJECTED never authorise a
-	// purge; ARCHIVED/TRASHED nodes excluded) and returns every live ancestor on a
-	// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+	// Walks ancestor lineage target->source for node ?1 and returns every live
+	// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash.
+	// The walk is ListPrunableNodes' exactly: only CONFIRMED and AUTO_ACCEPTED
+	// edges (NEEDS_REVIEW/REJECTED never authorise a purge), only the cache
+	// relationships PROXY_OF/DERIVED_FROM/DUPLICATE_OF (never PROJECT_SIDECAR or
+	// FINAL_EXPORT), and only through live (ACTIVE or HIDDEN) nodes.
 	// Used by internal/prune.Execute to re-verify the ancestor file on disk (via
 	// os.Lstat) immediately before deleting the candidate (#246, #352).
 	ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error)
@@ -738,7 +762,8 @@ type Querier interface {
 	// trashed or archived in between was silently flipped to MISSING.
 	MarkNodeMissing(ctx context.Context, id int64) error
 	// pipeline.TrashAsset calls this on the master node and on every linked
-	// FINAL_EXPORT/immich_export edge target (when keepExports=false). The
+	// FINAL_EXPORT/immich_export edge target whose edge is AUTO_ACCEPTED or
+	// CONFIRMED (when keepExports=false). The
 	// pipeline function has already moved the bytes to <root>/.trash/<rel>
 	// before this UPDATE; the lifecycle_state change is the durable record
 	// that the file is no longer at its original path.
@@ -863,6 +888,10 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
+	// pipeline.TrashAsset records each export it cascade-trashes with its master
+	// (keepExports=false), in the same transaction as the export's
+	// MarkNodeTrashed.
+	RecordTrashCascade(ctx context.Context, arg RecordTrashCascadeParams) error
 	// Clears disabled_at, re-enabling the account. Idempotent.
 	ReenableUser(ctx context.Context, id int64) error
 	// Updates the denormalized username/email (a user may have renamed since
@@ -1043,8 +1072,9 @@ type Querier interface {
 	TouchUserPAT(ctx context.Context, arg TouchUserPATParams) error
 	// Restores an archived media node back to ACTIVE state.
 	UnarchiveMediaNode(ctx context.Context, id int64) error
-	// pipeline.RestoreTrashedAsset calls this on the master node and on any
-	// linked TRASHED export node (same transaction). The pipeline function
+	// pipeline.RestoreTrashedAsset calls this on the master node and on each
+	// export that master's own trash cascaded (trash_cascades), in the same
+	// transaction. The pipeline function
 	// has already moved the bytes back from .trash/<rel> to the original
 	// path before this UPDATE; the lifecycle_state change is the durable
 	// record that the asset is queryable again.

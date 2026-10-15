@@ -65,8 +65,9 @@ var (
 )
 
 // TrashAsset moves the master file to <root>/.trash/<rel_path>, marks the node
-// TRASHED, and (when keepExports is false) deletes any linked Tier-2 export
-// files and marks their nodes TRASHED too. When keepExports is true, only the
+// TRASHED, and (when keepExports is false) moves the files of linked Tier-2
+// exports -- reviewed (AUTO_ACCEPTED or CONFIRMED) FINAL_EXPORT or
+// immich_export edges only -- into .trash/ and marks their nodes TRASHED too. When keepExports is true, only the
 // master moves -- Tier-2 exports stay ACTIVE on disk so the cloud gallery is
 // not disturbed.
 //
@@ -201,8 +202,10 @@ func trashAssetTx(
 }
 
 // RestoreTrashedAsset moves the file back from .trash/<rel> to the original
-// path, sets lifecycle_state back to ACTIVE, and (when linked exports were
-// also trashed by a keepExports=false TrashAsset call) restores them too.
+// path, sets lifecycle_state back to ACTIVE, and restores the linked exports
+// that this node's own keepExports=false TrashAsset call cascaded into the
+// trash (recorded in trash_cascades). Exports trashed independently stay
+// trashed.
 //
 // Idempotent for already-ACTIVE nodes (returns the existing row). Returns
 // ErrAssetNotTrashed / ErrAssetTrashFileMissing / ErrAssetHasSuperseded /
@@ -285,6 +288,12 @@ func restoreTrashedAssetTx(
 
 	if err := q.UntrashNode(ctx, loaded.ID); err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("untrash node: %w", err)
+	}
+	// If this node was itself cascade-trashed as some master's export, it
+	// is back now: close that cascade so the master's later restore cannot
+	// resurrect a subsequent, independent trash of this node.
+	if err := q.CloseTrashCascadesForExport(ctx, loaded.ID); err != nil {
+		return sqlcgen.MediaNode{}, fmt.Errorf("close trash cascade: %w", err)
 	}
 
 	if err := restoreLinkedExports(ctx, q, guard, log, loaded.ID, ml); err != nil {
@@ -517,11 +526,26 @@ func restoreFromTrash(guard *storage.Guard, filePath, nodeUUID string, log *slog
 	}
 }
 
-// purgeLinkedExports deletes the files for every Tier-2 export node linked to
-// the master via a FINAL_EXPORT or immich_export edge, and marks those nodes
-// MISSING -- they will be re-trashed by the outer MarkNodeTrashed call on the
-// master? No: we mark them TRASHED here. The caller runs MarkNodeTrashed on
-// the master AFTER this returns.
+// isCascadeExportEdge reports whether a master's trash may cascade over edge:
+// a FINAL_EXPORT or immich_export edge that is AUTO_ACCEPTED or CONFIRMED.
+// NEEDS_REVIEW is an unreviewed guess and REJECTED is a human saying "not
+// linked"; trashing a file the user never agreed belongs to the master is
+// data loss, so both are skipped. ListEdgesBySource already drops inactive
+// edges.
+func isCascadeExportEdge(edge sqlcgen.MediaEdge) bool {
+	if edge.RelationshipType != "FINAL_EXPORT" && edge.Resolver != "immich_export" {
+		return false
+	}
+	return edge.ReviewState == "AUTO_ACCEPTED" || edge.ReviewState == "CONFIRMED"
+}
+
+// purgeLinkedExports moves the files for every Tier-2 export node linked to
+// the master via a reviewed FINAL_EXPORT or immich_export edge (see
+// isCascadeExportEdge) into .trash/ and marks those nodes TRASHED. The caller
+// runs MarkNodeTrashed on the master AFTER this returns. Each export trashed
+// here is recorded in trash_cascades against the master, so restoring the
+// master brings back exactly these exports (restoreLinkedExports) and not
+// ones the user trashed on their own.
 //
 // Note: this runs inside the same transaction as the master's MarkNodeTrashed
 // call. If a linked export's file is in a read-only tier (Immich's exports
@@ -533,7 +557,7 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 		return fmt.Errorf("list edges by source: %w", err)
 	}
 	for _, edge := range edges {
-		if edge.RelationshipType != "FINAL_EXPORT" && edge.Resolver != "immich_export" {
+		if !isCascadeExportEdge(edge) {
 			continue
 		}
 		exp, err := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
@@ -568,6 +592,9 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 		if err := q.MarkNodeTrashed(ctx, exp.ID); err != nil {
 			return fmt.Errorf("mark export trashed: %w", err)
 		}
+		if err := q.RecordTrashCascade(ctx, sqlcgen.RecordTrashCascadeParams{ParentNodeID: parentID, ExportNodeID: exp.ID}); err != nil {
+			return fmt.Errorf("record trash cascade: %w", err)
+		}
 		if err := q.DeleteRemoteSyncStateForNode(ctx, exp.ID); err != nil {
 			log.Warn("delete remote sync state for export", "nodeID", exp.ID, "err", err)
 		}
@@ -581,7 +608,7 @@ func purgeRemoteSyncStateForLinkedExports(ctx context.Context, q *sqlcgen.Querie
 		return err
 	}
 	for _, edge := range edges {
-		if edge.RelationshipType != "FINAL_EXPORT" && edge.Resolver != "immich_export" {
+		if !isCascadeExportEdge(edge) {
 			continue
 		}
 		if err := q.DeleteRemoteSyncStateForNode(ctx, edge.TargetNodeID); err != nil {
@@ -591,27 +618,32 @@ func purgeRemoteSyncStateForLinkedExports(ctx context.Context, q *sqlcgen.Querie
 	return nil
 }
 
-// restoreLinkedExports restores any TRASHED export nodes linked to this master,
+// restoreLinkedExports restores the exports this master's own trash cascaded
+// into .trash/ (the open trash_cascades rows purgeLinkedExports recorded),
 // moving their files back from .trash/<rel> to the export's original path.
+// An export the user trashed on its own -- before or after the master -- has
+// no such row and stays in the trash.
 //
-// Tolerates missing .trash/ copies (TTL pruner may have already purged them,
-// or the export was on a read-only/virtual tier at trash time and was never
-// moved into .trash/ in the first place): in those cases the export's
-// lifecycle_state still flips back to ACTIVE so the master's restore succeeds
-// as a whole, and a warning is logged. The user can re-export if needed.
+// Tolerates missing .trash/ copies (TTL pruner may have already purged them):
+// the export's lifecycle_state still flips back to ACTIVE so the master's
+// restore succeeds as a whole, and a warning is logged. The user can
+// re-export if needed.
 func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.Guard, log *slog.Logger, parentID int64, ml *moveLog) error {
-	edges, err := q.ListEdgesBySource(ctx, parentID)
+	exportIDs, err := q.ListOpenTrashCascadeExports(ctx, parentID)
 	if err != nil {
-		return fmt.Errorf("list edges by source: %w", err)
+		return fmt.Errorf("list trash cascades: %w", err)
 	}
-	for _, edge := range edges {
-		if edge.RelationshipType != "FINAL_EXPORT" && edge.Resolver != "immich_export" {
+	for _, expID := range exportIDs {
+		exp, err := q.GetMediaNodeByID(ctx, expID)
+		if err != nil {
+			log.Warn("load export node", "nodeID", expID, "err", err)
 			continue
 		}
-		exp, err := q.GetMediaNodeByID(ctx, edge.TargetNodeID)
-		if err != nil {
-			log.Warn("load export node", "nodeID", edge.TargetNodeID, "err", err)
-			continue
+		// Whatever state the export is in now, this cascade is spent: a
+		// later, independent trash of the export must not be undone by
+		// this master's next restore.
+		if err := q.CloseTrashCascadesForExport(ctx, exp.ID); err != nil {
+			return fmt.Errorf("close trash cascade for export %d: %w", exp.ID, err)
 		}
 		if exp.LifecycleState != "TRASHED" {
 			continue

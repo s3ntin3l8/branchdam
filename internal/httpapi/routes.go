@@ -535,8 +535,9 @@ type DeleteAssetOutput struct {
 	}
 }
 
-// handleDeleteAsset trashes the asset's master file and any linked Tier-2
-// exports (keepExports=false): the bytes are moved to <root>/.trash/<rel>
+// handleDeleteAsset trashes the asset's master file and its linked Tier-2
+// exports (keepExports=false; reviewed FINAL_EXPORT/immich_export edges
+// only, see pipeline.TrashAsset): the bytes are moved to <root>/.trash/<rel>
 // and the row's lifecycle_state becomes TRASHED. Media node rows are never
 // removed from SQLite (Invariant 1: No CASCADE, rows are never deleted) --
 // the row remains, restorable via POST /api/v1/assets/{id}/restore for 30 days.
@@ -621,7 +622,8 @@ type RestoreAssetOutput struct {
 // handleRestoreAsset transitions an ARCHIVED or TRASHED media node back to
 // ACTIVE. If another live node currently occupies the file path, returns 409
 // Conflict. For TRASHED nodes, the file is moved back from <root>/.trash/<rel>
-// to its original path by pipeline.RestoreTrashedAsset.
+// to its original path by pipeline.RestoreTrashedAsset, along with the exports
+// that node's own trash cascaded (never exports trashed on their own).
 func (s *Server) handleRestoreAsset(ctx context.Context, in *AssetPathInput) (*RestoreAssetOutput, error) {
 	node, err := s.db.Reader.GetMediaNodeByID(ctx, in.ID)
 	if errors.Is(err, sql.ErrNoRows) {

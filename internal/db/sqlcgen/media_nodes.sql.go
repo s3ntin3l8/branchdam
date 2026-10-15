@@ -1333,7 +1333,8 @@ WITH RECURSIVE lineage(root, id) AS (
     JOIN lineage l ON e.target_node_id = l.id
     JOIN media_nodes a ON a.id = e.source_node_id
     WHERE e.is_active = 1 AND e.review_state IN ('CONFIRMED', 'AUTO_ACCEPTED')
-      AND a.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+      AND e.relationship_type IN ('PROXY_OF', 'DERIVED_FROM', 'DUPLICATE_OF')
+      AND a.lifecycle_state IN ('ACTIVE', 'HIDDEN')
 )
 SELECT n.id, n.node_uuid, n.file_path, n.file_name, n.size_bytes,
        n.mtime_unix, n.storage_location_id
@@ -1341,6 +1342,12 @@ FROM media_nodes n
 WHERE n.storage_location_id = ?1
   AND n.lifecycle_state = 'ACTIVE'
   AND n.mtime_unix < ?2
+  AND lower(n.file_name) NOT LIKE '%.drp'
+  AND lower(n.file_name) NOT LIKE '%.fcpxml'
+  AND lower(n.file_name) NOT LIKE '%.edl'
+  AND lower(n.file_name) NOT LIKE '%.prproj'
+  AND lower(n.file_name) NOT LIKE '%.dam.json'
+  AND lower(n.file_name) NOT LIKE '%.xmp'
   AND EXISTS (
     SELECT 1
     FROM lineage l
@@ -1377,13 +1384,28 @@ type ListPrunableNodesRow struct {
 // "live" matches v_media_edges_resolved's own parent_alive definition --
 // ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 // vanished (MISSING) or archived Tier-3 master can never authorize a purge.
-// Ancestor, not "same full_hash": walks media_edges target->source
-// (only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is an
-// unreviewed guess and must never authorise deleting a file -- and each walked
-// node must itself be non-ARCHIVED),
-// mirroring ListAncestors' direction convention and its ARCHIVED-intermediate
-// exclusion exactly -- a chain that only connects through a superseded
-// version doesn't represent the file currently on disk.
+// Ancestor, not "same full_hash": walks media_edges target->source,
+// mirroring ListAncestors' direction convention, but stricter on three
+// counts:
+//   - only CONFIRMED or AUTO_ACCEPTED edges count -- a NEEDS_REVIEW edge is
+//     an unreviewed guess and must never authorise deleting a file;
+//   - only cache relationships count: PROXY_OF, DERIVED_FROM and
+//     DUPLICATE_OF, i.e. a copy or rendition of the master's bytes.
+//     PROJECT_SIDECAR (a project file or .xmp is the CHILD of the media it
+//     references, at 1.00) and FINAL_EXPORT (finished work, not
+//     reproducible from the master alone) never make a node prunable, so a
+//     verified Tier-3 master can't authorise deleting the edit decisions
+//     or exports hanging off it;
+//   - every node on the walk must be live (ACTIVE or HIDDEN), the same
+//     definition the Tier-3 ancestor itself must meet -- a chain that only
+//     connects through a MISSING, ARCHIVED or TRASHED node doesn't
+//     describe the file currently on disk.
+//
+// Project files (.drp, .fcpxml, .edl, .prproj, .dam.json -- the
+// internal/projectfile registry) and .xmp sidecars are never candidates,
+// whatever edge links them: they hold edit decisions, not cached media.
+// Matched on file_name, not file_ext, because scans store file_ext
+// lowercase without the dot while agent events store it as sent.
 // Tier-1-only and prunable-only are already schema-enforced
 // (00001_init.sql's CHECK (tier = 'TIER1_LOCAL_SCRATCH' OR prunable = 0)) --
 // not re-checked here; the caller only invokes this against a location it
@@ -1532,7 +1554,8 @@ UPDATE media_nodes SET lifecycle_state = 'TRASHED', updated_at = unixepoch() WHE
 `
 
 // pipeline.TrashAsset calls this on the master node and on every linked
-// FINAL_EXPORT/immich_export edge target (when keepExports=false). The
+// FINAL_EXPORT/immich_export edge target whose edge is AUTO_ACCEPTED or
+// CONFIRMED (when keepExports=false). The
 // pipeline function has already moved the bytes to <root>/.trash/<rel>
 // before this UPDATE; the lifecycle_state change is the durable record
 // that the file is no longer at its original path.
@@ -1767,8 +1790,9 @@ const untrashNode = `-- name: UntrashNode :exec
 UPDATE media_nodes SET lifecycle_state = 'ACTIVE', updated_at = unixepoch() WHERE id = ?1
 `
 
-// pipeline.RestoreTrashedAsset calls this on the master node and on any
-// linked TRASHED export node (same transaction). The pipeline function
+// pipeline.RestoreTrashedAsset calls this on the master node and on each
+// export that master's own trash cascaded (trash_cascades), in the same
+// transaction. The pipeline function
 // has already moved the bytes back from .trash/<rel> to the original
 // path before this UPDATE; the lifecycle_state change is the durable
 // record that the asset is queryable again.

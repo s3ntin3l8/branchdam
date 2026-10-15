@@ -256,6 +256,14 @@ type StorageLocation struct {
 	IsVirtual     int64
 }
 
+type TrashCascade struct {
+	ID           int64
+	ParentNodeID int64
+	ExportNodeID int64
+	TrashedAt    int64
+	RestoredAt   sql.NullInt64
+}
+
 type User struct {
 	ID                        int64
 	Username                  string

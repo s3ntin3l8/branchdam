@@ -577,7 +577,8 @@ WITH RECURSIVE ancestors(ancestor_id) AS (
     JOIN ancestors a ON e.target_node_id = a.ancestor_id
     JOIN media_nodes n ON e.source_node_id = n.id
     WHERE e.is_active = 1 AND e.review_state IN ('CONFIRMED', 'AUTO_ACCEPTED')
-      AND n.lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+      AND e.relationship_type IN ('PROXY_OF', 'DERIVED_FROM', 'DUPLICATE_OF')
+      AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
 )
 SELECT media_nodes.id, media_nodes.file_path, media_nodes.storage_location_id,
        media_nodes.mtime_unix, media_nodes.size_bytes
@@ -598,10 +599,12 @@ type ListVerifiedTier3AncestorsRow struct {
 	SizeBytes         int64
 }
 
-// Walks ancestor lineage target->source for node ?1 (only CONFIRMED and
-// AUTO_ACCEPTED edges are followed -- NEEDS_REVIEW/REJECTED never authorise a
-// purge; ARCHIVED/TRASHED nodes excluded) and returns every live ancestor on a
-// TIER3_MASTER_ARCHIVE location with a verified full_hash.
+// Walks ancestor lineage target->source for node ?1 and returns every live
+// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash.
+// The walk is ListPrunableNodes' exactly: only CONFIRMED and AUTO_ACCEPTED
+// edges (NEEDS_REVIEW/REJECTED never authorise a purge), only the cache
+// relationships PROXY_OF/DERIVED_FROM/DUPLICATE_OF (never PROJECT_SIDECAR or
+// FINAL_EXPORT), and only through live (ACTIVE or HIDDEN) nodes.
 // Used by internal/prune.Execute to re-verify the ancestor file on disk (via
 // os.Lstat) immediately before deleting the candidate (#246, #352).
 func (q *Queries) ListVerifiedTier3Ancestors(ctx context.Context, id int64) ([]ListVerifiedTier3AncestorsRow, error) {
