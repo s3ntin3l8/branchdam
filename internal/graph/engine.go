@@ -23,6 +23,21 @@ func AutoAcceptThresholdForTier(tier int) float64 {
 	return 0.90
 }
 
+// relationshipTypes is the schema-legal set of media_edges.relationship_type
+// values (the column's CHECK constraint). Keep in sync with the schema if it
+// ever gains a type.
+var relationshipTypes = map[string]bool{
+	"DERIVED_FROM":    true,
+	"FINAL_EXPORT":    true,
+	"PROXY_OF":        true,
+	"PROJECT_SIDECAR": true,
+	"DUPLICATE_OF":    true,
+}
+
+// IsValidRelationshipType reports whether rel is a schema-legal
+// media_edges.relationship_type.
+func IsValidRelationshipType(rel string) bool { return relationshipTypes[rel] }
+
 const (
 	// NeedsReviewFloor is the confidence below which a candidate edge is
 	// discarded outright rather than queued for review. Exported for the

@@ -211,16 +211,19 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 > an existing agent payload still parses, but the server never trusts them. Similarly,
 > `EVENT_EDGE_ATTACHED`'s `reviewState` is advisory and ignored for `AUTO_ACCEPTED`/empty (the
 > server always derives `AUTO_ACCEPTED` vs. `NEEDS_REVIEW` from `confidence` and `tier` via the
-> same per-tier threshold every other resolver uses) and is an outright error for
-> `CONFIRMED`/`REJECTED` -- a human review decision is never the agent's to make.
+> same per-tier threshold every other resolver uses, and from node ownership -- see §3.2) and is
+> an outright error for `CONFIRMED`/`REJECTED` -- a human review decision is never the agent's to
+> make.
 >
-> **A rebase targeting an `ARCHIVED` node_uuid always fails.** `EVENT_NODE_MOVED`,
+> **A rebase targeting an `ARCHIVED` or `TRASHED` node_uuid always fails.** `EVENT_NODE_MOVED`,
 > `EVENT_PATH_REBASED`, and `POST /api/v1/agent/rebase` all refuse to rebase a node whose
-> `lifecycle_state` is `ARCHIVED` -- that node_uuid identifies a superseded version, and rebasing
-> it in place would resurrect it. `EVENT_NODE_MOVED`/`EVENT_PATH_REBASED` mark the event `FAILED`
-> with `error_log` describing the refusal; `POST /api/v1/agent/rebase` returns `404 Not Found`. An
-> agent holding a stale `node_uuid` from before a version collision should treat either as
-> terminal, not retry.
+> `lifecycle_state` is `ARCHIVED` or `TRASHED`. An `ARCHIVED` node_uuid identifies a superseded
+> version and a `TRASHED` one a deleted asset; a rebase sets the node `ACTIVE`, so it would
+> resurrect either one. Restoring from trash is a human action in the web UI.
+> `EVENT_NODE_MOVED`/`EVENT_PATH_REBASED` mark the event `FAILED` with `error_log` describing the
+> refusal (`node is archived` / `node is trashed`); `POST /api/v1/agent/rebase` returns
+> `404 Not Found` for both. An agent holding a stale `node_uuid` should treat either as terminal,
+> not retry.
 >
 > **A device may only rebase, move or delete nodes it created itself.** The server records which
 > paired device created each node (via `EVENT_NODE_CREATED`, `EVENT_VIRTUAL_NODE_CREATED`, an
@@ -228,9 +231,10 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 > that created a new node). `EVENT_NODE_MOVED`, `EVENT_NODE_DELETED`, `EVENT_PATH_REBASED` (on an
 > existing node) and `POST /api/v1/agent/rebase` refuse any other node -- server-scanned nodes, web
 > uploads and other devices' nodes: events are marked `FAILED` (not retried) and the HTTP endpoint
-> returns `403 Forbidden`. A content-dedup hit on upload points at somebody else's node and is not
-> claimed by the uploader. Nodes created before this rule existed are attributed from their
-> processed creation event when it is still in the queue; otherwise no device owns them.
+> returns `403 Forbidden`. `EVENT_EDGE_ATTACHED` into a child the device did not create is accepted
+> but stored `NEEDS_REVIEW` (see §3.2). A content-dedup hit on upload points at somebody else's
+> node and is not claimed by the uploader. Nodes created before this rule existed are attributed
+> from their processed creation event when it is still in the queue; otherwise no device owns them.
 >
 > **Identifiers are validated.** `nodeUuid` must be a canonical UUID and `fullHash` 64 lowercase
 > hex characters (`400 Bad Request` on the HTTP endpoint, a permanent event failure otherwise). A
@@ -271,8 +275,30 @@ have given it.
 
 ### 3.2. `EVENT_EDGE_ATTACHED`
 
-`confidence` is required, in `(0, 1]`, and must be `>=` the `needsReviewFloor` (0.50) or the
-event fails outright.
+`sourceNodeUuid` is the parent and `targetNodeUuid` the child. Edges drive `graph_status`, metadata
+inheritance and the Tier-3 ancestor walk that authorises prune, so the server holds a device to
+these rules (issue #504). Every violation marks the event `FAILED` without retry:
+
+- **UUIDs only.** Both nodes are named by canonical UUID. `sourceNodeId`/`targetNodeId` (integer
+  row IDs) are refused if present at all, even next to valid UUIDs.
+- **`relationshipType`** must be one of `DERIVED_FROM`, `FINAL_EXPORT`, `PROXY_OF`,
+  `PROJECT_SIDECAR`, `DUPLICATE_OF`. Empty defaults to `DERIVED_FROM`.
+- **`tier`** is clamped to 1 or 2 (0 or absent means 1, anything above 2 is stored as 2). Tier 3's
+  lower auto-accept threshold belongs to the server's own heuristics.
+- **`confidence`** is required, in `(0, 1]`, and must be `>=` the `needsReviewFloor` (0.50).
+
+How the edge is stored depends on who created the **target (child)** node:
+
+- **The device created the target:** `reviewState` is `AUTO_ACCEPTED` when `confidence` reaches
+  the tier's threshold (0.90 for tiers 1 and 2) and `NEEDS_REVIEW` below it, whoever created the
+  source. An agent-created derived file pointing at a server-scanned master works as before.
+- **The device did not create the target** (a server-scanned file, a web upload, another device's
+  node): the edge is still recorded, but always `NEEDS_REVIEW`, whatever its confidence. It shows
+  up in the review queue and authorises nothing -- no prune (a `NEEDS_REVIEW` edge never
+  authorises one), no metadata inheritance -- until a human confirms it.
+
+An edge that already exists is never overwritten, so a human `CONFIRMED`/`REJECTED` decision
+always stands.
 
 ```json
 {
@@ -409,7 +435,7 @@ header is also read.
 
 Errors: `400` for an invalid `nodeUuid`/`fullHash`/target path or a refused read-only/missing
 Tier-3 target; `403` if the node was not created by the calling device; `404` for an `ARCHIVED`
-node; `409` if the node already has a different `fullHash`. The response `status` is `REBASED`
+or `TRASHED` node; `409` if the node already has a different `fullHash`. The response `status` is `REBASED`
 for an existing node or `CREATED` when an unknown `nodeUuid` was inserted.
 
 **Request (`AgentRebaseInput`):**
@@ -521,6 +547,10 @@ alongside the existing fields -- older clients simply ignore it). `found: false`
   }
 }
 ```
+
+`agentId` is required and must equal the agent id of the paired device that authenticated the
+request (`403 agent id mismatch` otherwise), as on `/handshake` and `/events`: telemetry is stored
+per `agentId`, so one device can't overwrite another device's row.
 
 **Response (`AgentTelemetryOutput` - Status 200 OK):**
 ```json

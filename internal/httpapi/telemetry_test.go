@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func TestAgentTelemetry_ValidPayload(t *testing.T) {
 
 	now := time.Now().Unix()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", bytesOfJSON(t, map[string]any{
-		"agentId":       "workstation-macbook",
+		"agentId":       "test-device", // must match the authenticated device (DefaultTestAgentKeyLookup)
 		"clientVersion": "1.2.0",
 		"timestampUnix": now,
 		"scratchStorage": map[string]any{
@@ -142,7 +143,7 @@ func TestAgentTelemetry_PersistenceAndStorageHealthQuery(t *testing.T) {
 
 	now := time.Now().Unix()
 	postReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", bytesOfJSON(t, map[string]any{
-		"agentId":       "studio-mac-pro",
+		"agentId":       "test-device", // must match the authenticated device (DefaultTestAgentKeyLookup)
 		"clientVersion": "1.3.0",
 		"timestampUnix": now,
 		"scratchStorage": map[string]any{
@@ -197,8 +198,8 @@ func TestAgentTelemetry_PersistenceAndStorageHealthQuery(t *testing.T) {
 		t.Fatalf("len(healthRes.Agents) = %d, want 1", len(healthRes.Agents))
 	}
 	ag := healthRes.Agents[0]
-	if ag.AgentID != "studio-mac-pro" {
-		t.Errorf("ag.AgentID = %q, want studio-mac-pro", ag.AgentID)
+	if ag.AgentID != "test-device" {
+		t.Errorf("ag.AgentID = %q, want test-device", ag.AgentID)
 	}
 	if ag.ClientVersion != "1.3.0" {
 		t.Errorf("ag.ClientVersion = %q, want 1.3.0", ag.ClientVersion)
@@ -244,12 +245,12 @@ func TestAgentTelemetry_PersistenceAndStorageHealthQuery(t *testing.T) {
 	}
 
 	// Delete agent via DELETE /api/v1/storage-health/agents/{agentId}
-	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/storage-health/agents/studio-mac-pro", nil)
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/storage-health/agents/test-device", nil)
 	delReq.Header.Set("X-Authentik-Username", "admin")
 	delRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusOK {
-		t.Fatalf("DELETE /api/v1/storage-health/agents/studio-mac-pro status = %d, body=%s", delRec.Code, delRec.Body.String())
+		t.Fatalf("DELETE /api/v1/storage-health/agents/test-device status = %d, body=%s", delRec.Code, delRec.Body.String())
 	}
 
 	// Verify agent is deleted
@@ -261,5 +262,40 @@ func TestAgentTelemetry_PersistenceAndStorageHealthQuery(t *testing.T) {
 	}
 	if len(listRes.Agents) != 0 {
 		t.Errorf("len(listRes.Agents) = %d, want 0 after deletion", len(listRes.Agents))
+	}
+}
+
+// TestAgentTelemetry_AgentIDMismatchForbidden: telemetry is upserted keyed on
+// agent_id, so a paired device naming another device's id would overwrite
+// (or plant) that device's dashboard row. Same 403 as /agent/events and
+// /agent/handshake.
+func TestAgentTelemetry_AgentIDMismatchForbidden(t *testing.T) {
+	srv, database, _, _, _, _ := serverWithGuard(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", bytesOfJSON(t, map[string]any{
+		"agentId":       "someone-elses-workstation",
+		"timestampUnix": time.Now().Unix(),
+		"scratchStorage": map[string]any{
+			"mountPath": "/Volumes/Scratch", "totalBytes": 10, "freeBytes": 5, "usedBytes": 5,
+			"mirrorsSizeBytes": 1, "renderCacheSizeBytes": 1, "proxiesSizeBytes": 1, "prunableBytes": 1,
+		},
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", routeTestAgentKey) // authenticates as "test-device"
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "agent id mismatch") {
+		t.Errorf("body = %s, want it to name the agent id mismatch", rr.Body.String())
+	}
+	rows, err := database.Reader.ListAgentScratchTelemetry(context.Background())
+	if err != nil {
+		t.Fatalf("list telemetry: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("telemetry rows = %d, want 0 -- a refused report must not be persisted", len(rows))
 	}
 }
