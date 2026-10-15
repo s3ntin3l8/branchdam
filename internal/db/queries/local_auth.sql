@@ -140,6 +140,16 @@ UPDATE users SET disabled_at = NULL WHERE id = ?1;
 -- Toggles the is_admin flag.
 UPDATE users SET is_admin = ?2 WHERE id = ?1;
 
+-- name: CountOtherActiveLocalAdmins :one
+-- Last-admin guard for DisableUser / SetAdmin(false): the number of
+-- enabled source='local' admins other than ?1. Only source='local' rows
+-- count -- they are the accounts that can log in with a password and
+-- recover the instance; forward-jit/forward-link rows depend on a proxy
+-- that may not exist. Read inside the same writer transaction as the
+-- UPDATE so two concurrent demotions cannot both see "one other admin".
+SELECT COUNT(*) FROM users
+WHERE source = 'local' AND is_admin = 1 AND disabled_at IS NULL AND id != ?1;
+
 -- name: InsertLoginAudit :exec
 -- Append-only. The two indexes on (user_id, created_at) and (ip, created_at)
 -- cover the admin UI's tail queries without a sort.

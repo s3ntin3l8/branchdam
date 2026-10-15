@@ -234,6 +234,44 @@ func TestDisableUser_IsIdempotent(t *testing.T) {
 	assert.True(t, got.DisabledAt.Valid)
 }
 
+// TestLastLocalAdminGuard pins the service-level guard behind the 409 on
+// PATCH /api/v1/admin/users/{id} and POST .../disable: the last enabled
+// source='local' admin can be neither demoted nor disabled, and a refused
+// call changes nothing. Disabled admins and non-local admins don't count.
+func TestLastLocalAdminGuard(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	a, err := svc.CreateLocalUser(ctx, "admin-a", "", "password", true, now.Unix(), "setup")
+	require.NoError(t, err)
+	b, err := svc.CreateLocalUser(ctx, "admin-b", "", "password", true, now.Unix(), "setup")
+	require.NoError(t, err)
+	viewer, err := svc.CreateLocalUser(ctx, "viewer", "", "password", false, now.Unix(), "setup")
+	require.NoError(t, err)
+	_, err = svc.CreateForwardJITUser(ctx, "fwd", "fwd@example.com", true, now.Unix(), "forward:fwd")
+	require.NoError(t, err)
+
+	// Two local admins: demoting/disabling one is fine.
+	require.NoError(t, svc.SetAdmin(ctx, b.ID, false))
+	// a is now the last local admin; the forward-jit admin doesn't count.
+	assert.ErrorIs(t, svc.SetAdmin(ctx, a.ID, false), ErrLastLocalAdmin)
+	assert.ErrorIs(t, svc.DisableUser(ctx, a.ID, now), ErrLastLocalAdmin)
+	got, err := svc.GetUserByID(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), got.IsAdmin)
+	assert.False(t, got.DisabledAt.Valid)
+
+	// Non-admins and promotions are never blocked.
+	require.NoError(t, svc.DisableUser(ctx, viewer.ID, now))
+	require.NoError(t, svc.SetAdmin(ctx, a.ID, true))
+
+	// A disabled admin is not an "active" admin for the count.
+	require.NoError(t, svc.SetAdmin(ctx, b.ID, true))
+	require.NoError(t, svc.DisableUser(ctx, b.ID, now))
+	assert.ErrorIs(t, svc.DisableUser(ctx, a.ID, now), ErrLastLocalAdmin)
+}
+
 func TestWriteLoginAudit_BestEffort(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
