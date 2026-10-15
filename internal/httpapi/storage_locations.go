@@ -213,6 +213,16 @@ func (s *Server) handlePutStorageLocation(ctx context.Context, in *PutStorageLoc
 // POST /api/v1/restart picks it up; the next manual override change
 // triggers this same path and will pick it up too.
 //
+// Each rebuilt Location keeps its storage_locations row id, looked up by
+// rootPath (the UNIQUE key seedStorageLocations upserts on, and the same
+// key the overrides use). Guard.Resolve(path).ID is what the agent drainer
+// and the agent rebase route write as media_nodes.storage_location_id, so a
+// Guard rebuilt with ID 0 makes every later agent insert or move fail its
+// FK check and the event is marked FAILED for good. A config entry with no
+// row (added to config.yaml after boot, never seeded) is skipped with a
+// warning until the restart that seeds it; Guard.ReloadLocations refuses a
+// zero id outright as a second line of defence.
+//
 // A failure here is logged but does not fail the PUT request -- the DB
 // write already succeeded and the next restart will pick up the change
 // regardless.
@@ -236,8 +246,23 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 	}
 	effective := settings.ResolveStorageLocations(cfg.StorageLocations, overrides, s.log)
 
+	rows, err := s.db.Reader.ListStorageLocations(ctx)
+	if err != nil {
+		return fmt.Errorf("list storage locations: %w", err)
+	}
+	idByRoot := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		idByRoot[r.RootPath] = r.ID
+	}
+
 	locs := make([]storage.Location, 0, len(effective))
 	for _, c := range effective {
+		id, ok := idByRoot[c.RootPath]
+		if !ok {
+			s.log.Warn("storage reload: skipping location with no storage_locations row (restart to seed it)",
+				"name", c.Name, "rootPath", c.RootPath)
+			continue
+		}
 		if c.IsVirtual() {
 			clean := filepath.Clean(c.RootPath)
 			if !filepath.IsAbs(clean) {
@@ -246,7 +271,7 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 				continue
 			}
 			locs = append(locs, storage.Location{
-				ID:        0, // re-resolved from override; Guard doesn't need the DB id for Resolve/CheckWrite
+				ID:        id,
 				Name:      c.Name,
 				RootPath:  clean,
 				Tier:      c.Tier,
@@ -262,7 +287,7 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 			continue
 		}
 		locs = append(locs, storage.Location{
-			ID:        0, // re-resolved from override; Guard doesn't need the DB id for Resolve/CheckWrite
+			ID:        id,
 			Name:      c.Name,
 			RootPath:  filepath.Clean(resolved),
 			Tier:      c.Tier,
@@ -270,6 +295,5 @@ func (s *Server) reloadGuardLocations(ctx context.Context) error {
 			IsVirtual: false,
 		})
 	}
-	s.guard.ReloadLocations(locs)
-	return nil
+	return s.guard.ReloadLocations(locs)
 }

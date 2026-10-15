@@ -88,12 +88,27 @@ func NewGuard(locs []Location) *Guard {
 }
 
 // ReloadLocations atomically replaces the Guard's location set. Called after
-// a storage_locations row is updated in the database so the in-memory Guard
-// reflects the new configuration without requiring a server restart.
-func (g *Guard) ReloadLocations(locs []Location) {
+// a storage location override is written so the in-memory Guard reflects the
+// new configuration without requiring a server restart.
+//
+// Every location must carry its storage_locations row id (ID > 0): callers
+// use Resolve(path).ID as the storage_location_id foreign key on media_nodes
+// inserts and moves (internal/agent's drainer, the agent rebase route), so a
+// reload that zeroes the ids would make every such write fail its FK check.
+// A location without an id is refused with an error and the current set is
+// kept unchanged, so the regression fails loudly instead of silently
+// poisoning later writes. NewGuard does not enforce this because many test
+// fixtures build Guards purely for path/tier checks with no database.
+func (g *Guard) ReloadLocations(locs []Location) error {
+	for _, l := range locs {
+		if l.ID <= 0 {
+			return fmt.Errorf("storage: reload location %q (%s): missing storage_locations id", l.Name, l.RootPath)
+		}
+	}
 	g.mu.Lock()
 	g.locs = buildSortedLocations(locs)
 	g.mu.Unlock()
+	return nil
 }
 
 // locationLister is the subset of sqlcgen.Querier LoadGuard needs. Declared
