@@ -15,7 +15,7 @@ WAL, sqlc, goose) + React 19 SPA (Vite, @xyflow/react, TanStack Query, Tailwind)
 
 ```sh
 # Pre-PR Gates
-make check       # lint + test + build + golangci-lint
+make check       # lint + test + test-demo + build + golangci-lint
 make check-web   # cd web && lint + typecheck + test + build
 
 # Dev Servers
