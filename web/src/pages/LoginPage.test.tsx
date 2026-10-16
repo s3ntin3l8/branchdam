@@ -15,13 +15,13 @@ vi.mock("../api/client", () => ({
   },
 }));
 
-function renderWithClient() {
+function renderWithClient(initialEntries: Array<string | { pathname: string; state?: unknown }> = ["/login"]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <LoginPage />
       </MemoryRouter>
     </QueryClientProvider>
@@ -65,6 +65,19 @@ describe("LoginPage", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Sign in with SSO" })).toBeInTheDocument();
     });
+  });
+
+  it("starts SSO with a full page load of the return path, so the proxy sees it", async () => {
+    vi.mocked(api.setupStatus).mockResolvedValue({ readyForSetup: false, mode: "both" });
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign });
+    try {
+      renderWithClient([{ pathname: "/login", state: { from: "/audit?page=2" } }]);
+      await userEvent.click(await screen.findByRole("button", { name: "Sign in with SSO" }));
+      expect(assign).toHaveBeenCalledWith("/audit?page=2");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("expands the reset form when 'Forgot password?' is clicked", async () => {

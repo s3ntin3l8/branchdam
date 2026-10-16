@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { api } from "../api/client";
+import { returnPathFrom } from "../lib/returnPath";
 import MfaChallengeForm from "../components/MfaChallengeForm";
 
 // LoginPage is the entry point for local-auth deployments. It calls
@@ -12,12 +13,29 @@ import MfaChallengeForm from "../components/MfaChallengeForm";
 // the SPA's index route handles them via the regular SPA shell.
 //
 // When mode is "forward" or "both", the user has the option to log in
-// via the forward-auth SSO button (just navigates to "/" -- Traefik
-// handles the forward-auth flow itself). When mode is "local", the
+// via the forward-auth SSO button (a full page load of the return path --
+// Traefik handles the forward-auth flow itself). When mode is "local", the
 // forward-auth button is hidden.
+//
+// The page renders outside the Layout shell (router.tsx). Layout sends a
+// signed-out visitor here with the path they asked for in location state
+// ({ from }); a successful sign-in returns them there.
 export default function LoginPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnTo = returnPathFrom(location.state);
+
+  // Signed in: drop the cached pre-login /me (a 403) rather than merely
+  // invalidating it, so Layout starts from a fresh fetch and can't redirect
+  // back here on the stale error before the refetch lands.
+  const enterApp = () => {
+    queryClient.removeQueries({ queryKey: ["me"] });
+    navigate(returnTo, { replace: true });
+  };
+  // SSO is the reverse proxy's job, so it needs a real page load that
+  // passes through it; an in-SPA navigate never reaches the proxy.
+  const startSso = () => window.location.assign(returnTo);
 
   const {
     data: status,
@@ -32,9 +50,8 @@ export default function LoginPage() {
   const setupMutation = useMutation({
     mutationFn: api.setupAdmin,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["me"] });
       void queryClient.invalidateQueries({ queryKey: ["setup-status"] });
-      navigate("/", { replace: true });
+      enterApp();
     },
   });
 
@@ -45,17 +62,13 @@ export default function LoginPage() {
         // Don't navigate -- show the MFA challenge form.
         return;
       }
-      void queryClient.invalidateQueries({ queryKey: ["me"] });
-      navigate("/", { replace: true });
+      enterApp();
     },
   });
 
   const mfaChallengeMutation = useMutation({
     mutationFn: api.mfaChallenge,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["me"] });
-      navigate("/", { replace: true });
-    },
+    onSuccess: enterApp,
   });
 
   const resetRequestMutation = useMutation({
@@ -122,7 +135,7 @@ export default function LoginPage() {
             onSubmit={(input) => loginMutation.mutate(input)}
             pending={loginMutation.isPending}
             error={loginMutation.error?.message}
-            onSso={status.mode === "both" ? () => navigate("/") : undefined}
+            onSso={status.mode === "both" ? startSso : undefined}
             resetPending={resetRequestMutation.isPending}
             resetSent={resetRequestMutation.isSuccess}
             resetError={resetRequestMutation.error?.message}
@@ -130,7 +143,7 @@ export default function LoginPage() {
             onResetDismiss={() => resetRequestMutation.reset()}
           />
         ) : (
-          <ForwardOnly onSso={() => navigate("/")} />
+          <ForwardOnly onSso={startSso} />
         )}
       </div>
     </div>

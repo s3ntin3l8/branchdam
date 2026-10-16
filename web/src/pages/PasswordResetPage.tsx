@@ -16,12 +16,12 @@ import { api } from "../api/client";
 //   - mutation succeeded: render a success panel with a link to /login
 //   - mutation failed: render the form with the error message inline
 //
-// The page is nested inside the Layout shell in the production router
-// (main.tsx via router.tsx), same as /login: users arriving here are
+// The page is a top-level route outside the Layout shell in the
+// production router (router.tsx), same as /login: users arriving here are
 // typically unauthenticated (the link comes from an email, not a
-// logged-in session), so the sidebar nav renders around a standalone
-// min-h-screen card. A 401 from the unauthenticated /me fetch only
-// triggers the AuthErrorBanner -- it does not redirect or loop.
+// logged-in session), so it renders as a standalone card with no sidebar,
+// no /me fetch and no SSE stream -- and Layout's signed-out redirect to
+// /login never sees it.
 export default function PasswordResetPage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") ?? "";

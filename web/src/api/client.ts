@@ -88,19 +88,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       // response body wasn't JSON -- fall back to statusText
     }
     if (res.status === 401 || res.status === 403) {
+      // Layout listens for this to re-check /api/v1/me (a lost session
+      // redirects to /login); AuthErrorBanner shows it only for a 401.
+      // A 403 is usually a page-level "not allowed" (an admin-only list
+      // for a non-admin) that the page renders itself.
       window.dispatchEvent(
-        new CustomEvent("api-auth-error", { detail: { status: res.status, message: detail } })
+        new CustomEvent<ApiAuthErrorDetail>(API_AUTH_ERROR_EVENT, {
+          detail: { status: res.status, message: detail, path },
+        })
       );
     }
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
-  window.dispatchEvent(new CustomEvent("api-auth-success"));
   return (await res.json()) as T;
 }
 
+// API_AUTH_ERROR_EVENT fires on window for every 401/403 API response.
+// API_AUTH_SUCCESS_EVENT fires only when /api/v1/me confirms a signed-in
+// session -- not on any 2xx, whose ordering against a parallel query's
+// 401 would otherwise make the auth banner flicker.
+export const API_AUTH_ERROR_EVENT = "api-auth-error";
+export const API_AUTH_SUCCESS_EVENT = "api-auth-success";
+export const ME_PATH = "/api/v1/me";
+
+export interface ApiAuthErrorDetail {
+  status: number;
+  message: string;
+  path: string;
+}
+
+async function fetchMe(): Promise<Me> {
+  const me = await request<Me>(ME_PATH);
+  if (me.authenticated) {
+    window.dispatchEvent(new CustomEvent(API_AUTH_SUCCESS_EVENT));
+  }
+  return me;
+}
+
 export const api = {
-  me: () => request<Me>("/api/v1/me"),
+  me: fetchMe,
   config: () => request<Config>("/api/v1/config"),
   listPathRewrites: () => request<PathRewrite[]>("/api/v1/config/path-rewrites"),
 

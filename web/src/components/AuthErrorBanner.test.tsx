@@ -30,14 +30,21 @@ describe("AuthErrorBanner", () => {
     expect(screen.getByText(/session expired/i)).toBeInTheDocument();
   });
 
-  it("uses 'Access denied' for non-401 status codes", () => {
+  it("ignores 403s -- pages render their own 'not allowed' state", () => {
     render(<AuthErrorBanner />);
-    act(() => fireApiError(403, "not allowed"));
-    expect(screen.getByText(/access denied/i)).toBeInTheDocument();
-    expect(screen.getByText(/not allowed/i)).toBeInTheDocument();
+    act(() => fireApiError(403, "admin authorization required"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/admin authorization required/i)).not.toBeInTheDocument();
   });
 
-  it("hides the banner when api-auth-success fires (transient 401 recovery)", () => {
+  it("keeps a 401 banner up when a later 403 arrives", () => {
+    render(<AuthErrorBanner />);
+    act(() => fireApiError(401, "session expired"));
+    act(() => fireApiError(403, "not allowed"));
+    expect(screen.getByText(/session expired/i)).toBeInTheDocument();
+  });
+
+  it("hides the banner when a signed-in /me fires api-auth-success", () => {
     render(<AuthErrorBanner />);
     act(() => fireApiError(401, "session expired"));
     expect(screen.getByText(/authentication required/i)).toBeInTheDocument();
@@ -70,8 +77,8 @@ describe("AuthErrorBanner", () => {
     render(<AuthErrorBanner />);
     act(() => fireApiError(401, "session expired"));
     expect(screen.getByText(/session expired/i)).toBeInTheDocument();
-    act(() => fireApiError(403, "forbidden"));
-    expect(screen.getByText(/forbidden/i)).toBeInTheDocument();
+    act(() => fireApiError(401, "token revoked"));
+    expect(screen.getByText(/token revoked/i)).toBeInTheDocument();
     expect(screen.queryByText(/session expired/i)).not.toBeInTheDocument();
   });
 });
