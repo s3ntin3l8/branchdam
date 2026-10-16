@@ -601,8 +601,11 @@ likewise acknowledged without checking its target.
 64 hex characters (BLAKE3-256), and **server-computed** (#505). A `fullHash` a device supplied in
 an `EVENT_NODE_CREATED`/`EVENT_PATH_REBASED` event or a `POST /agent/rebase` is only *asserted*:
 `verified` stays `false` for it until the server's background re-hash worker (`internal/rehash`)
-has re-read the file on the Tier-3 archive and matched it, which happens within minutes of the
-node landing there (a hash that does not match never becomes verified). Bytes sent through
+has re-read the file on the Tier-3 archive and matched it, which normally happens within minutes
+of the node landing there (a hash that does not match never becomes verified). Right after
+upgrading to a server with this check, the worker first re-reads the whole existing archive in
+node order, so a newly landed master waits behind that backlog -- hours to days on a large
+archive; see [`operations.md`](operations.md). Bytes sent through
 `POST /agent/upload` are hashed by the server while streaming and are verified at once: the hash
 is the server's own, taken over the bytes as it received and wrote them, though not over a re-read
 of the stored file afterwards. Clients

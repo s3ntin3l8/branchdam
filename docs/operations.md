@@ -142,10 +142,16 @@ read is retried after an hour. A **mismatch** is logged at `WARN` (`rehash: agen
 full_hash does not match the file`, with the node UUID, path and both hashes) and recorded as
 `rehash_state = 'MISMATCH'` with the computed value in `rehash_computed`; the stored `full_hash` is
 never replaced by what was read (the archive copy may be the damaged one), and it never authorises
-pruning. The file is read again once a day. To repair it, compare the archive copy with a known-good
-copy (the device's own hash is the stored value): if the archive copy is damaged, restore the good
-copy over it and the next daily read verifies the master. If the archive copy is right and the
-device's hash was wrong, the master stays unverified and its Tier-1 caches are kept, never purged.
+pruning. The file is read again a day later, then after 2, 4, 8 ... days, at most every 30 days
+(only mismatches count toward that: a read that fails because the share is unmounted is retried
+hourly and doesn't lengthen the wait).
+To repair it, compare the archive copy with a known-good copy (the device's own hash is the stored
+value): if the archive copy is damaged, restore the good copy over it and the next re-read verifies
+the master. Then scan the archive location: restoring the file changed its mtime, and pruning
+re-checks every Tier-3 ancestor's mtime and size against the database right before it deletes, so
+until a scan records the new values, purges under that master stop with "ancestor unreachable". If
+the archive copy is right and the device's hash was wrong, the master stays unverified and its
+Tier-1 caches are kept, never purged.
 
 Right after upgrading, every hash on a `TIER3_MASTER_ARCHIVE` location starts out asserted -- the server cannot tell an
 older device's assertion from a hash it scanned -- so cache pruning pauses until the worker has
