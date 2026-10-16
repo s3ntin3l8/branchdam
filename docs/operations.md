@@ -149,7 +149,9 @@ To repair it, compare the archive copy with a known-good copy (the device's own 
 value): if the archive copy is damaged, restore the good copy over it and the next re-read verifies
 the master. Then scan the archive location: restoring the file changed its mtime, and pruning
 re-checks every Tier-3 ancestor's mtime and size against the database right before it deletes, so
-until a scan records the new values, purges under that master stop with "ancestor unreachable". If
+until a scan records the new values, purges under that master stop with "ancestor unreachable". The
+scan also re-hashes the master from its bytes and records that hash as server-computed, which
+verifies it right away and clears the mismatch backoff -- no waiting for the next re-read. If
 the archive copy is right and the device's hash was wrong, the master stays unverified and its
 Tier-1 caches are kept, never purged.
 

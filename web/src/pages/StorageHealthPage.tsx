@@ -42,7 +42,8 @@ const PRUNE_PREVIEW_LIMIT = 200;
 // swaps its label, errors render as inline text -- no toast library exists
 // in this codebase, so this deliberately doesn't add one. The list renders
 // at most PRUNE_PREVIEW_LIMIT rows and says below the scroll box how many
-// more there are; the count and total above it always cover the whole plan.
+// more there are; the count and total above it, and the Confirm Purge
+// label, always cover the whole plan.
 function PruneControl({ locationId }: { locationId: number }) {
   const [plan, setPlan] = useState<PruneCandidate[] | null>(null);
   const [result, setResult] = useState<PruneCandidate[] | null>(null);
@@ -140,7 +141,9 @@ function PruneControl({ locationId }: { locationId: number }) {
               disabled={pruneCache.isPending}
               className="rounded bg-red-900 px-2 py-1 text-xs text-red-200 hover:bg-red-800 disabled:opacity-50"
             >
-              {pruneCache.isPending ? "Purging…" : "Confirm Purge"}
+              {pruneCache.isPending
+                ? "Purging…"
+                : `Confirm Purge (${plan.length} file${plan.length === 1 ? "" : "s"})`}
             </button>
           )}
           <button

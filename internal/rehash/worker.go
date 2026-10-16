@@ -68,7 +68,9 @@ const DefaultRetryAfter = time.Hour
 // full read of the master every day for good.
 const DefaultMismatchRetryAfter = 24 * time.Hour
 
-// MaxMismatchRetryAfter caps the doubling MISMATCH backoff.
+// MaxMismatchRetryAfter caps the doubling MISMATCH backoff, and
+// WithMismatchRetryAfter clamps its base to it, so a mismatched master is
+// read again at most every 30 days.
 const MaxMismatchRetryAfter = 30 * 24 * time.Hour
 
 const (
@@ -129,11 +131,13 @@ func WithRetryAfter(d time.Duration) Option {
 	}
 }
 
-// WithMismatchRetryAfter overrides DefaultMismatchRetryAfter.
+// WithMismatchRetryAfter overrides DefaultMismatchRetryAfter. A value
+// above MaxMismatchRetryAfter is clamped to it, so the "at most every 30
+// days" re-read always holds.
 func WithMismatchRetryAfter(d time.Duration) Option {
 	return func(w *Worker) {
 		if d >= 0 {
-			w.mismatchRetryAfter = d
+			w.mismatchRetryAfter = min(d, MaxMismatchRetryAfter)
 		}
 	}
 }
@@ -260,9 +264,12 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 
 // mismatchBackoff is how long a row waits after its mismatches-th
 // MISMATCH for the current asserted value: base, doubled for every
-// mismatch after the first, capped at MaxMismatchRetryAfter (and never
-// below base). Only mismatches count -- the hourly ERROR retries of an
-// unmounted share don't (rehash_mismatches, 00042).
+// mismatch after the first, capped at MaxMismatchRetryAfter. The worker's
+// base never exceeds the cap (WithMismatchRetryAfter clamps it), so its
+// waits are always at most MaxMismatchRetryAfter; a larger base passed
+// straight in is returned as is, never shortened below it. Only
+// mismatches count -- the hourly ERROR retries of an unmounted share
+// don't (rehash_mismatches, 00042).
 func mismatchBackoff(base time.Duration, mismatches int64) time.Duration {
 	wait := base
 	for i := int64(1); i < mismatches && wait < MaxMismatchRetryAfter; i++ {

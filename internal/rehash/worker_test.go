@@ -245,6 +245,35 @@ func TestReadErrorsDontGrowTheMismatchBackoff(t *testing.T) {
 	}
 }
 
+// TestReadErrorKeepsTheMismatchRecord: a MISMATCH followed by a read
+// error leaves the row in ERROR, but still holding the mismatch count and
+// the hash the bytes last computed to, so the operator keeps the record.
+func TestReadErrorKeepsTheMismatchRecord(t *testing.T) {
+	e := newEnv(t)
+	content := "damaged bytes"
+	id := e.node(t, e.tier3ID, e.archive, "f.mov", strp(content), hashOf(t, "what the agent claimed"), db.HashSourceAgent)
+
+	now := time.Now()
+	w := NewWorker(e.db, e.guard, nil, WithRetryAfter(0), WithClock(func() time.Time { return now }))
+	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Mismatched != 1 {
+		t.Fatalf("first pass = %+v, %v; want one mismatch", stats, err)
+	}
+	if err := os.Remove(filepath.Join(e.archive, "f.mov")); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(DefaultMismatchRetryAfter + time.Hour)
+	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Errored != 1 {
+		t.Fatalf("pass after the mismatch window = %+v, %v; want one read error", stats, err)
+	}
+	p := e.provenance(t, id)
+	if p.Source != db.HashSourceAgent || p.RehashState.String != stateError || p.RehashMismatches != 1 {
+		t.Fatalf("provenance = %+v, want AGENT/ERROR with the mismatch count kept", p)
+	}
+	if !p.RehashComputed.Valid || p.RehashComputed.String != hashOf(t, content) {
+		t.Errorf("rehash_computed = %+v, want the mismatch's computed hash kept", p.RehashComputed)
+	}
+}
+
 // TestReadErrorRetriesAfterWindow: an unreadable file is recorded as ERROR
 // and only retried once RetryAfter has passed; a later successful read
 // then verifies it.
@@ -441,5 +470,18 @@ func TestMismatchBackoffDoublesToTheCap(t *testing.T) {
 	}
 	if got := mismatchBackoff(60*day, 3); got != 60*day {
 		t.Errorf("mismatchBackoff(60d, 3) = %s, want the base when it exceeds the cap", got)
+	}
+}
+
+// TestWithMismatchRetryAfterClampsToTheCap: a base above
+// MaxMismatchRetryAfter is clamped, so a worker never waits longer than
+// the documented 30 days between re-reads of a mismatched master.
+func TestWithMismatchRetryAfterClampsToTheCap(t *testing.T) {
+	w := NewWorker(nil, nil, nil, WithMismatchRetryAfter(60*24*time.Hour))
+	if w.mismatchRetryAfter != MaxMismatchRetryAfter {
+		t.Errorf("mismatchRetryAfter = %s, want MaxMismatchRetryAfter (%s)", w.mismatchRetryAfter, MaxMismatchRetryAfter)
+	}
+	if w := NewWorker(nil, nil, nil, WithMismatchRetryAfter(2*time.Hour)); w.mismatchRetryAfter != 2*time.Hour {
+		t.Errorf("mismatchRetryAfter = %s, want 2h (below the cap, kept)", w.mismatchRetryAfter)
 	}
 }
