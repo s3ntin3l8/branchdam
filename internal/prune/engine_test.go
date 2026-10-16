@@ -115,13 +115,19 @@ func seedNode(t *testing.T, database *db.DB, spec nodeSpec) sqlcgen.MediaNode {
 // production (nothing ever inserts a REJECTED row directly).
 func seedEdge(t *testing.T, database *db.DB, ancestorID, descendantID int64, reviewState string) {
 	t.Helper()
+	seedEdgeRel(t, database, ancestorID, descendantID, "PROXY_OF", reviewState)
+}
+
+// seedEdgeRel is seedEdge with an explicit relationship_type.
+func seedEdgeRel(t *testing.T, database *db.DB, ancestorID, descendantID int64, rel, reviewState string) {
+	t.Helper()
 	initial := reviewState
 	if initial == "REJECTED" || initial == "CONFIRMED" {
 		initial = "AUTO_ACCEPTED"
 	}
 	err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		edge, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
-			SourceNodeID: ancestorID, TargetNodeID: descendantID, RelationshipType: "PROXY_OF",
+			SourceNodeID: ancestorID, TargetNodeID: descendantID, RelationshipType: rel,
 			Confidence: 0.9, Tier: 2, Resolver: "test", EvidenceJson: "{}", ReviewState: initial,
 		})
 		if err != nil {
@@ -301,6 +307,120 @@ func TestPlanExcludesChainThroughArchivedIntermediate(t *testing.T) {
 			}
 		}
 	})
+
+	// A MISSING intermediate is a file the last scan could not find; the
+	// chain no longer describes anything on disk, so it must not authorise
+	// a purge any more than an ARCHIVED one does. Both the Plan query and
+	// Execute's re-check query must agree.
+	t.Run("MISSING intermediate: chain is not eligible", func(t *testing.T) {
+		database, tier1ID, candidate := buildChain(t, "MISSING")
+		got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		for _, c := range got {
+			if c.NodeID == candidate.ID {
+				t.Fatalf("candidate %d wrongly eligible through a MISSING intermediate: %+v", candidate.ID, got)
+			}
+		}
+		ancestors, err := database.Reader.ListVerifiedTier3Ancestors(context.Background(), candidate.ID)
+		if err != nil {
+			t.Fatalf("ListVerifiedTier3Ancestors: %v", err)
+		}
+		if len(ancestors) != 0 {
+			t.Fatalf("ListVerifiedTier3Ancestors walked through a MISSING intermediate: %+v", ancestors)
+		}
+	})
+}
+
+// TestPlanOnlyFollowsCacheRelationships proves only the cache relationships
+// (a copy or rendition of the master's bytes) make a Tier-1 node prunable.
+// PROJECT_SIDECAR makes a project file or .xmp the CHILD of the media it
+// references, at confidence 1.00 (graph.ProjectSidecarResolver), and a
+// FINAL_EXPORT child is finished work: neither is recoverable from the
+// Tier-3 master, so neither edge may authorise deleting the child. Execute's
+// re-check (ListVerifiedTier3Ancestors) must agree with Plan.
+func TestPlanOnlyFollowsCacheRelationships(t *testing.T) {
+	tests := []struct {
+		rel      string
+		eligible bool
+	}{
+		{"PROXY_OF", true},
+		{"DERIVED_FROM", true},
+		{"DUPLICATE_OF", true},
+		{"PROJECT_SIDECAR", false},
+		{"FINAL_EXPORT", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.rel, func(t *testing.T) {
+			database := openTestDB(t)
+			tier1ID := seedLocation(t, database, "t1", t.TempDir(), "TIER1_LOCAL_SCRATCH", false, true)
+			tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+
+			master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/master.jpg", mtimeUnix: oldMtime, fullHash: hash64("rel")})
+			candidate := seedNode(t, database, nodeSpec{locationID: tier1ID, path: "/scratch/child.jpg", mtimeUnix: oldMtime})
+			seedEdgeRel(t, database, master.ID, candidate.ID, tt.rel, "CONFIRMED")
+
+			got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			planned := len(got) == 1 && got[0].NodeID == candidate.ID
+			if planned != tt.eligible {
+				t.Fatalf("Plan = %+v, want eligible=%v for a %s child", got, tt.eligible, tt.rel)
+			}
+			ancestors, err := database.Reader.ListVerifiedTier3Ancestors(context.Background(), candidate.ID)
+			if err != nil {
+				t.Fatalf("ListVerifiedTier3Ancestors: %v", err)
+			}
+			if (len(ancestors) == 1) != tt.eligible {
+				t.Fatalf("ListVerifiedTier3Ancestors = %+v, want verified ancestor=%v over %s", ancestors, tt.eligible, tt.rel)
+			}
+		})
+	}
+}
+
+// TestPlanNeverSelectsProjectFilesOrSidecars proves project files and .xmp
+// sidecars on a prunable Tier-1 location are never candidates, even when a
+// verified Tier-3 master links to them. The PROJECT_SIDECAR case is the
+// shape the resolvers actually produce; the PROXY_OF/DERIVED_FROM cases
+// cover a mislabelled (manual or agent-attached) edge. A plain proxy in the
+// same setup stays eligible, so the exclusion is not vacuous.
+func TestPlanNeverSelectsProjectFilesOrSidecars(t *testing.T) {
+	tests := []struct {
+		file string
+		rel  string
+	}{
+		{"timeline.drp", "PROJECT_SIDECAR"},
+		{"IMG_0001.xmp", "PROJECT_SIDECAR"},
+		{"cut.fcpxml", "PROJECT_SIDECAR"},
+		{"timeline.drp", "PROXY_OF"},
+		{"IMG_0001.CR3.XMP", "DERIVED_FROM"},
+		{"reel.EDL", "DERIVED_FROM"},
+		{"edit.prproj", "DUPLICATE_OF"},
+		{"shot.dam.json", "DERIVED_FROM"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file+"/"+tt.rel, func(t *testing.T) {
+			database := openTestDB(t)
+			tier1ID := seedLocation(t, database, "t1", t.TempDir(), "TIER1_LOCAL_SCRATCH", false, true)
+			tier3ID := seedLocation(t, database, "t3", t.TempDir(), "TIER3_MASTER_ARCHIVE", true, false)
+
+			master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: "/archive/IMG_0001.CR3", mtimeUnix: oldMtime, fullHash: hash64("proj")})
+			project := seedNode(t, database, nodeSpec{locationID: tier1ID, path: "/scratch/" + tt.file, mtimeUnix: oldMtime})
+			proxy := seedNode(t, database, nodeSpec{locationID: tier1ID, path: "/scratch/IMG_0001_proxy.mp4", mtimeUnix: oldMtime})
+			seedEdgeRel(t, database, master.ID, project.ID, tt.rel, "CONFIRMED")
+			seedEdgeRel(t, database, master.ID, proxy.ID, "PROXY_OF", "CONFIRMED")
+
+			got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if len(got) != 1 || got[0].NodeID != proxy.ID {
+				t.Fatalf("Plan = %+v, want only the proxy %d (never %s %d)", got, proxy.ID, tt.file, project.ID)
+			}
+		})
+	}
 }
 
 // TestExecuteSymlinkEscapeRefused transposes

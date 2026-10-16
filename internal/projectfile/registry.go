@@ -12,6 +12,11 @@ var (
 
 // Register registers a project file parser for its reported extensions.
 // Ext extensions are normalized to lowercase without leading dot.
+//
+// A newly registered extension must also be excluded from prune in
+// ListPrunableNodes (internal/db/queries/media_nodes.sql): project files
+// and sidecars hold unique content. internal/db's
+// TestListPrunableNodesExcludesEveryProjectFileExtension enforces this.
 func Register(p Parser) {
 	mu.Lock()
 	defer mu.Unlock()

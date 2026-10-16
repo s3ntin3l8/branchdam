@@ -124,8 +124,16 @@ before ever letting it delete real files.
 A Tier-1 node is eligible only if **all** of:
 - it's `ACTIVE` on a `prunable: true` (Tier-1-only) storage location,
 - its `mtime_unix` is older than that location's `cacheTtlHours`,
-- it has a *live* ancestor (`ACTIVE` or `HIDDEN`, walked through `CONFIRMED` or `AUTO_ACCEPTED` edges only) on a
-  `TIER3_MASTER_ARCHIVE` location with a verified, non-`NULL`, 64-character `full_hash`.
+- it has a *live* ancestor (`ACTIVE` or `HIDDEN`) on a `TIER3_MASTER_ARCHIVE` location with a
+  verified, non-`NULL`, 64-character `full_hash`, reached only through `CONFIRMED` or
+  `AUTO_ACCEPTED` cache edges (`PROXY_OF`, `DERIVED_FROM`, `DUPLICATE_OF`) whose every
+  intermediate node is also `ACTIVE` or `HIDDEN`,
+- it is not a project file (`.drp`, `.fcpxml`, `.edl`, `.prproj`, `.dam.json`) or an `.xmp`
+  sidecar.
+
+`PROJECT_SIDECAR` and `FINAL_EXPORT` edges never make a node prunable: a project file or sidecar
+is the *child* of the media it references, and an export is finished work, so neither can be
+rebuilt from the Tier-3 master.
 
 `Execute` re-verifies eligibility twice more, immediately before deleting, to close two TOCTOU
 windows a dry-run `Plan` can't see: the DB-side Tier-3 ancestor can lose its verified hash between

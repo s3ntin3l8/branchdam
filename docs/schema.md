@@ -188,6 +188,7 @@ Every migration after `00001_init.sql`, in order:
 | `00034_pairing_url_sealed.sql` | `device_pairings.pairing_url TEXT` | Lets an operator re-open the full pairing credentials dialogue (QR + agent ID + API key + pairing URL + deep link) for an existing pairing without minting a new key. The column NEVER holds plaintext key material: sealed via `secrets.Box` when `BRANCHDAM_SECRET_KEY` is set, otherwise left NULL (never plaintext). `qr_svg` is sealed the same way by `pairing.Service`; boot-time `BackfillSealedCredentials` seals any legacy plaintext SVG rows |
 | `00035_node_creators.sql` | `node_creators(node_uuid PK -> media_nodes, agent_id, created_at)` | Records which paired device created a node through the agent API; the device-authenticated rebase / move / delete paths refuse nodes a device did not create. No row = not device-created (scan, web upload, or legacy). Backfilled from processed creation events |
 | `00036_restore_dropped_indexes.sql` | Re-creates `ix_media_nodes_camera_time` (from `00002`) and `ix_media_nodes_uploader ON media_nodes(uploaded_by_user_id) WHERE uploaded_by_user_id IS NOT NULL` (from `00020`) with `IF NOT EXISTS` | `00032`'s table rebuild re-created only some indexes; camera-serial lookups and per-uploader filters had degraded to full table scans |
+| `00037_trash_cascades.sql` | `trash_cascades(id, parent_node_id -> media_nodes, export_node_id -> media_nodes, trashed_at, restored_at)`, both FKs `RESTRICT` | Records which exports a master's `keepExports=false` trash moved into `.trash/`, so restoring the master brings back exactly those and never an export trashed on its own. `restored_at` closes a row once its export is back; rows are never deleted. No backfill: exports cascaded before this migration stay trashed when their master is restored and are restored individually |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.
@@ -220,7 +221,10 @@ Every migration after `00001_init.sql`, in order:
   its TTL (`mtime_unix`, not `last_seen_at`) is eligible only if a *live*
   (`lifecycle_state IN ('ACTIVE','HIDDEN')`) ancestor — walked via `media_edges` target→source,
   `REJECTED` edges excluded — on a `TIER3_MASTER_ARCHIVE` location has a non-NULL, 64-length
-  `full_hash`. Uses `length(full_hash) = 64` instead of a `GLOB` hex check — see the sqlc risk
+  `full_hash`. (Since tightened: only `CONFIRMED`/`AUTO_ACCEPTED` edges of the cache types
+  `PROXY_OF`/`DERIVED_FROM`/`DUPLICATE_OF` are walked, every node on the walk must be `ACTIVE` or
+  `HIDDEN`, and project files and `.xmp` sidecars are never candidates. `ListVerifiedTier3Ancestors`,
+  `Execute`'s re-check, walks the same way.) Uses `length(full_hash) = 64` instead of a `GLOB` hex check — see the sqlc risk
   section above for why.
 - Added `internal/prune` (`Plan`/`Execute`): `Execute` is `storage.Guard.Remove`'s first real
   production caller, gated by `Guard.CheckWrite` before every deletion. Purged nodes are marked
