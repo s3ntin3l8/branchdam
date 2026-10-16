@@ -187,6 +187,35 @@ describe("AuditQueuePage server-side filters and paging", () => {
     expect(screen.getByRole("button", { name: "Clear Filters" })).toBeInTheDocument();
   });
 
+  it("drops an unknown relationshipType from the URL instead of sending it", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [entry(1)], total: 1, resolvers: [] });
+    renderPage("/audit?relationshipType=BOGUS");
+    await screen.findByText("src-1.arw");
+    expect(lastQueueParams().relationshipType).toBeUndefined();
+    expect(screen.getByLabelText("Relationship")).toHaveValue("");
+  });
+
+  it("disables paging while the next page loads, so a double click can't skip one", async () => {
+    const user = userEvent.setup();
+    Element.prototype.scrollIntoView = vi.fn();
+    const page1 = Array.from({ length: 50 }, (_, i) => entry(i + 1));
+    let release: () => void = () => {};
+    vi.mocked(api.listAuditQueue).mockImplementation(async (p: AuditQueueParams = {}) => {
+      if (!p.beforeId) return { entries: page1, total: 150 };
+      await new Promise<void>((r) => (release = r));
+      return { entries: [entry(101)], total: 150 };
+    });
+    renderPage();
+    await screen.findByText("src-1.arw");
+
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
+    release();
+    await screen.findByText("src-101.arw");
+    expect(vi.mocked(api.listAuditQueue).mock.calls.filter(([p]) => p?.beforeId === 50)).toHaveLength(1);
+  });
+
   it("pages forward and back with Previous, and scrolls the page to the top", async () => {
     const user = userEvent.setup();
     const scrollSpy = vi.fn();

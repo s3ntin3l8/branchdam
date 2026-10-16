@@ -589,6 +589,7 @@ type Querier interface {
 	// Distinct resolvers across the whole NEEDS_REVIEW queue, for the audit
 	// page's resolver filter -- the options must come from the server now that
 	// filtering is server-side, not from whichever page happens to be loaded.
+	// Active edges only, like the queue's own view (v_media_edges_resolved).
 	ListAuditQueueResolvers(ctx context.Context) ([]string, error)
 	// COALESCE is not a null-guard here -- the WHERE clause already excludes
 	// NULL/empty camera_model -- it exists so sqlc infers []string instead of

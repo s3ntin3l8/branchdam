@@ -289,7 +289,7 @@ function AuditRow({
           body={
             <>
               Reject <strong className="text-neutral-100">{edgeSummary(entry)}</strong>? The edge leaves the queue
-              and automated resolvers will not re-propose it. You can undo this from{" "}
+              and automated resolvers will not re-propose it. An admin can undo this from{" "}
               <em>Recently reviewed</em> on this page.
             </>
           }
@@ -634,8 +634,8 @@ function BatchConfirmModal({
         <p className="text-xs text-neutral-300">
           {verb === "confirm" ? "Confirm" : "Reject"} the{" "}
           <strong className="text-neutral-100">{edges.length}</strong> selected edge
-          {edges.length === 1 ? "" : "s"}? Only the selected edges are changed, not the rest of the queue. Each one
-          can be undone from <em>Recently reviewed</em> afterwards.
+          {edges.length === 1 ? "" : "s"}? Only the selected edges are changed, not the rest of the queue. An admin
+          can undo each one from <em>Recently reviewed</em> afterwards.
         </p>
 
         {running && (
@@ -700,7 +700,11 @@ export default function AuditQueuePage() {
   // whole queue (and its total), not just the loaded page.
   const tierFilter = searchParams.get("tier") || "";
   const resolverFilter = searchParams.get("resolver") || "";
-  const relFilter = (searchParams.get("relationshipType") || "") as EdgeAuditEntry["relationshipType"] | "";
+  // Validated like the api client's tier/minConfidence: an unknown type in
+  // the URL would 422 and leave the page without a filter bar to clear it.
+  const relParam = searchParams.get("relationshipType") || "";
+  const relFilter: EdgeAuditEntry["relationshipType"] | "" =
+    RELATIONSHIP_TYPES.find((r) => r.value === relParam)?.value ?? "";
   const minConfFilter = searchParams.get("minConfidence") || "";
   const hasActiveFilters = Boolean(tierFilter || resolverFilter || relFilter || minConfFilter);
 
@@ -1046,7 +1050,7 @@ export default function AuditQueuePage() {
             <div className="flex items-center space-x-2">
               <button
                 aria-label="First page"
-                disabled={trail.length === 0}
+                disabled={trail.length === 0 || isFetching}
                 onClick={handleFirst}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
@@ -1054,7 +1058,7 @@ export default function AuditQueuePage() {
               </button>
               <button
                 aria-label="Previous page"
-                disabled={trail.length === 0}
+                disabled={trail.length === 0 || isFetching}
                 onClick={handlePrev}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
@@ -1062,7 +1066,9 @@ export default function AuditQueuePage() {
               </button>
               <button
                 aria-label="Next page"
-                disabled={!hasMore}
+                // Disabled while a page loads: the cursor comes from the
+                // rows on screen, so a second click would repeat it.
+                disabled={!hasMore || isFetching}
                 onClick={handleNext}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >

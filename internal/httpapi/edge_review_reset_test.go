@@ -337,6 +337,15 @@ func TestAuditQueueServerSideFilters(t *testing.T) {
 		seedReviewEdge(t, database, locID, s)
 	}
 
+	// An inactive NEEDS_REVIEW edge (a Resolve snapshot that dropped it) is
+	// outside the queue, so its resolver is not offered as a filter either.
+	inactiveID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{tier: 1, resolver: "resolve_project_db", confidence: 0.9})
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		return q.InactivateResolveEdge(context.Background(), inactiveID)
+	}); err != nil {
+		t.Fatalf("inactivate: %v", err)
+	}
+
 	cases := []struct {
 		name  string
 		q     url.Values

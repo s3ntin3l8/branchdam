@@ -75,7 +75,7 @@ WHERE (lifecycle_state = ?2 OR ?2 IS NULL)
   AND (uploaded_by_user_id = ?6 OR ?6 IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query))
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
 `
 
 type CountMediaNodesFilteredParams struct {
@@ -112,7 +112,7 @@ CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query))
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
 `
 
 // Backs GET /api/v1/assets' search-aware total (q, no structural filter;
@@ -1079,7 +1079,7 @@ CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query))
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -1191,7 +1191,7 @@ WHERE (lifecycle_state = ?5 OR ?5 IS NULL)
   AND (uploaded_by_user_id = ?9 OR ?9 IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query))
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.

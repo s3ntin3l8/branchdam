@@ -23,7 +23,7 @@ CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query))
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -57,7 +57,7 @@ CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query));
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query));
 
 -- name: ListMediaNodesFiltered :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -89,7 +89,7 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query))
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -119,7 +119,7 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR lower(node_uuid) = lower(p.name_query));
+       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query));
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes
