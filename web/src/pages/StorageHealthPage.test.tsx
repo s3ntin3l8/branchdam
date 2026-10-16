@@ -254,8 +254,10 @@ describe("StorageHealthPage", () => {
     const fileList = screen.getByRole("list", { name: "Files to be purged" });
     expect(within(fileList).getByText("/mnt/scratch/proxy-200.jpg")).toBeInTheDocument();
     expect(within(fileList).queryByText("/mnt/scratch/proxy-201.jpg")).not.toBeInTheDocument();
-    expect(within(fileList).getByText(/and 5 more/)).toBeInTheDocument();
-    expect(within(fileList).getAllByRole("listitem")).toHaveLength(201);
+    expect(within(fileList).getAllByRole("listitem")).toHaveLength(200);
+    // Outside the scroll box, so it is visible without scrolling.
+    expect(within(fileList).queryByText(/and 5 more/)).not.toBeInTheDocument();
+    expect(screen.getByText(/and 5 more/)).toBeInTheDocument();
   });
 
   it("shows a DISABLED badge independently of INACTIVE", async () => {

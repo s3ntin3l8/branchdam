@@ -84,6 +84,56 @@ func TestMigration00041BackfillsFullHashProvenance(t *testing.T) {
 	}
 }
 
+// TestMigration00042BackfillsMismatchBackoff: a MISMATCH recorded under
+// 00041 counts as the first mismatch and is due a day after it was
+// checked; other rows start with no mismatches and no retry time.
+func TestMigration00042BackfillsMismatchBackoff(t *testing.T) {
+	writerDB := openRawWriter(t, filepath.Join(t.TempDir(), "mismatch-backfill.db"))
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(nil)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 41); err != nil {
+		t.Fatalf("up to 41: %v", err)
+	}
+	hash := func(c string) string { return "'" + strings.Repeat(c, 64) + "'" }
+	for _, stmt := range []string{
+		`INSERT INTO storage_locations (id, name, root_path, tier) VALUES (1, 'archive', '/archive', 'TIER3_MASTER_ARCHIVE')`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name, full_hash) VALUES (1, 'u1', 1, '/archive/1.mov', '1.mov', ` + hash("a") + `)`,
+		`INSERT INTO media_nodes (id, node_uuid, storage_location_id, file_path, file_name, full_hash) VALUES (2, 'u2', 1, '/archive/2.mov', '2.mov', ` + hash("b") + `)`,
+		`INSERT INTO full_hash_provenance (node_id, full_hash, source, rehash_state, rehash_checked_at, rehash_attempts, rehash_computed)
+		 VALUES (1, ` + hash("a") + `, 'AGENT', 'MISMATCH', 1000, 30, ` + hash("c") + `)`,
+		`INSERT INTO full_hash_provenance (node_id, full_hash, source, rehash_state, rehash_checked_at, rehash_attempts)
+		 VALUES (2, ` + hash("b") + `, 'AGENT', 'ERROR', 1000, 5)`,
+	} {
+		if _, err := writerDB.Exec(stmt); err != nil {
+			t.Fatalf("seed %q: %v", stmt, err)
+		}
+	}
+	if err := goose.UpTo(writerDB, migrationsDir, 42); err != nil {
+		t.Fatalf("up to 42: %v", err)
+	}
+	for _, tc := range []struct {
+		id         int64
+		mismatches int64
+		retryAt    sql.NullInt64
+	}{
+		{1, 1, sql.NullInt64{Int64: 1000 + 86400, Valid: true}},
+		{2, 0, sql.NullInt64{}},
+	} {
+		var mismatches int64
+		var retryAt sql.NullInt64
+		if err := writerDB.QueryRow(`SELECT rehash_mismatches, rehash_retry_at FROM full_hash_provenance WHERE node_id = ?`, tc.id).
+			Scan(&mismatches, &retryAt); err != nil {
+			t.Fatal(err)
+		}
+		if mismatches != tc.mismatches || retryAt != tc.retryAt {
+			t.Errorf("node %d: mismatches=%d retry_at=%+v, want %d %+v", tc.id, mismatches, retryAt, tc.mismatches, tc.retryAt)
+		}
+	}
+}
+
 // TestRecordFullHashSource pins RecordFullHashProvenance's upsert rules:
 // AGENT never downgrades a SERVER row for the same value, a new value
 // replaces the row and its re-hash bookkeeping, SERVER always wins, and a
@@ -137,19 +187,22 @@ func TestRecordFullHashSource(t *testing.T) {
 	}
 	// A failed re-hash, then the same assertion again: bookkeeping kept.
 	if _, err := database.InTxResult(ctx, func(q *sqlcgen.Queries) (int64, error) {
-		return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
-			NodeID: nodeID, FullHash: h1, RehashState: sql.NullString{String: "ERROR", Valid: true},
+		return q.RecordRehashMismatch(ctx, sqlcgen.RecordRehashMismatchParams{
+			NodeID: nodeID, FullHash: h1,
+			RehashComputed: sql.NullString{String: h2, Valid: true},
+			RehashRetryAt:  sql.NullInt64{Int64: 5_000, Valid: true},
 		})
 	}); err != nil {
 		t.Fatal(err)
 	}
 	record(&h1, HashSourceAgent)
-	if p := get(); p.RehashState.String != "ERROR" || p.RehashAttempts != 1 {
+	if p := get(); p.RehashState.String != "MISMATCH" || p.RehashAttempts != 1 || p.RehashMismatches != 1 || p.RehashRetryAt.Int64 != 5_000 {
 		t.Fatalf("re-asserting the same value reset bookkeeping: %+v", p)
 	}
 
 	record(&h1, HashSourceServer)
-	if p := get(); p.Source != HashSourceServer || p.RehashState.Valid || p.RehashAttempts != 0 {
+	if p := get(); p.Source != HashSourceServer || p.RehashState.Valid || p.RehashAttempts != 0 ||
+		p.RehashMismatches != 0 || p.RehashRetryAt.Valid {
 		t.Fatalf("after SERVER h1: %+v", p)
 	}
 	record(&h1, HashSourceAgent)

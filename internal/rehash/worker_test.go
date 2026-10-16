@@ -186,8 +186,8 @@ func TestMismatchStaysAgent(t *testing.T) {
 	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Mismatched != 1 {
 		t.Fatalf("pass after the mismatch window = %+v, %v; want the same mismatch again", stats, err)
 	}
-	if p := e.provenance(t, id); p.Source != db.HashSourceAgent || p.RehashAttempts != 2 {
-		t.Fatalf("provenance = %+v, want still AGENT after two attempts", p)
+	if p := e.provenance(t, id); p.Source != db.HashSourceAgent || p.RehashAttempts != 2 || p.RehashMismatches != 2 {
+		t.Fatalf("provenance = %+v, want still AGENT after two mismatches", p)
 	}
 
 	// An operator restores a good copy of the file: the next re-read after
@@ -195,20 +195,53 @@ func TestMismatchStaysAgent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(e.archive, "b.mov"), []byte("what the agent claimed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The second mismatch doubled the wait to two days. rehash_checked_at
-	// is stamped by SQLite's real clock (the start of this test), so the
-	// windows here are measured from there: 40 hours in, the row is
-	// still held back; 49 hours in, the restored bytes verify.
-	now = now.Add(15 * time.Hour)
+	// The second mismatch doubled the wait to two days (rehash_retry_at is
+	// set from the worker's clock): a day later the row is still held
+	// back, two days later the restored bytes verify.
+	now = now.Add(25 * time.Hour)
 	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats != (Stats{}) {
 		t.Fatalf("pass inside the doubled window = %+v, %v; want nothing (backoff is two days)", stats, err)
 	}
-	now = now.Add(9 * time.Hour)
+	now = now.Add(24 * time.Hour)
 	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Matched != 1 {
 		t.Fatalf("pass after restoring the file = %+v, %v; want one match", stats, err)
 	}
-	if p := e.provenance(t, id); p.Source != db.HashSourceServer || p.RehashState.Valid || p.RehashComputed.Valid {
-		t.Errorf("provenance = %+v, want SERVER with the mismatch cleared", p)
+	if p := e.provenance(t, id); p.Source != db.HashSourceServer || p.RehashState.Valid || p.RehashComputed.Valid ||
+		p.RehashMismatches != 0 || p.RehashRetryAt.Valid {
+		t.Errorf("provenance = %+v, want SERVER with the mismatch bookkeeping cleared", p)
+	}
+}
+
+// TestReadErrorsDontGrowTheMismatchBackoff: a share unmounted for a day
+// piles up ERROR attempts; the first real mismatch after it still waits
+// only DefaultMismatchRetryAfter, since only mismatches count.
+func TestReadErrorsDontGrowTheMismatchBackoff(t *testing.T) {
+	e := newEnv(t)
+	asserted := hashOf(t, "what the agent claimed")
+	id := e.node(t, e.tier3ID, e.archive, "e.mov", nil, asserted, db.HashSourceAgent)
+
+	// WithRetryAfter(0) compresses the hourly ERROR retries: every pass
+	// whose clock has moved on re-reads the (still missing) file.
+	now := time.Now()
+	w := NewWorker(e.db, e.guard, nil, WithRetryAfter(0), WithClock(func() time.Time { return now }))
+	for i := 0; i < 24; i++ {
+		if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Errored != 1 {
+			t.Fatalf("pass %d: %+v, %v; want one read error", i, stats, err)
+		}
+		now = now.Add(time.Hour)
+	}
+	if err := os.WriteFile(filepath.Join(e.archive, "e.mov"), []byte("damaged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Mismatched != 1 {
+		t.Fatalf("pass once the share is back = %+v, %v; want one mismatch", stats, err)
+	}
+	p := e.provenance(t, id)
+	if p.RehashAttempts != 25 || p.RehashMismatches != 1 {
+		t.Fatalf("provenance = %+v, want 25 attempts and 1 mismatch", p)
+	}
+	if want := now.Add(DefaultMismatchRetryAfter).Unix(); !p.RehashRetryAt.Valid || p.RehashRetryAt.Int64 != want {
+		t.Errorf("rehash_retry_at = %+v, want %d (one day, not the cap)", p.RehashRetryAt, want)
 	}
 }
 

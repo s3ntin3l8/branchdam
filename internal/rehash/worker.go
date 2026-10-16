@@ -231,10 +231,10 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 		return stats, errors.New("rehash: database or storage guard not configured")
 	}
 	rows, err := w.db.Reader.ListRehashCandidates(ctx, sqlcgen.ListRehashCandidatesParams{
-		AfterID:             w.cursor,
-		RetryBefore:         sql.NullInt64{Int64: w.now().Add(-w.retryAfter).Unix(), Valid: true},
-		MismatchRetryBefore: sql.NullInt64{Int64: w.now().Add(-w.mismatchRetryAfter).Unix(), Valid: true},
-		BatchLimit:          int64(w.batchSize),
+		AfterID:     w.cursor,
+		RetryBefore: sql.NullInt64{Int64: w.now().Add(-w.retryAfter).Unix(), Valid: true},
+		NowUnix:     sql.NullInt64{Int64: w.now().Unix(), Valid: true},
+		BatchLimit:  int64(w.batchSize),
 	})
 	if err != nil {
 		return stats, fmt.Errorf("list rehash candidates: %w", err)
@@ -242,10 +242,6 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 	for _, row := range rows {
 		if ctx.Err() != nil {
 			return stats, ctx.Err()
-		}
-		if !w.mismatchDue(row) {
-			w.cursor = row.ID
-			continue
 		}
 		if err := w.processOne(ctx, row, &stats); err != nil {
 			return stats, err
@@ -259,22 +255,14 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
-// mismatchDue reports whether row may be read now. Only a MISMATCH row can
-// be held back: the claim query already applied the first window, and
-// each later attempt doubles it (see DefaultMismatchRetryAfter).
-func (w *Worker) mismatchDue(row sqlcgen.ListRehashCandidatesRow) bool {
-	if !row.RehashState.Valid || row.RehashState.String != stateMismatch || !row.RehashCheckedAt.Valid {
-		return true
-	}
-	wait := mismatchBackoff(w.mismatchRetryAfter, row.RehashAttempts)
-	return !w.now().Before(time.Unix(row.RehashCheckedAt.Int64, 0).Add(wait))
-}
-
-// mismatchBackoff is base doubled for every attempt after the first,
-// capped at MaxMismatchRetryAfter (and never below base).
-func mismatchBackoff(base time.Duration, attempts int64) time.Duration {
+// mismatchBackoff is how long a row waits after its mismatches-th
+// MISMATCH for the current asserted value: base, doubled for every
+// mismatch after the first, capped at MaxMismatchRetryAfter (and never
+// below base). Only mismatches count -- the hourly ERROR retries of an
+// unmounted share don't (rehash_mismatches, 00042).
+func mismatchBackoff(base time.Duration, mismatches int64) time.Duration {
 	wait := base
-	for i := int64(1); i < attempts && wait < MaxMismatchRetryAfter; i++ {
+	for i := int64(1); i < mismatches && wait < MaxMismatchRetryAfter; i++ {
 		wait *= 2
 	}
 	if wait > MaxMismatchRetryAfter && base <= MaxMismatchRetryAfter {
@@ -300,10 +288,9 @@ func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidate
 		w.log.Warn("rehash: could not read agent-asserted master; will retry",
 			"nodeUuid", row.NodeUuid, "path", row.FilePath, "retryAfter", w.retryAfter, "err", hashErr)
 		return w.record(ctx, func(q *sqlcgen.Queries) (int64, error) {
-			return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
-				NodeID:      row.ID,
-				FullHash:    asserted,
-				RehashState: sql.NullString{String: stateError, Valid: true},
+			return q.RecordRehashError(ctx, sqlcgen.RecordRehashErrorParams{
+				NodeID:   row.ID,
+				FullHash: asserted,
 			})
 		})
 	case computed == asserted:
@@ -313,16 +300,17 @@ func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidate
 			return q.MarkRehashMatched(ctx, sqlcgen.MarkRehashMatchedParams{NodeID: row.ID, FullHash: asserted})
 		})
 	default:
+		wait := mismatchBackoff(w.mismatchRetryAfter, row.RehashMismatches+1)
 		stats.Mismatched++
 		w.log.Warn("rehash: agent-asserted full_hash does not match the file; it will not authorise pruning",
 			"nodeUuid", row.NodeUuid, "path", row.FilePath, "asserted", asserted, "computed", computed,
-			"rereadAfter", mismatchBackoff(w.mismatchRetryAfter, row.RehashAttempts+1))
+			"rereadAfter", wait)
 		return w.record(ctx, func(q *sqlcgen.Queries) (int64, error) {
-			return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
+			return q.RecordRehashMismatch(ctx, sqlcgen.RecordRehashMismatchParams{
 				NodeID:         row.ID,
 				FullHash:       asserted,
-				RehashState:    sql.NullString{String: stateMismatch, Valid: true},
 				RehashComputed: sql.NullString{String: computed, Valid: true},
+				RehashRetryAt:  sql.NullInt64{Int64: w.now().Add(wait).Unix(), Valid: true},
 			})
 		})
 	}

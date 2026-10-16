@@ -142,7 +142,9 @@ read is retried after an hour. A **mismatch** is logged at `WARN` (`rehash: agen
 full_hash does not match the file`, with the node UUID, path and both hashes) and recorded as
 `rehash_state = 'MISMATCH'` with the computed value in `rehash_computed`; the stored `full_hash` is
 never replaced by what was read (the archive copy may be the damaged one), and it never authorises
-pruning. The file is read again a day later, then after 2, 4, 8 ... days, at most every 30 days.
+pruning. The file is read again a day later, then after 2, 4, 8 ... days, at most every 30 days
+(only mismatches count toward that: a read that fails because the share is unmounted is retried
+hourly and doesn't lengthen the wait).
 To repair it, compare the archive copy with a known-good copy (the device's own hash is the stored
 value): if the archive copy is damaged, restore the good copy over it and the next re-read verifies
 the master. Then scan the archive location: restoring the file changed its mtime, and pruning

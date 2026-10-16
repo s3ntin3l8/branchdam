@@ -754,13 +754,11 @@ type Querier interface {
 	// node id order after after_id, whose current full_hash is only
 	// agent-asserted and has not been re-hashed yet -- or whose last attempt
 	// failed to read the file (ERROR) before retry_before, or read bytes that
-	// did not match (MISMATCH) before mismatch_retry_before. A MISMATCH is
-	// re-read on the longer window so that restoring a good copy of the file
-	// onto the archive verifies it without anyone editing the database; the
-	// stored value is never replaced by what was read. mismatch_retry_before
-	// is the shortest MISMATCH window; internal/rehash skips a row whose
-	// per-attempt backoff (from rehash_attempts and rehash_checked_at) has not
-	// passed yet. A row whose full_hash
+	// did not match (MISMATCH) and whose rehash_retry_at has come (now_unix).
+	// A MISMATCH is re-read on a doubling backoff the worker records with it
+	// (00042), so that restoring a good copy of the file onto the archive
+	// verifies it without anyone editing the database; the stored value is
+	// never replaced by what was read. A row whose full_hash
 	// no longer equals the node's vouches for nothing and is skipped. Driven from the AGENT partial index
 	// (ix_full_hash_provenance_agent) so a fully verified archive costs an
 	// empty index range per pass, not a media_nodes scan.
@@ -978,11 +976,18 @@ type Querier interface {
 	// cascades over. Upsert: a node restored and trashed again restarts its
 	// retention window.
 	RecordNodeTrashed(ctx context.Context, nodeID int64) error
-	// A re-hash of node ?1's asserted value ?2 did not match: state ?3 is
-	// MISMATCH (the bytes hash to ?4 instead) or ERROR (the file could not be
-	// read; ?4 is NULL). The row stays 'AGENT', so the value keeps authorising
-	// nothing. Same ?2 condition as MarkRehashMatched.
-	RecordRehashFailure(ctx context.Context, arg RecordRehashFailureParams) (int64, error)
+	// A re-hash of node ?1's asserted value ?2 could not read the file: ERROR,
+	// retried after the worker's RetryAfter. An earlier MISMATCH count is
+	// kept, so a share that flaps between reads doesn't restart the backoff.
+	// The row stays 'AGENT', so the value keeps authorising nothing. Same ?2
+	// condition as MarkRehashMatched.
+	RecordRehashError(ctx context.Context, arg RecordRehashErrorParams) (int64, error)
+	// A re-hash of node ?1's asserted value ?2 read bytes that hash to ?3
+	// instead: MISMATCH, counted in rehash_mismatches and not read again
+	// before ?4 (unix seconds; the worker's doubling backoff). The row stays
+	// 'AGENT', so the value keeps authorising nothing. Same ?2 condition as
+	// MarkRehashMatched.
+	RecordRehashMismatch(ctx context.Context, arg RecordRehashMismatchParams) (int64, error)
 	// pipeline.TrashAsset records each export it cascade-trashes with its master
 	// (keepExports=false), in the same transaction as the export's
 	// MarkNodeTrashed.

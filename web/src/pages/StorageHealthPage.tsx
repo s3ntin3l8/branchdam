@@ -37,8 +37,8 @@ function formatDuration(durationMs: number): string {
 // swaps its label, errors render as inline text -- no toast library exists
 // in this codebase, so this deliberately doesn't add one. The list renders
 // at most PRUNE_PREVIEW_LIMIT rows (a cache location can have thousands of
-// candidates) and says how many more there are; the count and total above
-// it always cover the whole plan.
+// candidates) and says below the scroll box how many more there are; the
+// count and total above it always cover the whole plan.
 const PRUNE_PREVIEW_LIMIT = 200;
 
 function PruneControl({ locationId }: { locationId: number }) {
@@ -120,12 +120,12 @@ function PruneControl({ locationId }: { locationId: number }) {
                 <span className="shrink-0 text-neutral-400">{formatBytes(c.sizeBytes)}</span>
               </li>
             ))}
-            {plan.length > PRUNE_PREVIEW_LIMIT && (
-              <li className="px-2 py-1 text-neutral-400">
-                …and {plan.length - PRUNE_PREVIEW_LIMIT} more
-              </li>
-            )}
           </ul>
+        )}
+        {plan.length > PRUNE_PREVIEW_LIMIT && (
+          <p className="text-neutral-400">
+            Showing the first {PRUNE_PREVIEW_LIMIT}; …and {plan.length - PRUNE_PREVIEW_LIMIT} more.
+          </p>
         )}
         {pruneCache.isError && (
           <p className="text-red-400">Purge failed: {String(pruneCache.error)}</p>
