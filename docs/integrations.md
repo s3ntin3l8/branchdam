@@ -96,6 +96,10 @@ Non-destructive photo editing in Skylum Luminar Neo is indexed via `branchdam-ag
 - Opens the local SQLite catalog file (`catalog.db`) with `?mode=ro` (safe for concurrent access).
 - Reads edit operations and links exported derivative files back to their source camera RAW masters.
 - Emits `EVENT_EDGE_ATTACHED` edges at **Tier 2 (Confidence: 0.89)** into branchDAM's Audit Queue.
+  Unless the agent itself created the child node (the edited export), the server stores the edge
+  `NEEDS_REVIEW` for a human to confirm, whatever its confidence -- see
+  [`agent-api.md` §3.2](agent-api.md#32-event_edge_attached). The same applies to the Resolve
+  `PROJECT_SIDECAR` edges the agent emits.
 
 See the [Luminar Catalog Schema Reference](https://github.com/s3ntin3l8/branchdam-agent/blob/main/docs/luminar-catalog.md) for query mappings.
 

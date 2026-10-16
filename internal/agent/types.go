@@ -32,6 +32,13 @@ var (
 	// lifecycle_state guard and media_nodes' superseded_by/ARCHIVED CHECK.
 	ErrArchivedNode = errors.New("agent: node is archived, refusing to rebase")
 
+	// ErrTrashedNode is fatal for the same reason as ErrArchivedNode: a
+	// TRASHED node's file sits in .trash awaiting purge, and
+	// RebaseNodePathByUUID would flip it back to ACTIVE, undoing a
+	// user's delete. Restoring from trash is a deliberate, human action
+	// (the web UI's restore), never a side effect of an agent rebase.
+	ErrTrashedNode = errors.New("agent: node is trashed, refusing to rebase")
+
 	// ErrWouldCreateCycle is fatal, not transient: the graph does not
 	// un-cycle itself by retrying the same edge.
 	ErrWouldCreateCycle = errors.New("agent: edge would create a cycle")
@@ -98,16 +105,30 @@ type NodeCreatedPayload struct {
 }
 
 // EdgeAttachedPayload represents the payload for EVENT_EDGE_ATTACHED.
+//
+// Source is the parent, Target the child. When the device did not create
+// the target (RequireNodeOwner), the edge is stored NEEDS_REVIEW whatever
+// its confidence. See applyEdgeAttached.
 type EdgeAttachedPayload struct {
-	SourceNodeUUID   string          `json:"sourceNodeUuid"`
-	TargetNodeUUID   string          `json:"targetNodeUuid"`
-	SourceNodeID     int64           `json:"sourceNodeId,omitempty"`
-	TargetNodeID     int64           `json:"targetNodeId,omitempty"`
-	RelationshipType string          `json:"relationshipType"`
-	Confidence       float64         `json:"confidence,omitempty"`
-	Tier             int64           `json:"tier,omitempty"`
-	Resolver         string          `json:"resolver,omitempty"`
-	EvidenceJSON     json.RawMessage `json:"evidenceJson,omitempty"`
+	SourceNodeUUID string `json:"sourceNodeUuid"`
+	TargetNodeUUID string `json:"targetNodeUuid"`
+	// SourceNodeID/TargetNodeID are refused: a non-zero value fails the
+	// event (ErrMalformedPayload). Integer row IDs are server-internal and
+	// enumerable, so they let a device name nodes it has never been told
+	// about; agents identify nodes by UUID only. Kept in the struct so such
+	// a payload is recognised and rejected rather than silently ignored.
+	SourceNodeID int64 `json:"sourceNodeId,omitempty"`
+	TargetNodeID int64 `json:"targetNodeId,omitempty"`
+	// RelationshipType must satisfy graph.IsValidRelationshipType; empty
+	// defaults to DERIVED_FROM.
+	RelationshipType string  `json:"relationshipType"`
+	Confidence       float64 `json:"confidence,omitempty"`
+	// Tier is clamped to [1, 2]: devices may assert direct (1) or
+	// structural (2) evidence, never Tier 3, whose lower auto-accept
+	// threshold is reserved for the server's own heuristics. 0 means 1.
+	Tier         int64           `json:"tier,omitempty"`
+	Resolver     string          `json:"resolver,omitempty"`
+	EvidenceJSON json.RawMessage `json:"evidenceJson,omitempty"`
 
 	// ReviewState is deprecated and ignored: review_state is now always
 	// derived from (Confidence, Tier) via graph.AutoAcceptThresholdForTier,

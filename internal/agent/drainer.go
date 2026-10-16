@@ -266,15 +266,16 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		}
 
 		// Handle error: check if fatal poison-pill or exceeded retry limit.
-		// ErrArchivedNode and ErrWouldCreateCycle join the fatal set for the
-		// same reason as the rest: retrying doesn't change the outcome --
-		// an ARCHIVED node doesn't un-archive itself and the graph doesn't
-		// un-cycle itself.
+		// ErrArchivedNode, ErrTrashedNode and ErrWouldCreateCycle join the
+		// fatal set for the same reason as the rest: retrying doesn't
+		// change the outcome -- an ARCHIVED or TRASHED node doesn't change
+		// state by itself and the graph doesn't un-cycle itself.
 		isFatal := errors.Is(processErr, ErrMalformedPayload) ||
 			errors.Is(processErr, ErrUnknownEventType) ||
 			errors.Is(processErr, ErrInvalidNodeUUID) ||
 			errors.Is(processErr, ErrReadOnlyRebase) ||
 			errors.Is(processErr, ErrArchivedNode) ||
+			errors.Is(processErr, ErrTrashedNode) ||
 			errors.Is(processErr, ErrWouldCreateCycle) ||
 			errors.Is(processErr, ErrVirtualPathNotVirtual) ||
 			errors.Is(processErr, ErrCrossAgentCollision) ||
@@ -643,42 +644,62 @@ func writeGPSMetadata(ctx context.Context, q *sqlcgen.Queries, nodeID int64, p N
 	return nil
 }
 
+// agentMaxEdgeTier is the highest evidence tier a device may assert. Tier 3
+// (heuristic matching) carries the lowest auto-accept threshold and is the
+// server's own resolvers' to claim; a device-supplied 3 is clamped to 2.
+const agentMaxEdgeTier = 2
+
+// applyEdgeAttached records a lineage edge asserted by a paired device.
+// Edges drive graph_status and the Tier-3 ancestor walk that authorises
+// prune, so a device is held to these rules (issue #504):
+//
+//   - nodes are named by UUID only; integer row IDs are refused;
+//   - relationshipType must be schema-legal, and tier is clamped to [1, 2];
+//   - if the device created the TARGET (child) node, review_state is
+//     derived from (confidence, tier) exactly as graph.Engine does,
+//     whoever owns the source -- an agent-created derived file pointing at a
+//     server-scanned master is the normal case and keeps working;
+//   - if it did NOT create the target (a server-scanned file, a web upload,
+//     another device's node), the edge is still recorded -- Luminar and
+//     Resolve legitimately describe files the server scanned -- but as
+//     NEEDS_REVIEW whatever its confidence. A NEEDS_REVIEW edge never
+//     authorises prune (Invariant 7) or metadata inheritance until a human
+//     confirms it, so a device can no longer make arbitrary nodes prunable.
+//
+// An existing edge (including a human CONFIRMED/REJECTED one) is never
+// overwritten -- Invariant 6.
 func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev sqlcgen.ListPendingAgentEventsRow) error {
 	var p EdgeAttachedPayload
 	if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 		return fmt.Errorf("%w: unmarshal edge attached: %v", ErrMalformedPayload, err)
 	}
 
-	sourceID := p.SourceNodeID
-	if sourceID == 0 {
-		if p.SourceNodeUUID == "" {
-			return fmt.Errorf("%w: missing sourceNodeUuid in edge attached payload", ErrMalformedPayload)
-		}
-		srcNode, err := q.GetMediaNodeByUUID(ctx, p.SourceNodeUUID)
-		if err != nil {
-			return fmt.Errorf("resolve source node %q: %w", p.SourceNodeUUID, err)
-		}
-		sourceID = srcNode.ID
+	// Validate the whole payload before touching the database.
+	if p.SourceNodeID != 0 || p.TargetNodeID != 0 {
+		return fmt.Errorf("%w: sourceNodeId/targetNodeId are not accepted, identify nodes by sourceNodeUuid/targetNodeUuid", ErrMalformedPayload)
 	}
-
-	targetID := p.TargetNodeID
-	if targetID == 0 {
-		if p.TargetNodeUUID == "" {
-			return fmt.Errorf("%w: missing targetNodeUuid in edge attached payload", ErrMalformedPayload)
-		}
-		tgtNode, err := q.GetMediaNodeByUUID(ctx, p.TargetNodeUUID)
-		if err != nil {
-			return fmt.Errorf("resolve target node %q: %w", p.TargetNodeUUID, err)
-		}
-		targetID = tgtNode.ID
+	if p.SourceNodeUUID == "" {
+		return fmt.Errorf("%w: missing sourceNodeUuid in edge attached payload", ErrMalformedPayload)
+	}
+	if p.TargetNodeUUID == "" {
+		return fmt.Errorf("%w: missing targetNodeUuid in edge attached payload", ErrMalformedPayload)
+	}
+	if !ValidNodeUUID(p.SourceNodeUUID) || !ValidNodeUUID(p.TargetNodeUUID) {
+		return fmt.Errorf("%w: malformed sourceNodeUuid/targetNodeUuid in edge attached payload", ErrInvalidNodeUUID)
 	}
 
 	if p.RelationshipType == "" {
 		p.RelationshipType = "DERIVED_FROM"
 	}
+	if !graph.IsValidRelationshipType(p.RelationshipType) {
+		return fmt.Errorf("%w: unknown relationshipType %q", ErrMalformedPayload, p.RelationshipType)
+	}
 	tier := p.Tier
 	if tier <= 0 {
 		tier = 1
+	}
+	if tier > agentMaxEdgeTier {
+		tier = agentMaxEdgeTier
 	}
 	resolver := p.Resolver
 	if resolver == "" {
@@ -707,8 +728,29 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 	if p.Confidence < graph.NeedsReviewFloor {
 		return fmt.Errorf("%w: confidence %v is below needsReviewFloor %v, refusing to create edge", ErrMalformedPayload, p.Confidence, graph.NeedsReviewFloor)
 	}
+
+	srcNode, err := q.GetMediaNodeByUUID(ctx, p.SourceNodeUUID)
+	if err != nil {
+		return fmt.Errorf("resolve source node %q: %w", p.SourceNodeUUID, err)
+	}
+	tgtNode, err := q.GetMediaNodeByUUID(ctx, p.TargetNodeUUID)
+	if err != nil {
+		return fmt.Errorf("resolve target node %q: %w", p.TargetNodeUUID, err)
+	}
+	sourceID, targetID := srcNode.ID, tgtNode.ID
+
+	// Only the child's creator may assert its provenance with authority;
+	// anyone else's edge is a suggestion for a human to confirm.
+	targetOwned := true
+	if err := RequireNodeOwner(ctx, q, ev.AgentID, p.TargetNodeUUID); err != nil {
+		if !errors.Is(err, ErrNotNodeOwner) {
+			return err
+		}
+		targetOwned = false
+	}
+
 	reviewState := "NEEDS_REVIEW"
-	if p.Confidence >= graph.AutoAcceptThresholdForTier(int(tier)) {
+	if targetOwned && p.Confidence >= graph.AutoAcceptThresholdForTier(int(tier)) {
 		reviewState = "AUTO_ACCEPTED"
 	}
 
@@ -790,6 +832,11 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 	// otherwise). Refuse before that happens.
 	if node.LifecycleState == "ARCHIVED" {
 		return fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
+	}
+	// Same for TRASHED: the rebase would flip it back to ACTIVE and undo
+	// the delete. Restoring from trash is a human action, not a move.
+	if node.LifecycleState == "TRASHED" {
+		return fmt.Errorf("%w: node uuid %s", ErrTrashedNode, p.NodeUUID)
 	}
 	// A device may only re-point nodes it created itself.
 	if err := RequireNodeOwner(ctx, q, ev.AgentID, p.NodeUUID); err != nil {
@@ -951,6 +998,10 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		// resurrect a superseded version.
 		if existing.LifecycleState == "ARCHIVED" {
 			return 0, fmt.Errorf("%w: node uuid %s", ErrArchivedNode, p.NodeUUID)
+		}
+		// And a TRASHED one: rebasing would resurrect a deleted node.
+		if existing.LifecycleState == "TRASHED" {
+			return 0, fmt.Errorf("%w: node uuid %s", ErrTrashedNode, p.NodeUUID)
 		}
 		if err := RequireNodeOwner(ctx, q, ev.AgentID, p.NodeUUID); err != nil {
 			return 0, err

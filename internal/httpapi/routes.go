@@ -1191,18 +1191,10 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	}
 
 	// The full schema-legal set (media_edges.relationship_type's CHECK
-	// constraint) -- a superset of validParentRelationships below, which
-	// narrows to the subset inherit-metadata may treat as identity ancestry.
-	// Keep the two in sync with the schema if it ever gains a relationship
-	// type.
-	validRels := map[string]bool{
-		"DERIVED_FROM":    true,
-		"FINAL_EXPORT":    true,
-		"PROXY_OF":        true,
-		"PROJECT_SIDECAR": true,
-		"DUPLICATE_OF":    true,
-	}
-	if !validRels[in.Body.RelationshipType] {
+	// constraint, graph.IsValidRelationshipType) -- a superset of
+	// validParentRelationships below, which narrows to the subset
+	// inherit-metadata may treat as identity ancestry.
+	if !graph.IsValidRelationshipType(in.Body.RelationshipType) {
 		return nil, huma.Error422UnprocessableEntity("invalid relationship type")
 	}
 
@@ -2163,7 +2155,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		mtime = time.Now().Unix()
 	}
 
-	var archivedNode, notOwner, hashConflict bool
+	var retiredNode, notOwner, hashConflict bool
 	out := &AgentRebaseOutput{}
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, err := q.GetMediaNodeByUUID(ctx, in.Body.NodeUUID)
@@ -2173,8 +2165,10 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			// lifecycle filter of its own -- rebasing here would resurrect
 			// it. Refuse before that happens, same as internal/agent's
 			// drainer for the two event-driven rebase paths.
-			if existing.LifecycleState == "ARCHIVED" {
-				archivedNode = true
+			// TRASHED likewise: the rebase would flip a deleted node back to
+			// ACTIVE. Restoring from trash is a human action in the web UI.
+			if existing.LifecycleState == "ARCHIVED" || existing.LifecycleState == "TRASHED" {
+				retiredNode = true
 				return nil
 			}
 			// A device may only rebase nodes it created itself; without
@@ -2291,7 +2285,8 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	if err != nil {
 		return nil, huma.Error500InternalServerError("rebase operation failed", err)
 	}
-	if archivedNode {
+	if retiredNode {
+		// ARCHIVED or TRASHED: both read as "no live asset with this UUID".
 		return nil, huma.Error404NotFound("asset not found")
 	}
 	if notOwner {
@@ -2640,8 +2635,15 @@ type AgentTelemetryOutput struct {
 // It updates the agent's latest snapshot in agent_scratch_telemetry and broadcasts an SSE nudge
 // so connected web dashboards refresh real-time storage metrics immediately.
 func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInput) (*AgentTelemetryOutput, error) {
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+	p, ok := auth.From(ctx)
+	if !ok || p.Kind != auth.KindMachine {
 		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+	}
+	// Same cross-check as handleAgentEvent: telemetry is upserted keyed on
+	// agent_id, so without it a paired device could overwrite (or plant)
+	// another device's dashboard row.
+	if in.Body.AgentID != p.Name {
+		return nil, huma.Error403Forbidden("agent id mismatch", nil)
 	}
 
 	prunedCountsJSON := "{}"
