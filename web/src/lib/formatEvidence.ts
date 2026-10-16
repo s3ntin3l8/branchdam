@@ -41,7 +41,9 @@ export const SIGNAL_LABELS: Readonly<Record<string, string>> = {
   child_original_document_id: "Child original document ID",
   parent_document_id: "Parent document ID",
   // filename_stem
-  filename_stem: "Filename stem",
+  // "Stem", not "Filename stem": the row sits under the "Filename stem"
+  // resolver heading and would otherwise repeat it.
+  filename_stem: "Stem",
   dji_telemetry: "DJI telemetry",
   same_directory: "Same directory",
   same_capture_day: "Same capture day",
@@ -74,14 +76,16 @@ function lookup(map: Readonly<Record<string, string>>, key: string): string | un
   return Object.hasOwn(map, key) ? map[key] : undefined;
 }
 
-// humanizeKey turns snake_case (or camelCase) into a sentence-case label:
-// "proxy_ext_direction_forced" -> "Proxy ext direction forced".
+// humanizeKey turns snake_case or camelCase into a sentence-case label,
+// keeping acronyms intact: "proxy_ext_direction_forced" -> "Proxy ext
+// direction forced", "GPSLatitude" -> "GPS latitude".
 export function humanizeKey(key: string): string {
   const words = key
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .split(/[_\s-]+/)
     .filter(Boolean)
-    .map((w) => w.toLowerCase());
+    .map((w) => (w.length > 1 && w === w.toUpperCase() && /[A-Z]/.test(w) ? w : w.toLowerCase()));
   if (words.length === 0) return key;
   const sentence = words.join(" ");
   return sentence.charAt(0).toUpperCase() + sentence.slice(1);

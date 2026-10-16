@@ -36,7 +36,7 @@ function EvidenceRows({ rows }: { rows: EvidenceRow[] }) {
 
 function EvidencePanel({ evidenceJson }: { evidenceJson?: string }) {
   const headingId = useId();
-  const evidence = formatEvidence(evidenceJson);
+  const evidence = useMemo(() => formatEvidence(evidenceJson), [evidenceJson]);
   if (evidence.kind === "empty") return null;
   if (evidence.kind === "raw") {
     return <div className="mt-2 break-all font-mono text-xs text-neutral-400">Evidence: {evidence.raw}</div>;

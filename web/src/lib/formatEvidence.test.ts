@@ -82,7 +82,7 @@ describe("formatEvidence", () => {
     );
     expect(structured(ev).groups[0].label).toBe("Filename stem");
     expect(rowsOf(ev, "filename_stem")).toEqual({
-      "Filename stem": "dji_0042",
+      Stem: "dji_0042",
       "DJI telemetry": "yes",
       "Same directory": "yes",
       "Same capture day": "yes",
@@ -107,7 +107,7 @@ describe("formatEvidence", () => {
       }),
     );
     expect(rowsOf(ev, "filename_stem")).toEqual({
-      "Filename stem": "dsc01301",
+      Stem: "dsc01301",
       "Same capture day": "yes",
       "Same camera model": "yes (ILCE-7M4)",
       "Same directory": "yes",
@@ -245,6 +245,10 @@ describe("humanizeKey", () => {
     expect(humanizeKey("proxy_ext_direction_forced")).toBe("Proxy ext direction forced");
     expect(humanizeKey("mediaFilePath")).toBe("Media file path");
     expect(humanizeKey("x")).toBe("X");
+    expect(humanizeKey("GPSLatitude")).toBe("GPS latitude");
+    expect(humanizeKey("gpsLatitude")).toBe("Gps latitude");
+    expect(humanizeKey("rawXMPPath")).toBe("Raw XMP path");
+    expect(humanizeKey("ID")).toBe("ID");
     expect(humanizeKey("___")).toBe("___");
   });
 });
