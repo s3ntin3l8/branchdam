@@ -58,18 +58,28 @@ function AssetInheritMetadataControl({ asset }: { asset: Asset }) {
     inheritMetadata.mutate(asset.id, {
       onSuccess: (data) => {
         setPlan(null);
-        const count = Object.keys(data.inherited).filter((tag) => !identityTags.has(tag)).length;
-        setMessage(count > 0 ? `Inherited ${count} tag${count === 1 ? "" : "s"}.` : "Nothing new to inherit.");
+        const count = Object.keys(data.inherited).filter(
+          (tag) => !identityTags.has(tag),
+        ).length;
+        setMessage(
+          count > 0
+            ? `Inherited ${count} tag${count === 1 ? "" : "s"}.`
+            : "Nothing new to inherit.",
+        );
       },
     });
   };
 
-  const plannedTags = plan ? Object.entries(plan.inherited).sort(([a], [b]) => a.localeCompare(b)) : [];
+  const plannedTags = plan
+    ? Object.entries(plan.inherited).sort(([a], [b]) => a.localeCompare(b))
+    : [];
 
   return (
     <span className="flex items-center gap-2 text-xs">
       {previewInherit.isError && (
-        <span className="text-red-400">Cannot inherit: {String(previewInherit.error)}</span>
+        <span className="text-red-400">
+          Cannot inherit: {String(previewInherit.error)}
+        </span>
       )}
       {message && <span className="text-neutral-400">{message}</span>}
       <button
@@ -87,17 +97,24 @@ function AssetInheritMetadataControl({ asset }: { asset: Asset }) {
           body={
             <div className="space-y-3">
               <p>
-                This rewrites <strong className="text-amber-300">{asset.fileName}</strong> in place, writing these
-                tags
+                This rewrites{" "}
+                <strong className="text-amber-300">{asset.fileName}</strong> in
+                place, writing these tags
                 {plan.parentFileName ? (
                   <>
                     {" "}
-                    from <strong className="text-neutral-100">{plan.parentFileName}</strong>
+                    from{" "}
+                    <strong className="text-neutral-100">
+                      {plan.parentFileName}
+                    </strong>
                   </>
                 ) : null}
                 :
               </p>
-              <table className="w-full text-left font-mono text-[11px]" aria-label="Tags to be written">
+              <table
+                className="w-full text-left font-mono text-[11px]"
+                aria-label="Tags to be written"
+              >
                 <thead className="text-neutral-500">
                   <tr>
                     <th className="pr-3 font-normal">Tag</th>
@@ -132,7 +149,9 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="grid grid-cols-3 gap-2 py-1 text-sm">
       <dt className="text-neutral-500">{label}</dt>
-      <dd className="col-span-2 break-all font-mono text-neutral-200">{value ?? "—"}</dd>
+      <dd className="col-span-2 break-all font-mono text-neutral-200">
+        {value ?? "—"}
+      </dd>
     </div>
   );
 }
@@ -152,15 +171,22 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 // list instead of adding one.
 function AssetPruneControl({ asset }: { asset: Asset }) {
   const { data: locationsData } = useStorageLocations();
-  const location = locationsData?.locations.find((l) => l.id === asset.storageLocationId);
+  const location = locationsData?.locations.find(
+    (l) => l.id === asset.storageLocationId,
+  );
 
-  const [checked, setChecked] = useState<"eligible" | "ineligible" | null>(null);
+  const [checked, setChecked] = useState<"eligible" | "ineligible" | null>(
+    null,
+  );
   // null = not attempted; otherwise the actual outcome for THIS asset's
   // candidate, not just "the request succeeded" -- Execute re-verifies
   // eligibility right before deleting, so a 200 response can still report
   // purged=false (e.g. the Tier-3 master went MISSING between the dry-run
   // and this click), which must not be shown as "Cache purged."
-  const [purgeResult, setPurgeResult] = useState<{ purged: boolean; error?: string } | null>(null);
+  const [purgeResult, setPurgeResult] = useState<{
+    purged: boolean;
+    error?: string;
+  } | null>(null);
   const pruneCache = usePruneCache();
 
   // Storage locations are always fetched at app startup elsewhere, so this
@@ -175,18 +201,29 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
     setPurgeResult(null);
     pruneCache.mutate(
       { storageLocationId: asset.storageLocationId, nodeIds: [asset.id] },
-      { onSuccess: (res) => setChecked(res.candidates.length > 0 ? "eligible" : "ineligible") },
+      {
+        onSuccess: (res) =>
+          setChecked(res.candidates.length > 0 ? "eligible" : "ineligible"),
+      },
     );
   };
 
   const confirmPurge = () => {
     pruneCache.mutate(
-      { storageLocationId: asset.storageLocationId, nodeIds: [asset.id], execute: true },
+      {
+        storageLocationId: asset.storageLocationId,
+        nodeIds: [asset.id],
+        execute: true,
+      },
       {
         onSuccess: (res) => {
           setChecked(null);
           const outcome = res.candidates.find((c) => c.nodeId === asset.id);
-          setPurgeResult(outcome ? { purged: outcome.purged, error: outcome.error } : { purged: false });
+          setPurgeResult(
+            outcome
+              ? { purged: outcome.purged, error: outcome.error }
+              : { purged: false },
+          );
         },
       },
     );
@@ -198,7 +235,11 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
     ) : (
       <span className="text-xs text-red-400">
         Purge failed{purgeResult.error ? `: ${purgeResult.error}` : ""}.{" "}
-        <button type="button" onClick={() => setPurgeResult(null)} className="underline hover:text-red-300">
+        <button
+          type="button"
+          onClick={() => setPurgeResult(null)}
+          className="underline hover:text-red-300"
+        >
           Dismiss
         </button>
       </span>
@@ -209,7 +250,11 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
     return (
       <span className="text-xs text-neutral-500">
         Not eligible for pruning.{" "}
-        <button type="button" onClick={() => setChecked(null)} className="underline hover:text-neutral-300">
+        <button
+          type="button"
+          onClick={() => setChecked(null)}
+          className="underline hover:text-neutral-300"
+        >
           Dismiss
         </button>
       </span>
@@ -219,7 +264,11 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
   if (checked === "eligible") {
     return (
       <span className="flex items-center gap-2 text-xs">
-        {pruneCache.isError && <span className="text-red-400">Purge failed: {String(pruneCache.error)}</span>}
+        {pruneCache.isError && (
+          <span className="text-red-400">
+            Purge failed: {String(pruneCache.error)}
+          </span>
+        )}
         <button
           type="button"
           onClick={confirmPurge}
@@ -241,7 +290,11 @@ function AssetPruneControl({ asset }: { asset: Asset }) {
 
   return (
     <span>
-      {pruneCache.isError && <span className="mr-2 text-xs text-red-400">Check failed: {String(pruneCache.error)}</span>}
+      {pruneCache.isError && (
+        <span className="mr-2 text-xs text-red-400">
+          Check failed: {String(pruneCache.error)}
+        </span>
+      )}
       <button
         type="button"
         onClick={checkEligibility}
@@ -260,12 +313,17 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
   const trashAsset = useTrashAsset();
   const restoreAsset = useRestoreAsset();
 
-  if (asset.lifecycleState === "ARCHIVED" || asset.lifecycleState === "TRASHED") {
+  if (
+    asset.lifecycleState === "ARCHIVED" ||
+    asset.lifecycleState === "TRASHED"
+  ) {
     if (asset.supersededBy) {
       return (
         <div className="flex items-center gap-2">
           <span className="rounded border border-neutral-700 bg-neutral-800/80 px-2.5 py-1 text-xs text-neutral-400">
-            {asset.lifecycleState === "ARCHIVED" ? "Archived (Superseded)" : "Trashed (Superseded)"}
+            {asset.lifecycleState === "ARCHIVED"
+              ? "Archived (Superseded)"
+              : "Trashed (Superseded)"}
           </span>
           <Link
             to={`/assets/${asset.supersededBy}`}
@@ -294,7 +352,10 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
         </button>
         {restoreAsset.isError && (
           <span className="text-xs text-red-400">
-            Failed to restore: {restoreAsset.error instanceof Error ? restoreAsset.error.message : String(restoreAsset.error)}
+            Failed to restore:{" "}
+            {restoreAsset.error instanceof Error
+              ? restoreAsset.error.message
+              : String(restoreAsset.error)}
           </span>
         )}
       </div>
@@ -343,9 +404,12 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
           title="Trash Asset"
           body={
             <>
-              Move <strong className="text-amber-300">{asset.fileName}</strong> to <code className="text-amber-300">.trash/</code>?
-              The master file and any linked Tier-2 export copies will be removed from their original locations.
-              The media node is marked <code className="text-amber-300">TRASHED</code> and the bytes are auto-purged after 30 days unless restored.
+              Move <strong className="text-amber-300">{asset.fileName}</strong>{" "}
+              to <code className="text-amber-300">.trash/</code>? The master
+              file and any linked Tier-2 export copies will be removed from
+              their original locations. The media node is marked{" "}
+              <code className="text-amber-300">TRASHED</code> and the bytes are
+              auto-purged after 30 days unless restored.
             </>
           }
           confirmLabel="Confirm Trash"
@@ -369,8 +433,11 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
           title="Free Up Space"
           body={
             <>
-              Move <strong className="text-amber-300">{asset.fileName}</strong> to <code className="text-amber-300">.trash/</code> but keep any Tier-2 export copies on disk?
-              The master file is removed from the archive; cloud galleries are left untouched. Auto-purged after 30 days unless restored.
+              Move <strong className="text-amber-300">{asset.fileName}</strong>{" "}
+              to <code className="text-amber-300">.trash/</code> but keep any
+              Tier-2 export copies on disk? The master file is removed from the
+              archive; cloud galleries are left untouched. Auto-purged after 30
+              days unless restored.
             </>
           }
           confirmLabel="Confirm Free Up Space"
@@ -397,10 +464,11 @@ function AssetMetadataInspector({ assetId }: { assetId: number }) {
   const metadata = data?.metadata ?? [];
 
   const filtered = filter.trim()
-    ? metadata.filter((m) =>
-        m.key.toLowerCase().includes(filter.toLowerCase()) ||
-        m.value.toLowerCase().includes(filter.toLowerCase()) ||
-        m.source.toLowerCase().includes(filter.toLowerCase())
+    ? metadata.filter(
+        (m) =>
+          m.key.toLowerCase().includes(filter.toLowerCase()) ||
+          m.value.toLowerCase().includes(filter.toLowerCase()) ||
+          m.source.toLowerCase().includes(filter.toLowerCase()),
       )
     : metadata;
 
@@ -423,13 +491,19 @@ function AssetMetadataInspector({ assetId }: { assetId: number }) {
 
       <div className="rounded border border-neutral-800 p-3 max-h-96 overflow-y-auto">
         {isLoading ? (
-          <p className="text-xs text-neutral-500">Loading extracted metadata…</p>
+          <p className="text-xs text-neutral-500">
+            Loading extracted metadata…
+          </p>
         ) : isError ? (
           <p className="text-xs text-red-400">Failed to load metadata tags.</p>
         ) : metadata.length === 0 ? (
-          <p className="text-xs text-neutral-500">No extracted metadata rows found for this asset.</p>
+          <p className="text-xs text-neutral-500">
+            No extracted metadata rows found for this asset.
+          </p>
         ) : filtered.length === 0 ? (
-          <p className="text-xs text-neutral-500">No tags match &quot;{filter}&quot;.</p>
+          <p className="text-xs text-neutral-500">
+            No tags match &quot;{filter}&quot;.
+          </p>
         ) : (
           <table className="w-full text-left text-xs font-mono">
             <thead className="border-b border-neutral-800 text-neutral-500">
@@ -441,9 +515,14 @@ function AssetMetadataInspector({ assetId }: { assetId: number }) {
             </thead>
             <tbody className="divide-y divide-neutral-900">
               {filtered.map((m, idx) => (
-                <tr key={`${m.source}-${m.key}-${idx}`} className="hover:bg-neutral-900/50">
+                <tr
+                  key={`${m.source}-${m.key}-${idx}`}
+                  className="hover:bg-neutral-900/50"
+                >
                   <td className="py-1 pr-3 text-indigo-400">{m.source}</td>
-                  <td className="py-1 pr-3 text-neutral-300 font-semibold">{m.key}</td>
+                  <td className="py-1 pr-3 text-neutral-300 font-semibold">
+                    {m.key}
+                  </td>
                   <td className="py-1 text-neutral-200 break-all">{m.value}</td>
                 </tr>
               ))}
@@ -461,16 +540,22 @@ export default function AssetDetailPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const rawDepth = Number(searchParams.get("depth"));
-  const depth = !Number.isNaN(rawDepth) && rawDepth >= 1 && rawDepth <= 5 ? rawDepth : 2;
+  const depth =
+    !Number.isNaN(rawDepth) && rawDepth >= 1 && rawDepth <= 5 ? rawDepth : 2;
 
   const { data: asset, isLoading, isError } = useAsset(assetId);
-  const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(assetId, depth);
+  const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(
+    assetId,
+    depth,
+  );
   const { data: sync, isLoading: isSyncLoading } = useAssetSyncStatus(assetId);
   const retrySync = useRetrySync();
 
-  if (!assetId || Number.isNaN(assetId)) return <div className="p-6 text-red-400">Invalid asset id.</div>;
+  if (!assetId || Number.isNaN(assetId))
+    return <div className="p-6 text-red-400">Invalid asset id.</div>;
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
-  if (isError || !asset) return <div className="p-6 text-red-400">Asset not found.</div>;
+  if (isError || !asset)
+    return <div className="p-6 text-red-400">Asset not found.</div>;
 
   const handleDepthChange = (newDepth: number) => {
     setSearchParams((prev) => {
@@ -491,7 +576,9 @@ export default function AssetDetailPage() {
             className="h-24 w-24 shrink-0 rounded-lg object-cover"
           />
           <div>
-            <h1 className="text-xl font-semibold text-neutral-100">{asset.fileName}</h1>
+            <h1 className="text-xl font-semibold text-neutral-100">
+              {asset.fileName}
+            </h1>
             <p className="text-sm text-neutral-500">{asset.filePath}</p>
           </div>
         </div>
@@ -502,16 +589,22 @@ export default function AssetDetailPage() {
       </div>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium text-neutral-400">Media Preview</h2>
+        <h2 className="mb-2 text-sm font-medium text-neutral-400">
+          Media Preview
+        </h2>
         <AssetMediaPreview asset={asset} lineage={lineage} />
       </section>
 
       <section>
         <div className="mb-2 flex items-center justify-between">
           <h2 className="text-sm font-medium text-neutral-400">Metadata</h2>
-          {asset.lifecycleState !== "ARCHIVED" && asset.lifecycleState !== "MISSING" && (
-            <AssetInheritMetadataControl asset={asset} />
-          )}
+          {/* MISSING and TRASHED files aren't at their recorded path, so
+              there is nothing to write inherited tags into (Restore first). */}
+          {asset.lifecycleState !== "ARCHIVED" &&
+            asset.lifecycleState !== "MISSING" &&
+            asset.lifecycleState !== "TRASHED" && (
+              <AssetInheritMetadataControl asset={asset} />
+            )}
         </div>
         <dl className="rounded border border-neutral-800 p-3">
           <Field label="Node UUID" value={asset.nodeUuid} />
@@ -528,17 +621,24 @@ export default function AssetDetailPage() {
       <AssetMetadataInspector assetId={asset.id} />
 
       <section>
-        <h2 className="mb-2 text-sm font-medium text-neutral-400">Sync status</h2>
+        <h2 className="mb-2 text-sm font-medium text-neutral-400">
+          Sync status
+        </h2>
         <div className="rounded border border-neutral-800 p-3">
           {isSyncLoading ? (
             <p className="text-sm text-neutral-500">Loading sync status…</p>
           ) : sync?.sync && sync.sync.length > 0 ? (
             <div className="space-y-3">
               {sync.sync.map((s) => (
-                <div key={s.remote} className="flex items-start justify-between gap-4 text-sm">
+                <div
+                  key={s.remote}
+                  className="flex items-start justify-between gap-4 text-sm"
+                >
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium text-neutral-200">{s.remote}</span>
+                      <span className="font-medium text-neutral-200">
+                        {s.remote}
+                      </span>
                       <span className="rounded bg-neutral-800 px-2 py-0.5 font-mono text-xs text-neutral-300">
                         {s.syncStatus}
                       </span>
@@ -549,24 +649,32 @@ export default function AssetDetailPage() {
                       )}
                     </div>
                     {s.retryCount !== undefined && s.retryCount > 0 && (
-                      <p className="mt-1 text-xs text-neutral-400">Retries: {s.retryCount}</p>
+                      <p className="mt-1 text-xs text-neutral-400">
+                        Retries: {s.retryCount}
+                      </p>
                     )}
-                    {s.lastError && <p className="mt-1 break-all text-xs text-red-400">Error: {s.lastError}</p>}
+                    {s.lastError && (
+                      <p className="mt-1 break-all text-xs text-red-400">
+                        Error: {s.lastError}
+                      </p>
+                    )}
                     {s.lastAttemptAt !== undefined && (
                       <p className="mt-1 text-xs text-neutral-500">
-                        Last attempt: {new Date(s.lastAttemptAt * 1000).toLocaleString()}
+                        Last attempt:{" "}
+                        {new Date(s.lastAttemptAt * 1000).toLocaleString()}
                       </p>
                     )}
                   </div>
-                  {(s.syncStatus === "PUSH_FAILED" || s.exhausted) && asset.lifecycleState !== "ARCHIVED" && (
-                    <button
-                      onClick={() => retrySync.mutate(asset.id)}
-                      disabled={retrySync.isPending}
-                      className="shrink-0 rounded border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-neutral-200 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {retrySync.isPending ? "Retrying…" : "Retry"}
-                    </button>
-                  )}
+                  {(s.syncStatus === "PUSH_FAILED" || s.exhausted) &&
+                    asset.lifecycleState !== "ARCHIVED" && (
+                      <button
+                        onClick={() => retrySync.mutate(asset.id)}
+                        disabled={retrySync.isPending}
+                        className="shrink-0 rounded border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-neutral-200 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {retrySync.isPending ? "Retrying…" : "Retry"}
+                      </button>
+                    )}
                 </div>
               ))}
             </div>
@@ -574,14 +682,18 @@ export default function AssetDetailPage() {
             <p className="text-sm text-neutral-500">No sync state yet.</p>
           )}
           {retrySync.isError && (
-            <p className="mt-3 text-xs text-red-400">Failed to retry sync: {String(retrySync.error)}</p>
+            <p className="mt-3 text-xs text-red-400">
+              Failed to retry sync: {String(retrySync.error)}
+            </p>
           )}
         </div>
       </section>
 
       <section>
         <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-medium text-neutral-400">Multi-hop Lineage Graph</h2>
+          <h2 className="text-sm font-medium text-neutral-400">
+            Multi-hop Lineage Graph
+          </h2>
           <div className="flex items-center gap-2 text-sm text-neutral-400">
             <span>Traversal Depth:</span>
             <select

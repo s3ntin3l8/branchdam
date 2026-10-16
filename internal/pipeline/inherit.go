@@ -34,6 +34,9 @@ var (
 	// ErrChildMissing: the child is MISSING, so there is no file at its
 	// recorded path to write the tags into.
 	ErrChildMissing = errors.New("asset is MISSING: its file is not on disk")
+	// ErrChildTrashed: the child is TRASHED, so its file was moved into
+	// .trash/ and is no longer at its recorded path either.
+	ErrChildTrashed = errors.New("asset is TRASHED: restore it before inheriting metadata")
 )
 
 // ErrParentUnavailable indicates that the parent asset is in an archived or missing state.
@@ -341,7 +344,7 @@ func exiftoolAvailable(deps InheritDeps) bool {
 
 // loadInheritChild loads the child node and runs the checks both the plan
 // and the write paths make before touching parent edges: the node exists
-// and isn't ARCHIVED or MISSING, isn't a project file, and its location
+// and isn't ARCHIVED, MISSING or TRASHED, isn't a project file, and its location
 // accepts writes.
 func loadInheritChild(ctx context.Context, deps InheritDeps, childID int64) (sqlcgen.MediaNode, error) {
 	if deps.DB == nil {
@@ -359,6 +362,9 @@ func loadInheritChild(ctx context.Context, deps InheritDeps, childID int64) (sql
 	}
 	if child.LifecycleState == "MISSING" {
 		return child, ErrChildMissing
+	}
+	if child.LifecycleState == "TRASHED" {
+		return child, ErrChildTrashed
 	}
 
 	// Refuse project archive files

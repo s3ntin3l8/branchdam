@@ -6068,7 +6068,8 @@ func fakeExiftoolOnPath(t *testing.T) {
 
 // TestInheritMetadataDryRunRefusesWhatTheWriteWould: the preview must not
 // promise a write the confirm click would be denied -- neither without
-// exiftool nor for a MISSING child whose file is not on disk.
+// exiftool nor for a MISSING or TRASHED child whose file is not at its
+// recorded path.
 func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
 	seedParentMake := func(t *testing.T, database *db.DB, parentID int64) {
 		t.Helper()
@@ -6106,6 +6107,23 @@ func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
 			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
 			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "MISSING") {
 				t.Errorf("%q: status = %d, want 409 naming MISSING, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("TRASHED child", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.MarkNodeTrashed(context.Background(), child.ID)
+		}); err != nil {
+			t.Fatalf("mark child TRASHED: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "TRASHED") {
+				t.Errorf("%q: status = %d, want 409 naming TRASHED, body = %s", q, rr.Code, rr.Body.String())
 			}
 		}
 	})
