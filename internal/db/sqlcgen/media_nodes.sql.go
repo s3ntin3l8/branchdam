@@ -74,7 +74,8 @@ WHERE (lifecycle_state = ?2 OR ?2 IS NULL)
   AND (storage_location_id = ?5 OR ?5 IS NULL)
   AND (uploaded_by_user_id = ?6 OR ?6 IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query))
 `
 
 type CountMediaNodesFilteredParams struct {
@@ -110,10 +111,12 @@ FROM media_nodes
 CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query))
 `
 
-// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes
+// Backs GET /api/v1/assets' search-aware total (q, no structural filter;
+// the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 // by excluding ARCHIVED and superseded rows and applying the same optional
 // name_query (NULL = no search).
 func (q *Queries) CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error) {
@@ -1075,7 +1078,8 @@ CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
                    CAST(?4 AS TEXT) AS sort_key) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -1106,7 +1110,7 @@ type ListMediaNodesParams struct {
 // LIKE ... ESCAPE clause, so both go through p's columns instead.
 // name_query is a plain case-insensitive substring of file_name (instr, so
 // the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
 // an unknown value falls through every CASE to the id DESC tiebreak.
 func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listMediaNodes,
@@ -1186,7 +1190,8 @@ WHERE (lifecycle_state = ?5 OR ?5 IS NULL)
   AND (storage_location_id = ?8 OR ?8 IS NULL)
   AND (uploaded_by_user_id = ?9 OR ?9 IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -1219,7 +1224,7 @@ type ListMediaNodesFilteredParams struct {
 // LIKE ... ESCAPE clause, so both go through p's columns instead.
 // name_query is a plain case-insensitive substring of file_name (instr, so
 // the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
 // an unknown value falls through every CASE to the id DESC tiebreak.
 // Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 // sqlc's SQLite type inference only picks up the column's own (nullable)

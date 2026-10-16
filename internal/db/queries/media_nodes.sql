@@ -16,13 +16,14 @@ FROM media_nodes
 -- LIKE ... ESCAPE clause, so both go through p's columns instead.
 -- name_query is a plain case-insensitive substring of file_name (instr, so
 -- the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
--- only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+-- only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
 -- an unknown value falls through every CASE to the id DESC tiebreak.
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
                    CAST(sqlc.arg('sort') AS TEXT) AS sort_key) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -46,7 +47,8 @@ WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL;
 
 -- name: CountMediaNodesSearch :one
--- Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes
+-- Backs GET /api/v1/assets' search-aware total (q, no structural filter;
+-- the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 -- by excluding ARCHIVED and superseded rows and applying the same optional
 -- name_query (NULL = no search).
 SELECT COUNT(*)
@@ -54,7 +56,8 @@ FROM media_nodes
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0);
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query));
 
 -- name: ListMediaNodesFiltered :many
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
@@ -71,7 +74,7 @@ FROM media_nodes
 -- LIKE ... ESCAPE clause, so both go through p's columns instead.
 -- name_query is a plain case-insensitive substring of file_name (instr, so
 -- the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
--- only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+-- only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
 -- an unknown value falls through every CASE to the id DESC tiebreak.
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
                    CAST(sqlc.arg('sort') AS TEXT) AS sort_key) AS p
@@ -85,7 +88,8 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query))
 ORDER BY
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
@@ -114,7 +118,8 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0);
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
+       OR lower(node_uuid) = lower(p.name_query));
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes
