@@ -28,8 +28,11 @@ function formatDuration(durationMs: number): string {
 }
 
 // PruneControl is a two-step flow: "Purge Cache" runs a dry-run plan and
-// shows the candidate count/bytes; a second, explicit click ("Confirm
-// Purge") re-posts with execute:true. Mirrors the repo's existing feedback
+// lists the candidate files (path and size) with a total; a second,
+// explicit click ("Confirm Purge") re-posts with execute:true, narrowed via
+// nodeIds to exactly the files that were shown -- so a candidate that
+// became eligible between the preview and the click is never purged
+// without the operator having seen it. Mirrors the repo's existing feedback
 // pattern (IngestPage/AuditQueuePage) -- isPending disables the button and
 // swaps its label, errors render as inline text -- no toast library exists
 // in this codebase, so this deliberately doesn't add one.
@@ -47,8 +50,9 @@ function PruneControl({ locationId }: { locationId: number }) {
   };
 
   const runExecute = () => {
+    if (!plan || plan.length === 0) return;
     pruneCache.mutate(
-      { storageLocationId: locationId, execute: true },
+      { storageLocationId: locationId, nodeIds: plan.map((c) => c.nodeId), execute: true },
       {
         onSuccess: (res) => {
           setPlan(null);
@@ -100,6 +104,19 @@ function PruneControl({ locationId }: { locationId: number }) {
             ? "No files are eligible for pruning right now."
             : `${plan.length} file${plan.length === 1 ? "" : "s"} eligible (${formatBytes(totalBytes)}).`}
         </p>
+        {plan.length > 0 && (
+          <ul
+            aria-label="Files to be purged"
+            className="max-h-48 overflow-y-auto rounded border border-neutral-700 bg-neutral-900/60 divide-y divide-neutral-800"
+          >
+            {plan.map((c) => (
+              <li key={c.nodeId} className="flex items-baseline justify-between gap-3 px-2 py-1">
+                <span className="font-mono break-all text-neutral-200">{c.filePath}</span>
+                <span className="shrink-0 text-neutral-400">{formatBytes(c.sizeBytes)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
         {pruneCache.isError && (
           <p className="text-red-400">Purge failed: {String(pruneCache.error)}</p>
         )}

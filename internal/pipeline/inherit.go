@@ -297,39 +297,67 @@ type InheritDeps struct {
 	Log    *slog.Logger
 }
 
-// InheritMetadata copies identity metadata (EXIF/XMP) from child's winning
-// parent edge into the child file on disk, then updates size_bytes, mtime_unix,
-// fast_hash, and node_metadata in SQLite.
-func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[string]string, error) {
+// InheritPlan is what InheritMetadata would write into a child's file:
+// the winning parent and the exact tag set metadata.Plan produced for it.
+// Tags is empty when the child already carries everything the parent could
+// give it (the no-op short-circuit below), in which case nothing is written.
+type InheritPlan struct {
+	Child  sqlcgen.MediaNode
+	Parent sqlcgen.MediaNode
+	Tags   map[string]string
+}
+
+// PlanInheritMetadata runs every eligibility check and the tag planning
+// step of InheritMetadata -- including the storage.Guard write check, so a
+// preview of a read-only location is refused the same way the real write
+// would be -- but writes nothing: no exiftool subprocess, no file change,
+// no SQLite row. It backs ?dryRun=1 on POST /assets/{id}/inherit-metadata,
+// letting the SPA show the operator exactly which tags would be stamped
+// into the file before asking them to confirm the in-place rewrite.
+func PlanInheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (*InheritPlan, error) {
+	child, err := loadInheritChild(ctx, deps, childID)
+	if err != nil {
+		return nil, err
+	}
+	return planInheritFor(ctx, deps, child)
+}
+
+// loadInheritChild loads the child node and runs the checks both the plan
+// and the write paths make before touching parent edges: the node exists
+// and isn't ARCHIVED, isn't a project file, and its location accepts writes.
+func loadInheritChild(ctx context.Context, deps InheritDeps, childID int64) (sqlcgen.MediaNode, error) {
 	if deps.DB == nil {
-		return nil, errors.New("database is nil")
+		return sqlcgen.MediaNode{}, errors.New("database is nil")
 	}
 	child, err := deps.DB.Reader.GetMediaNodeByID(ctx, childID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNodeNotFound
+		return child, ErrNodeNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get asset: %w", err)
+		return child, fmt.Errorf("get asset: %w", err)
 	}
 	if child.LifecycleState == "ARCHIVED" {
-		return nil, ErrNodeNotFound
+		return child, ErrNodeNotFound
 	}
 
 	// Refuse project archive files
 	if _, ok := projectfile.GetParser(child.FilePath); ok {
-		return nil, ErrIsProjectFile
+		return child, ErrIsProjectFile
 	}
 
 	// Guard check
 	if deps.Guard != nil {
 		if err := deps.Guard.CheckWrite(child.FilePath); err != nil {
-			return nil, err
+			return child, err
 		}
 	}
+	return child, nil
+}
 
-	unlock := globalNodeLocker.lock(child.ID)
-	defer unlock()
-
+// planInheritFor is the parent-selection and tag-planning half of
+// PlanInheritMetadata, split out so InheritMetadata can run it under the
+// per-node lock after its own pre-lock checks.
+func planInheritFor(ctx context.Context, deps InheritDeps, child sqlcgen.MediaNode) (*InheritPlan, error) {
 	parents, err := deps.DB.Reader.ListEdgesByTarget(ctx, child.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list parent edges: %w", err)
@@ -369,7 +397,30 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 	// do not spawn an exiftool write or rewrite the file on disk. Return empty map
 	// so callers accurately observe that no tags were written.
 	if child.DerivedFromID.Valid && child.DerivedFromID.String == parent.NodeUuid && len(tags) <= 2 {
-		return map[string]string{}, nil
+		tags = map[string]string{}
+	}
+	return &InheritPlan{Child: child, Parent: parent, Tags: tags}, nil
+}
+
+// InheritMetadata copies identity metadata (EXIF/XMP) from child's winning
+// parent edge into the child file on disk, then updates size_bytes, mtime_unix,
+// fast_hash, and node_metadata in SQLite.
+func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[string]string, error) {
+	child, err := loadInheritChild(ctx, deps, childID)
+	if err != nil {
+		return nil, err
+	}
+
+	unlock := globalNodeLocker.lock(child.ID)
+	defer unlock()
+
+	plan, err := planInheritFor(ctx, deps, child)
+	if err != nil {
+		return nil, err
+	}
+	parent, tags := plan.Parent, plan.Tags
+	if len(tags) == 0 {
+		return tags, nil
 	}
 
 	if deps.Prober == nil {

@@ -7,6 +7,7 @@ import {
   useAssetSyncStatus,
   useTrashAsset,
   useInheritMetadata,
+  usePreviewInheritMetadata,
   usePruneCache,
   useRestoreAsset,
   useRetrySync,
@@ -16,7 +17,7 @@ import AssetGraphCanvas from "../components/AssetGraphCanvas";
 import AssetMediaPreview from "../components/AssetMediaPreview";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
-import type { Asset } from "../api/types";
+import type { Asset, InheritMetadataResponse } from "../api/types";
 
 // identityTags are the two tags Plan (internal/metadata) always emits
 // regardless of whether there was anything to inherit -- excluded from the
@@ -26,46 +27,103 @@ import type { Asset } from "../api/types";
 const identityTags = new Set(["XMP-dc:Identifier", "XMP-xmpMM:DerivedFrom"]);
 
 // AssetInheritMetadataControl backs POST /api/v1/assets/{id}/inherit-metadata
-// (#54) -- the client for this endpoint (api.inheritMetadata) has existed
-// since #156 but had no caller anywhere in the SPA until now (#186).
-// Attempt-then-report, same shape as AssetPruneControl below: the endpoint's
-// eligibility rules (a resolved Tier-1/2 ancestry parent that isn't
-// ARCHIVED/MISSING, a writable location, exiftool available) are involved
-// enough that re-deriving them client-side to gate the button would drift
-// from the server's actual logic -- the 409/422/503 response body's message
-// is surfaced as-is instead.
+// (#54). The endpoint rewrites the child's file in place, so the button no
+// longer fires it directly: it first asks for a ?dryRun=1 plan (same
+// server-side eligibility checks, nothing written), shows the operator the
+// exact tags and the parent they come from, and only writes on Confirm.
+// Eligibility failures (no resolved parent, read-only location, ...) come
+// back from the dry run with the server's own 409/422 message, surfaced
+// as-is rather than re-derived client-side.
 function AssetInheritMetadataControl({ asset }: { asset: Asset }) {
+  const previewInherit = usePreviewInheritMetadata();
   const inheritMetadata = useInheritMetadata();
-  const [inheritedCount, setInheritedCount] = useState<number | null>(null);
+  const [plan, setPlan] = useState<InheritMetadataResponse | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
 
-  const handleClick = () => {
-    setInheritedCount(null);
-    inheritMetadata.mutate(asset.id, {
+  const handlePreview = () => {
+    setMessage(null);
+    inheritMetadata.reset();
+    previewInherit.mutate(asset.id, {
       onSuccess: (data) => {
-        const count = Object.keys(data.inherited).filter((tag) => !identityTags.has(tag)).length;
-        setInheritedCount(count);
+        if (Object.keys(data.inherited).length === 0) {
+          setMessage("Nothing new to inherit.");
+          return;
+        }
+        setPlan(data);
       },
     });
   };
 
+  const handleConfirm = () => {
+    inheritMetadata.mutate(asset.id, {
+      onSuccess: (data) => {
+        setPlan(null);
+        const count = Object.keys(data.inherited).filter((tag) => !identityTags.has(tag)).length;
+        setMessage(count > 0 ? `Inherited ${count} tag${count === 1 ? "" : "s"}.` : "Nothing new to inherit.");
+      },
+    });
+  };
+
+  const plannedTags = plan ? Object.entries(plan.inherited).sort(([a], [b]) => a.localeCompare(b)) : [];
+
   return (
     <span className="flex items-center gap-2 text-xs">
-      {inheritMetadata.isError && (
-        <span className="text-red-400">Inherit failed: {String(inheritMetadata.error)}</span>
+      {previewInherit.isError && (
+        <span className="text-red-400">Cannot inherit: {String(previewInherit.error)}</span>
       )}
-      {inheritedCount !== null && !inheritMetadata.isError && (
-        <span className="text-neutral-400">
-          {inheritedCount > 0 ? `Inherited ${inheritedCount} tag${inheritedCount === 1 ? "" : "s"}.` : "Nothing new to inherit."}
-        </span>
-      )}
+      {message && <span className="text-neutral-400">{message}</span>}
       <button
         type="button"
-        onClick={handleClick}
-        disabled={inheritMetadata.isPending}
+        onClick={handlePreview}
+        disabled={previewInherit.isPending || inheritMetadata.isPending}
         className="rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
       >
-        {inheritMetadata.isPending ? "Inheriting…" : "Inherit Metadata"}
+        {previewInherit.isPending ? "Checking…" : "Inherit Metadata"}
       </button>
+      {plan && (
+        <ConfirmDialog
+          titleId="inherit-metadata-title"
+          title="Inherit Metadata"
+          body={
+            <div className="space-y-3">
+              <p>
+                This rewrites <strong className="text-amber-300">{asset.fileName}</strong> in place, writing these
+                tags
+                {plan.parentFileName ? (
+                  <>
+                    {" "}
+                    from <strong className="text-neutral-100">{plan.parentFileName}</strong>
+                  </>
+                ) : null}
+                :
+              </p>
+              <table className="w-full text-left font-mono text-[11px]" aria-label="Tags to be written">
+                <thead className="text-neutral-500">
+                  <tr>
+                    <th className="pr-3 font-normal">Tag</th>
+                    <th className="font-normal">Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plannedTags.map(([tag, value]) => (
+                    <tr key={tag}>
+                      <td className="pr-3 align-top text-neutral-400">{tag}</td>
+                      <td className="break-all text-neutral-200">{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          }
+          confirmLabel="Write Tags"
+          pendingLabel="Writing…"
+          isPending={inheritMetadata.isPending}
+          error={inheritMetadata.isError ? inheritMetadata.error : undefined}
+          errorLabel="Inherit failed"
+          onConfirm={handleConfirm}
+          onCancel={() => setPlan(null)}
+        />
+      )}
     </span>
   );
 }
@@ -240,6 +298,22 @@ function AssetDeleteControl({ asset }: { asset: Asset }) {
           </span>
         )}
       </div>
+    );
+  }
+
+  // A MISSING asset's file is already gone from its recorded path (the
+  // scanner couldn't find it), so there is nothing for Trash or Free Up
+  // Space to move into .trash/ -- offering them would only produce a
+  // server error, or worse, read as "this will free space". The row is
+  // kept (invariant 1) and recovers on its own if the file reappears.
+  if (asset.lifecycleState === "MISSING") {
+    return (
+      <span
+        className="rounded border border-amber-800/80 bg-amber-950/60 px-2.5 py-1 text-xs text-amber-300"
+        title="The file was not found at its recorded path on the last scan. It is kept in the catalog and relinked if it reappears."
+      >
+        Missing on disk
+      </span>
     );
   }
 

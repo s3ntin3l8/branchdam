@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -193,53 +193,102 @@ describe("AssetDetailPage trash control", () => {
   });
 });
 
-describe("AssetDetailPage inherit-metadata control", () => {
-  it("reports how many tags were inherited, excluding the always-emitted identity tags", async () => {
-    vi.mocked(api.getAsset).mockResolvedValue(asset);
+describe("AssetDetailPage MISSING asset", () => {
+  it("offers neither Trash nor Free Up Space for a MISSING asset", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue({ ...asset, lifecycleState: "MISSING" });
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
-    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
-      inherited: {
-        "EXIF:Make": "SONY",
-        "EXIF:LensModel": "FE 24-70mm F2.8 GM",
-        "XMP-dc:Identifier": "uuid-child",
-        "XMP-xmpMM:DerivedFrom": "uuid-parent",
-      },
-    });
 
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    const button = await screen.findByRole("button", { name: /inherit metadata/i });
-    await userEvent.click(button);
-
-    await waitFor(() => expect(api.inheritMetadata).toHaveBeenCalledWith(42));
-    await waitFor(() => expect(screen.getByText("Inherited 2 tags.")).toBeInTheDocument());
+    expect(screen.getByText("Missing on disk")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^trash$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /free up space/i })).not.toBeInTheDocument();
   });
+});
 
-  it("reports nothing new when only identity tags come back", async () => {
+describe("AssetDetailPage inherit-metadata control", () => {
+  function mockPage() {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
-    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
-      inherited: { "XMP-dc:Identifier": "uuid-child" },
-    });
+  }
+  const plannedTags = {
+    "EXIF:Make": "SONY",
+    "EXIF:LensModel": "FE 24-70mm F2.8 GM",
+    "XMP-dc:Identifier": "uuid-child",
+    "XMP-xmpMM:DerivedFrom": "uuid-parent",
+  };
+
+  // The endpoint rewrites the file in place: the button must only ask the
+  // server for a dry-run plan, show it, and write nothing until Confirm.
+  it("previews the planned tags with a dry run and writes only on confirm", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
+    vi.mocked(api.inheritMetadata)
+      .mockResolvedValueOnce({ inherited: plannedTags, dryRun: true, parentId: 7, parentFileName: "master.arw" })
+      .mockResolvedValueOnce({ inherited: plannedTags });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Inherit Metadata" });
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
+    expect(api.inheritMetadata).toHaveBeenCalledWith(42, { dryRun: true });
+    expect(within(dialog).getByText("master.arw")).toBeInTheDocument();
+    expect(within(dialog).getByText("EXIF:LensModel")).toBeInTheDocument();
+    expect(within(dialog).getByText("FE 24-70mm F2.8 GM")).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Write Tags" }));
+
+    await waitFor(() => expect(api.inheritMetadata).toHaveBeenCalledTimes(2));
+    expect(api.inheritMetadata).toHaveBeenLastCalledWith(42);
+    await waitFor(() => expect(screen.getByText("Inherited 2 tags.")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("writes nothing when the preview is cancelled", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
+    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({ inherited: plannedTags, dryRun: true });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+    const dialog = await screen.findByRole("dialog", { name: "Inherit Metadata" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
+    expect(api.inheritMetadata).toHaveBeenCalledWith(42, { dryRun: true });
+  });
+
+  it("reports nothing new, without a dialog, when the dry run plans no tags", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
+    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({ inherited: {}, dryRun: true });
 
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
     await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
     await waitFor(() => expect(screen.getByText("Nothing new to inherit.")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
   });
 
   // The server's 409/422/503 responses carry the actual reason (no resolved
   // parent, read-only location, exiftool unavailable, ...) -- surfaced
   // as-is rather than re-derived client-side, since the eligibility rules
-  // are the server's, not the SPA's, to own.
-  it("surfaces the server's error message on failure", async () => {
-    vi.mocked(api.getAsset).mockResolvedValue(asset);
-    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
-    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+  // are the server's, not the SPA's, to own. The dry run runs the same
+  // checks, so the refusal arrives before any confirm is offered.
+  it("surfaces the server's error message from the dry run", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
     vi.mocked(api.inheritMetadata).mockRejectedValueOnce(
       new Error("asset has no resolved parent edge to inherit from"),
     );
@@ -251,6 +300,7 @@ describe("AssetDetailPage inherit-metadata control", () => {
     await waitFor(() =>
       expect(screen.getByText(/asset has no resolved parent edge to inherit from/i)).toBeInTheDocument(),
     );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("hides the control for an ARCHIVED asset", async () => {

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router";
 import { useJobs, useCancelJob } from "../hooks/queries";
+import ConfirmDialog from "../components/ConfirmDialog";
 import type { ScanJob } from "../api/types";
 
 const kindBadge: Record<ScanJob["kind"], string> = {
@@ -64,8 +65,23 @@ export default function IngestJobsPage() {
 
   const offset = (page - 1) * PAGE_SIZE;
 
-  const [cancellingId, setCancellingId] = useState<number | null>(null);
+  // Cancelling a scan asks first: the job can't be resumed, only re-run.
+  // cancelTarget is the job whose confirm dialog is open (and, once
+  // confirmed, the one whose request is in flight). cancelMutation is a
+  // single shared instance, so every row's Cancel is disabled while any
+  // cancel is pending -- a second row's click would otherwise re-target
+  // the same mutation mid-flight and drop the first row's result.
+  const [cancelTarget, setCancelTarget] = useState<ScanJob | null>(null);
   const cancelMutation = useCancelJob();
+
+  const openCancelDialog = (job: ScanJob) => {
+    cancelMutation.reset();
+    setCancelTarget(job);
+  };
+  const closeCancelDialog = () => {
+    cancelMutation.reset();
+    setCancelTarget(null);
+  };
 
   const { data, isLoading, isError, error } = useJobs({
     limit: PAGE_SIZE,
@@ -265,17 +281,13 @@ export default function IngestJobsPage() {
                         {j.state === "RUNNING" ? (
                           <button
                             type="button"
-                            disabled={cancelMutation.isPending && cancellingId === j.id}
-                            onClick={() => {
-                              setCancellingId(j.id);
-                              cancelMutation.mutate(j.id, {
-                                onSettled: () => setCancellingId(null),
-                              });
-                            }}
+                            disabled={cancelMutation.isPending}
+                            onClick={() => openCancelDialog(j)}
+                            aria-label={`Cancel job #${j.id}`}
                             className="rounded bg-red-950/60 border border-red-800/80 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-900/80 disabled:opacity-50 transition-colors"
                             title="Cancel this running scan job"
                           >
-                            {cancelMutation.isPending && cancellingId === j.id ? "Cancelling…" : "Cancel"}
+                            {cancelMutation.isPending && cancelTarget?.id === j.id ? "Cancelling…" : "Cancel"}
                           </button>
                         ) : (
                           <span className="text-neutral-600">—</span>
@@ -316,6 +328,29 @@ export default function IngestJobsPage() {
             </div>
           </div>
         </>
+      )}
+
+      {cancelTarget && (
+        <ConfirmDialog
+          titleId="cancel-job-title"
+          title="Cancel Scan Job"
+          body={
+            <>
+              Stop scan job <strong className="text-amber-300">#{cancelTarget.id}</strong> ({cancelTarget.kind})? Files it
+              has already indexed stay indexed, but the job can&apos;t be resumed: files it hasn&apos;t reached yet are only
+              picked up by the next scan.
+            </>
+          }
+          confirmLabel="Cancel Job"
+          pendingLabel="Cancelling…"
+          isPending={cancelMutation.isPending}
+          error={cancelMutation.isError ? cancelMutation.error : undefined}
+          errorLabel="Failed to cancel"
+          onConfirm={() => {
+            cancelMutation.mutate(cancelTarget.id, { onSuccess: () => setCancelTarget(null) });
+          }}
+          onCancel={closeCancelDialog}
+        />
       )}
     </div>
   );

@@ -279,6 +279,15 @@ export function useAuditEntries(params: import("../api/types").AuditQueryParams 
   });
 }
 
+// usePreviewInheritMetadata is the ?dryRun=1 half of inherit-metadata: it
+// runs the server's eligibility checks and tag planning and returns what
+// would be written, without touching the file -- so nothing to invalidate.
+export function usePreviewInheritMetadata() {
+  return useMutation({
+    mutationFn: (id: number) => api.inheritMetadata(id, { dryRun: true }),
+  });
+}
+
 export function useInheritMetadata() {
   const queryClient = useQueryClient();
   return useMutation({

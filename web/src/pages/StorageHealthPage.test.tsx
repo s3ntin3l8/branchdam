@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
@@ -199,7 +199,10 @@ describe("StorageHealthPage", () => {
     });
     vi.mocked(api.pruneCache).mockResolvedValueOnce({
       executed: false,
-      candidates: [{ nodeId: 42, filePath: "/mnt/scratch/proxy.jpg", sizeBytes: 12345, purged: false }],
+      candidates: [
+        { nodeId: 42, filePath: "/mnt/scratch/proxy.jpg", sizeBytes: 12345, purged: false },
+        { nodeId: 43, filePath: "/mnt/scratch/proxy2.mov", sizeBytes: 2 * 1024 * 1024, purged: false },
+      ],
     });
 
     renderWithClient(<StorageHealthPage />);
@@ -207,17 +210,28 @@ describe("StorageHealthPage", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /purge cache/i }));
     await waitFor(() => expect(api.pruneCache).toHaveBeenCalledWith({ storageLocationId: 1 }));
-    await waitFor(() => expect(screen.getByText(/1 file eligible/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/2 files eligible/)).toBeInTheDocument());
+
+    // The preview lists the actual files, not just a count.
+    const fileList = screen.getByRole("list", { name: "Files to be purged" });
+    expect(within(fileList).getByText("/mnt/scratch/proxy.jpg")).toBeInTheDocument();
+    expect(within(fileList).getByText("12.1 KB")).toBeInTheDocument();
+    expect(within(fileList).getByText("/mnt/scratch/proxy2.mov")).toBeInTheDocument();
+    expect(within(fileList).getByText("2 MB")).toBeInTheDocument();
 
     vi.mocked(api.pruneCache).mockResolvedValueOnce({
       executed: true,
-      candidates: [{ nodeId: 42, filePath: "/mnt/scratch/proxy.jpg", sizeBytes: 12345, purged: true }],
+      candidates: [
+        { nodeId: 42, filePath: "/mnt/scratch/proxy.jpg", sizeBytes: 12345, purged: true },
+        { nodeId: 43, filePath: "/mnt/scratch/proxy2.mov", sizeBytes: 2 * 1024 * 1024, purged: true },
+      ],
     });
     await userEvent.click(screen.getByRole("button", { name: /confirm purge/i }));
+    // Execute is narrowed to exactly the previewed files.
     await waitFor(() =>
-      expect(api.pruneCache).toHaveBeenCalledWith({ storageLocationId: 1, execute: true }),
+      expect(api.pruneCache).toHaveBeenCalledWith({ storageLocationId: 1, nodeIds: [42, 43], execute: true }),
     );
-    await waitFor(() => expect(screen.getByText("Purged 1 file.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Purged 2 files.")).toBeInTheDocument());
   });
 
   it("shows a DISABLED badge independently of INACTIVE", async () => {

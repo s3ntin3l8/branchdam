@@ -461,6 +461,90 @@ func TestInheritMetadataRefusesProjectFileChild(t *testing.T) {
 	}
 }
 
+// TestInheritMetadataDryRunWritesNothing covers ?dryRun=1: the SPA's
+// confirmation preview. It must report the tags the real call would stamp
+// (and which parent they come from) while leaving both the file on disk and
+// the media_nodes row byte-for-byte untouched -- and it must still refuse a
+// read-only location, so the preview never promises a write the confirm
+// click would then be denied.
+func TestInheritMetadataDryRunWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	srv, database, parent, child := inheritTestServer(t, root)
+	resolved, _ := filepath.EvalSymlinks(root)
+	childBytes := []byte("not really a jpeg, but nothing may read or rewrite it")
+	if err := os.WriteFile(filepath.Join(resolved, "child.jpg"), childBytes, 0o600); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		return q.InsertNodeMetadata(context.Background(), sqlcgen.InsertNodeMetadataParams{
+			NodeID: parent.ID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+		})
+	}); err != nil {
+		t.Fatalf("seed parent metadata: %v", err)
+	}
+	before, err := database.Reader.GetMediaNodeByID(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("get child before: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata?dryRun=1", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Inherited      map[string]string `json:"inherited"`
+		DryRun         bool              `json:"dryRun"`
+		ParentID       int64             `json:"parentId"`
+		ParentFileName string            `json:"parentFileName"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !body.DryRun {
+		t.Errorf("dryRun = false, want true")
+	}
+	if body.Inherited["EXIF:Make"] != "SONY" {
+		t.Errorf("planned EXIF:Make = %q, want SONY (body %s)", body.Inherited["EXIF:Make"], rr.Body.String())
+	}
+	if body.Inherited["XMP-xmpMM:DerivedFrom"] != "uuid-parent" {
+		t.Errorf("planned XMP-xmpMM:DerivedFrom = %q, want uuid-parent", body.Inherited["XMP-xmpMM:DerivedFrom"])
+	}
+	if body.ParentID != parent.ID || body.ParentFileName != "parent.jpg" {
+		t.Errorf("parent = (%d, %q), want (%d, parent.jpg)", body.ParentID, body.ParentFileName, parent.ID)
+	}
+
+	got, err := os.ReadFile(filepath.Join(resolved, "child.jpg"))
+	if err != nil {
+		t.Fatalf("read child after: %v", err)
+	}
+	if !bytes.Equal(got, childBytes) {
+		t.Errorf("child file changed on a dry run")
+	}
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("get child after: %v", err)
+	}
+	if after.DerivedFromID != before.DerivedFromID || after.SizeBytes != before.SizeBytes ||
+		after.MtimeUnix != before.MtimeUnix || *after.FastHash != *before.FastHash || after.ThumbState != before.ThumbState {
+		t.Errorf("child row changed on a dry run: before %+v, after %+v", before, after)
+	}
+	meta, err := database.Reader.ListNodeMetadata(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("list child metadata: %v", err)
+	}
+	if len(meta) != 0 {
+		t.Errorf("child node_metadata gained %d rows on a dry run", len(meta))
+	}
+
+	t.Run("read-only location still 409s", func(t *testing.T) {
+		srv.guard = storage.NewGuard([]storage.Location{{ID: child.StorageLocationID, Name: "inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: true}})
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata?dryRun=1", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
 // TestInheritMetadataRefreshesNodeStateAfterWrite is the happy-path test:
 // exiftool actually rewrites the child's file, and the endpoint must update
 // media_nodes.size_bytes/mtime_unix/fast_hash to match the rewritten file --

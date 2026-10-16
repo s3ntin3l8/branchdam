@@ -18,6 +18,7 @@ import type {
   DeleteCompanionPairingResponse,
   Edge,
   EdgeAuditEntry,
+  InheritMetadataResponse,
   JobsQueryParams,
   LineageResponse,
   ListPairingsResponse,
@@ -287,8 +288,11 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
-  inheritMetadata: (id: number) =>
-    request<{ inherited: Record<string, string> }>(`/api/v1/assets/${id}/inherit-metadata`, { method: "POST" }),
+  inheritMetadata: (id: number, opts: { dryRun?: boolean } = {}) =>
+    request<InheritMetadataResponse>(
+      `/api/v1/assets/${id}/inherit-metadata${opts.dryRun ? "?dryRun=1" : ""}`,
+      { method: "POST" },
+    ),
 
   startScan: (input: StartScanRequest) =>
     request<{ jobId: number }>("/api/v1/scan", {

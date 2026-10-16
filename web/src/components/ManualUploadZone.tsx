@@ -9,7 +9,7 @@ export interface QueueItem {
   id: string;
   file: File;
   relativePath: string;
-  status: "queued" | "uploading" | "complete" | "error";
+  status: "queued" | "uploading" | "complete" | "error" | "cancelled";
   progress: number;
   error?: string;
   response?: WebUploadResponse;
@@ -52,6 +52,9 @@ export default function ManualUploadZone() {
   // Set on unmount: stops the loop and aborts the in-flight XHR so leaving
   // the page doesn't keep uploading the rest of the queue in the background.
   const cancelledRef = useRef(false);
+  // Set by "Cancel All": stops the current run after aborting the in-flight
+  // upload. Unlike cancelledRef it is reset at the start of every run.
+  const stopRequestedRef = useRef(false);
   useEffect(() => {
     cancelledRef.current = false;
     return () => {
@@ -180,6 +183,22 @@ export default function ManualUploadZone() {
     });
   };
 
+  // cancelUpload aborts one in-flight upload. The run's catch marks the
+  // item "cancelled" and moves on to the next file; the cancelled file is
+  // left in the queue (not removed) so it can be retried with Start Upload.
+  const cancelUpload = (id: string) => {
+    queueRef.current.find((i) => i.id === id)?.abortController?.abort();
+  };
+
+  // cancelAll stops the whole run: the in-flight upload is aborted and the
+  // remaining queued files are left queued for a later Start Upload.
+  const cancelAll = () => {
+    stopRequestedRef.current = true;
+    for (const item of queueRef.current) {
+      item.abortController?.abort();
+    }
+  };
+
   const clearCompleted = () => {
     setDedupNotices([]);
     setQueue((prev) => prev.filter((i) => i.status !== "complete"));
@@ -187,6 +206,7 @@ export default function ManualUploadZone() {
 
   const startUploads = async () => {
     if (selectedLocationId === "" || isProcessingQueue) return;
+    stopRequestedRef.current = false;
     setIsProcessingQueue(true);
 
     // Each item is attempted at most once per run, so a failing file isn't
@@ -194,10 +214,15 @@ export default function ManualUploadZone() {
     const attempted = new Set<string>();
     const nextItem = () =>
       queueRef.current.find(
-        (i) => (i.status === "queued" || i.status === "error") && !attempted.has(i.id)
+        (i) =>
+          (i.status === "queued" || i.status === "error" || i.status === "cancelled") && !attempted.has(i.id)
       );
 
-    for (let item = nextItem(); item && !cancelledRef.current; item = nextItem()) {
+    for (
+      let item = nextItem();
+      item && !cancelledRef.current && !stopRequestedRef.current;
+      item = nextItem()
+    ) {
       attempted.add(item.id);
       const abortController = new AbortController();
 
@@ -257,7 +282,7 @@ export default function ManualUploadZone() {
         if ((err as Error)?.name === "AbortError") {
           setQueue((prev) =>
             prev.map((i) =>
-              i.id === item.id ? { ...i, status: "queued", progress: 0, abortController: undefined } : i
+              i.id === item.id ? { ...i, status: "cancelled", progress: 0, abortController: undefined } : i
             )
           );
         } else {
@@ -466,6 +491,15 @@ export default function ManualUploadZone() {
                   Clear Completed
                 </button>
               )}
+              {isProcessingQueue && (
+                <button
+                  type="button"
+                  onClick={cancelAll}
+                  className="rounded border border-red-800/80 bg-red-950/60 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-900/60"
+                >
+                  Cancel All
+                </button>
+              )}
               <button
                 type="button"
                 onClick={startUploads}
@@ -563,7 +597,19 @@ export default function ManualUploadZone() {
                   {item.status === "error" && (
                     <span className="rounded bg-red-950 px-2 py-0.5 text-[11px] text-red-400">Failed</span>
                   )}
-                  {item.status !== "uploading" && (
+                  {item.status === "cancelled" && (
+                    <span className="rounded bg-neutral-800 px-2 py-0.5 text-[11px] text-neutral-400">Cancelled</span>
+                  )}
+                  {item.status === "uploading" ? (
+                    <button
+                      type="button"
+                      onClick={() => cancelUpload(item.id)}
+                      className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 hover:border-red-800 hover:text-red-300"
+                      aria-label={`Cancel upload of ${item.file.name}`}
+                    >
+                      Cancel
+                    </button>
+                  ) : (
                     <button
                       type="button"
                       onClick={() => removeItem(item.id)}

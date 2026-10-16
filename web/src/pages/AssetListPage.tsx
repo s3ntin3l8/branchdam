@@ -16,6 +16,15 @@ const statusColor: Record<string, string> = {
 
 const PAGE_SIZE = 50;
 
+// canTrash reports whether a row may be trashed, individually or as part of
+// the bulk selection. ARCHIVED/TRASHED rows are already out (they offer
+// Restore instead), and a MISSING row's file is gone from its recorded
+// path, so there is nothing for Trash to move -- the row is kept per
+// invariant 1 and relinks itself if the file reappears.
+function canTrash(a: Asset): boolean {
+  return a.lifecycleState !== "ARCHIVED" && a.lifecycleState !== "TRASHED" && a.lifecycleState !== "MISSING";
+}
+
 export default function AssetListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -123,9 +132,7 @@ export default function AssetListPage() {
     setRestoreTargetId(null);
   }
 
-  const selectableIds = assets
-    .filter((a) => a.lifecycleState !== "ARCHIVED" && a.lifecycleState !== "TRASHED")
-    .map((a) => a.id);
+  const selectableIds = assets.filter(canTrash).map((a) => a.id);
   const allSelectableSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
   const someSelected = selectedIds.size > 0;
 
@@ -463,7 +470,7 @@ export default function AssetListPage() {
                       type="checkbox"
                       aria-label={`Select ${a.fileName}`}
                       checked={selectedIds.has(a.id)}
-                      disabled={a.lifecycleState === "ARCHIVED"}
+                      disabled={!canTrash(a)}
                       onChange={() => toggleRow(a.id)}
                       className="rounded border-neutral-700 bg-neutral-800 text-indigo-500 focus:ring-0 disabled:opacity-40"
                     />
@@ -509,6 +516,13 @@ export default function AssetListPage() {
                           </span>
                         )}
                       </div>
+                    ) : a.lifecycleState === "MISSING" ? (
+                      <span
+                        className="text-neutral-500"
+                        title="The file was not found at its recorded path on the last scan, so there is nothing to trash."
+                      >
+                        —
+                      </span>
                     ) : (
                       <button
                         type="button"

@@ -239,6 +239,35 @@ describe("AssetListPage batch trash", () => {
     expect(screen.getByText("2 selected")).toBeInTheDocument();
   });
 
+  // TRASHED rows offer Restore, and a MISSING row's file is already gone,
+  // so neither can be selected for (or individually offered) Trash.
+  it("TRASHED and MISSING rows can't be selected or trashed", async () => {
+    vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+    vi.mocked(api.listAssets).mockResolvedValue({
+      assets: [
+        baseAsset({ id: 1, filePath: "/scratch/a.jpg", fileName: "a.jpg" }),
+        baseAsset({ id: 4, filePath: "/scratch/t.jpg", fileName: "t.jpg", lifecycleState: "TRASHED" }),
+        baseAsset({ id: 5, filePath: "/scratch/m.jpg", fileName: "m.jpg", lifecycleState: "MISSING" }),
+      ],
+      total: 3,
+    });
+
+    renderWithClient(<AssetListPage />);
+    await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
+
+    expect(screen.getByRole("checkbox", { name: "Select t.jpg" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Select m.jpg" })).toBeDisabled();
+    // Only a.jpg's row offers Trash.
+    expect(screen.getAllByRole("button", { name: "Trash" })).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Select all on this page" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select t.jpg" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select m.jpg" })).not.toBeChecked();
+  });
+
   it("issues one trash call per selected id on confirm", async () => {
     vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });

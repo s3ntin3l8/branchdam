@@ -149,14 +149,39 @@ describe("IngestJobsPage", () => {
       expect(screen.getByText("#42")).toBeInTheDocument();
     });
 
-    const cancelButton = screen.getByRole("button", { name: "Cancel" });
-    expect(cancelButton).toBeInTheDocument();
-
+    const cancelButton = screen.getByRole("button", { name: "Cancel job #42" });
     const user = (await import("@testing-library/user-event")).default.setup();
     await user.click(cancelButton);
 
+    // A confirmation dialog first; nothing is sent until it is confirmed.
+    const dialog = await screen.findByRole("dialog", { name: "Cancel Scan Job" });
+    expect(api.cancelJob).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel Job" }));
     await waitFor(() => {
       expect(api.cancelJob).toHaveBeenCalledWith(42);
     });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("does not cancel the job when the confirmation is dismissed", async () => {
+    vi.mocked(api.cancelJob).mockReset();
+    vi.mocked(api.listJobs).mockResolvedValueOnce({
+      jobs: [
+        { id: 42, kind: "FULL_SCAN", state: "RUNNING", filesSeen: 10, filesHashed: 5, filesFailed: 0, edgesCreated: 0 },
+      ],
+      total: 1,
+    });
+
+    renderWithClient(<IngestJobsPage />);
+    await waitFor(() => expect(screen.getByText("#42")).toBeInTheDocument());
+
+    const user = (await import("@testing-library/user-event")).default.setup();
+    await user.click(screen.getByRole("button", { name: "Cancel job #42" }));
+    const dialog = await screen.findByRole("dialog", { name: "Cancel Scan Job" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.cancelJob).not.toHaveBeenCalled();
   });
 });
