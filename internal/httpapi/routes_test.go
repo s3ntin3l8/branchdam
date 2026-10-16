@@ -6149,6 +6149,25 @@ func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
 		}
 	})
 
+	t.Run("ACTIVE child whose file cannot be opened", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses file modes")
+		}
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := os.Chmod(child.FilePath, 0); err != nil {
+			t.Fatalf("chmod child file: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(child.FilePath, 0o600) })
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "cannot be opened") {
+				t.Errorf("%q: status = %d, want 409 naming the unopenable file, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
 	t.Run("TRASHED child", func(t *testing.T) {
 		fakeExiftoolOnPath(t)
 		srv, database, parent, child := inheritTestServer(t, t.TempDir())
