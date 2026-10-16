@@ -1,7 +1,7 @@
 # Agent API contract fixtures
 
-`fixtures/` holds one JSON file per request and response of every
-`/api/v1/agent/*` route, generated from the server's own DTOs by
+`fixtures/` holds one JSON file per request and response body (and query
+parameters) of every `/api/v1/agent/*` route, generated from the server's own DTOs by
 `TestContractFixtures` (`internal/httpapi/contract_fixtures_test.go`):
 
 | Fixture | What it pins |
@@ -18,6 +18,12 @@
 | `telemetry_request` / `telemetry_response` | `POST /api/v1/agent/telemetry` |
 | `upload_request_headers` / `upload_response` | `POST /api/v1/agent/upload` headers (the body is the raw file) and response |
 
+The fixtures pin bodies and query parameters, plus the upload route's own
+headers. They do not pin the authentication headers every agent route
+takes (`X-API-Key`, and `X-Timestamp`/`X-Nonce`/`X-Signature` for signed
+requests): those are described in [`docs/agent-api.md`](../agent-api.md),
+not here, so `upload_request_headers` is not the complete header contract.
+
 Every fixture sets every field, so it shows the full wire shape; the test
 fails when a DTO gains a field the fixture leaves at its zero value, and
 every request fixture must decode strictly (no unknown field) into the DTO
@@ -29,5 +35,8 @@ the route reads. Example values are placeholders, not real data.
    regenerated `fixtures/`.
 2. branchdam-agent and branchdam-mobile each pin a copy of `fixtures/` and
    run a conformance test that decodes every pinned fixture into their own
-   DTO and re-encodes it. Refresh their copy (their `make contract-sync`)
-   in a follow-up PR; their test then shows exactly which fields drifted.
+   DTO and re-encodes it. That pinning (and each client's
+   `make contract-sync` target, which refreshes the copy) lands in the
+   clients' own follow-up PRs after this one; from then on, refresh the
+   copy in a follow-up PR and their test shows exactly which fields
+   drifted.

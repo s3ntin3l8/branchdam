@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/agent"
+	"github.com/s3ntin3l8/branchdam/internal/naming"
 )
 
 // The agent-API contract fixtures (X1): one JSON file per request and
@@ -42,6 +43,9 @@ const (
 	fxEventUUID = "33333333-3333-4333-8333-333333333333"
 	fxAgentID   = "workstation-01"
 	fxScopeID   = "4444444444444444444444444444444444444444444444444444444444444444"
+	// fxOldScope is the scope a migrating agent retires; it must differ
+	// from fxScopeID, or the handler skips the retirement.
+	fxOldScope = "5555555555555555555555555555555555555555555555555555555555555555"
 )
 
 func strp(s string) *string   { return &s }
@@ -72,7 +76,7 @@ func contractFixtures(t *testing.T) map[string]any {
 	hsOut.Body.ServerTimeUnix = 1760000000
 	hsOut.Body.AcknowledgedEventUUID = fxEventUUID
 	hsOut.Body.PendingEventsCount = 2
-	hsOut.Body.NamingTemplate = "{date:2006}/{date:2006-01-02}/{original}"
+	hsOut.Body.NamingTemplate = naming.DefaultPathTemplate
 	hsOut.Body.CurrentKeyID = 7
 	hsOut.Body.PendingRotation = &pendingRotationDTO{
 		KeyID:                8,
@@ -239,7 +243,7 @@ func contractFixtures(t *testing.T) map[string]any {
 		EvidenceJSON:   json.RawMessage(`{"clip":"A001_C002"}`),
 	}}
 	rsIn.Body.LegacyTimelineNodeUUIDs = []string{fxNodeUUID}
-	rsIn.Body.RetireScopeID = fxScopeID
+	rsIn.Body.RetireScopeID = fxOldScope
 	fx["resolve_snapshot_request"] = rsIn.Body
 	fx["resolve_snapshot_response"] = ResolveSnapshotResult{
 		Created: 1, Refreshed: 2, Removed: 3, Unchanged: 4, Unresolved: 5, ReviewedConflicts: 6,
@@ -372,6 +376,13 @@ func requireAllFieldsSet(t *testing.T, path string, v reflect.Value) {
 		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() != reflect.Uint8 {
 			for i := 0; i < v.Len(); i++ {
 				requireAllFieldsSet(t, fmt.Sprintf("%s[%d]", path, i), v.Index(i))
+			}
+		}
+		if v.Kind() == reflect.Map {
+			// Map-backed fixtures (query parameters, upload headers,
+			// count maps) need every value set, not only a non-empty map.
+			for _, k := range v.MapKeys() {
+				requireAllFieldsSet(t, fmt.Sprintf("%s[%v]", path, k), v.MapIndex(k))
 			}
 		}
 	default:
