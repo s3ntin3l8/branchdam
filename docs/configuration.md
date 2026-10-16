@@ -102,7 +102,7 @@ implications and what happens if that key is absent or lost.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `signedRequests` | bool | `false` | Require HMAC-SHA256 signatures and replay protection on agent endpoints. |
+| `signedRequests` | bool | `false` | Require HMAC-SHA256 signatures and replay protection on agent endpoints. The HMAC key is the device's own raw API key (the `X-API-Key` value) -- the key `branchdam-agent` and `branchdam-mobile` already sign with; see [`agent-api.md`](agent-api.md#request-signing-agentsignedrequests). |
 | `replayWindowSecs` | int | `300` | Maximum allowed clock drift / nonce replay window in seconds. |
 | `signedMaxBodyBytes` | int | `16777216` (16 MiB; `0` = default) | Max body the signature validator buffers on signed JSON agent endpoints; over-limit requests get `413`. |
 | `skipSignaturePaths` | list of string | `[/api/v1/agent/upload]` | Paths that bypass signature validation (the API key check still runs). Entries ending in `/` match as a prefix, others exactly. Unset uses the default (the streaming upload route); an explicit empty list exempts nothing. |

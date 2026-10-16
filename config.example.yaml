@@ -60,6 +60,8 @@ agent:
   # Per-device pairing is the only auth path for /api/v1/agent/* routes.
   # Paired devices bypass Authentik ForwardAuth at the Traefik layer
   # (see docs/forward-auth.md). No shared key — each device gets its own.
+  # Signatures are HMAC-SHA256 keyed by the device's raw API key over
+  # method\nrequestURI\nnonce\ntimestamp\n + body (docs/agent-api.md).
   signedRequests: false           # require HMAC-SHA256 signature and replay protection (default false)
   replayWindowSecs: 300           # maximum allowed clock drift / nonce replay window in seconds (default 300)
   # Body cap for signed JSON endpoints. /api/v1/agent/upload streams up to

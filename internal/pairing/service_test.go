@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
@@ -169,8 +170,28 @@ func TestKeyLookup_ActiveKeyReturnsAgentID(t *testing.T) {
 	assert.Equal(t, pairing.AgentID, result.AgentID)
 	// The signing key must be non-empty for an authenticated hit -- it's
 	// the HMAC key AgentChain uses to validate signed requests from this
-	// device (issue #453 PR C). Length 32 == SHA-256 output bytes.
-	assert.Len(t, result.SigningKey, 32)
+	// device (issue #453 PR C).
+	assert.NotEmpty(t, result.SigningKey)
+}
+
+// TestKeyLookup_SigningKeyIsRawAPIKey pins the signing-key contract to
+// what both shipped clients actually sign with: HMAC-SHA256 keyed by the
+// raw API key bytes (branchdam-agent internal/branchdam/client.go
+// signRequest; branchdam-mobile core/client/client.go signRequest). The
+// server previously returned HMAC-SHA256(pepper, "sign:"+key), which no
+// client can compute, so agent.signedRequests=true 401'd every device.
+func TestKeyLookup_SigningKeyIsRawAPIKey(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	_, key, err := svc.CreatePairing(ctx, "iPhone", "user:tester", 0, stubQRPayload)
+	require.NoError(t, err)
+
+	result, err := svc.KeyLookup(ctx, key.Plaintext)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(key.Plaintext), result.SigningKey,
+		"signing key must be the raw presented API key -- the key clients sign with")
+	assert.Equal(t, auth.SigningKeyForAPIKey(key.Plaintext), result.SigningKey)
 }
 
 func TestKeyLookup_UnknownKeyReturnsEmpty(t *testing.T) {
@@ -245,13 +266,13 @@ func TestRotateKey_HappyPath(t *testing.T) {
 	oldResult, err := svc.KeyLookup(ctx, oldKey.Plaintext)
 	require.NoError(t, err)
 	assert.Equal(t, pairing.AgentID, oldResult.AgentID)
-	assert.Len(t, oldResult.SigningKey, 32)
+	assert.Equal(t, []byte(oldKey.Plaintext), oldResult.SigningKey)
 
 	// New key should also work.
 	newResult, err := svc.KeyLookup(ctx, newKey.Plaintext)
 	require.NoError(t, err)
 	assert.Equal(t, pairing.AgentID, newResult.AgentID)
-	assert.Len(t, newResult.SigningKey, 32)
+	assert.Equal(t, []byte(newKey.Plaintext), newResult.SigningKey)
 }
 
 func TestRotateKey_GraceExpiryExpiresOldKey(t *testing.T) {

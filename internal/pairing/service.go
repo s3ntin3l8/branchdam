@@ -346,7 +346,7 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 
 // KeyLookup resolves an X-API-Key header value to the agent_id of the
 // device it authenticates AND the per-device HMAC signing key (issue
-// #453 PR C), or (auth.KeyLookupResult{}, nil) when no active key
+// #453 PR C; auth.SigningKeyForAPIKey), or (auth.KeyLookupResult{}, nil) when no active key
 // matches. A non-nil error is a genuine DB failure and propagates as
 // 500.
 //
@@ -367,25 +367,17 @@ func (s *Service) KeyLookup(ctx context.Context, presented string) (auth.KeyLook
 	if err != nil {
 		return auth.KeyLookupResult{}, fmt.Errorf("lookup pairing: %w", err)
 	}
+	// The signing key is auth.SigningKeyForAPIKey -- the raw presented
+	// key, the same key branchdam-agent and branchdam-mobile sign with
+	// -- and deliberately NOT a pepper-derived value: a key only the
+	// server can compute is one no client can sign with, which is how
+	// agent.signedRequests=true once rejected every real device. The
+	// pepper still protects the stored lookup hash (hashKey); the
+	// signing key is never persisted.
 	return auth.KeyLookupResult{
 		AgentID:    pairing.AgentID,
-		SigningKey: s.signingKeyFor(presented),
+		SigningKey: auth.SigningKeyForAPIKey(presented),
 	}, nil
-}
-
-// signingKeyFor derives the per-device HMAC signing key from the
-// presented plaintext. Distinct from hashKey's HMAC by the "sign:"
-// label prefix -- two distinct HMAC outputs from the same plaintext +
-// pepper, so the database-stored key_lookup_hash can't be inverted to
-// recover the signing key (and vice versa) without the pepper.
-//
-// Plaintext is held only for the lifetime of this function call: the
-// Service does not retain it, so a future request that needs to verify
-// a signature re-derives the key on the spot.
-func (s *Service) signingKeyFor(plaintext string) []byte {
-	mac := hmac.New(sha256.New, s.pepper)
-	mac.Write([]byte("sign:" + plaintext))
-	return mac.Sum(nil)
 }
 
 // RotateKey mints a new API key, sets expires_at on the pairing's
