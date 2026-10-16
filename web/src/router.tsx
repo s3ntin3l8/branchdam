@@ -1,6 +1,7 @@
 import { Suspense, lazy } from "react";
 import { createBrowserRouter, type RouteObject } from "react-router";
 import { Layout } from "./App";
+import NotFoundPage from "./pages/NotFoundPage";
 
 const AssetListPage = lazy(() => import("./pages/AssetListPage"));
 const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
@@ -36,17 +37,29 @@ function RouterErrorElement() {
   );
 }
 
+const loadingFallback = <div className="p-6 text-neutral-400">Loading…</div>;
+
 // routeConfig is exported (separately from the createBrowserRouter call
-// below) so router.test.tsx can assert on route placement -- e.g. that
-// /password-reset stays registered -- without rendering the data router
-// or touching the DOM.
+// below) so router.test.tsx can assert on route placement and mount the
+// real tree in a memory router.
 //
-// /password-reset is nested inside the Layout shell, same as /login: an
-// unauthenticated visitor renders with the sidebar and fires
-// useEventStream/useMe/useUnlinkedCount, but a 401 there only triggers
-// the AuthErrorBanner -- no redirect loop. See PasswordResetPage.tsx's
-// header comment for the full rationale.
+// /login and /password-reset are top-level routes OUTSIDE the Layout
+// shell: a signed-out visitor sees a standalone card, with no sidebar,
+// /me probe or SSE stream. Every other route is a Layout child, and
+// Layout redirects a signed-out visitor to /login in local/both auth mode
+// (see Layout's doc comment). /mfa/setup stays inside the shell -- it is
+// for a signed-in user enrolling a second factor.
 export const routeConfig: RouteObject[] = [
+  {
+    path: "/login",
+    element: <Suspense fallback={loadingFallback}><LoginPage /></Suspense>,
+    errorElement: <RouterErrorElement />,
+  },
+  {
+    path: "/password-reset",
+    element: <Suspense fallback={loadingFallback}><PasswordResetPage /></Suspense>,
+    errorElement: <RouterErrorElement />,
+  },
   {
     path: "/",
     element: <Layout />,
@@ -63,9 +76,8 @@ export const routeConfig: RouteObject[] = [
       { path: "companion", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading pairings…</div>}><CompanionPairingsPage /></Suspense> },
       { path: "audit-log", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit log…</div>}><AuditLogPage /></Suspense> },
       { path: "users", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading users…</div>}><UsersPage /></Suspense> },
-      { path: "login", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><LoginPage /></Suspense> },
-      { path: "mfa/setup", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><MfaSetupPage /></Suspense> },
-      { path: "password-reset", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}><PasswordResetPage /></Suspense> },
+      { path: "mfa/setup", element: <Suspense fallback={loadingFallback}><MfaSetupPage /></Suspense> },
+      { path: "*", element: <NotFoundPage /> },
     ],
   },
 ];

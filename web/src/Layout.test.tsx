@@ -13,14 +13,20 @@ vi.mock("./hooks/queries", () => ({
   useUnlinkedCount: vi.fn(() => ({ data: 0 })),
 }));
 
-vi.mock("./api/client", () => ({
-  api: {
-    logout: vi.fn().mockResolvedValue(undefined),
-    mfaChallenge: vi.fn().mockResolvedValue({ ok: true }),
-  },
-}));
+vi.mock("./api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api/client")>();
+  return {
+    ...actual,
+    api: {
+      logout: vi.fn().mockResolvedValue(undefined),
+      mfaChallenge: vi.fn().mockResolvedValue({ ok: true }),
+      setupStatus: vi.fn().mockResolvedValue({ readyForSetup: false, mode: "local" }),
+    },
+  };
+});
 
 import { useMe } from "./hooks/queries";
+import { useEventStream } from "./hooks/useEventStream";
 
 function renderLayout(meData: ReturnType<typeof useMe>["data"]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -118,5 +124,30 @@ describe("Layout MFA challenge gate", () => {
     });
 
     expect(screen.getByRole("button", { name: /sign out/i })).toBeInTheDocument();
+  });
+});
+
+describe("Layout live-update stream gate", () => {
+  it("opens the stream for a signed-in session", () => {
+    renderLayout({ kind: "user", authenticated: true, isAdmin: true });
+    expect(useEventStream).toHaveBeenLastCalledWith({ enabled: true });
+  });
+
+  it("keeps it closed while an MFA challenge is pending", () => {
+    renderLayout({
+      kind: "user",
+      authenticated: true,
+      isAdmin: false,
+      isLocal: true,
+      localUserId: 1,
+      mfaRequired: true,
+      mfaVerified: false,
+    });
+    expect(useEventStream).toHaveBeenLastCalledWith({ enabled: false });
+  });
+
+  it("keeps it closed for an anonymous session", () => {
+    renderLayout({ kind: "user", authenticated: false, isAdmin: false });
+    expect(useEventStream).toHaveBeenLastCalledWith({ enabled: false });
   });
 });

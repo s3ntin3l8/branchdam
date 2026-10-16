@@ -6,6 +6,7 @@ import {
   useConfirmEdge,
   useCreateEdge,
   useRejectEdge,
+  useStartScan,
   useTrashAsset,
   useUnlinkedCount,
   useUploadFile,
@@ -23,6 +24,7 @@ vi.mock("../api/client", async (importOriginal) => {
       createEdge: vi.fn(),
       listAssets: vi.fn(),
       listUsers: vi.fn(),
+      startScan: vi.fn(),
       trashAsset: vi.fn(),
       uploadFile: vi.fn(),
     },
@@ -168,5 +170,19 @@ describe("useUploadFile", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("useStartScan", () => {
+  it("refreshes the jobs list as well as scan progress", async () => {
+    vi.mocked(api.startScan).mockResolvedValue({ jobId: 7 });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useStartScan(), { wrapper: wrapper(queryClient) });
+    result.current.mutate({ storageLocationId: 1 });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(invalidatedKeys(queryClient)).toEqual(expect.arrayContaining([["progress"], ["jobs"]]));
   });
 });

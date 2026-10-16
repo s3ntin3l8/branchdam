@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError } from "./client";
+import { api, ApiError, API_AUTH_ERROR_EVENT, API_AUTH_SUCCESS_EVENT } from "./client";
 
 function mockFetchOnce(status: number, body: unknown, ok = status >= 200 && status < 300) {
   vi.stubGlobal(
@@ -332,5 +332,51 @@ describe("asset media URLs", () => {
     expect(api.thumbnailUrl(3)).toBe("/api/v1/assets/3/thumbnail");
     expect(api.thumbnailUrl(3, "ab/cd")).toBe("/api/v1/assets/3/thumbnail?v=ab%2Fcd");
     expect(api.streamUrl(3, "h")).toBe("/api/v1/assets/3/stream?v=h");
+  });
+
+  describe("auth events", () => {
+    function listen(name: string) {
+      const events: Array<unknown> = [];
+      const handler = (e: Event) => events.push((e as CustomEvent).detail);
+      window.addEventListener(name, handler);
+      return { events, stop: () => window.removeEventListener(name, handler) };
+    }
+
+    it("reports 401 and 403 with the failing path", async () => {
+      const errors = listen(API_AUTH_ERROR_EVENT);
+      try {
+        mockFetchOnce(401, { detail: "session expired" }, false);
+        await expect(api.config()).rejects.toBeInstanceOf(ApiError);
+        mockFetchOnce(403, { detail: "admin authorization required" }, false);
+        await expect(api.listUsers()).rejects.toBeInstanceOf(ApiError);
+        mockFetchOnce(404, { detail: "nope" }, false);
+        await expect(api.getAsset(1)).rejects.toBeInstanceOf(ApiError);
+      } finally {
+        errors.stop();
+      }
+      expect(errors.events).toEqual([
+        { status: 401, message: "session expired", path: "/api/v1/config" },
+        { status: 403, message: "admin authorization required", path: "/api/v1/users" },
+      ]);
+    });
+
+    it("signals auth success only for a signed-in /me, not for any 2xx", async () => {
+      const successes = listen(API_AUTH_SUCCESS_EVENT);
+      try {
+        mockFetchOnce(200, { version: "1.2.3" });
+        await api.config();
+        expect(successes.events).toHaveLength(0);
+
+        mockFetchOnce(200, { kind: "user", authenticated: false, isAdmin: false });
+        await api.me();
+        expect(successes.events).toHaveLength(0);
+
+        mockFetchOnce(200, { kind: "user", authenticated: true, isAdmin: false });
+        await api.me();
+        expect(successes.events).toHaveLength(1);
+      } finally {
+        successes.stop();
+      }
+    });
   });
 });

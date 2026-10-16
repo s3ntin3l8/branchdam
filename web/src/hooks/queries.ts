@@ -25,8 +25,8 @@ export function useUsers(
     queryKey: ["users", params],
     queryFn: () => api.listUsers(params),
     // Non-admins get 403 from this admin-only endpoint, and every 401/403
-    // raises the global "Access denied" banner -- callers that can't know
-    // the user is an admin must gate on useMe().isAdmin.
+    // makes Layout re-check /api/v1/me -- callers that can't know the user
+    // is an admin must gate on useMe().isAdmin.
     enabled: options.enabled ?? true,
     retry: (failureCount, error) => {
       // 503 = feature disabled, 401/403 = not allowed: retrying can't help
@@ -369,6 +369,8 @@ export function useStartScan() {
     mutationFn: (input: Parameters<typeof api.startScan>[0]) => api.startScan(input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["progress"] });
+      // A started scan is a new row on the Ingest Jobs page.
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
 }

@@ -1,26 +1,25 @@
-import { lazy, Suspense } from "react";
-import { NavLink, Outlet, Route, Routes } from "react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { Navigate, NavLink, Outlet, useLocation } from "react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEventStream } from "./hooks/useEventStream";
 import { useMe, useUnlinkedCount } from "./hooks/queries";
-import { api } from "./api/client";
+import { api, API_AUTH_ERROR_EVENT, ME_PATH, type ApiAuthErrorDetail } from "./api/client";
 import { AuthErrorBanner } from "./components/AuthErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { UserMenu } from "./components/UserMenu";
 import BrandMark from "./components/BrandMark";
 import MfaChallengeForm from "./components/MfaChallengeForm";
 
-const AssetListPage = lazy(() => import("./pages/AssetListPage"));
-const AssetDetailPage = lazy(() => import("./pages/AssetDetailPage"));
-const AuditQueuePage = lazy(() => import("./pages/AuditQueuePage"));
-const IngestPage = lazy(() => import("./pages/IngestPage"));
-const IngestJobsPage = lazy(() => import("./pages/IngestJobsPage"));
-const SettingsPage = lazy(() => import("./pages/SettingsPage"));
-const StorageHealthPage = lazy(() => import("./pages/StorageHealthPage"));
-const CompanionPairingsPage = lazy(() => import("./pages/CompanionPairingsPage"));
-const AuditLogPage = lazy(() => import("./pages/AuditLogPage"));
-const UsersPage = lazy(() => import("./pages/UsersPage"));
-const PasswordResetPage = lazy(() => import("./pages/PasswordResetPage"));
+// isAuthFailure reports whether a /api/v1/me error means "no signed-in
+// session": the server answers an anonymous request in local or both mode
+// with 403 "authentication required" (auth.RequireAdmin with a nil
+// Principal), and 401 is the generic "session lost". Duck-typed on
+// .status rather than instanceof ApiError so a mocked api module in tests
+// doesn't have to re-export the class.
+function isAuthFailure(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 401 || status === 403;
+}
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   return (
@@ -37,9 +36,15 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   );
 }
 
-// Layout wraps every route. It owns the SSE hook, the auth banner, and the
-// nav sidebar. useEventStream must run here (not in App's body) so it's
-// inside the Router context that useNavigation/useBlocker require.
+// Layout wraps every signed-in route (router.tsx; /login and
+// /password-reset render outside it). It owns the SSE hook, the auth
+// banner, and the nav sidebar.
+//
+// A signed-out visitor in local or both auth mode (GET /api/v1/setup/status)
+// is redirected to /login with the path they asked for in location state,
+// and LoginPage returns them there after sign-in. Forward mode has no local
+// login page, so it keeps rendering the shell and leaves sign-in to the
+// reverse proxy.
 //
 // When me.mfaRequired is true (half-authed session after a page reload
 // during an MFA challenge), the layout renders only the MFA challenge
@@ -48,10 +53,49 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 // this, a reload strands the SPA half-authenticated because the 403
 // from MFAGate on every API call renders a dead shell.
 export function Layout() {
-  const { disconnected } = useEventStream();
-  const { data: me } = useMe();
-  const { data: unlinkedCount } = useUnlinkedCount();
+  const meQuery = useMe();
+  const me = meQuery.data;
+  const location = useLocation();
   const queryClient = useQueryClient();
+
+  // A failed /me keeps the last good data (TanStack Query retains it), so
+  // "signed in" must also check the latest fetch didn't fail on auth.
+  const authFailed = meQuery.isError === true && isAuthFailure(meQuery.error);
+  const signedIn = !!me?.authenticated && !authFailed;
+  // Signed out: the latest /me failed on auth, or (forward mode with no
+  // identity headers) answered for an anonymous browser. LoginPage drops
+  // the cached /me before navigating back here, so a pre-login 403 can't
+  // bounce a freshly signed-in user straight back to /login.
+  const signedOut =
+    authFailed || (meQuery.isSuccess === true && me?.kind === "user" && !me.authenticated);
+
+  // Only a signed-out visitor needs the auth mode: local and both mode
+  // have a /login page to send them to; forward mode leaves sign-in to
+  // the reverse proxy, so it keeps rendering the shell as before.
+  const setupStatus = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: api.setupStatus,
+    enabled: signedOut,
+    retry: false,
+  });
+
+  const { disconnected } = useEventStream({ enabled: signedIn && !me?.mfaRequired });
+  const { data: unlinkedCount } = useUnlinkedCount();
+
+  // Any 401/403 from another endpoint may mean the session just expired:
+  // re-check /me so the redirect below can fire. Skipped for /me's own
+  // failure, which would otherwise loop.
+  useEffect(() => {
+    const onAuthError = (e: Event) => {
+      const detail = (e as CustomEvent<ApiAuthErrorDetail>).detail;
+      if (!detail || detail.path === ME_PATH) return;
+      // cancelRefetch: false joins an in-flight /me instead of restarting
+      // it once per failing query on a page full of them.
+      void queryClient.invalidateQueries({ queryKey: ["me"] }, { cancelRefetch: false });
+    };
+    window.addEventListener(API_AUTH_ERROR_EVENT, onAuthError);
+    return () => window.removeEventListener(API_AUTH_ERROR_EVENT, onAuthError);
+  }, [queryClient]);
 
   const mfaChallengeMutation = useMutation({
     mutationFn: api.mfaChallenge,
@@ -67,7 +111,23 @@ export function Layout() {
     },
   });
 
-  if (me?.mfaRequired) {
+  if (signedOut) {
+    const mode = setupStatus.data?.mode;
+    if (mode === "local" || mode === "both") {
+      const from = `${location.pathname}${location.search}${location.hash}`;
+      return <Navigate to="/login" replace state={{ from }} />;
+    }
+    if (setupStatus.isPending) {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-neutral-950 text-neutral-400">
+          Checking sign-in…
+        </div>
+      );
+    }
+    // Forward mode, or the status probe failed: fall through to the shell.
+  }
+
+  if (me?.mfaRequired && !authFailed) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-neutral-950">
         <div className="w-full max-w-sm rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow">
@@ -145,77 +205,5 @@ export function Layout() {
         </ErrorBoundary>
       </main>
     </div>
-  );
-}
-
-// App is kept as a thin wrapper that re-renders the original imperative
-// <Routes> tree for any code paths (tests, legacy callers) that mount it
-// directly. Production now uses the data-router created in main.tsx.
-export default function App() {
-  return (
-    <Routes>
-      <Route element={<Layout />}>
-        <Route path="/" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading assets…</div>}>
-            <AssetListPage />
-          </Suspense>
-        } />
-        <Route path="/assets" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading assets…</div>}>
-            <AssetListPage />
-          </Suspense>
-        } />
-        <Route path="/assets/:id" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading asset…</div>}>
-            <AssetDetailPage />
-          </Suspense>
-        } />
-        <Route path="/audit" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit queue…</div>}>
-            <AuditQueuePage />
-          </Suspense>
-        } />
-        <Route path="/ingest" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading ingest…</div>}>
-            <IngestPage />
-          </Suspense>
-        } />
-        <Route path="/jobs" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading jobs…</div>}>
-            <IngestJobsPage />
-          </Suspense>
-        } />
-        <Route path="/storage-health" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading storage health…</div>}>
-            <StorageHealthPage />
-          </Suspense>
-        } />
-        <Route path="/settings" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading settings…</div>}>
-            <SettingsPage />
-          </Suspense>
-        } />
-        <Route path="/companion" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading companion pairings…</div>}>
-            <CompanionPairingsPage />
-          </Suspense>
-        } />
-        <Route path="/audit-log" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit log…</div>}>
-            <AuditLogPage />
-          </Suspense>
-        } />
-        <Route path="/users" element={
-          <Suspense fallback={<div className="p-6 text-neutral-400">Loading users…</div>}>
-            <UsersPage />
-          </Suspense>
-        } />
-      </Route>
-      <Route path="/password-reset" element={
-        <Suspense fallback={<div className="p-6 text-neutral-400">Loading…</div>}>
-          <PasswordResetPage />
-        </Suspense>
-      } />
-    </Routes>
   );
 }

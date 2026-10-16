@@ -280,7 +280,8 @@ signed with the old key fails verification. The expected rotation
 workflow is:
 
 1. Notify users to log out (or just let the rotation happen; the SPA
-   redirects to `/login` on a 401 from the session middleware).
+   redirects to `/login` once `/api/v1/me` answers 401/403 for the
+   now-invalid cookie, and returns the user to the page they were on).
 2. Stop the server, set the new `BRANCHDAM_SECRET_KEY` in `.env`.
 3. Restart. All users log in again with their existing credentials
    (password hashes are unaffected; only the cookie HMAC key changed).
