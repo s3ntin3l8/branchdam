@@ -977,10 +977,12 @@ type Querier interface {
 	// retention window.
 	RecordNodeTrashed(ctx context.Context, nodeID int64) error
 	// A re-hash of node ?1's asserted value ?2 could not read the file: ERROR,
-	// retried after the worker's RetryAfter. An earlier MISMATCH count is
-	// kept, so a share that flaps between reads doesn't restart the backoff.
-	// The row stays 'AGENT', so the value keeps authorising nothing. Same ?2
-	// condition as MarkRehashMatched.
+	// retried after the worker's RetryAfter. ERROR keeps both an earlier
+	// MISMATCH count and the last computed value: the count so a share that
+	// flaps between reads doesn't restart the backoff, the computed hash so
+	// the operator keeps the record of what the bytes last hashed to. The row
+	// stays 'AGENT', so the value keeps authorising nothing. Same ?2 condition
+	// as MarkRehashMatched.
 	RecordRehashError(ctx context.Context, arg RecordRehashErrorParams) (int64, error)
 	// A re-hash of node ?1's asserted value ?2 read bytes that hash to ?3
 	// instead: MISMATCH, counted in rehash_mismatches and not read again

@@ -8,6 +8,7 @@ import { ToggleField } from "../components/form/ToggleField";
 import { RestartToApplyButton } from "../components/RestartServerButton";
 import { DirtyFormContext, useDirtyFormProvider, useDirtyGuard } from "../hooks/useDirtyFormGuard";
 import { formatBytes } from "../lib/formatBytes";
+import Dialog from "../components/Dialog";
 
 function formatRelativeTime(unixSecs: number): string {
   if (unixSecs <= 0) return "never";
@@ -41,7 +42,8 @@ const PRUNE_PREVIEW_LIMIT = 200;
 // swaps its label, errors render as inline text -- no toast library exists
 // in this codebase, so this deliberately doesn't add one. The list renders
 // at most PRUNE_PREVIEW_LIMIT rows and says below the scroll box how many
-// more there are; the count and total above it always cover the whole plan.
+// more there are; the count and total above it, and the Confirm Purge
+// label, always cover the whole plan.
 function PruneControl({ locationId }: { locationId: number }) {
   const [plan, setPlan] = useState<PruneCandidate[] | null>(null);
   const [result, setResult] = useState<PruneCandidate[] | null>(null);
@@ -139,7 +141,9 @@ function PruneControl({ locationId }: { locationId: number }) {
               disabled={pruneCache.isPending}
               className="rounded bg-red-900 px-2 py-1 text-xs text-red-200 hover:bg-red-800 disabled:opacity-50"
             >
-              {pruneCache.isPending ? "Purging…" : "Confirm Purge"}
+              {pruneCache.isPending
+                ? "Purging…"
+                : `Confirm Purge (${plan.length} file${plan.length === 1 ? "" : "s"})`}
             </button>
           )}
           <button
@@ -825,30 +829,33 @@ export default function StorageHealthPage() {
       </section>
     </div>
     {blocker.state === "blocked" && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-w-sm">
-          <h2 className="text-lg font-semibold text-neutral-100 mb-2">Unsaved Changes</h2>
-          <p className="text-sm text-neutral-400 mb-4">
-            You have unsaved changes. Leave without saving?
-          </p>
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => blocker.reset()}
-              className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700"
-            >
-              Stay
-            </button>
-            <button
-              type="button"
-              onClick={() => blocker.proceed()}
-              className="rounded bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600"
-            >
-              Leave
-            </button>
-          </div>
+      <Dialog
+        title="Unsaved Changes"
+        onClose={() => blocker.reset()}
+        overlayClassName="z-50 bg-black/60"
+        panelClassName="w-full max-w-sm rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
+        titleClassName="text-lg font-semibold text-neutral-100 mb-2"
+      >
+        <p className="text-sm text-neutral-400 mb-4">
+          You have unsaved changes. Leave without saving?
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => blocker.reset()}
+            className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700"
+          >
+            Stay
+          </button>
+          <button
+            type="button"
+            onClick={() => blocker.proceed()}
+            className="rounded bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600"
+          >
+            Leave
+          </button>
         </div>
-      </div>
+      </Dialog>
     )}
     </DirtyFormContext.Provider>
   );

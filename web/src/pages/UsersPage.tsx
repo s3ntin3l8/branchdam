@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   useAdminResetPassword,
@@ -13,6 +13,7 @@ import {
 import { ApiError } from "../api/client";
 import type { AttributionUser } from "../api/types";
 import ConfirmDialog from "../components/ConfirmDialog";
+import Dialog from "../components/Dialog";
 import InlineNotice from "../components/InlineNotice";
 
 function formatUnixTime(unix: number | undefined): string {
@@ -24,39 +25,24 @@ interface ModalProps {
   open: boolean;
   onClose: () => void;
   title: string;
+  // false: Escape and backdrop clicks don't close it (see Dialog).
+  dismissible?: boolean;
   children: React.ReactNode;
 }
 
-function Modal({ open, onClose, title, children }: ModalProps) {
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
-
+function Modal({ open, onClose, title, dismissible = true, children }: ModalProps) {
   if (!open) return null;
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+    <Dialog
+      title={title}
+      onClose={onClose}
+      dismissible={dismissible}
+      overlayClassName="z-50 bg-black/60"
+      panelClassName="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900 p-6 shadow-xl"
+      titleClassName="text-lg font-semibold text-neutral-100 mb-4"
     >
-      <div
-        className="w-full max-w-md rounded-lg border border-neutral-700 bg-neutral-900 p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 id="modal-title" className="text-lg font-semibold text-neutral-100 mb-4">
-          {title}
-        </h2>
-        {children}
-      </div>
-    </div>
+      {children}
+    </Dialog>
   );
 }
 
@@ -279,7 +265,8 @@ export default function UsersPage() {
 
       <div className="mb-4">
         <input
-          type="text"
+          type="search"
+          aria-label="Search users"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search users by name, username, or email…"
@@ -498,7 +485,12 @@ export default function UsersPage() {
       )}
 
       {/* Create User Modal */}
-      <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} title="Create User">
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        title="Create User"
+        dismissible={!createUserMutation.isPending}
+      >
         <form onSubmit={handleCreateSubmit} className="space-y-4">
           {createError && (
             <div className="rounded border border-red-800/60 bg-red-950/40 p-2.5 text-xs text-red-300">
@@ -506,10 +498,11 @@ export default function UsersPage() {
             </div>
           )}
           <div>
-            <label className="block text-xs font-medium text-neutral-300 mb-1">
+            <label htmlFor="create-username" className="block text-xs font-medium text-neutral-300 mb-1">
               Username *
             </label>
             <input
+              id="create-username"
               type="text"
               required
               value={createUsername}
@@ -519,10 +512,11 @@ export default function UsersPage() {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-neutral-300 mb-1">
+            <label htmlFor="create-email" className="block text-xs font-medium text-neutral-300 mb-1">
               Email (optional)
             </label>
             <input
+              id="create-email"
               type="email"
               value={createEmail}
               onChange={(e) => setCreateEmail(e.target.value)}
@@ -531,10 +525,11 @@ export default function UsersPage() {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-neutral-300 mb-1">
+            <label htmlFor="create-password" className="block text-xs font-medium text-neutral-300 mb-1">
               Initial Password
             </label>
             <input
+              id="create-password"
               type="password"
               value={createPassword}
               onChange={(e) => setCreatePassword(e.target.value)}
@@ -581,6 +576,7 @@ export default function UsersPage() {
         open={Boolean(resetTargetUser)}
         onClose={() => setResetTargetUser(null)}
         title="Reset User Password"
+        dismissible={!resetPasswordMutation.isPending}
       >
         <div className="space-y-4 text-sm text-neutral-300">
           {resetError && (
@@ -620,6 +616,10 @@ export default function UsersPage() {
         open={Boolean(revealPassword)}
         onClose={() => setRevealPassword(null)}
         title="Temporary Password Generated"
+        // The password is shown once and can't be fetched again, so only
+        // the explicit Done button closes this -- never Escape or a stray
+        // backdrop click.
+        dismissible={false}
       >
         <div className="space-y-4">
           <p className="text-xs text-neutral-300">

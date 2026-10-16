@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { INPUT_CLASS } from "./inputStyles";
+import { useFieldIds } from "./fieldContext";
 
 interface SecretFieldProps {
   hasValue: boolean;
@@ -33,10 +34,13 @@ function generateSecret(): string {
 // happens through "Revert to config" like any other overridden field.
 export function SecretField({ hasValue, value, onChange, disabled, generatable }: SecretFieldProps) {
   const [reveal, setReveal] = useState(false);
+  const ids = useFieldIds();
 
   return (
     <div className="flex gap-2">
       <input
+        id={ids?.controlId}
+        aria-describedby={ids?.docId}
         type={reveal ? "text" : "password"}
         value={value}
         onChange={(e) => onChange(e.target.value)}

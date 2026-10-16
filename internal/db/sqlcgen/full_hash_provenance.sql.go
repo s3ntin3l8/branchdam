@@ -207,7 +207,7 @@ func (q *Queries) RecordFullHashProvenance(ctx context.Context, arg RecordFullHa
 
 const recordRehashError = `-- name: RecordRehashError :execrows
 UPDATE full_hash_provenance
-SET rehash_state = 'ERROR', rehash_computed = NULL, rehash_retry_at = NULL,
+SET rehash_state = 'ERROR', rehash_retry_at = NULL,
     rehash_checked_at = unixepoch(), rehash_attempts = rehash_attempts + 1
 WHERE node_id = ?1 AND full_hash = ?2 AND source = 'AGENT'
 `
@@ -218,10 +218,12 @@ type RecordRehashErrorParams struct {
 }
 
 // A re-hash of node ?1's asserted value ?2 could not read the file: ERROR,
-// retried after the worker's RetryAfter. An earlier MISMATCH count is
-// kept, so a share that flaps between reads doesn't restart the backoff.
-// The row stays 'AGENT', so the value keeps authorising nothing. Same ?2
-// condition as MarkRehashMatched.
+// retried after the worker's RetryAfter. ERROR keeps both an earlier
+// MISMATCH count and the last computed value: the count so a share that
+// flaps between reads doesn't restart the backoff, the computed hash so
+// the operator keeps the record of what the bytes last hashed to. The row
+// stays 'AGENT', so the value keeps authorising nothing. Same ?2 condition
+// as MarkRehashMatched.
 func (q *Queries) RecordRehashError(ctx context.Context, arg RecordRehashErrorParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, recordRehashError, arg.NodeID, arg.FullHash)
 	if err != nil {

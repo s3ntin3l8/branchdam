@@ -450,7 +450,8 @@ export default function AssetListPage() {
         </div>
       ) : (
         <>
-          <table className="w-full text-left text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[960px] text-left text-sm">
             <thead className="border-b border-neutral-800 text-neutral-400">
               <tr>
                 <th className="py-2 pr-4">
@@ -550,6 +551,7 @@ export default function AssetListPage() {
               ))}
             </tbody>
           </table>
+          </div>
 
           {/* PAGINATION CONTROLS */}
           <div className="flex items-center justify-between pt-4 border-t border-neutral-800 text-xs text-neutral-400">

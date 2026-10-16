@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import Dialog from "./Dialog";
 import { useAssets } from "../hooks/queries";
 import Thumbnail from "./Thumbnail";
 import type { Asset } from "../api/types";
@@ -11,70 +12,25 @@ export interface NodePickerModalProps {
   title?: string;
 }
 
-export default function NodePickerModal({
-  isOpen,
+// NodePickerModal mounts its dialog only while open, so each opening starts
+// with an empty search and the Dialog primitive handles focus (into the
+// search box on open, back to the opener on close), the Tab trap and Escape.
+export default function NodePickerModal(props: NodePickerModalProps) {
+  if (!props.isOpen) return null;
+  return <NodePickerDialog {...props} />;
+}
+
+function NodePickerDialog({
   onClose,
   onSelect,
   selectedAssetId,
   title = "Select Asset Node",
 }: NodePickerModalProps) {
   const [searchQuery, setSearchQuery] = useState("");
-  const dialogRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
-  const wasOpenRef = useRef(false);
 
   const { data, isLoading, isError, error } = useAssets({ limit: 100 });
   const assets = useMemo(() => data?.assets ?? [], [data?.assets]);
-
-  useEffect(() => {
-    if (isOpen) {
-      if (!wasOpenRef.current) {
-        previousFocusRef.current = document.activeElement as HTMLElement;
-        wasOpenRef.current = true;
-        setSearchQuery("");
-        const timer = setTimeout(() => {
-          searchInputRef.current?.focus();
-        }, 50);
-        return () => clearTimeout(timer);
-      }
-    } else {
-      if (wasOpenRef.current) {
-        wasOpenRef.current = false;
-        if (previousFocusRef.current) {
-          previousFocusRef.current.focus();
-          previousFocusRef.current = null;
-        }
-      }
-    }
-  }, [isOpen]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    },
-    [onClose],
-  );
-
-  const handleTrapFocus = useCallback((e: React.KeyboardEvent) => {
-    if (e.key !== "Tab" || !dialogRef.current) return;
-    const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
-      'input, select, button, [tabindex]:not([tabindex="-1"])',
-    );
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }, []);
 
   const filteredAssets = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -89,40 +45,26 @@ export default function NodePickerModal({
     });
   }, [assets, searchQuery]);
 
-  if (!isOpen) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+    <Dialog
+      title={title}
+      onClose={onClose}
+      initialFocusRef={searchInputRef}
+      overlayClassName="z-60 bg-black/70 backdrop-blur-xs"
+      panelClassName="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+      headerClassName="mb-4 flex items-center justify-between border-b border-neutral-800 pb-3"
+      titleClassName="text-lg font-semibold text-neutral-100"
+      headerAction={
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close dialog"
+          className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+        >
+          ✕
+        </button>
+      }
     >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="node-picker-modal-title"
-        onKeyDown={(e) => {
-          handleKeyDown(e);
-          handleTrapFocus(e);
-        }}
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
-      >
-        <div className="mb-4 flex items-center justify-between border-b border-neutral-800 pb-3">
-          <h2 id="node-picker-modal-title" className="text-lg font-semibold text-neutral-100">
-            {title}
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close dialog"
-            className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
-          >
-            ✕
-          </button>
-        </div>
-
         {/* Search Bar */}
         <div className="mb-4">
           <div className="relative">
@@ -263,7 +205,6 @@ export default function NodePickerModal({
             Cancel
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

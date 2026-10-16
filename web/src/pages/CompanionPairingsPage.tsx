@@ -10,6 +10,7 @@ import {
   useRotatePairing,
 } from "../hooks/queries";
 import ConfirmDialog from "../components/ConfirmDialog";
+import Dialog from "../components/Dialog";
 import type {
   CompanionPairingListItem,
   CreateCompanionPairingResponse,
@@ -67,33 +68,27 @@ interface QrModalProps {
 
 function QrModal({ open, onClose, title, body }: QrModalProps) {
   if (!open) return null;
+  // Dialog generates a unique title id per instance, so two of these open
+  // at once no longer share one id.
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="qr-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+    <Dialog
+      title={title}
+      onClose={onClose}
+      overlayClassName="z-50 bg-black/60"
+      panelClassName="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900 p-6 shadow-xl"
+      titleClassName="text-lg font-semibold text-neutral-100 mb-4"
     >
-      <div
-        className="w-full max-w-lg rounded-lg border border-neutral-700 bg-neutral-900 p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 id="qr-modal-title" className="text-lg font-semibold text-neutral-100 mb-4">
-          {title}
-        </h2>
-        {body}
-        <div className="mt-6 flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 hover:border-neutral-500"
-          >
-            Close
-          </button>
-        </div>
+      {body}
+      <div className="mt-6 flex justify-end">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 hover:border-neutral-500"
+        >
+          Close
+        </button>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -484,6 +479,7 @@ export default function CompanionPairingsPage() {
               </p>
               <input
                 type="text"
+                aria-label="Device label"
                 value={createLabel}
                 onChange={(e) => setCreateLabel(e.target.value)}
                 placeholder="e.g. Björn's iPhone 16 Pro"
@@ -544,6 +540,7 @@ export default function CompanionPairingsPage() {
             </p>
             <input
               type="text"
+              aria-label="Device label"
               value={renameLabel}
               onChange={(e) => setRenameLabel(e.target.value)}
               placeholder="e.g. Björn's iPhone 16 Pro"

@@ -1,3 +1,5 @@
+import { useFieldIds } from "./fieldContext";
+
 interface ToggleFieldProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
@@ -5,8 +7,11 @@ interface ToggleFieldProps {
 }
 
 export function ToggleField({ checked, onChange, disabled }: ToggleFieldProps) {
+  const ids = useFieldIds();
   return (
     <button
+      id={ids?.controlId}
+      aria-describedby={ids?.docId}
       type="button"
       role="switch"
       aria-checked={checked}

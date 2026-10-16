@@ -226,6 +226,7 @@ describe("StorageHealthPage", () => {
         { nodeId: 43, filePath: "/mnt/scratch/proxy2.mov", sizeBytes: 2 * 1024 * 1024, purged: true },
       ],
     });
+    expect(screen.getByRole("button", { name: /confirm purge/i })).toHaveTextContent("Confirm Purge (2 files)");
     await userEvent.click(screen.getByRole("button", { name: /confirm purge/i }));
     // Execute is narrowed to exactly the previewed files.
     await waitFor(() =>
@@ -258,6 +259,23 @@ describe("StorageHealthPage", () => {
     // Outside the scroll box, so it is visible without scrolling.
     expect(within(fileList).queryByText(/and 5 more/)).not.toBeInTheDocument();
     expect(screen.getByText(/and 5 more/)).toBeInTheDocument();
+    // The confirm button counts the whole plan, not just the rows shown.
+    expect(screen.getByRole("button", { name: /confirm purge/i })).toHaveTextContent("205 files");
+  });
+
+  it("labels the confirm button with a singular count for a one-file plan", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ tier: "TIER1_LOCAL_SCRATCH", prunable: true })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    vi.mocked(api.pruneCache).mockResolvedValueOnce({
+      executed: false,
+      candidates: [{ nodeId: 7, filePath: "/mnt/scratch/one.jpg", sizeBytes: 10, purged: false }],
+    });
+
+    renderWithClient(<StorageHealthPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /purge cache/i }));
+    expect(await screen.findByRole("button", { name: /confirm purge/i })).toHaveTextContent("Confirm Purge (1 file)");
   });
 
   it("shows a DISABLED badge independently of INACTIVE", async () => {

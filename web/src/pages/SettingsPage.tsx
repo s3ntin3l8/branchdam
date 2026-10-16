@@ -13,6 +13,7 @@ import { SettingsLayout } from "../components/settings/SettingsLayout";
 import type { SettingsCategory } from "../components/settings/SettingsLayout";
 import { AppearanceSettings } from "../components/settings/AppearanceSettings";
 import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
+import Dialog from "../components/Dialog";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
 // aren't part of the wire DTO -- there's no generated client here (see
@@ -321,6 +322,7 @@ function PathRewritesEditor({
                   <td className="py-2 pr-4 text-amber-300">
                     <input
                       type="text"
+                      aria-label={`Rule ${i + 1} original host prefix`}
                       value={rw.from}
                       onChange={(e) => handleUpdate(i, "from", e.target.value)}
                       className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-amber-300 focus:border-indigo-500 focus:outline-none"
@@ -329,6 +331,7 @@ function PathRewritesEditor({
                   <td className="py-2 pr-4 text-emerald-300">
                     <input
                       type="text"
+                      aria-label={`Rule ${i + 1} target container prefix`}
                       value={rw.to}
                       onChange={(e) => handleUpdate(i, "to", e.target.value)}
                       className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-emerald-300 focus:border-indigo-500 focus:outline-none"
@@ -353,6 +356,7 @@ function PathRewritesEditor({
       <div className="flex flex-wrap items-center gap-2 border-t border-neutral-800 pt-3">
         <input
           type="text"
+          aria-label="New rule original host prefix"
           placeholder="Original host prefix (e.g. D:\Footage\)"
           value={newFrom}
           onChange={(e) => setNewFrom(e.target.value)}
@@ -360,6 +364,7 @@ function PathRewritesEditor({
         />
         <input
           type="text"
+          aria-label="New rule target container prefix"
           placeholder="Target container prefix (e.g. /storage/projects/Footage/)"
           value={newTo}
           onChange={(e) => setNewTo(e.target.value)}
@@ -660,20 +665,33 @@ export default function SettingsPage() {
       </SettingsLayout>
     </div>
     {blocker.state === "blocked" && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-w-sm">
-          <h2 className="text-lg font-semibold text-neutral-100 mb-2">Unsaved Changes</h2>
-          <p className="text-sm text-neutral-400 mb-4">
-            You have unsaved settings changes. Leave without saving?
-          </p>
-          <div className="flex justify-end gap-2">
-            <button type="button" onClick={() => blocker.reset()}
-              className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700">Stay</button>
-            <button type="button" onClick={() => blocker.proceed()}
-              className="rounded bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600">Leave</button>
-          </div>
+      <Dialog
+        title="Unsaved Changes"
+        onClose={() => blocker.reset()}
+        overlayClassName="z-50 bg-black/60"
+        panelClassName="w-full max-w-sm rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
+        titleClassName="text-lg font-semibold text-neutral-100 mb-2"
+      >
+        <p className="text-sm text-neutral-400 mb-4">
+          You have unsaved settings changes. Leave without saving?
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => blocker.reset()}
+            className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700"
+          >
+            Stay
+          </button>
+          <button
+            type="button"
+            onClick={() => blocker.proceed()}
+            className="rounded bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600"
+          >
+            Leave
+          </button>
         </div>
-      </div>
+      </Dialog>
     )}
     </DirtyFormContext.Provider>
   );

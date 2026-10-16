@@ -18,6 +18,7 @@ import AssetMediaPreview from "../components/AssetMediaPreview";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset, InheritMetadataResponse } from "../api/types";
+import { formatBytes } from "../lib/formatBytes";
 
 // identityTags are the two tags Plan (internal/metadata) always emits
 // regardless of whether there was anything to inherit -- excluded from the
@@ -412,8 +413,9 @@ function AssetMetadataInspector({ assetId }: { assetId: number }) {
         </h2>
         {metadata.length > 0 && (
           <input
-            type="text"
-            placeholder="Filter tags..."
+            type="search"
+            aria-label="Filter tags"
+            placeholder="Filter tags…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-600"
@@ -455,6 +457,26 @@ function AssetMetadataInspector({ assetId }: { assetId: number }) {
   );
 }
 
+function DetailMessage({
+  title,
+  tone = "neutral",
+  children,
+}: {
+  title: string;
+  tone?: "neutral" | "error";
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="p-6">
+      <h1 className={`mb-2 text-lg font-semibold ${tone === "error" ? "text-red-400" : "text-neutral-100"}`}>{title}</h1>
+      <div className="mb-4 text-sm text-neutral-400">{children}</div>
+      <Link to="/assets" className="text-sm text-brand hover:underline">
+        Back to assets
+      </Link>
+    </div>
+  );
+}
+
 // The route reuses this page across /assets/:id changes, so every control's
 // local state (an open inherit preview, a planned purge, a trash dialog, the
 // metadata filter) would otherwise carry over to the next asset and its
@@ -466,20 +488,51 @@ export default function AssetDetailPage() {
 }
 
 function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
-  const assetId = id ? Number(id) : undefined;
+  // Only a positive integer is an asset id; anything else (a node UUID, a
+  // typo) stays undefined so no query fires for /assets/NaN.
+  const parsedId = id ? Number(id) : NaN;
+  const assetId = Number.isInteger(parsedId) && parsedId > 0 ? parsedId : undefined;
   const [searchParams, setSearchParams] = useSearchParams();
 
   const rawDepth = Number(searchParams.get("depth"));
   const depth = !Number.isNaN(rawDepth) && rawDepth >= 1 && rawDepth <= 5 ? rawDepth : 2;
 
-  const { data: asset, isLoading, isError } = useAsset(assetId);
+  const { data: asset, isLoading, isError, error, refetch, isFetching } = useAsset(assetId);
   const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(assetId, depth);
   const { data: sync, isLoading: isSyncLoading } = useAssetSyncStatus(assetId);
   const retrySync = useRetrySync();
 
-  if (!assetId || Number.isNaN(assetId)) return <div className="p-6 text-red-400">Invalid asset id.</div>;
+  if (assetId === undefined) {
+    return (
+      <DetailMessage title="Invalid asset id">
+        Asset pages are addressed by numeric id (for example <code>/assets/42</code>).
+      </DetailMessage>
+    );
+  }
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
-  if (isError || !asset) return <div className="p-6 text-red-400">Asset not found.</div>;
+  if (isError || !asset) {
+    // Only a 404 means the asset doesn't exist. Anything else (a 5xx, a
+    // dropped connection, a 403) says nothing about the asset, so it gets
+    // its own message and a retry rather than a misleading "not found".
+    // Duck-typed on .status (as App.tsx does) rather than instanceof
+    // ApiError, so a mocked api module needn't re-export the class.
+    if ((error as { status?: unknown } | null)?.status === 404) {
+      return <DetailMessage title="Asset not found">There is no asset with id {assetId}.</DetailMessage>;
+    }
+    return (
+      <DetailMessage title="Couldn't load this asset" tone="error">
+        <span className="block">{error instanceof Error ? error.message : "The server didn't return the asset."}</span>
+        <button
+          type="button"
+          onClick={() => void refetch()}
+          disabled={isFetching}
+          className="mt-3 rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
+        >
+          {isFetching ? "Retrying…" : "Retry"}
+        </button>
+      </DetailMessage>
+    );
+  }
 
   const handleDepthChange = (newDepth: number) => {
     setSearchParams((prev) => {
@@ -490,8 +543,8 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
 
   return (
     <div className="space-y-6 p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-4">
           <Thumbnail
             assetId={asset.id}
             thumbState={asset.thumbState}
@@ -499,12 +552,12 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
             version={asset.fullHash ?? asset.fastHash}
             className="h-24 w-24 shrink-0 rounded-lg object-cover"
           />
-          <div>
-            <h1 className="text-xl font-semibold text-neutral-100">{asset.fileName}</h1>
-            <p className="text-sm text-neutral-500">{asset.filePath}</p>
+          <div className="min-w-0">
+            <h1 className="break-all text-xl font-semibold text-neutral-100">{asset.fileName}</h1>
+            <p className="break-all text-sm text-neutral-500">{asset.filePath}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <AssetPruneControl asset={asset} />
           <AssetDeleteControl asset={asset} />
         </div>
@@ -526,7 +579,10 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
         </div>
         <dl className="rounded border border-neutral-800 p-3">
           <Field label="Node UUID" value={asset.nodeUuid} />
-          <Field label="Size" value={`${asset.sizeBytes} bytes`} />
+          <Field
+            label="Size"
+            value={<span title={`${asset.sizeBytes.toLocaleString()} bytes`}>{formatBytes(asset.sizeBytes)}</span>}
+          />
           <Field label="Indexing status" value={asset.indexingStatus} />
           <Field label="Graph status" value={asset.graphStatus} />
           <Field label="Lifecycle" value={asset.lifecycleState} />
@@ -594,8 +650,9 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
         <div className="mb-2 flex items-center justify-between">
           <h2 className="text-sm font-medium text-neutral-400">Multi-hop Lineage Graph</h2>
           <div className="flex items-center gap-2 text-sm text-neutral-400">
-            <span>Traversal Depth:</span>
+            <label htmlFor="lineage-depth">Traversal depth</label>
             <select
+              id="lineage-depth"
               value={depth}
               onChange={(e) => handleDepthChange(Number(e.target.value))}
               className="rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
