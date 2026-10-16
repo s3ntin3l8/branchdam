@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -404,4 +405,93 @@ func TestBuildMessage_Uses8BitTransferEncoding(t *testing.T) {
 	assert.Equal(t, 2, strings.Count(s, "Content-Transfer-Encoding: 8bit"))
 	// And NO quoted-printable anywhere (issue 3: CTE used to lie about QP)
 	assert.NotContains(t, s, "quoted-printable")
+}
+
+// TestLogSender_RedactsResetTokenInPreview: the provider=log preview is
+// the first 200 runes of the text body, which for a password-reset mail
+// includes the reset link -- and with it most of the single-use token.
+// That put a live credential in the server log.
+func TestLogSender_RedactsResetTokenInPreview(t *testing.T) {
+	var buf strings.Builder
+	sender := &logSender{log: slog.New(slog.NewJSONHandler(&buf, nil))}
+
+	const token = "Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5"
+	body := PasswordResetText(ResetEmailData{
+		Username:  "alice",
+		ResetLink: "https://dam.example.com/password-reset?token=" + token,
+		ExpiresAt: "12:00 UTC, Mon Jan 2",
+	})
+	require.Contains(t, body, token, "precondition: the rendered body carries the token")
+
+	require.NoError(t, sender.Send(context.Background(), "alice@example.com", "Reset", "<p>html</p>", body))
+	assert.NotContains(t, buf.String(), token[:8], "no part of the reset token may reach the log")
+
+	var record map[string]any
+	require.NoError(t, json.Unmarshal([]byte(buf.String()), &record))
+	preview, _ := record["body_preview"].(string)
+	// The 200-rune cut may land inside the marker; the value is gone
+	// either way.
+	assert.Contains(t, preview, "token=[", "the link stays visible, with its token value redacted")
+}
+
+func TestRedactTokens(t *testing.T) {
+	assert.Equal(t, "a?token=[REDACTED]&x=1", redactTokens("a?token=abc-_DEF&x=1"))
+	assert.Equal(t, "Token=[REDACTED] tail", redactTokens("Token=xyz tail"))
+	assert.Equal(t, "no secrets here", redactTokens("no secrets here"))
+}
+
+// TestSMTPSender_ImplicitTLSDialHonorsContext: the implicit-TLS path
+// dialled with tls.DialWithDialer and a zero net.Dialer, which ignores
+// ctx and has no timeout, so a server that accepts TCP but never answers
+// the TLS handshake hung Send forever (the conn deadline is only set
+// after the dial returns).
+func TestSMTPSender_ImplicitTLSDialHonorsContext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open and never speak TLS.
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	sender := newSMTPSender(Config{
+		Provider: "smtp",
+		Host:     "127.0.0.1",
+		Port:     addr.Port,
+		From:     "noreply@example.com",
+		TLS:      "implicit",
+	}, slog.New(slog.DiscardHandler))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sender.Send(ctx, "user@example.com", "s", "<p>h</p>", "t") }()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a stalled TLS handshake must fail, not succeed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send did not return after its context expired: the implicit-TLS dial ignores ctx")
+	}
 }

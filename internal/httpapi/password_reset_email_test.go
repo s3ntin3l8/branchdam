@@ -147,8 +147,9 @@ func TestHandlePasswordResetRequest_SMTP_SkipsEmailWhenBaseURLUnset(t *testing.T
 	rr := requestPasswordReset(t, srv, "attacker.example", userEmail)
 	assert.Equal(t, http.StatusOK, rr.Code)
 
-	// The goroutine path is never entered when baseURL is unset -- there
-	// is nothing to wait on -- so no synchronization is needed here.
+	// The lookup/mint/send job runs off the request path; wait for it so
+	// the zero below is a real "skipped", not "not yet run".
+	srv.waitPasswordResetJobs()
 	assert.Equal(t, 0, notifier.callCount(), "must not fall back to the Host header; email delivery should be skipped entirely")
 }
 
@@ -159,6 +160,7 @@ func TestHandlePasswordResetRequest_LogProvider_SkipsEmailWhenBaseURLUnset(t *te
 	rr := requestPasswordReset(t, srv, "attacker.example", userEmail)
 	assert.Equal(t, http.StatusOK, rr.Code)
 
+	srv.waitPasswordResetJobs()
 	assert.Equal(t, 0, notifier.callCount(), "provider=log must also skip delivery when baseURL is unset -- the interface-level fix has no per-provider carve-out")
 }
 

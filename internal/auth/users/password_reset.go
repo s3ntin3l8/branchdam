@@ -262,19 +262,17 @@ func (p *PasswordResetService) ConfirmPasswordReset(ctx context.Context, plainte
 		if err := revokeAllUserSessionsTx(ctx, q, user.ID, now.Unix()); err != nil {
 			return fmt.Errorf("password-reset: revoke sessions: %w", err)
 		}
-		// Clear MFA credentials + recovery codes (Issue 10): the
-		// self-service confirm path uses a token delivered out of
-		// band (operator pass-through, mail), so an attacker who
-		// already owns the inbox can mint a token AND know the
-		// password. Leaving MFA enrolled lets them walk straight in
-		// via /mfa/challenge. Clearing MFA forces re-enrollment, which
-		// requires the user to physically re-add their authenticator.
-		if err := q.DeleteMFACredentials(ctx, user.ID); err != nil {
-			return fmt.Errorf("password-reset: clear mfa credentials: %w", err)
-		}
-		if err := q.DeleteRecoveryCodes(ctx, user.ID); err != nil {
-			return fmt.Errorf("password-reset: clear mfa recovery codes: %w", err)
-		}
+		// MFA credentials and recovery codes are deliberately KEPT.
+		// The reset token arrives out of band (email, or an operator
+		// pass-through), so whoever holds it controls the mailbox, not
+		// necessarily the account. If this path cleared MFA, mailbox
+		// access alone would be a full account takeover: mint a token,
+		// set a password, log in with no second factor. Keeping MFA
+		// means the new password only gets a half-authed session that
+		// /mfa/challenge still gates. A user who lost both their
+		// authenticator and their recovery codes needs an admin reset
+		// (AdminResetPassword), which does clear MFA after the admin
+		// has verified the person out of band.
 
 		details := fmt.Sprintf(`{"token_id":%d,"kind":"self-service-confirm"}`, consumed.ID)
 		return q.InsertLoginAudit(ctx, sqlcgen.InsertLoginAuditParams{
@@ -357,7 +355,8 @@ func (p *PasswordResetService) AdminResetPassword(ctx context.Context, targetUse
 		// who lost phone + recovery codes would otherwise be locked
 		// out forever: /mfa/disable requires a valid TOTP, so without
 		// this clear neither the user nor an admin can disable MFA
-		// after a password reset.
+		// after a password reset. Only this admin path clears MFA; the
+		// self-service ConfirmPasswordReset keeps it (see there).
 		if err := q.DeleteMFACredentials(ctx, user.ID); err != nil {
 			return fmt.Errorf("password-reset: clear mfa credentials: %w", err)
 		}

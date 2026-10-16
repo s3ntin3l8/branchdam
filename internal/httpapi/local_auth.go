@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -47,6 +48,12 @@ type localAuthHandlers struct {
 	log                 *slog.Logger
 	authMode            auth.AuthMode
 	jit                 auth.JITProvisioner
+
+	// resetSlots bounds in-flight password-reset background jobs
+	// (password_reset.go's dispatchPasswordResetRequest); resetJobs
+	// lets tests wait for them.
+	resetSlots chan struct{}
+	resetJobs  sync.WaitGroup
 }
 
 // registerLocalAuthRoutes mounts /api/v1/setup/status,
@@ -258,8 +265,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user.DisabledAt.Valid {
+		// Same response and limiter accounting as a wrong password.
+		// A distinct "account disabled" 403 (and no limiter hit) told
+		// the caller the password they guessed was right, so a
+		// disabled account could be brute-forced without throttling
+		// and its password tried elsewhere. The audit row keeps the
+		// precise reason for the operator.
+		s.localAuth.loginLimiter.RecordFailure(ip)
 		s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: user.ID, Valid: true}, username, "local", "user-disabled", ip, r.UserAgent(), "{}")
-		writeJSONError(w, http.StatusForbidden, "account disabled")
+		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 

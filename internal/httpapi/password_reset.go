@@ -8,8 +8,8 @@
 //	POST /api/v1/password-reset/confirm   -- no auth, 200 / 404
 //	POST /api/v1/admin/users/{id}/reset-password   -- admin-only, returns new password
 //
-// The /request handler emits a slog.WARN with only numeric fields
-// (user_id, token_id, expires_at). The plaintext token and the
+// The /request handler's background job emits a slog.WARN with only
+// numeric fields (user_id, token_id, expires_at). The plaintext token and the
 // request IP/User-Agent are deliberately NOT logged here. The
 // plaintext token is delivered to admins via the admin-UI pending-
 // resets panel (PR #408) and via the admin reset-password endpoint's
@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -39,23 +40,24 @@ import (
 // handlePasswordResetRequest: POST /api/v1/password-reset/request
 // body: {"email": "..."}
 //
-// Always returns 200 OK with an empty body. On a user-found, a token
-// is minted and an admin-only slog marker is written (numeric fields
-// only -- user_id, token_id, expires_at). The plaintext token does
-// NOT cross into slog; the response body does NOT include the token.
-// Operators/admins retrieve the token via the admin-UI pending-resets
-// panel (PR #408). On a no-such-user, no token is minted, no log
-// line is written -- the response is byte-identical to the success
-// path so the endpoint cannot be used to enumerate which addresses
-// have accounts.
+// Always returns 200 OK with a fixed body. The user lookup, the token
+// mint, the operator log marker and the email send all run in a
+// background job (runPasswordResetRequest) that is dispatched before the
+// 200 is written, so the request path does the same work whether or not
+// the address belongs to an account. Earlier revisions ran the lookup
+// and -- for a found user only -- a writer-pool transaction (token row +
+// audit row) synchronously; that extra writer round-trip, which queues
+// behind every other writer on the single-connection pool, was a timing
+// side-channel that let a caller enumerate which addresses have
+// accounts despite the byte-identical response. On a no-such-user, no
+// token is minted and no log line is written.
 //
 // Rate-limited by resetLimiter (NOT loginLimiter -- a separate
 // per-IP budget, so a user who tripped the login limiter can still
 // request a reset; see cmd/branchdam/main.go's resetLimiter init).
-// The /request handler is read-only against the limiter: the
-// 200-always response means there's no notion of "failure" to
-// record. The cool-off's purpose is to throttle token-mint + log
-// volume, not to lock out legitimate users.
+// Every request is recorded as a limiter failure (see below), and the
+// number of in-flight background jobs is capped (resetJobSlots) so an
+// unauthenticated flood from many IPs cannot pile up goroutines.
 func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 	if s.localAuth == nil || s.localAuth.reset == nil || s.localAuth.resetLimiter == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "local auth is not configured")
@@ -69,11 +71,6 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
 	}
-	// Every request counts as an attempt: each one mints a token row and
-	// can send an email, so an unauthenticated caller must not be able to
-	// loop on it (mail bombing / token-table growth).
-	s.localAuth.resetLimiter.RecordFailure(ip)
-
 	var body struct {
 		Email string `json:"email"`
 	}
@@ -87,15 +84,73 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	issue, ok, err := s.localAuth.reset.RequestPasswordReset(r.Context(), email, ip, r.UserAgent())
+	// Every well-formed request counts as an attempt, whether or not an
+	// account matches: a found address mints a token row and sends an
+	// email, and counting only those would let the limiter itself reveal
+	// which addresses exist. Malformed bodies are rejected above without
+	// a strike because they never reach the background job.
+	s.localAuth.resetLimiter.RecordFailure(ip)
+
+	s.dispatchPasswordResetRequest(email, ip, r.UserAgent())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// resetJobSlots caps concurrently running password-reset background jobs.
+// A full set of slots drops the request (logged) rather than blocking the
+// handler, which would re-open the timing side-channel under load.
+const resetJobSlots = 32
+
+// resetJobTimeout bounds one background password-reset job: lookup +
+// token mint on the writer pool, plus the email send (which has its own
+// emailpkg.SendTimeout inside this budget).
+const resetJobTimeout = emailpkg.SendTimeout + 15*time.Second
+
+// dispatchPasswordResetRequest runs runPasswordResetRequest on a
+// background goroutine detached from the request context (which is
+// canceled as soon as the handler returns). Every value the job needs is
+// passed by value; r is never shared with it.
+func (s *Server) dispatchPasswordResetRequest(email, ip, userAgent string) {
+	la := s.localAuth
+	select {
+	case la.resetSlots <- struct{}{}:
+	default:
+		la.log.Warn("password-reset: too many reset requests in flight; dropping this one",
+			slog.String("ip", sanitizeForLog(ip)),
+			slog.Int("in_flight", len(la.resetSlots)),
+			slog.Int("slots", cap(la.resetSlots)))
+		return
+	}
+	la.resetJobs.Add(1)
+	go func() {
+		defer la.resetJobs.Done()
+		defer func() { <-la.resetSlots }()
+		ctx, cancel := context.WithTimeout(context.Background(), resetJobTimeout)
+		defer cancel()
+		s.runPasswordResetRequest(ctx, email, ip, userAgent)
+	}()
+}
+
+// waitPasswordResetJobs blocks until every dispatched password-reset job
+// has finished. Test-only synchronization point.
+func (s *Server) waitPasswordResetJobs() {
+	if s.localAuth != nil {
+		s.localAuth.resetJobs.Wait()
+	}
+}
+
+// runPasswordResetRequest is the off-request-path half of
+// /password-reset/request: look the address up, mint a token for an
+// enabled local user, emit the operator marker and (when configured)
+// email the link. Errors are logged; the caller already got its 200.
+func (s *Server) runPasswordResetRequest(ctx context.Context, email, ip, userAgent string) {
+	la := s.localAuth
+	issue, ok, err := la.reset.RequestPasswordReset(ctx, email, ip, userAgent)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "request reset: "+err.Error())
+		la.log.Warn("password-reset: request failed", slog.String("error", err.Error()))
 		return
 	}
 	if !ok {
-		// Enumeration defense: the response is byte-identical to the
-		// success path, and no slog.WARN is written.
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		// No such (enabled, local) user: nothing minted, nothing logged.
 		return
 	}
 	// Operator-facing: emit a token-minted marker to slog so journalctl
@@ -111,7 +166,7 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// the lgtm suppression.
 	// Go's typed slog fields (Int64, Int) make it clear to CodeQL
 	// that these are numeric, not user-controlled strings.
-	s.localAuth.log.Warn("password-reset: token minted (operator: retrieve via admin pending-resets panel)",
+	la.log.Warn("password-reset: token minted (operator: retrieve via admin pending-resets panel)",
 		slog.Int64("user_id", issue.Token.UserID),
 		slog.Int64("token_id", issue.Token.ID),
 		slog.Int64("expires_at", issue.ExpiresAt.Unix()),
@@ -121,84 +176,57 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 	// link to the user's email address. The notifier is nil when
 	// auth.email.provider is unset (default "log"), which silently
 	// skips delivery. Enumeration defense: email is only sent when a
-	// token was minted (user found), and the 200 response is identical.
-	//
-	// Delivery is performed in a background goroutine so the 200
-	// response is returned without blocking on the SMTP round-trip.
-	// Without this, an attacker could distinguish "user exists" (full
-	// SMTP round-trip before 200) from "user does not exist" (200
-	// immediately), defeating the byte-identical response defense.
-	// The user lookup ALSO runs inside the goroutine: if it ran on the
-	// request hot path, a found-user would pay a DB round-trip the
-	// not-found path doesn't, leaving a timing side-channel the
-	// byte-identical response was meant to close. By moving the lookup
-	// off the request hot path, both branches (found and not-found)
-	// pay exactly the same DB round-trips before the 200 response is
-	// written.
-	//
-	// Errors are logged from the goroutine; the caller never sees
-	// them. We copy every value the goroutine needs into locals
-	// (request context is canceled when the handler returns, so we
-	// cannot share r, user, issue with the goroutine).
-	if s.localAuth.email != nil {
-		// baseURL is resolved from config only (auth.email.baseURL), with
-		// NO fallback to the inbound request's Host header, for ANY
-		// provider -- including provider=log. An earlier revision of this
-		// fix fell back to the Host header only when provider != "smtp",
-		// reasoning that logSender never transmits externally so there's
-		// no real victim inbox. That reasoning is correct at runtime, but
-		// CodeQL's go/email-content-injection query resolves Send through
-		// the email.Notifier INTERFACE: it can't see that the provider
-		// check guarantees only logSender.Send runs on that branch, so it
-		// conservatively still traces the Host-derived value into
-		// smtpSender.Send's parameters and re-flagged w.Write(msg) below
-		// (verified live: alert #86 reopened on that revision). The fix
-		// has to keep Host-derived data out of every call to
-		// s.localAuth.email.Send, not just the ones reachable via SMTP at
-		// runtime. So: fail closed for every provider when baseURL is
-		// unset, including the provider=log dev-mode preview.
-		baseURL, ok := passwordResetBaseURL(s)
-		if !ok {
-			s.localAuth.log.Warn("password-reset: auth.email.baseURL is not configured; skipping email delivery (including the provider=log preview). Set auth.email.baseURL in config.yaml to enable the emailed reset link.")
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-			return
-		}
-		resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
-		subject := "Reset your branchDAM password"
-		expiresLabel := issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2")
-		userID := issue.Token.UserID
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), emailpkg.SendTimeout)
-			defer cancel()
-			user, lookupErr := s.localAuth.users.GetUserByID(ctx, userID)
-			if lookupErr != nil || !user.Email.Valid || user.Email.String == "" {
-				// Token-mint already happened; just skip delivery. No
-				// slog.WARN -- a missing/empty email is an operator
-				// configuration choice (the admin UI doesn't require
-				// email on local users) and spamming the log every time
-				// such a user requests a reset would be noise.
-				return
-			}
-			htmlBody := emailpkg.PasswordResetHTML(emailpkg.ResetEmailData{
-				Username:  user.Username,
-				ResetLink: resetLink,
-				ExpiresAt: expiresLabel,
-			})
-			textBody := emailpkg.PasswordResetText(emailpkg.ResetEmailData{
-				Username:  user.Username,
-				ResetLink: resetLink,
-				ExpiresAt: expiresLabel,
-			})
-			if sendErr := s.localAuth.email.Send(ctx, user.Email.String, subject, htmlBody, textBody); sendErr != nil {
-				s.localAuth.log.Warn("password-reset: email delivery failed",
-					slog.Int64("user_id", userID),
-					slog.String("error", sendErr.Error()),
-				)
-			}
-		}()
+	// token was minted (user found), and it happens after the 200.
+	if la.email == nil {
+		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// baseURL is resolved from config only (auth.email.baseURL), with
+	// NO fallback to the inbound request's Host header, for ANY
+	// provider -- including provider=log. An earlier revision of this
+	// fix fell back to the Host header only when provider != "smtp",
+	// reasoning that logSender never transmits externally so there's
+	// no real victim inbox. That reasoning is correct at runtime, but
+	// CodeQL's go/email-content-injection query resolves Send through
+	// the email.Notifier INTERFACE: it can't see that the provider
+	// check guarantees only logSender.Send runs on that branch, so it
+	// conservatively still traces the Host-derived value into
+	// smtpSender.Send's parameters and re-flagged w.Write(msg)
+	// (verified live: alert #86 reopened on that revision). The fix
+	// has to keep Host-derived data out of every call to
+	// la.email.Send, not just the ones reachable via SMTP at runtime.
+	// So: fail closed for every provider when baseURL is unset,
+	// including the provider=log dev-mode preview.
+	baseURL, ok := passwordResetBaseURL(s)
+	if !ok {
+		la.log.Warn("password-reset: auth.email.baseURL is not configured; skipping email delivery (including the provider=log preview). Set auth.email.baseURL in config.yaml to enable the emailed reset link.")
+		return
+	}
+	resetLink := fmt.Sprintf("%s/password-reset?token=%s", baseURL, issue.PlaintextToken)
+	subject := "Reset your branchDAM password"
+	expiresLabel := issue.ExpiresAt.Format("15:04 UTC, Mon Jan 2")
+	userID := issue.Token.UserID
+	user, lookupErr := la.users.GetUserByID(ctx, userID)
+	if lookupErr != nil || !user.Email.Valid || user.Email.String == "" {
+		// Token-mint already happened; just skip delivery. No
+		// slog.WARN -- a missing/empty email is an operator
+		// configuration choice (the admin UI doesn't require
+		// email on local users) and spamming the log every time
+		// such a user requests a reset would be noise.
+		return
+	}
+	data := emailpkg.ResetEmailData{
+		Username:  user.Username,
+		ResetLink: resetLink,
+		ExpiresAt: expiresLabel,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, emailpkg.SendTimeout)
+	defer cancel()
+	if sendErr := la.email.Send(sendCtx, user.Email.String, subject, emailpkg.PasswordResetHTML(data), emailpkg.PasswordResetText(data)); sendErr != nil {
+		la.log.Warn("password-reset: email delivery failed",
+			slog.Int64("user_id", userID),
+			slog.String("error", sendErr.Error()),
+		)
+	}
 }
 
 // handlePasswordResetConfirm: POST /api/v1/password-reset/confirm
