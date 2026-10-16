@@ -69,7 +69,9 @@ type Querier interface {
 	// PENDING rows ListPendingAgentEvents would claim right now. DrainAll stops
 	// once this reaches 0 even if deferred rows remain PENDING.
 	CountDueAgentEvents(ctx context.Context, nowUnix int64) (int64, error)
-	CountLoginAudit(ctx context.Context) (int64, error)
+	// Counterpart to ListLoginAudit -- must apply identical WHERE so
+	// pagination totals match the visible rows.
+	CountLoginAudit(ctx context.Context, arg CountLoginAuditParams) (int64, error)
 	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
 	CountMediaNodes(ctx context.Context) (int64, error)
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
@@ -631,6 +633,10 @@ type Querier interface {
 	// Newest-first. Offset pagination -- volume is bounded by authentication
 	// events (not per-asset), so the drift problem that justifies keyset
 	// pagination on /api/v1/edges/audit doesn't apply here.
+	// Filters are all sqlc.narg, same shape as ListActorAudit, so the audit
+	// log page's filters apply to this stream too: user_id (actor),
+	// outcome (shown as the event), source (shown as the resource id) and a
+	// created_at window.
 	ListLoginAudit(ctx context.Context, arg ListLoginAuditParams) ([]ListLoginAuditRow, error)
 	// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
 	// Returns node_uuid, lifecycle_state, full_hash, storage location tier, and

@@ -423,8 +423,10 @@ function LocationGaugeCard({ loc }: { loc: StorageLocationHealth }) {
               legitimately disagree with what's actually running right now
               -- this chip is the only always-visible signal of that, since
               the per-field "Applies on restart" badges are inside the
-              collapsed Edit form. */}
-          {loc.overriddenFields.length > 0 && (
+              collapsed Edit form. It keys on the server's pendingRestart
+              (changed since boot), not on overriddenFields: an override
+              persists after the restart that applied it. */}
+          {loc.pendingRestart && (
             <span className="rounded bg-amber-950 px-2 py-0.5 text-xs font-medium text-amber-300 border border-amber-800">
               PENDING RESTART
             </span>
@@ -725,7 +727,7 @@ export default function StorageHealthPage() {
   // registry by design (see AGENTS.md's storageLocation.<rootPath>.*
   // invariant) -- so this page needs its own restart affordance rather than
   // relying on that banner to ever appear for a location-only edit.
-  const hasPendingLocationOverride = locations.some((loc) => loc.overriddenFields.length > 0);
+  const hasPendingLocationOverride = locations.some((loc) => loc.pendingRestart);
 
   return (
     <DirtyFormContext.Provider value={dirtyContextValue}>

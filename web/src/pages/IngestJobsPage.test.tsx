@@ -9,6 +9,7 @@ vi.mock("../api/client", () => ({
   api: {
     listJobs: vi.fn(),
     cancelJob: vi.fn(),
+    listStorageLocations: vi.fn(() => Promise.resolve({ locations: [] })),
   },
 }));
 
@@ -183,5 +184,37 @@ describe("IngestJobsPage", () => {
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(api.cancelJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("IngestJobsPage: location and timestamps", () => {
+  it("shows each job's storage location, start and finish time", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({
+      locations: [{ id: 3, name: "NAS archive", rootPath: "/nas", tier: "TIER3_MASTER_ARCHIVE", readOnly: false, prunable: false }],
+    });
+    vi.mocked(api.listJobs).mockResolvedValueOnce({
+      jobs: [
+        {
+          id: 21, kind: "FULL_SCAN", state: "COMPLETED", filesSeen: 1, filesHashed: 1, filesFailed: 0, edgesCreated: 0,
+          storageLocationId: 3, startedAt: 1700000000, updatedAt: 1700000200, finishedAt: 1700000200,
+        },
+        {
+          id: 22, kind: "INCREMENTAL", state: "RUNNING", filesSeen: 1, filesHashed: 0, filesFailed: 0, edgesCreated: 0,
+          storageLocationId: 9, startedAt: 1700000300, updatedAt: 1700000400,
+        },
+      ],
+      total: 2,
+    });
+    renderWithClient(<IngestJobsPage />);
+
+    const done = (await screen.findByText("#21")).closest("tr")!;
+    expect(await within(done).findByText("NAS archive")).toBeInTheDocument();
+    expect(within(done).getByText(new Date(1700000000 * 1000).toLocaleString())).toBeInTheDocument();
+    expect(within(done).getByText("(3m 20s)")).toBeInTheDocument();
+
+    const running = screen.getByText("#22").closest("tr")!;
+    // A location missing from the list falls back to its id.
+    expect(within(running).getByText("#9")).toBeInTheDocument();
+    expect(within(running).getByText("Running")).toBeInTheDocument();
   });
 });

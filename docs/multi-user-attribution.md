@@ -75,7 +75,11 @@ Two parallel logs:
 
 `GET /api/v1/audit?type=activity|login` merges both, newest-first,
 with offset pagination. The `type=login` query reads `login_audit`
-directly; `type=activity` reads `actor_audit`.
+directly; `type=activity` reads `actor_audit`. Both streams take the
+same filters (`actorUserId`, `event`, `resourceType`, `resourceId`,
+`sinceUnix`, `untilUnix` exclusive). On the login stream `event`
+matches the outcome, `resourceId` the login source and `actorUserId`
+the user; every login entry's `resourceType` is `login_source`.
 
 Audit writes are best-effort: a failed audit write is logged, not
 surfaced as a 5xx. A successful write followed by a failed response

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAuditEntries, useMe } from "../hooks/queries";
+import { useAuditEntries, useMe, useUsers } from "../hooks/queries";
 import type { AuditEntry } from "../api/types";
 
 const PAGE_SIZE = 50;
@@ -40,46 +40,88 @@ function DetailsCell({ detailsJson }: { detailsJson?: string }) {
   );
 }
 
+// dayStartUnix turns a yyyy-mm-dd date input into unix seconds at local
+// midnight that day, plus `addDays`. The server's untilUnix is exclusive,
+// so an inclusive "to" date is sent as the next day's midnight.
+function dayStartUnix(date: string, addDays = 0): number | undefined {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return undefined;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + addDays);
+  return Number.isNaN(d.getTime()) ? undefined : Math.floor(d.getTime() / 1000);
+}
+
+interface TextFilters {
+  event: string;
+  resourceType: string;
+  resourceId: string;
+}
+
+const EMPTY_TEXT_FILTERS: TextFilters = { event: "", resourceType: "", resourceId: "" };
+
 export default function AuditLogPage() {
   const [type, setType] = useState<"activity" | "login">("activity");
   const [page, setPage] = useState(1);
-  const [eventFilter, setEventFilter] = useState("");
-  const [resourceTypeFilter, setResourceTypeFilter] = useState("");
-  const [debouncedEventFilter, setDebouncedEventFilter] = useState("");
-  const [debouncedResourceTypeFilter, setDebouncedResourceTypeFilter] = useState("");
+  // Text inputs are debounced together so typing doesn't fire a request
+  // per keystroke; the selects and dates apply immediately.
+  const [text, setText] = useState<TextFilters>(EMPTY_TEXT_FILTERS);
+  const [debouncedText, setDebouncedText] = useState<TextFilters>(EMPTY_TEXT_FILTERS);
+  const [actorUserId, setActorUserId] = useState("");
+  const [sinceDate, setSinceDate] = useState("");
+  const [untilDate, setUntilDate] = useState("");
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setDebouncedEventFilter(eventFilter);
-    }, 250);
+    const t = setTimeout(() => setDebouncedText(text), 250);
     return () => clearTimeout(t);
-  }, [eventFilter]);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      setDebouncedResourceTypeFilter(resourceTypeFilter);
-    }, 250);
-    return () => clearTimeout(t);
-  }, [resourceTypeFilter]);
+  }, [text]);
 
   const { data: me, isLoading: isMeLoading } = useMe();
   const isAdmin = Boolean(me?.isAdmin);
+  const { data: usersData } = useUsers({ limit: 200 }, { enabled: isAdmin });
+  const users = usersData?.users ?? [];
 
   const offset = (page - 1) * PAGE_SIZE;
+  const sinceUnix = dayStartUnix(sinceDate);
+  const untilUnix = dayStartUnix(untilDate, 1);
+  const rangeInvalid = sinceUnix !== undefined && untilUnix !== undefined && untilUnix <= sinceUnix;
 
-  const { data, isLoading, isError, error } = useAuditEntries({
-    type,
-    limit: PAGE_SIZE,
-    offset,
-    event: debouncedEventFilter.trim() || undefined,
-    resourceType: debouncedResourceTypeFilter.trim() || undefined,
-  }, isAdmin);
+  const { data, isPending, isError, error, isFetching, isPlaceholderData } = useAuditEntries(
+    {
+      type,
+      limit: PAGE_SIZE,
+      offset,
+      event: debouncedText.event.trim() || undefined,
+      // Every login entry has the same resource type, so the stream
+      // hides that filter; don't let a value typed for activity linger.
+      resourceType: (type === "activity" && debouncedText.resourceType.trim()) || undefined,
+      resourceId: debouncedText.resourceId.trim() || undefined,
+      actorUserId: actorUserId ? Number(actorUserId) : undefined,
+      sinceUnix,
+      untilUnix,
+    },
+    isAdmin && !rangeInvalid,
+  );
 
   const entries = data?.entries ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const hasActiveFilters = Boolean(eventFilter.trim() || resourceTypeFilter.trim());
+  const hasActiveFilters = Boolean(
+    text.event.trim() || (type === "activity" && text.resourceType.trim()) || text.resourceId.trim() || actorUserId || sinceDate || untilDate,
+  );
+
+  const setTextFilter = (key: keyof TextFilters, value: string) => {
+    setText((prev) => ({ ...prev, [key]: value }));
+    setPage(1);
+  };
+
+  const clearFilters = () => {
+    setText(EMPTY_TEXT_FILTERS);
+    setDebouncedText(EMPTY_TEXT_FILTERS);
+    setActorUserId("");
+    setSinceDate("");
+    setUntilDate("");
+    setPage(1);
+  };
 
   if (!isMeLoading && !isAdmin) {
     return (
@@ -91,6 +133,10 @@ export default function AuditLogPage() {
       </div>
     );
   }
+
+  const inputClass =
+    "rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500";
+  const isLogin = type === "login";
 
   return (
     <div className="p-6 space-y-6">
@@ -104,8 +150,8 @@ export default function AuditLogPage() {
       </div>
 
       {/* FILTER CONTROLS */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs">
-        <div className="flex flex-wrap items-center gap-4">
+      <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs">
+        <div className="flex flex-wrap items-end gap-4">
           <div>
             <label htmlFor="log-type-select" className="block text-neutral-400 mb-1">Log Stream</label>
             <select
@@ -115,7 +161,7 @@ export default function AuditLogPage() {
                 setType(e.target.value as "activity" | "login");
                 setPage(1);
               }}
-              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 focus:outline-none focus:border-neutral-500"
+              className={inputClass}
             >
               <option value="activity">Admin & System Activity</option>
               <option value="login">Authentication & Logins</option>
@@ -123,59 +169,127 @@ export default function AuditLogPage() {
           </div>
 
           <div>
-            <label htmlFor="log-event-filter" className="block text-neutral-400 mb-1">Filter Event</label>
-            <input
-              id="log-event-filter"
-              type="text"
-              placeholder="e.g. scan.started, asset.archived"
-              value={eventFilter}
+            <label htmlFor="log-actor-filter" className="block text-neutral-400 mb-1">Actor</label>
+            <select
+              id="log-actor-filter"
+              value={actorUserId}
               onChange={(e) => {
-                setEventFilter(e.target.value);
+                setActorUserId(e.target.value);
                 setPage(1);
               }}
-              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500 min-w-[200px]"
+              className={`${inputClass} min-w-[160px]`}
+            >
+              <option value="">Anyone</option>
+              {users.map((u) => (
+                <option key={u.id} value={String(u.id)}>
+                  {u.username}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="log-since-filter" className="block text-neutral-400 mb-1">From</label>
+            <input
+              id="log-since-filter"
+              type="date"
+              value={sinceDate}
+              onChange={(e) => {
+                setSinceDate(e.target.value);
+                setPage(1);
+              }}
+              className={inputClass}
             />
           </div>
 
           <div>
-            <label htmlFor="log-resource-filter" className="block text-neutral-400 mb-1">Filter Resource Type</label>
+            <label htmlFor="log-until-filter" className="block text-neutral-400 mb-1">To</label>
             <input
-              id="log-resource-filter"
-              type="text"
-              placeholder="e.g. asset, scan_job"
-              value={resourceTypeFilter}
+              id="log-until-filter"
+              type="date"
+              value={untilDate}
               onChange={(e) => {
-                setResourceTypeFilter(e.target.value);
+                setUntilDate(e.target.value);
                 setPage(1);
               }}
-              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500 min-w-[160px]"
+              aria-invalid={rangeInvalid}
+              className={inputClass}
             />
           </div>
-
-          {hasActiveFilters && (
-            <button
-              type="button"
-              onClick={() => {
-                setEventFilter("");
-                setDebouncedEventFilter("");
-                setResourceTypeFilter("");
-                setDebouncedResourceTypeFilter("");
-                setPage(1);
-              }}
-              className="self-end text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
-            >
-              Clear Filters
-            </button>
-          )}
         </div>
 
-        <div className="text-neutral-400">
-          Total: <strong className="text-neutral-200">{total}</strong> records
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="flex flex-wrap items-end gap-4">
+            <div>
+              <label htmlFor="log-event-filter" className="block text-neutral-400 mb-1">
+                {isLogin ? "Filter Event (outcome, exact)" : "Filter Event (exact)"}
+              </label>
+              <input
+                id="log-event-filter"
+                type="text"
+                placeholder={isLogin ? "e.g. ok, bad-password" : "e.g. scan.started, asset.archived"}
+                value={text.event}
+                onChange={(e) => setTextFilter("event", e.target.value)}
+                className={`${inputClass} min-w-[200px]`}
+              />
+            </div>
+
+            {!isLogin && (
+              <div>
+                <label htmlFor="log-resource-filter" className="block text-neutral-400 mb-1">Filter Resource Type</label>
+                <input
+                  id="log-resource-filter"
+                  type="text"
+                  placeholder="e.g. asset, scan_job"
+                  value={text.resourceType}
+                  onChange={(e) => setTextFilter("resourceType", e.target.value)}
+                  className={`${inputClass} min-w-[160px]`}
+                />
+              </div>
+            )}
+
+            <div>
+              <label htmlFor="log-resource-id-filter" className="block text-neutral-400 mb-1">
+                {isLogin ? "Login Source" : "Resource ID"}
+              </label>
+              <input
+                id="log-resource-id-filter"
+                type="text"
+                placeholder={isLogin ? "e.g. local" : "e.g. 42"}
+                value={text.resourceId}
+                onChange={(e) => setTextFilter("resourceId", e.target.value)}
+                className={`${inputClass} min-w-[120px]`}
+              />
+            </div>
+
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
+              >
+                Clear Filters
+              </button>
+            )}
+          </div>
+
+          <div className="text-neutral-400" aria-live="polite">
+            {isFetching && isPlaceholderData ? "Updating… " : null}
+            Total: <strong className="text-neutral-200">{total}</strong> records
+          </div>
         </div>
+        {rangeInvalid && (
+          <p role="alert" className="text-red-400">
+            The "To" date must not be before the "From" date.
+          </p>
+        )}
       </div>
 
       {/* TABLE */}
-      {isLoading ? (
+      {/* isPending, not isLoading: the query is disabled until /me says
+          admin, and a disabled query isn't "loading" -- the page used to
+          flash "No audit entries" in that window. */}
+      {isMeLoading || (isPending && !rangeInvalid) ? (
         <div className="p-6 text-neutral-400">Loading audit log…</div>
       ) : isError ? (
         <div className="p-6 text-red-400">Failed to load audit entries: {String(error)}</div>

@@ -1,9 +1,11 @@
 import { useContext, useMemo, useState } from "react";
+import { Link } from "react-router";
 import { ApiError } from "../api/client";
 import type { SettingsField } from "../api/types";
 import { DirtyFormContext, useDirtyFormProvider, useDirtyGuard } from "../hooks/useDirtyFormGuard";
 import { FieldRow } from "../components/form/FieldRow";
 import { NumberField } from "../components/form/NumberField";
+import { StringListField } from "../components/form/StringListField";
 import { SecretField } from "../components/form/SecretField";
 import { SelectField } from "../components/form/SelectField";
 import { TextField } from "../components/form/TextField";
@@ -75,8 +77,11 @@ function ReadOnlyValue({ field }: { field: SettingsField }) {
 }
 
 function renderInput(field: SettingsField, draft: unknown, onChange: (value: unknown) => void, secretsAvailable: boolean) {
-  if (!field.editable || field.type === "stringList") {
+  if (!field.editable) {
     return <ReadOnlyValue field={field} />;
+  }
+  if (field.type === "stringList") {
+    return <StringListField value={Array.isArray(draft) ? (draft as string[]) : []} onChange={onChange} />;
   }
   if (field.secret) {
     return (
@@ -103,6 +108,33 @@ function renderInput(field: SettingsField, draft: unknown, onChange: (value: unk
   }
 }
 
+// SaveCallbacks reports one field's save/revert outcome back to the
+// editor that started it, so each field shows its own "Saved" or error.
+interface SaveCallbacks {
+  onSuccess: () => void;
+  onError: (message: string) => void;
+}
+
+type SaveStatus = { kind: "saved" | "reverted" } | { kind: "error"; message: string } | null;
+
+// SaveStatusText is a field's inline save feedback: "Saved" until the
+// field is edited again, or the server's error for that field.
+function SaveStatusText({ status }: { status: SaveStatus }) {
+  if (!status) return null;
+  if (status.kind === "error") {
+    return (
+      <p role="alert" className="mt-1 text-xs text-red-400">
+        {status.message}
+      </p>
+    );
+  }
+  return (
+    <p role="status" className="mt-1 text-xs text-emerald-400">
+      {status.kind === "saved" ? "Saved" : "Reverted to config"}
+    </p>
+  );
+}
+
 function SettingsFieldEditor({
   field,
   saving,
@@ -113,8 +145,8 @@ function SettingsFieldEditor({
   field: SettingsField;
   saving: boolean;
   secretsAvailable: boolean;
-  onSave: (key: string, value: unknown, onError: () => void) => void;
-  onRevert: (key: string, onError: () => void) => void;
+  onSave: (key: string, value: unknown, cb: SaveCallbacks) => void;
+  onRevert: (key: string, cb: SaveCallbacks) => void;
 }) {
   const { register } = useContext(DirtyFormContext);
   const { markDirty, markClean } = register(field.key);
@@ -122,6 +154,7 @@ function SettingsFieldEditor({
   const [prevBaseline, setPrevBaseline] = useState(baseline);
   const [draft, setDraft] = useState<unknown>(baseline);
   const [dirty, setDirty] = useState(false);
+  const [status, setStatus] = useState<SaveStatus>(null);
 
   if (baseline !== prevBaseline) {
     setPrevBaseline(baseline);
@@ -134,6 +167,7 @@ function SettingsFieldEditor({
   const handleChange = (value: unknown) => {
     setDraft(value);
     setDirty(true);
+    setStatus(null);
     markDirty();
   };
 
@@ -162,10 +196,15 @@ function SettingsFieldEditor({
                 setDirty(false);
                 markClean();
                 if (field.secret) setDraft("");
-                onSave(field.key, submitted, () => {
-                  setDirty(true);
-                  markDirty();
-                  if (field.secret) setDraft(submitted);
+                setStatus(null);
+                onSave(field.key, submitted, {
+                  onSuccess: () => setStatus({ kind: "saved" }),
+                  onError: (message) => {
+                    setDirty(true);
+                    markDirty();
+                    if (field.secret) setDraft(submitted);
+                    setStatus({ kind: "error", message });
+                  },
                 });
               }}
               disabled={saving}
@@ -180,7 +219,15 @@ function SettingsFieldEditor({
               onClick={() => {
                 setDirty(false);
                 markClean();
-                onRevert(field.key, () => { setDirty(true); markDirty(); });
+                setStatus(null);
+                onRevert(field.key, {
+                  onSuccess: () => setStatus({ kind: "reverted" }),
+                  onError: (message) => {
+                    setDirty(true);
+                    markDirty();
+                    setStatus({ kind: "error", message });
+                  },
+                });
               }}
               disabled={saving}
               className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
@@ -190,6 +237,7 @@ function SettingsFieldEditor({
           )}
         </div>
       </div>
+      <SaveStatusText status={status} />
     </FieldRow>
   );
 }
@@ -202,8 +250,8 @@ function PathRewritesEditor({
 }: {
   field?: SettingsField;
   saving: boolean;
-  onSave: (key: string, value: unknown, onError: () => void) => void;
-  onRevert: (key: string, onError: () => void) => void;
+  onSave: (key: string, value: unknown, cb: SaveCallbacks) => void;
+  onRevert: (key: string, cb: SaveCallbacks) => void;
 }) {
   const { register } = useContext(DirtyFormContext);
   const { markDirty, markClean } = register(field?.key ?? "pathRewrites");
@@ -217,6 +265,11 @@ function PathRewritesEditor({
   const [dirty, setDirty] = useState(false);
   const [newFrom, setNewFrom] = useState("");
   const [newTo, setNewTo] = useState("");
+  const [status, setStatus] = useState<SaveStatus>(null);
+  const edit = () => {
+    setDirty(true);
+    setStatus(null);
+  };
 
   if (currentRules !== prevRules) {
     setPrevRules(currentRules);
@@ -230,12 +283,12 @@ function PathRewritesEditor({
     setRules((prev) => [...prev, { from: newFrom.trim(), to: newTo.trim() }]);
     setNewFrom("");
     setNewTo("");
-    setDirty(true);
+    edit();
   };
 
   const handleDelete = (index: number) => {
     setRules((prev) => prev.filter((_, i) => i !== index));
-    setDirty(true);
+    edit();
   };
 
   const handleUpdate = (index: number, key: "from" | "to", val: string) => {
@@ -244,7 +297,7 @@ function PathRewritesEditor({
       copy[index] = { ...copy[index], [key]: val };
       return copy;
     });
-    setDirty(true);
+    edit();
   };
 
   const canSave = field?.editable && dirty;
@@ -276,7 +329,15 @@ function PathRewritesEditor({
                 const submitted = rules;
                 setDirty(false);
                 markClean();
-                onSave("pathRewrites", submitted, () => { setDirty(true); markDirty(); });
+                setStatus(null);
+                onSave("pathRewrites", submitted, {
+                  onSuccess: () => setStatus({ kind: "saved" }),
+                  onError: (message) => {
+                    setDirty(true);
+                    markDirty();
+                    setStatus({ kind: "error", message });
+                  },
+                });
               }}
               disabled={saving}
               className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
@@ -290,7 +351,15 @@ function PathRewritesEditor({
               onClick={() => {
                 setDirty(false);
                 markClean();
-                onRevert("pathRewrites", () => { setDirty(true); markDirty(); });
+                setStatus(null);
+                onRevert("pathRewrites", {
+                  onSuccess: () => setStatus({ kind: "reverted" }),
+                  onError: (message) => {
+                    setDirty(true);
+                    markDirty();
+                    setStatus({ kind: "error", message });
+                  },
+                });
               }}
               disabled={saving}
               className="rounded border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500 disabled:opacity-50"
@@ -303,6 +372,7 @@ function PathRewritesEditor({
       <p className="mb-4 text-xs text-neutral-500">
         Host-to-container path transformation rules used when resolving project-file references.
       </p>
+      <SaveStatusText status={status} />
 
       {rules.length === 0 ? (
         <p className="mb-4 text-sm text-neutral-500">No operator path rewrites configured.</p>
@@ -387,7 +457,6 @@ export default function SettingsPage() {
   const { data: config, isLoading: configLoading } = useConfig();
   const { data: settings, isLoading: settingsLoading, error: settingsError } = useSettings();
   const putSettings = usePutSettings();
-  const [fieldError, setFieldError] = useState<string | null>(null);
   const { dirtyCount, register } = useDirtyFormProvider();
   const blocker = useDirtyGuard(dirtyCount);
   const dirtyContextValue = useMemo(() => ({ dirtyCount, register }), [dirtyCount, register]);
@@ -423,28 +492,24 @@ export default function SettingsPage() {
     return Array.from(byGroup.entries());
   }, [settings]);
 
-  const handleSave = (key: string, value: unknown, onError: () => void) => {
-    setFieldError(null);
+  // Each field reports its own outcome inline (SaveCallbacks); there is
+  // no page-level error banner to scroll back up to.
+  const handleSave = (key: string, value: unknown, cb: SaveCallbacks) => {
     putSettings.mutate(
       { set: { [key]: value } },
       {
-        onError: (err: unknown) => {
-          setFieldError((err as { message?: string }).message || `Failed to save ${key}`);
-          onError();
-        },
+        onSuccess: () => cb.onSuccess(),
+        onError: (err: unknown) => cb.onError((err as { message?: string }).message || `Failed to save ${key}`),
       }
     );
   };
 
-  const handleRevert = (key: string, onError: () => void) => {
-    setFieldError(null);
+  const handleRevert = (key: string, cb: SaveCallbacks) => {
     putSettings.mutate(
       { unset: [key] },
       {
-        onError: (err: unknown) => {
-          setFieldError((err as { message?: string }).message || `Failed to revert ${key}`);
-          onError();
-        },
+        onSuccess: () => cb.onSuccess(),
+        onError: (err: unknown) => cb.onError((err as { message?: string }).message || `Failed to revert ${key}`),
       }
     );
   };
@@ -482,10 +547,6 @@ export default function SettingsPage() {
           Secret storage is unavailable (<span className="font-mono">BRANCHDAM_SECRET_KEY</span> is not set) -- secret
           fields cannot be changed until it is configured.
         </div>
-      )}
-
-      {fieldError && (
-        <div className="mb-6 rounded-lg border border-red-800/60 bg-red-950/30 p-4 text-sm text-red-300">{fieldError}</div>
       )}
 
       <SettingsLayout categories={CATEGORIES}>
@@ -568,12 +629,12 @@ export default function SettingsPage() {
             <p className="mb-3 text-sm text-neutral-200">
               Manage paired mobile devices (Android, iOS), rotate keys, and revoke lost devices.
             </p>
-            <a
-              href="/companion"
+            <Link
+              to="/companion"
               className="inline-block rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
             >
               Open Companion Pairing
-            </a>
+            </Link>
           </div>
           {categoryGroups.get("integrations")?.map(([group, fields]) => (
             <div key={group} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-4">
