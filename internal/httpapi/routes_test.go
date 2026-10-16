@@ -6131,6 +6131,24 @@ func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
 		}
 	})
 
+	t.Run("ACTIVE child whose path is a dangling symlink", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := os.Remove(child.FilePath); err != nil {
+			t.Fatalf("remove child file: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(filepath.Dir(child.FilePath), "gone.jpg"), child.FilePath); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not on disk") {
+				t.Errorf("%q: status = %d, want 409 naming the missing file, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
 	t.Run("TRASHED child", func(t *testing.T) {
 		fakeExiftoolOnPath(t)
 		srv, database, parent, child := inheritTestServer(t, t.TempDir())

@@ -455,8 +455,17 @@ function AssetMetadataInspector({ assetId }: { assetId: number }) {
   );
 }
 
+// The route reuses this page across /assets/:id changes, so every control's
+// local state (an open inherit preview, a planned purge, a trash dialog, the
+// metadata filter) would otherwise carry over to the next asset and its
+// confirm would act on that asset under the previous one's plan. Keying the
+// page by the id remounts it per asset.
 export default function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
+  return <AssetDetailPageForAsset key={id} id={id} />;
+}
+
+function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
   const assetId = id ? Number(id) : undefined;
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -510,12 +519,10 @@ export default function AssetDetailPage() {
         <div className="mb-2 flex items-center justify-between">
           <h2 className="text-sm font-medium text-neutral-400">Metadata</h2>
           {/* MISSING and TRASHED files aren't at their recorded path, so
-              there is nothing to write inherited tags into (Restore first).
-              Keyed by asset so a preview never outlives a navigation to
-              another asset. */}
+              there is nothing to write inherited tags into (Restore first). */}
           {asset.lifecycleState !== "ARCHIVED" &&
             asset.lifecycleState !== "MISSING" &&
-            asset.lifecycleState !== "TRASHED" && <AssetInheritMetadataControl key={asset.id} asset={asset} />}
+            asset.lifecycleState !== "TRASHED" && <AssetInheritMetadataControl asset={asset} />}
         </div>
         <dl className="rounded border border-neutral-800 p-3">
           <Field label="Node UUID" value={asset.nodeUuid} />

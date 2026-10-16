@@ -41,6 +41,9 @@ var (
 	// ErrChildFileNotFound: the row is live but its file is not at the
 	// recorded path (deleted out of band before a scan marked it MISSING).
 	ErrChildFileNotFound = errors.New("asset's file is not on disk at its recorded path")
+	// ErrChildFileUnreadable: the file is there but cannot be opened
+	// (permissions, ...), which exiftool's write would fail on too.
+	ErrChildFileUnreadable = errors.New("asset's file cannot be opened at its recorded path")
 )
 
 // ErrParentUnavailable indicates that the parent asset is in an archived or missing state.
@@ -345,16 +348,24 @@ func PlanInheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (
 }
 
 // checkTagWritePossible reports why the tag write could not run: no
-// exiftool, or no file at the child's recorded path (Guard.CheckWrite
-// resolves by path prefix only, so a row still ACTIVE whose file was
-// removed out of band, before a scan marked it MISSING, gets this far).
+// exiftool, or no file exiftool could open at the child's recorded path
+// (Guard.CheckWrite resolves by path prefix only, so a row still ACTIVE
+// whose file was removed out of band, before a scan marked it MISSING,
+// gets this far). Opening the file follows symlinks the way exiftool
+// does, so a dangling link counts as missing, and it fails on a file the
+// process may not read.
 func checkTagWritePossible(deps InheritDeps, child sqlcgen.MediaNode) error {
 	if deps.Prober == nil || !deps.Prober.HasExiftool() {
 		return probe.ErrToolUnavailable
 	}
-	if _, err := os.Lstat(child.FilePath); errors.Is(err, fs.ErrNotExist) {
+	f, err := os.Open(child.FilePath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return ErrChildFileNotFound
+	case err != nil:
+		return fmt.Errorf("%w: %w", ErrChildFileUnreadable, err)
 	}
+	_ = f.Close()
 	return nil
 }
 

@@ -62,7 +62,64 @@ function renderWithClient() {
   );
 }
 
+const otherAsset: Asset = { ...asset, id: 43, fileName: "a43.jpg", filePath: "/mnt/scratch/a43.jpg" };
+
+// renderAt42AfterVisiting43 renders the page at /assets/43 first, then
+// navigates to /assets/42: 43 is then in the query cache, so navigating back
+// to it renders straight away with no loading state in between -- the case
+// where the page instance (and its controls' local state) is reused.
+async function renderAt42AfterVisiting43() {
+  vi.mocked(api.getAsset).mockImplementation(async (id: number) => (id === 43 ? otherAsset : asset));
+  vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+  vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+  let navigate: NavigateFunction | undefined;
+  function NavigateProbe() {
+    navigate = useNavigate();
+    return null;
+  }
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <MemoryRouter initialEntries={["/assets/43"]}>
+        <NavigateProbe />
+        <Routes>
+          <Route path="/assets/:id" element={<AssetDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
+  const goTo = async (path: string) => {
+    await act(async () => {
+      await navigate?.(path);
+    });
+  };
+  await goTo("/assets/42");
+  await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+  return goTo;
+}
+
 describe("AssetDetailPage purge control", () => {
+  // A purge planned for 42 must not survive a navigation to 43, where
+  // Confirm Purge would execute 43 under 42's candidate list.
+  it("drops a planned purge when navigating to another asset", async () => {
+    vi.mocked(api.pruneCache).mockReset();
+    vi.mocked(api.pruneCache).mockResolvedValueOnce({
+      executed: false,
+      candidates: [{ nodeId: 42, filePath: asset.filePath, sizeBytes: asset.sizeBytes, purged: false }],
+    });
+    const goTo = await renderAt42AfterVisiting43();
+
+    await userEvent.click(await screen.findByRole("button", { name: /purge cache/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /confirm purge/i })).toBeInTheDocument());
+
+    await goTo("/assets/43");
+    await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: /confirm purge/i })).not.toBeInTheDocument();
+    expect(api.pruneCache).toHaveBeenCalledTimes(1);
+  });
+
   it("checks eligibility then executes on confirm", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
@@ -272,45 +329,18 @@ describe("AssetDetailPage inherit-metadata control", () => {
   // to 43, where Write Tags would write 43 under 42's previewed plan.
   it("drops an open preview when navigating to another asset", async () => {
     vi.mocked(api.inheritMetadata).mockReset();
-    const other: Asset = { ...asset, id: 43, fileName: "a43.jpg", filePath: "/mnt/scratch/a43.jpg" };
-    vi.mocked(api.getAsset).mockImplementation(async (id: number) => (id === 43 ? other : asset));
-    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
-    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
     vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
       inherited: plannedTags,
       dryRun: true,
       parentId: 7,
       parentFileName: "master.arw",
     });
+    const goTo = await renderAt42AfterVisiting43();
 
-    let navigate: NavigateFunction | undefined;
-    function NavigateProbe() {
-      navigate = useNavigate();
-      return null;
-    }
-    render(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-        <MemoryRouter initialEntries={["/assets/43"]}>
-          <NavigateProbe />
-          <Routes>
-            <Route path="/assets/:id" element={<AssetDetailPage />} />
-          </Routes>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-    // Visit 43 first, so the later navigation back to it renders straight
-    // from the query cache with no loading state in between.
-    await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
-    await act(async () => {
-      await navigate?.("/assets/42");
-    });
-    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
     await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
     await screen.findByRole("dialog", { name: "Inherit Metadata" });
 
-    await act(async () => {
-      await navigate?.("/assets/43");
-    });
+    await goTo("/assets/43");
     await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
