@@ -334,6 +334,20 @@ describe("theme.css dual-theme contract", () => {
       });
     }
 
+    // The #571 regression values themselves: a swap to a hard-coded colour
+    // would pass the name checks below but break one of the two themes.
+    it("edge labels use the canvas surface and graph text tokens", () => {
+      expect(xyTokens.get("--xy-edge-label-background-color")).toBe("var(--surface-canvas)");
+      expect(xyTokens.get("--xy-edge-label-color")).toBe("var(--graph-text)");
+    });
+
+    for (const [token, value] of xyTokens) {
+      it(`${token} resolves through a theme token`, () => {
+        // Hard-coded colours would be identical in both themes.
+        expect(value === "transparent" || value.includes("var(--")).toBe(true);
+      });
+    }
+
     for (const token of xyTokens.keys()) {
       it(`${token} is a name xyflow reads ahead of its own default`, () => {
         expect(token.endsWith("-default")).toBe(false);

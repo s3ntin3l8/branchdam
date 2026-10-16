@@ -307,8 +307,8 @@
 
 /*
  * @xyflow/react reads its own CSS variables. Override them so the canvas
- * background, edge labels, controls, minimap, handles, and selection all
- * pick up our theme tokens instead of xyflow's built-in light palette.
+ * background, edge labels, controls, handles, and selection all pick up
+ * our theme tokens instead of xyflow's built-in light palette.
  *
  * xyflow resolves every themable property as
  * `var(--xy-NAME, var(--xy-NAME-default))` and declares the `-default`
@@ -349,10 +349,6 @@
   --xy-handle-border-color: var(--border-subtle);
   --xy-selection-background-color: color-mix(in srgb, var(--color-brand) 10%, transparent);
   --xy-selection-border: 1px dashed var(--color-brand);
-  --xy-minimap-background-color: var(--surface-raised);
-  --xy-minimap-mask-background-color: var(--text-faint);
-  --xy-minimap-mask-stroke-color: var(--text-faint);
-  --xy-minimap-node-background-color: var(--surface-raised);
 }
 
 /*
