@@ -11,8 +11,11 @@
 //   - a mismatch is logged and recorded (MISMATCH, with the computed value),
 //     and the asserted hash keeps authorising nothing -- the stored
 //     media_nodes.full_hash is never replaced by what was read, since the
-//     archive copy may be the damaged one. It is re-read after
-//     MismatchRetryAfter, so restoring a good copy of the file verifies it;
+//     archive copy may be the damaged one. It is re-read on a doubling
+//     backoff -- DefaultMismatchRetryAfter after the first mismatch, then
+//     twice as long after each further one, capped at
+//     MaxMismatchRetryAfter -- so restoring a good copy of the file
+//     verifies it;
 //   - a read failure is recorded (ERROR) and retried after RetryAfter.
 //
 // Bounded: one file at a time, at most BatchSize files per claim query.

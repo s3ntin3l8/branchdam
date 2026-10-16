@@ -69,7 +69,7 @@ WHERE node_id = ?1;
 -- (ix_full_hash_provenance_agent) so a fully verified archive costs an
 -- empty index range per pass, not a media_nodes scan.
 SELECT n.id, n.node_uuid, n.file_path, n.full_hash, n.size_bytes,
-       p.rehash_attempts, p.rehash_mismatches
+       p.rehash_mismatches
 FROM full_hash_provenance p
 JOIN media_nodes n ON n.id = p.node_id
 JOIN storage_locations s ON s.id = n.storage_location_id

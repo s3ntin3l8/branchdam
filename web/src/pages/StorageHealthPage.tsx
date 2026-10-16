@@ -27,6 +27,10 @@ function formatDuration(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
+// A cache location can have thousands of prune candidates; the preview
+// lists this many and says how many more there are.
+const PRUNE_PREVIEW_LIMIT = 200;
+
 // PruneControl is a two-step flow: "Purge Cache" runs a dry-run plan and
 // lists the candidate files (path and size) with a total; a second,
 // explicit click ("Confirm Purge") re-posts with execute:true, narrowed via
@@ -36,11 +40,8 @@ function formatDuration(durationMs: number): string {
 // pattern (IngestPage/AuditQueuePage) -- isPending disables the button and
 // swaps its label, errors render as inline text -- no toast library exists
 // in this codebase, so this deliberately doesn't add one. The list renders
-// at most PRUNE_PREVIEW_LIMIT rows (a cache location can have thousands of
-// candidates) and says below the scroll box how many more there are; the
-// count and total above it always cover the whole plan.
-const PRUNE_PREVIEW_LIMIT = 200;
-
+// at most PRUNE_PREVIEW_LIMIT rows and says below the scroll box how many
+// more there are; the count and total above it always cover the whole plan.
 function PruneControl({ locationId }: { locationId: number }) {
   const [plan, setPlan] = useState<PruneCandidate[] | null>(null);
   const [result, setResult] = useState<PruneCandidate[] | null>(null);
