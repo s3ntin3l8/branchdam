@@ -119,3 +119,32 @@ func TestPendingRotationForAndAdoption(t *testing.T) {
 	}
 	assert.Equal(t, 1, adopted)
 }
+
+// TestRevokePairingClearsSealedRotationCopy: revoking a pairing drops a
+// pending rotation's sealed copy, so a revoked pairing's key can never be
+// delivered (RevokeAllKeysForPairing sets rotation_sealed_key = NULL).
+func TestRevokePairingClearsSealedRotationCopy(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestServiceWithBox(t, testBox(t))
+	p, _, err := svc.CreatePairing(ctx, "dev", "test", 0, rotPayload)
+	require.NoError(t, err)
+	k2, _, err := svc.RotateKey(ctx, p.ID, "test", 60, rotPayload)
+	require.NoError(t, err)
+
+	sealedFor := func() bool {
+		keys, err := svc.ListKeys(ctx, p.ID)
+		require.NoError(t, err)
+		for _, k := range keys {
+			if k.ID == k2.ID {
+				return k.RotationSealedKey.Valid
+			}
+		}
+		t.Fatalf("rotated key %d not listed", k2.ID)
+		return false
+	}
+	require.True(t, sealedFor(), "precondition: rotation stored a sealed copy")
+
+	_, err = svc.RevokePairing(ctx, p.ID, "test")
+	require.NoError(t, err)
+	assert.False(t, sealedFor(), "revoke must clear the sealed rotation copy")
+}
