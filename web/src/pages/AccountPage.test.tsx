@@ -118,8 +118,39 @@ describe("AccountPage: two-factor authentication", () => {
   });
 });
 
+describe("AccountPage: loading", () => {
+  it("shows a failed /me with a retry instead of loading forever", async () => {
+    vi.mocked(api.me).mockRejectedValueOnce(new Error("server down"));
+    vi.mocked(api.me).mockResolvedValue(localUser);
+    renderPage();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed to load your account: server down");
+    expect(screen.queryByText("Loading account…")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Account security" })).toBeInTheDocument();
+  });
+});
+
 describe("AccountPage: personal access tokens", () => {
   const admin: Me = { ...localUser, isAdmin: true };
+
+  it("says the token list is partial when the server holds more than one page", async () => {
+    vi.mocked(api.me).mockResolvedValue(admin);
+    vi.mocked(api.listPats).mockResolvedValue({ pats: [pat({ id: 1, name: "newest" })], total: 201 });
+    renderPage();
+
+    await screen.findByText("newest");
+    expect(screen.getByText(/Showing the 1 most recent of 201 tokens/)).toBeInTheDocument();
+  });
+
+  it("does not call a complete token list partial", async () => {
+    vi.mocked(api.me).mockResolvedValue(admin);
+    vi.mocked(api.listPats).mockResolvedValue({ pats: [pat({ id: 1, name: "only" })], total: 1 });
+    renderPage();
+
+    await screen.findByText("only");
+    expect(screen.queryByText(/most recent of/)).not.toBeInTheDocument();
+  });
 
   it("lists tokens with their status and only offers revoke for live ones", async () => {
     vi.mocked(api.me).mockResolvedValue(admin);

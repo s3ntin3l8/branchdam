@@ -26,8 +26,22 @@ const primaryButton =
   "rounded bg-brand-dark px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50";
 
 export default function AccountPage() {
-  const { data: me, isLoading } = useMe();
+  const { data: me, isLoading, isError, error, refetch, isFetching } = useMe();
 
+  if (isError) {
+    // Layout handles 401/403; anything else (a 500, a dropped connection)
+    // lands here instead of spinning on "Loading account" forever.
+    return (
+      <div className="space-y-3 p-6">
+        <p role="alert" className="text-red-400">
+          Failed to load your account: {error.message}
+        </p>
+        <button type="button" onClick={() => void refetch()} disabled={isFetching} className={secondaryButton}>
+          {isFetching ? "Retrying…" : "Retry"}
+        </button>
+      </div>
+    );
+  }
   if (isLoading || !me) {
     return <div className="p-6 text-neutral-400">Loading account…</div>;
   }
@@ -225,70 +239,78 @@ function PatSection({ isAdmin }: { isAdmin: boolean }) {
             ) : !pats.data || pats.data.pats.length === 0 ? (
               <p className="text-sm text-neutral-500">No tokens yet.</p>
             ) : (
-              <div className="overflow-x-auto rounded border border-neutral-800">
-                <table className="w-full text-left text-sm text-neutral-200">
-                  <thead className="border-b border-neutral-800 bg-neutral-900/60 text-xs uppercase tracking-wider text-neutral-400">
-                    <tr>
-                      <th scope="col" className="px-3 py-2">Name</th>
-                      <th scope="col" className="px-3 py-2">Scopes</th>
-                      <th scope="col" className="px-3 py-2">Created</th>
-                      <th scope="col" className="px-3 py-2">Last used</th>
-                      <th scope="col" className="px-3 py-2">Expires</th>
-                      <th scope="col" className="px-3 py-2">Status</th>
-                      <th scope="col" className="px-3 py-2 text-right">
-                        <span className="sr-only">Actions</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-neutral-800/60">
-                    {pats.data.pats.map((pat) => {
-                      const status = patStatus(pat, nowSec);
-                      return (
-                        <tr key={pat.id}>
-                          <td className="px-3 py-2">
-                            <div className="font-medium text-neutral-100">{pat.name}</div>
-                            <div className="font-mono text-[11px] text-neutral-500">{pat.hashedKeyPrefix}…</div>
-                          </td>
-                          <td className="px-3 py-2 font-mono text-xs text-neutral-300">{pat.scopes.join(", ")}</td>
-                          <td className="whitespace-nowrap px-3 py-2 text-xs text-neutral-400">{formatUnixTime(pat.createdAt)}</td>
-                          <td className="whitespace-nowrap px-3 py-2 text-xs text-neutral-400">
-                            {pat.lastUsedAt ? formatUnixTime(pat.lastUsedAt) : "Never"}
-                          </td>
-                          <td className="whitespace-nowrap px-3 py-2 text-xs text-neutral-400">
-                            {pat.expiresAt ? formatUnixTime(pat.expiresAt) : "Never"}
-                          </td>
-                          <td className="px-3 py-2">
-                            {status === "active" ? (
-                              <span className="rounded border border-emerald-800/60 bg-emerald-950/80 px-2 py-0.5 text-xs text-emerald-300">
-                                Active
-                              </span>
-                            ) : (
-                              <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
-                                {status === "revoked" ? "Revoked" : "Expired"}
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {!pat.revokedAt && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  revoke.reset();
-                                  setRevoking(pat);
-                                }}
-                                aria-label={`Revoke ${pat.name}`}
-                                className="rounded border border-red-900/60 px-2.5 py-1 text-xs text-red-300 hover:border-red-700"
-                              >
-                                Revoke
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                {pats.data.total > pats.data.pats.length && (
+                  <p className="mb-2 text-xs text-amber-300">
+                    Showing the {pats.data.pats.length} most recent of {pats.data.total} tokens
+                    (revoked ones included); older tokens are not listed.
+                  </p>
+                )}
+                <div className="overflow-x-auto rounded border border-neutral-800">
+                  <table className="w-full text-left text-sm text-neutral-200">
+                    <thead className="border-b border-neutral-800 bg-neutral-900/60 text-xs uppercase tracking-wider text-neutral-400">
+                      <tr>
+                        <th scope="col" className="px-3 py-2">Name</th>
+                        <th scope="col" className="px-3 py-2">Scopes</th>
+                        <th scope="col" className="px-3 py-2">Created</th>
+                        <th scope="col" className="px-3 py-2">Last used</th>
+                        <th scope="col" className="px-3 py-2">Expires</th>
+                        <th scope="col" className="px-3 py-2">Status</th>
+                        <th scope="col" className="px-3 py-2 text-right">
+                          <span className="sr-only">Actions</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-800/60">
+                      {pats.data.pats.map((pat) => {
+                        const status = patStatus(pat, nowSec);
+                        return (
+                          <tr key={pat.id}>
+                            <td className="px-3 py-2">
+                              <div className="font-medium text-neutral-100">{pat.name}</div>
+                              <div className="font-mono text-[11px] text-neutral-500">{pat.hashedKeyPrefix}…</div>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-xs text-neutral-300">{pat.scopes.join(", ")}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-xs text-neutral-400">{formatUnixTime(pat.createdAt)}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-xs text-neutral-400">
+                              {pat.lastUsedAt ? formatUnixTime(pat.lastUsedAt) : "Never"}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-xs text-neutral-400">
+                              {pat.expiresAt ? formatUnixTime(pat.expiresAt) : "Never"}
+                            </td>
+                            <td className="px-3 py-2">
+                              {status === "active" ? (
+                                <span className="rounded border border-emerald-800/60 bg-emerald-950/80 px-2 py-0.5 text-xs text-emerald-300">
+                                  Active
+                                </span>
+                              ) : (
+                                <span className="rounded bg-neutral-800/80 px-2 py-0.5 text-xs text-neutral-400">
+                                  {status === "revoked" ? "Revoked" : "Expired"}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              {!pat.revokedAt && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    revoke.reset();
+                                    setRevoking(pat);
+                                  }}
+                                  aria-label={`Revoke ${pat.name}`}
+                                  className="rounded border border-red-900/60 px-2.5 py-1 text-xs text-red-300 hover:border-red-700"
+                                >
+                                  Revoke
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </div>
         </>

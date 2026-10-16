@@ -148,7 +148,7 @@ export default function MfaSetupPage() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (!code) return;
+            if (!code.trim()) return;
             enableMutation.mutate({ code: code.trim() });
           }}
           className="space-y-3"
@@ -177,7 +177,7 @@ export default function MfaSetupPage() {
           ) : null}
           <button
             type="submit"
-            disabled={enableMutation.isPending || !code}
+            disabled={enableMutation.isPending || !code.trim()}
             className="w-full rounded bg-brand-dark px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
             {enableMutation.isPending ? "Verifying…" : "Enable MFA"}

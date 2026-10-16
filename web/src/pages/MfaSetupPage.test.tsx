@@ -82,6 +82,18 @@ describe("MfaSetupPage", () => {
     expect(screen.getByRole("button", { name: "Enable MFA" })).toBeInTheDocument();
   });
 
+  it("never submits a whitespace-only code", async () => {
+    vi.mocked(api.mfaSetup).mockResolvedValue({ otpauthURI: "otpauth://totp/x", asciiQR: "" });
+    renderPage();
+
+    await screen.findByText("otpauth://totp/x");
+    const input = screen.getByPlaceholderText("123456");
+    await userEvent.type(input, "   ");
+    expect(screen.getByRole("button", { name: "Enable MFA" })).toBeDisabled();
+    await userEvent.type(input, "{Enter}");
+    expect(api.mfaEnable).not.toHaveBeenCalled();
+  });
+
   it("shows a setup failure with a way back", async () => {
     vi.mocked(api.mfaSetup).mockRejectedValue(new Error("MFA is not available"));
     renderPage();
