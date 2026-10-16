@@ -307,9 +307,18 @@
 
 /*
  * @xyflow/react reads its own CSS variables. Override them so the canvas
- * background, controls, minimap, handles, and selection all pick up our
- * theme tokens. The defaults xyflow ships with assume a dark backdrop; this
- * keeps them aligned with whichever theme is active.
+ * background, edge labels, controls, minimap, handles, and selection all
+ * pick up our theme tokens instead of xyflow's built-in light palette.
+ *
+ * xyflow resolves every themable property as
+ * `var(--xy-NAME, var(--xy-NAME-default))` and declares the `-default`
+ * names itself on `.react-flow` (and `.react-flow.dark`). A `-default`
+ * declared here on :root therefore never wins -- the closer `.react-flow`
+ * declaration shadows it -- which is how edge labels and the zoom controls
+ * stayed white in dark mode (#571). We set the un-suffixed names instead:
+ * xyflow never declares those, so they inherit down from :root and take
+ * precedence in that var() chain. theme.test.ts asserts every name here is
+ * one xyflow's stylesheet actually reads.
  *
  * Lives at :root rather than per-theme: every value below references a
  * --surface-* / --graph-* / --text-* semantic token, and THOSE are defined
@@ -317,29 +326,33 @@
  * themes and avoids duplicating ~25 lines of overrides.
  */
 :root {
-  --xy-background-color-default: var(--surface-canvas);
-  --xy-background-pattern-color-default: var(--border-subtle);
-  --xy-node-color-default: var(--text-primary);
-  --xy-node-border-default: var(--border-subtle);
-  --xy-node-background-color-default: var(--surface-raised);
-  --xy-edge-stroke-default: var(--graph-edge-default);
-  --xy-edge-stroke-selected-default: var(--color-brand);
-  --xy-connectionline-stroke-default: var(--graph-edge-default);
-  --xy-attribution-background-color-default: transparent;
-  --xy-controls-button-background-color-default: var(--surface-raised);
-  --xy-controls-button-background-color-hover-default: var(--surface-raised);
-  --xy-controls-button-color-default: var(--text-primary);
-  --xy-controls-button-color-hover-default: var(--text-primary);
-  --xy-controls-button-border-default: var(--border-subtle);
-  --xy-controls-box-shadow-default: 0 0 0 1px var(--border-subtle);
-  --xy-handle-background-color-default: var(--surface-raised);
-  --xy-handle-border-color-default: var(--border-subtle);
-  --xy-selection-background-color-default: var(--color-brand);
-  --xy-selection-border-default: 1px dashed var(--color-brand);
-  --xy-minimap-background-color-default: var(--surface-raised);
-  --xy-minimap-mask-background-color-default: var(--text-faint);
-  --xy-minimap-mask-stroke-default: var(--text-faint);
-  --xy-minimap-node-background-color-default: var(--surface-raised);
+  --xy-background-color: var(--surface-canvas);
+  --xy-background-pattern-color: var(--border-subtle);
+  --xy-node-color: var(--text-primary);
+  --xy-node-border: 1px solid var(--border-subtle);
+  --xy-node-background-color: var(--surface-raised);
+  --xy-edge-stroke: var(--graph-edge-default);
+  --xy-edge-stroke-selected: var(--color-brand);
+  --xy-connectionline-stroke: var(--graph-edge-default);
+  /* Edge labels sit on the canvas colour so they cut cleanly through the
+     edge and background dots; text uses the graph label token. */
+  --xy-edge-label-background-color: var(--surface-canvas);
+  --xy-edge-label-color: var(--graph-text);
+  --xy-attribution-background-color: transparent;
+  --xy-controls-button-background-color: var(--surface-raised);
+  --xy-controls-button-background-color-hover: var(--color-neutral-800);
+  --xy-controls-button-color: var(--text-primary);
+  --xy-controls-button-color-hover: var(--text-primary);
+  --xy-controls-button-border-color: var(--border-subtle);
+  --xy-controls-box-shadow: 0 0 0 1px var(--border-subtle);
+  --xy-handle-background-color: var(--surface-raised);
+  --xy-handle-border-color: var(--border-subtle);
+  --xy-selection-background-color: color-mix(in srgb, var(--color-brand) 10%, transparent);
+  --xy-selection-border: 1px dashed var(--color-brand);
+  --xy-minimap-background-color: var(--surface-raised);
+  --xy-minimap-mask-background-color: var(--text-faint);
+  --xy-minimap-mask-stroke-color: var(--text-faint);
+  --xy-minimap-node-background-color: var(--surface-raised);
 }
 
 /*
