@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertDemo, assertPortsFree, demoEnv } from "./env.mjs";
 import { generateMedia } from "./media.mjs";
 
@@ -254,7 +254,8 @@ export async function startDemo({ keep = false, quiet = false } = {}) {
   }
 }
 
-const invokedDirectly = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+// pathToFileURL percent-encodes like import.meta.url (paths with spaces, non-ASCII).
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   const demo = await startDemo({ keep: process.argv.includes("--keep") });
   console.log(`
