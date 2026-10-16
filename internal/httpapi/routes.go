@@ -1726,6 +1726,38 @@ type scanJobDTO struct {
 	FilesFailed  int64  `json:"filesFailed"`
 	EdgesCreated int64  `json:"edgesCreated"`
 	LastError    string `json:"lastError,omitempty"`
+	// StorageLocationID is the location the job scanned (the column is
+	// nullable, so it is omitted for a row without one).
+	StorageLocationID *int64 `json:"storageLocationId,omitempty"`
+	// StartedAt / UpdatedAt / FinishedAt are unix seconds. FinishedAt is
+	// absent while the job is still running.
+	StartedAt  int64  `json:"startedAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
+	FinishedAt *int64 `json:"finishedAt,omitempty"`
+}
+
+// scanJobToDTO is the one scan_jobs row -> DTO mapping, shared by
+// /api/v1/progress and /api/v1/jobs.
+func scanJobToDTO(r sqlcgen.ScanJob) scanJobDTO {
+	dto := scanJobDTO{
+		ID: r.ID, Kind: r.Kind, State: r.State,
+		FilesSeen: r.FilesSeen, FilesHashed: r.FilesHashed, FilesFailed: r.FilesFailed,
+		EdgesCreated: r.EdgesCreated,
+		StartedAt:    r.StartedAt,
+		UpdatedAt:    r.UpdatedAt,
+	}
+	if r.LastError.Valid {
+		dto.LastError = r.LastError.String
+	}
+	if r.StorageLocationID.Valid {
+		v := r.StorageLocationID.Int64
+		dto.StorageLocationID = &v
+	}
+	if r.FinishedAt.Valid {
+		v := r.FinishedAt.Int64
+		dto.FinishedAt = &v
+	}
+	return dto
 }
 
 type ProgressOutput struct {
@@ -1742,15 +1774,7 @@ func (s *Server) handleProgress(ctx context.Context, in *ProgressInput) (*Progre
 	out := &ProgressOutput{}
 	out.Body.Jobs = make([]scanJobDTO, len(rows))
 	for i, r := range rows {
-		dto := scanJobDTO{
-			ID: r.ID, Kind: r.Kind, State: r.State,
-			FilesSeen: r.FilesSeen, FilesHashed: r.FilesHashed, FilesFailed: r.FilesFailed,
-			EdgesCreated: r.EdgesCreated,
-		}
-		if r.LastError.Valid {
-			dto.LastError = r.LastError.String
-		}
-		out.Body.Jobs[i] = dto
+		out.Body.Jobs[i] = scanJobToDTO(r)
 	}
 	return out, nil
 }
@@ -1802,15 +1826,7 @@ func (s *Server) handleListJobs(ctx context.Context, in *ListJobsInput) (*ListJo
 	out := &ListJobsOutput{}
 	out.Body.Jobs = make([]scanJobDTO, len(rows))
 	for i, r := range rows {
-		dto := scanJobDTO{
-			ID: r.ID, Kind: r.Kind, State: r.State,
-			FilesSeen: r.FilesSeen, FilesHashed: r.FilesHashed, FilesFailed: r.FilesFailed,
-			EdgesCreated: r.EdgesCreated,
-		}
-		if r.LastError.Valid {
-			dto.LastError = r.LastError.String
-		}
-		out.Body.Jobs[i] = dto
+		out.Body.Jobs[i] = scanJobToDTO(r)
 	}
 	out.Body.Total = total
 	return out, nil
@@ -3036,6 +3052,13 @@ type storageLocationHealthDTO struct {
 	// overloaded" note. An operator who disabled a location sees Disabled
 	// immediately; IsActive only catches up on the next restart's seed.
 	Disabled bool `json:"disabled"`
+	// PendingRestart is true when this location's effective safe-field
+	// values differ from the ones the running process seeded at boot --
+	// an edit made since the last restart that the restart will apply.
+	// Unlike OverriddenFields it clears once the restart has happened.
+	// Without a boot snapshot (no settings store) it falls back to "has
+	// any override".
+	PendingRestart bool `json:"pendingRestart"`
 	// OverriddenFields lists which of name/watch/sweep/sweepIntervalSecs/
 	// cacheTtlHours/enabled currently have a live storageLocation.* override
 	// row -- the UI's only way to know whether a "Reset to config" action on
@@ -3050,6 +3073,44 @@ type storageLocationHealthDTO struct {
 	DegradedMessage      *string  `json:"degradedMessage,omitempty"`
 	WatcherBacklog       int      `json:"watcherBacklog"`
 	WatcherDroppedEvents int64    `json:"watcherDroppedEvents"`
+}
+
+// locationValues is one storage location's effective safe-field values.
+// Comparable, so two resolutions can be diffed with !=.
+type locationValues struct {
+	name                         string
+	watch, sweep, disabled       bool
+	sweepIntervalSecs, cacheTTLH int
+}
+
+// effectiveLocationValues applies ov to config.yaml's entry for a
+// location, with the same cacheTtlHours validity rule as the display
+// merge in handleStorageHealth (and settings.ResolveStorageLocations).
+// Used to compare the boot-time override set with the current one, so
+// an override that was set and then unset again, or set to the value
+// config.yaml already has, doesn't count as pending.
+func effectiveLocationValues(base config.StorageLocation, ov settings.StorageLocationOverride, prunable bool) locationValues {
+	v := locationValues{
+		name: base.Name, watch: base.Watch, sweep: base.Sweep,
+		sweepIntervalSecs: base.SweepIntervalSecs, cacheTTLH: base.CacheTTLHours,
+	}
+	if ov.Name != nil {
+		v.name = *ov.Name
+	}
+	if ov.Watch != nil {
+		v.watch = *ov.Watch
+	}
+	if ov.Sweep != nil {
+		v.sweep = *ov.Sweep
+	}
+	if ov.SweepIntervalSecs != nil {
+		v.sweepIntervalSecs = *ov.SweepIntervalSecs
+	}
+	if ov.CacheTTLHours != nil && *ov.CacheTTLHours >= 0 && (*ov.CacheTTLHours == 0 || prunable) {
+		v.cacheTTLH = *ov.CacheTTLHours
+	}
+	v.disabled = ov.Enabled != nil && !*ov.Enabled
+	return v
 }
 
 type storageQueueHealthDTO struct {
@@ -3277,6 +3338,14 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 				overriddenFields = append(overriddenFields, "enabled")
 			}
 		}
+		pendingRestart := len(overriddenFields) > 0
+		if s.settingsStore != nil {
+			if boot, ok := s.settingsStore.BootStorageLocationOverrides(); ok {
+				prunable := loc.Prunable == 1
+				pendingRestart = effectiveLocationValues(base, boot[loc.RootPath], prunable) !=
+					effectiveLocationValues(base, overrides[loc.RootPath], prunable)
+			}
+		}
 		var watcherBacklog int
 		var watcherDropped int64
 		if wh, ok := watcherMap[loc.ID]; ok {
@@ -3298,6 +3367,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 			CacheTtlHours:        cacheTTLHours,
 			Disabled:             disabled,
 			OverriddenFields:     overriddenFields,
+			PendingRestart:       pendingRestart,
 			NodeCount:            countMap[loc.ID],
 			WatcherBacklog:       watcherBacklog,
 			WatcherDroppedEvents: watcherDropped,
@@ -3629,19 +3699,58 @@ func marshalLoginDetails(ip, userAgent string) string {
 // Lives in this file rather than internal/audit because login_audit
 // is owned by internal/auth/users (PR #407) -- this is the read side
 // of the merged /api/v1/audit route.
+// loginAuditResourceType is the resourceType every login_audit entry is
+// reported under on /api/v1/audit?type=login.
+const loginAuditResourceType = "login_source"
+
 func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEntryOut, int64, error) {
 	limit := in.Limit
 	if limit > 200 {
 		limit = 200
 	}
+	// The same filters the activity stream takes, mapped onto the
+	// login_audit columns each entry is displayed from (see the DTO
+	// mapping below): event = outcome, resourceId = source, actor =
+	// user_id. Every login entry's resourceType is "login_source", so
+	// any other resourceType matches nothing.
+	if in.ResourceType != "" && in.ResourceType != loginAuditResourceType {
+		return []auditEntryOut{}, 0, nil
+	}
+	var userID, outcome, source, since, until any
+	if in.ActorUserID > 0 {
+		userID = in.ActorUserID
+	}
+	if in.Event != "" {
+		outcome = in.Event
+	}
+	if in.ResourceID != "" {
+		source = in.ResourceID
+	}
+	if in.SinceUnix > 0 {
+		since = in.SinceUnix
+	}
+	if in.UntilUnix > 0 {
+		until = in.UntilUnix
+	}
 	rows, err := s.db.Reader.ListLoginAudit(ctx, sqlcgen.ListLoginAuditParams{
-		Limit:  limit,
-		Offset: in.Offset,
+		Limit:     limit,
+		Offset:    in.Offset,
+		UserID:    userID,
+		Outcome:   outcome,
+		Source:    source,
+		SinceUnix: since,
+		UntilUnix: until,
 	})
 	if err != nil {
 		return nil, 0, err
 	}
-	total, err := s.db.Reader.CountLoginAudit(ctx)
+	total, err := s.db.Reader.CountLoginAudit(ctx, sqlcgen.CountLoginAuditParams{
+		UserID:    userID,
+		Outcome:   outcome,
+		Source:    source,
+		SinceUnix: since,
+		UntilUnix: until,
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -3652,7 +3761,7 @@ func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEnt
 			Source:       "login_audit",
 			ActorKind:    "user",
 			Event:        r.Outcome,
-			ResourceType: "login_source",
+			ResourceType: loginAuditResourceType,
 			ResourceID:   r.Source,
 			ActorName:    r.UsernamePresented,
 			DetailsJSON:  marshalLoginDetails(r.Ip, r.UserAgent),

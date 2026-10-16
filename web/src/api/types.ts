@@ -260,6 +260,14 @@ export interface ScanJob {
   filesFailed: number;
   edgesCreated: number;
   lastError?: string;
+  // The storage location the job scanned (absent for a row without one).
+  storageLocationId?: number;
+  // Unix seconds. finishedAt is absent while the job is still running.
+  // The server always sends startedAt/updatedAt; optional here so
+  // fixtures that predate them stay valid.
+  startedAt?: number;
+  updatedAt?: number;
+  finishedAt?: number;
 }
 
 export interface StartScanRequest {
@@ -334,6 +342,11 @@ export interface StorageLocationHealth {
   // anything, since every field above already reports the merged value
   // with no per-field provenance.
   overriddenFields: StorageLocationSafeField[];
+  // pendingRestart: an edit made since the running process booted that a
+  // restart will apply. Unlike overriddenFields it clears after the
+  // restart, while the override itself persists. Always sent by the
+  // server; optional here so fixtures that predate it stay valid.
+  pendingRestart?: boolean;
   nodeCount: number;
   totalBytes: number;
   usedBytes: number;

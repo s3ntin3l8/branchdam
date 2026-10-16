@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import type {
   CreateCompanionPairingRequest,
   CreateCompanionPairingResponse,
   ListPairingsResponse,
+  PairingAuditResponse,
   PairingCredentialsResponse,
   RenameCompanionPairingRequest,
   RenameCompanionPairingResponse,
@@ -32,6 +33,10 @@ const renamePairingMock = vi.fn<
 const pairingCredentialsMock = vi.fn<(id: number) => Promise<PairingCredentialsResponse>>();
 const revokePairingMock = vi.fn<(id: number) => Promise<{ revokedAtUnix: number }>>();
 const deletePairingMock = vi.fn<(id: number) => Promise<{ ok: boolean }>>();
+const getPairingMock = vi.fn<(id: number) => Promise<CompanionPairingDetail>>();
+const pairingAuditMock = vi.fn<
+  (id: number, params: { limit?: number; offset?: number }) => Promise<PairingAuditResponse>
+>();
 
 vi.mock("../api/client", () => ({
   api: {
@@ -44,6 +49,8 @@ vi.mock("../api/client", () => ({
     renamePairing: (id: number, input: RenameCompanionPairingRequest) =>
       renamePairingMock(id, input),
     pairingCredentials: (id: number) => pairingCredentialsMock(id),
+    getPairing: (id: number) => getPairingMock(id),
+    pairingAudit: (id: number, params: { limit?: number; offset?: number }) => pairingAuditMock(id, params),
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -91,6 +98,8 @@ beforeEach(() => {
   pairingCredentialsMock.mockReset();
   revokePairingMock.mockReset();
   deletePairingMock.mockReset();
+  getPairingMock.mockReset();
+  pairingAuditMock.mockReset();
 });
 
 function renderPage() {
@@ -501,9 +510,78 @@ describe("CompanionPairingsPage", () => {
   });
 });
 
-// Reference the sample detail so TypeScript doesn't drop the
-// companion-pairing detail type from the import -- the production
-// page reads CompanionPairingDetail via the api mock, and the test
-// file doesn't reference it directly. Keeping an unused import
-// would have flagged a lint error.
-void sampleDetail;
+describe("CompanionPairingsPage: pairing details", () => {
+  it("shows a pairing's keys and pages through its audit trail", async () => {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    getPairingMock.mockResolvedValue({
+      ...sampleDetail,
+      keys: [
+        { id: 42, keyPreview: "WXyZ", createdAtUnix: 1700000000 },
+        { id: 41, keyPreview: "OLDK", createdAtUnix: 1690000000, expiresAtUnix: 1695000000 },
+      ],
+    });
+    pairingAuditMock.mockImplementation(async (_id, params) => ({
+      events:
+        (params.offset ?? 0) === 0
+          ? [{ id: 9, actor: "user:admin", event: "KEY_ROTATED", detailsJson: '{"keyId":42}', createdAtUnix: 1700000500 }]
+          : [{ id: 1, actor: "user:admin", event: "PAIR_CREATED", detailsJson: "{}", createdAtUnix: 1700000000 }],
+      total: 21,
+    }));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Details for Björn's iPhone" }));
+    const dialog = await screen.findByRole("dialog", { name: "Pairing details: Björn's iPhone" });
+    const liveKey = (await within(dialog).findByText("••••WXyZ")).closest("tr")!;
+    expect(within(liveKey).getByText("Active")).toBeInTheDocument();
+    const oldKey = within(dialog).getByText("••••OLDK").closest("tr")!;
+    expect(within(oldKey).getByText("Expired")).toBeInTheDocument();
+    expect(getPairingMock).toHaveBeenCalledWith(1);
+
+    expect(await within(dialog).findByText("KEY_ROTATED")).toBeInTheDocument();
+    expect(pairingAuditMock).toHaveBeenLastCalledWith(1, { limit: 20, offset: 0 });
+    expect(within(dialog).getByText("Page 1 of 2")).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Older" }));
+    expect(await within(dialog).findByText("PAIR_CREATED")).toBeInTheDocument();
+    expect(pairingAuditMock).toHaveBeenLastCalledWith(1, { limit: 20, offset: 20 });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
+describe("CompanionPairingsPage: rotate grace period", () => {
+  async function openRotate() {
+    listPairingsMock.mockResolvedValue({ pairings: [samplePairing], total: 1 });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /^Rotate$/ }));
+    return screen.findByRole("dialog", { name: /rotate api key/i });
+  }
+
+  it.each(["", "0", "10081", "1.5"])("refuses %j and never sends it", async (value) => {
+    const dialog = await openRotate();
+    const input = within(dialog).getByLabelText(/grace period/i);
+    fireEvent.change(input, { target: { value } });
+    expect(within(dialog).getByText(/Enter whole minutes from 1 to 10080/)).toBeInTheDocument();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    const button = within(dialog).getByRole("button", { name: "Rotate key" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(rotatePairingMock).not.toHaveBeenCalled();
+  });
+
+  it("sends a valid grace period as a number", async () => {
+    rotatePairingMock.mockResolvedValue({
+      keyId: 43,
+      apiKey: "bdam_new",
+      keyPreview: "_new",
+      pairingUrl: "",
+      qrSvg: "",
+      previousKeyExpiresAtUnix: 1700003600,
+    });
+    const dialog = await openRotate();
+    fireEvent.change(within(dialog).getByLabelText(/grace period/i), { target: { value: "60" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rotate key" }));
+    await waitFor(() => expect(rotatePairingMock).toHaveBeenCalledWith(1, { graceMinutes: 60 }));
+  });
+});

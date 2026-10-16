@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
@@ -10,6 +10,10 @@ vi.mock("../api/client", () => ({
   api: {
     listAudit: vi.fn(),
     me: vi.fn().mockResolvedValue({ isAdmin: true, kind: "user", name: "admin" }),
+    listUsers: vi.fn().mockResolvedValue({
+      users: [{ id: 7, username: "bob", authProvider: "local", externalUid: "bob", createdAt: 1, lastSeenAt: 1 }],
+      total: 1,
+    }),
   },
 }));
 
@@ -106,5 +110,68 @@ describe("AuditLogPage", () => {
     });
     expect(screen.getByText(/Administrator privileges are required/i)).toBeInTheDocument();
     expect(api.listAudit).not.toHaveBeenCalled();
+  });
+});
+
+describe("AuditLogPage: filters and loading", () => {
+  it("shows a loading state, not an empty log, while /me is still loading", async () => {
+    let resolveMe: (v: unknown) => void = () => {};
+    vi.mocked(api.me).mockImplementationOnce(() => new Promise((r) => (resolveMe = r)) as never);
+    vi.mocked(api.listAudit).mockResolvedValue({ entries: [], total: 0 });
+    renderWithClient(<AuditLogPage />);
+
+    expect(screen.getByText("Loading audit log…")).toBeInTheDocument();
+    expect(screen.queryByText(/no audit entries/i)).not.toBeInTheDocument();
+
+    resolveMe({ isAdmin: true, kind: "user", name: "admin", authenticated: true });
+    expect(await screen.findByText(/no audit entries recorded/i)).toBeInTheDocument();
+  });
+
+  it("sends the actor and an inclusive date range to the server", async () => {
+    vi.mocked(api.listAudit).mockResolvedValue({ entries: [], total: 0 });
+    renderWithClient(<AuditLogPage />);
+
+    await screen.findByRole("option", { name: "bob" });
+    fireEvent.change(screen.getByLabelText("Actor"), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-03-01" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-03-02" } });
+
+    const since = Math.floor(new Date(2026, 2, 1).getTime() / 1000);
+    const until = Math.floor(new Date(2026, 2, 3).getTime() / 1000);
+    await waitFor(() =>
+      expect(api.listAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ actorUserId: 7, sinceUnix: since, untilUnix: until }),
+      ),
+    );
+  });
+
+  it("flags a reversed date range instead of querying it", async () => {
+    vi.mocked(api.listAudit).mockResolvedValue({ entries: [], total: 0 });
+    renderWithClient(<AuditLogPage />);
+    await screen.findByText(/no audit entries recorded/i);
+    vi.mocked(api.listAudit).mockClear();
+
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-03-05" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-03-01" } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/must not be before/);
+    expect(api.listAudit).not.toHaveBeenCalledWith(expect.objectContaining({ untilUnix: expect.any(Number) }));
+  });
+
+  it("applies filters to the login stream, without the resource type", async () => {
+    vi.mocked(api.listAudit).mockResolvedValue({ entries: [], total: 0 });
+    renderWithClient(<AuditLogPage />);
+    await screen.findByText(/no audit entries recorded/i);
+
+    fireEvent.change(screen.getByLabelText(/filter resource type/i), { target: { value: "asset" } });
+    fireEvent.change(screen.getByLabelText("Log Stream"), { target: { value: "login" } });
+    expect(screen.queryByLabelText(/filter resource type/i)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/filter event/i), { target: { value: "bad-password" } });
+
+    await waitFor(() =>
+      expect(api.listAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: "login", event: "bad-password", resourceType: undefined }),
+      ),
+    );
   });
 });

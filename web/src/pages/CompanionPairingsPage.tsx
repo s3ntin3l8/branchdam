@@ -11,6 +11,7 @@ import {
 } from "../hooks/queries";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Dialog from "../components/Dialog";
+import PairingDetailDialog from "../components/PairingDetailDialog";
 import type {
   CompanionPairingListItem,
   CreateCompanionPairingResponse,
@@ -31,9 +32,9 @@ import type {
 //  1. "Pair new device" CTA -> modal with QR + reveal-once plaintext key
 //  2. Pairings table: agent_id, friendly label (pencil to rename),
 //     active keys, status, actions
-//  3. Per-pairing row: show credentials (audited re-fetch), rotate
-//     (grace-minutes input), revoke (ConfirmDialog), delete
-//     (ConfirmDialog), view audit (modal)
+//  3. Per-pairing row: details (keys + paged audit trail, modal), show
+//     credentials (audited re-fetch), rotate (grace-minutes input),
+//     revoke (ConfirmDialog), delete (ConfirmDialog)
 
 // --- helpers ---
 
@@ -43,6 +44,20 @@ function formatUnixTime(unix: number): string {
   // log of their own actions, so server-local is what they want. UTC
   // would just force a mental conversion for the homelab use case.
   return new Date(unix * 1000).toLocaleString();
+}
+
+// The rotate route's graceMinutes bounds (companion_pairings.go):
+// 1 minute to 7 days.
+const GRACE_MIN = 1;
+const GRACE_MAX = 10080;
+
+// parseGraceMinutes validates the rotate dialog's grace input: a whole
+// number of minutes within the server's bounds, or null. An empty or
+// partly typed field must never reach the server as NaN.
+function parseGraceMinutes(raw: string): number | null {
+  if (!/^\d+$/.test(raw.trim())) return null;
+  const n = Number(raw.trim());
+  return n >= GRACE_MIN && n <= GRACE_MAX ? n : null;
 }
 
 function pairingStatusLabel(p: CompanionPairingListItem): string {
@@ -257,7 +272,10 @@ export default function CompanionPairingsPage() {
   const [renameLabel, setRenameLabel] = useState("");
 
   const [rotateForId, setRotateForId] = useState<number | null>(null);
-  const [rotateGrace, setRotateGrace] = useState(1440); // 24h default
+  const [rotateGrace, setRotateGrace] = useState("1440"); // 24h default
+  const graceMinutes = parseGraceMinutes(rotateGrace);
+
+  const [detailId, setDetailId] = useState<number | null>(null);
   const [rotateResult, setRotateResult] = useState<RotateCompanionPairingResponse | null>(null);
 
   // ConfirmDialog targets: revoke and delete replace the old
@@ -321,8 +339,9 @@ export default function CompanionPairingsPage() {
   };
 
   const handleRotate = (id: number) => {
+    if (graceMinutes === null) return;
     rotate.mutate(
-      { id, input: { graceMinutes: rotateGrace } },
+      { id, input: { graceMinutes } },
       {
         onSuccess: (res) => {
           setRotateResult(res);
@@ -408,6 +427,14 @@ export default function CompanionPairingsPage() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setDetailId(p.id)}
+                        aria-label={`Details for ${p.friendlyLabel}`}
+                        className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:border-neutral-500"
+                      >
+                        Details
+                      </button>
                       <button
                         type="button"
                         onClick={() => void handleShowCredentials(p)}
@@ -604,13 +631,24 @@ export default function CompanionPairingsPage() {
                 Grace period (minutes)
                 <input
                   type="number"
-                  min="1"
-                  max="10080"
+                  min={GRACE_MIN}
+                  max={GRACE_MAX}
+                  step={1}
                   value={rotateGrace}
-                  onChange={(e) => setRotateGrace(Number(e.target.value))}
-                  className="mt-1 w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100"
+                  onChange={(e) => setRotateGrace(e.target.value)}
+                  aria-invalid={graceMinutes === null}
+                  aria-describedby="rotate-grace-hint"
+                  className="mt-1 w-full rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 aria-[invalid=true]:border-red-700"
                 />
               </label>
+              <p
+                id="rotate-grace-hint"
+                className={`text-xs ${graceMinutes === null ? "text-red-400" : "text-neutral-500"}`}
+              >
+                {graceMinutes === null
+                  ? `Enter whole minutes from ${GRACE_MIN} to ${GRACE_MAX} (7 days).`
+                  : `The old key stops working ${graceMinutes} minute${graceMinutes === 1 ? "" : "s"} after rotation.`}
+              </p>
               {rotate.error && (
                 <p className="text-xs text-red-400">Failed: {rotate.error.message}</p>
               )}
@@ -618,7 +656,7 @@ export default function CompanionPairingsPage() {
                 <button
                   type="button"
                   onClick={() => rotateForId !== null && handleRotate(rotateForId)}
-                  disabled={rotate.isPending}
+                  disabled={rotate.isPending || graceMinutes === null}
                   className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                 >
                   {rotate.isPending ? "Rotating…" : "Rotate key"}
@@ -628,6 +666,8 @@ export default function CompanionPairingsPage() {
           )
         }
       />
+
+      {detailId !== null && <PairingDetailDialog pairingId={detailId} onClose={() => setDetailId(null)} />}
 
       {revokeTarget && (
         <ConfirmDialog

@@ -11,11 +11,33 @@ import (
 )
 
 const countLoginAudit = `-- name: CountLoginAudit :one
-SELECT COUNT(*) FROM login_audit
+SELECT COUNT(*)
+FROM login_audit
+WHERE (?1 IS NULL OR user_id = ?1)
+  AND (?2 IS NULL OR outcome = ?2)
+  AND (?3 IS NULL OR source = ?3)
+  AND (?4 IS NULL OR created_at >= ?4)
+  AND (?5 IS NULL OR created_at < ?5)
 `
 
-func (q *Queries) CountLoginAudit(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countLoginAudit)
+type CountLoginAuditParams struct {
+	UserID    interface{}
+	Outcome   interface{}
+	Source    interface{}
+	SinceUnix interface{}
+	UntilUnix interface{}
+}
+
+// Counterpart to ListLoginAudit -- must apply identical WHERE so
+// pagination totals match the visible rows.
+func (q *Queries) CountLoginAudit(ctx context.Context, arg CountLoginAuditParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countLoginAudit,
+		arg.UserID,
+		arg.Outcome,
+		arg.Source,
+		arg.SinceUnix,
+		arg.UntilUnix,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -25,13 +47,23 @@ const listLoginAudit = `-- name: ListLoginAudit :many
 
 SELECT id, user_id, username_presented, source, outcome, ip, user_agent, created_at
 FROM login_audit
+WHERE (?3 IS NULL OR user_id = ?3)
+  AND (?4 IS NULL OR outcome = ?4)
+  AND (?5 IS NULL OR source = ?5)
+  AND (?6 IS NULL OR created_at >= ?6)
+  AND (?7 IS NULL OR created_at < ?7)
 ORDER BY created_at DESC, id DESC
 LIMIT ?1 OFFSET ?2
 `
 
 type ListLoginAuditParams struct {
-	Limit  int64
-	Offset int64
+	Limit     int64
+	Offset    int64
+	UserID    interface{}
+	Outcome   interface{}
+	Source    interface{}
+	SinceUnix interface{}
+	UntilUnix interface{}
 }
 
 type ListLoginAuditRow struct {
@@ -56,8 +88,20 @@ type ListLoginAuditRow struct {
 // Newest-first. Offset pagination -- volume is bounded by authentication
 // events (not per-asset), so the drift problem that justifies keyset
 // pagination on /api/v1/edges/audit doesn't apply here.
+// Filters are all sqlc.narg, same shape as ListActorAudit, so the audit
+// log page's filters apply to this stream too: user_id (actor),
+// outcome (shown as the event), source (shown as the resource id) and a
+// created_at window.
 func (q *Queries) ListLoginAudit(ctx context.Context, arg ListLoginAuditParams) ([]ListLoginAuditRow, error) {
-	rows, err := q.db.QueryContext(ctx, listLoginAudit, arg.Limit, arg.Offset)
+	rows, err := q.db.QueryContext(ctx, listLoginAudit,
+		arg.Limit,
+		arg.Offset,
+		arg.UserID,
+		arg.Outcome,
+		arg.Source,
+		arg.SinceUnix,
+		arg.UntilUnix,
+	)
 	if err != nil {
 		return nil, err
 	}

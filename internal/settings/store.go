@@ -58,6 +58,15 @@ type Store struct {
 	// process started never shows as "pending" (nothing changed since boot).
 	bootEffective *config.Config
 
+	// bootLocationOverrides is the storageLocation.* override set as it
+	// stood at NewStore time -- what the boot-time storage-location seeder
+	// applied. The storage-health page diffs the current overrides against
+	// it to tell "changed, restart to apply" from "already running", the
+	// same way PendingRestart uses bootEffective. Nil (bootLocationsOK
+	// false) when the read failed at boot.
+	bootLocationOverrides map[string]StorageLocationOverride
+	bootLocationsOK       bool
+
 	// applyMu serializes Apply: reload-validate-write-reload must run as one
 	// unit.
 	applyMu sync.Mutex
@@ -82,7 +91,21 @@ func NewStore(ctx context.Context, database *db.DB, base config.Config, box *sec
 		return nil, err
 	}
 	s.bootEffective = s.Effective()
+	if locs, err := LoadStorageLocationOverrides(ctx, database.Reader); err != nil {
+		log.Warn("settings: could not snapshot storage location overrides at boot; their pending-restart state will be approximate", "err", err)
+	} else {
+		s.bootLocationOverrides = locs
+		s.bootLocationsOK = true
+	}
 	return s, nil
+}
+
+// BootStorageLocationOverrides returns the storageLocation.* overrides
+// that were in effect when this process started, keyed by rootPath. ok is
+// false when they couldn't be read at boot. Callers must treat the map as
+// read-only.
+func (s *Store) BootStorageLocationOverrides() (overrides map[string]StorageLocationOverride, ok bool) {
+	return s.bootLocationOverrides, s.bootLocationsOK
 }
 
 // Effective returns the current resolved config.Config. Safe for

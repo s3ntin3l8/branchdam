@@ -282,6 +282,48 @@ describe("SettingsPage", () => {
     expect(screen.getByText(":8080")).toBeInTheDocument();
   });
 
+  it("gives a read-only row a plain label and every <label for> a real control", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    const { container } = renderWithClient(<SettingsPage />);
+
+    // Non-editable string and stringList fields render a ReadOnlyValue,
+    // not a control, so their label must not point at an id.
+    for (const key of ["listenAddr", "authz.groups"]) {
+      const row = await screen.findByTestId(`field-row-${key}`);
+      expect(row.querySelector("label")).toBeNull();
+    }
+    expect(within(screen.getByTestId("field-row-listenAddr")).getByText("Listen Address").tagName).toBe("SPAN");
+    // An editable row keeps its association.
+    expect(screen.getByLabelText("Hash Workers")).toHaveValue(4);
+    // No <label for> anywhere on the page points at a missing element.
+    const labels = Array.from(container.querySelectorAll("label[for]"));
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) {
+      expect(document.getElementById(label.getAttribute("for")!)).not.toBeNull();
+    }
+  });
+
+  it("does not claim there are no path rewrites while settings load or after a failed load", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    // Still loading: the fetch never settles.
+    vi.mocked(api.getSettings).mockReturnValue(new Promise(() => {}));
+    const { unmount } = renderWithClient(<SettingsPage />);
+    expect(await screen.findByText("Loading path rewrites…")).toBeInTheDocument();
+    expect(screen.queryByText("No operator path rewrites configured.")).not.toBeInTheDocument();
+    unmount();
+
+    // Failed load.
+    vi.mocked(api.getSettings).mockRejectedValue(new ApiError(500, "boom"));
+    renderWithClient(<SettingsPage />);
+    expect(await screen.findByText("Failed to load settings.")).toBeInTheDocument();
+    expect(screen.getByText("Path rewrites are unavailable because settings failed to load.")).toBeInTheDocument();
+    expect(screen.queryByText("No operator path rewrites configured.")).not.toBeInTheDocument();
+  });
+
   it("renders the Appearance category with a theme switcher (no server round-trip)", async () => {
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
     vi.mocked(api.listPathRewrites).mockResolvedValue([]);
@@ -636,5 +678,88 @@ describe("SettingsPage", () => {
     // Verify Metadata group and setting label are rendered
     expect(await screen.findByRole("heading", { name: "Metadata" })).toBeInTheDocument();
     expect(screen.getByText("Auto-Inherit Metadata")).toBeInTheDocument();
+  });
+});
+
+describe("SettingsPage: list editing, saved state and links", () => {
+  const proxies = () =>
+    settingsResponse({
+      fields: [
+        field({
+          key: "http.trustedProxies",
+          type: "stringList",
+          label: "Trusted Proxies",
+          group: "HTTP",
+          value: ["10.0.0.1"],
+          source: "config",
+          applyMode: "restart",
+          editable: true,
+        }),
+      ],
+    });
+
+  it("edits a stringList setting and saves it as an array", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(proxies());
+    vi.mocked(api.putSettings).mockResolvedValue(proxies());
+    renderWithClient(<SettingsPage />);
+
+    const input = await screen.findByLabelText("Trusted Proxies");
+    await user.type(input, "192.168.1.0/24{Enter}");
+    // A duplicate is refused.
+    await user.type(input, "10.0.0.1");
+    expect(screen.getByText("Already in the list.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    await user.clear(input);
+    await user.click(screen.getByRole("button", { name: "Remove 10.0.0.1" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.putSettings).toHaveBeenCalled());
+    expect(vi.mocked(api.putSettings).mock.calls[0][0]).toEqual({ set: { "http.trustedProxies": ["192.168.1.0/24"] } });
+    expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+  });
+
+  it("shows a failed save next to the field that failed", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(proxies());
+    vi.mocked(api.putSettings).mockRejectedValue(new ApiError(422, "entry 0 is not an IP or CIDR"));
+    renderWithClient(<SettingsPage />);
+
+    await user.type(await screen.findByLabelText("Trusted Proxies"), "nope{Enter}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("entry 0 is not an IP or CIDR");
+    // Inline, inside the Trusted Proxies row -- not a banner at the top.
+    expect(alert.closest("div")?.textContent).toContain("Trusted Proxies");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("links to Companion Pairing with a router link, not a full page load", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const router = createMemoryRouter(
+      [
+        { path: "/settings", element: <SettingsPage /> },
+        { path: "/companion", element: <div>companion page</div> },
+      ],
+      { initialEntries: ["/settings"] },
+    );
+    render(
+      <ThemeProvider>
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>
+      </ThemeProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole("link", { name: "Open Companion Pairing" }));
+    expect(await screen.findByText("companion page")).toBeInTheDocument();
   });
 });

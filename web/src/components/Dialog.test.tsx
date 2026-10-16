@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import Dialog from "./Dialog";
@@ -102,6 +102,30 @@ describe("Dialog", () => {
     await userEvent.click(screen.getByRole("button", { name: "Open" }));
     await userEvent.click(screen.getByRole("dialog"));
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stays open when a drag starts in the panel and is released on the backdrop", async () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open" }));
+    const overlay = screen.getByRole("dialog").parentElement as HTMLElement;
+    const input = screen.getByLabelText("First");
+
+    // What a browser sends for a text selection dragged out of an input
+    // and released over the backdrop: mousedown on the input, mouseup on
+    // the backdrop, then a click on their common ancestor -- the overlay.
+    fireEvent.mouseDown(input);
+    fireEvent.mouseUp(overlay);
+    fireEvent.click(overlay);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // A press that starts and ends on the backdrop still closes it.
+    fireEvent.mouseDown(overlay);
+    fireEvent.mouseUp(overlay);
+    fireEvent.click(overlay);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("ignores Escape and the backdrop when not dismissible", async () => {

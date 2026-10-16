@@ -1,4 +1,4 @@
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
 
 // The query key namespaces backing a single asset's detail page (useAsset,
@@ -276,6 +276,9 @@ export function useAuditEntries(params: import("../api/types").AuditQueryParams 
     queryKey: ["audit-entries", params],
     queryFn: () => api.listAudit(params),
     enabled,
+    // Keep the current page on screen while a filter or page change
+    // loads, instead of flashing the loading state.
+    placeholderData: keepPreviousData,
   });
 }
 

@@ -1,8 +1,25 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router";
-import { useJobs, useCancelJob } from "../hooks/queries";
+import { useJobs, useCancelJob, useStorageLocations } from "../hooks/queries";
 import ConfirmDialog from "../components/ConfirmDialog";
 import type { ScanJob } from "../api/types";
+
+function formatUnixTime(unix?: number): string {
+  if (!unix) return "—";
+  return new Date(unix * 1000).toLocaleString();
+}
+
+// formatElapsed renders a job's run time compactly ("45s", "3m 20s",
+// "2h 5m", "3d 4h").
+function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
 
 const kindBadge: Record<ScanJob["kind"], string> = {
   FULL_SCAN: "bg-indigo-950 text-indigo-300 border-indigo-800",
@@ -89,6 +106,11 @@ export default function IngestJobsPage() {
     kind: kind || undefined,
     state: state || undefined,
   });
+
+  // Location names for the jobs table; a job whose location isn't in the
+  // list (or before the list loads) shows its id.
+  const { data: locationList } = useStorageLocations();
+  const locationNames = new Map((locationList?.locations ?? []).map((l) => [l.id, l.name]));
 
   const jobs = data?.jobs ?? [];
   const total = data?.total ?? 0;
@@ -237,12 +259,15 @@ export default function IngestJobsPage() {
       ) : (
         <>
           <div className="rounded-lg border border-neutral-800 overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left text-sm">
+            <table className="w-full min-w-[1200px] text-left text-sm">
               <thead className="border-b border-neutral-800 bg-neutral-900/60 text-neutral-400 text-xs">
                 <tr>
                   <th className="py-2.5 px-4 font-semibold">Job ID</th>
                   <th className="py-2.5 px-4 font-semibold">Kind</th>
                   <th className="py-2.5 px-4 font-semibold">State</th>
+                  <th className="py-2.5 px-4 font-semibold">Location</th>
+                  <th className="py-2.5 px-4 font-semibold">Started</th>
+                  <th className="py-2.5 px-4 font-semibold">Finished</th>
                   <th className="py-2.5 px-4 font-semibold text-right">Files Seen</th>
                   <th className="py-2.5 px-4 font-semibold text-right">Files Hashed</th>
                   <th className="py-2.5 px-4 font-semibold text-right">Failed</th>
@@ -269,6 +294,24 @@ export default function IngestJobsPage() {
                         >
                           {stateDisplay.label}
                         </span>
+                      </td>
+                      <td className="py-2.5 px-4 text-neutral-300">
+                        {j.storageLocationId === undefined
+                          ? "—"
+                          : locationNames.get(j.storageLocationId) ?? `#${j.storageLocationId}`}
+                      </td>
+                      <td className="py-2.5 px-4 whitespace-nowrap text-neutral-400">{formatUnixTime(j.startedAt)}</td>
+                      <td className="py-2.5 px-4 whitespace-nowrap text-neutral-400">
+                        {j.finishedAt && j.startedAt ? (
+                          <>
+                            {formatUnixTime(j.finishedAt)}
+                            <span className="ml-1 text-neutral-500">({formatElapsed(j.finishedAt - j.startedAt)})</span>
+                          </>
+                        ) : j.state === "RUNNING" ? (
+                          <span title={`Last progress ${formatUnixTime(j.updatedAt)}`}>Running</span>
+                        ) : (
+                          "—"
+                        )}
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono text-neutral-300">{j.filesSeen.toLocaleString()}</td>
                       <td className="py-2.5 px-4 text-right font-mono text-neutral-300">{j.filesHashed.toLocaleString()}</td>

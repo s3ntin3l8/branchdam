@@ -420,7 +420,7 @@ describe("StorageHealthPage", () => {
   // storage-location overrides -- see AGENTS.md's storageLocation.<rootPath>.*
   // invariant -- so this page's own restart button is the only affordance
   // an operator gets after a location-only edit. It must therefore be
-  // gated on overriddenFields, not always shown.
+  // gated on the server's pendingRestart, not always shown.
   it("shows a restart-to-apply button only when a location has a pending override", async () => {
     vi.mocked(api.getStorageHealth).mockResolvedValue({
       locations: [baseLocation({ overriddenFields: [] })],
@@ -438,7 +438,7 @@ describe("StorageHealthPage", () => {
     vi.mocked(api.postRestart).mockClear();
     vi.mocked(api.postRestart).mockResolvedValue({ ok: true });
     vi.mocked(api.getStorageHealth).mockResolvedValue({
-      locations: [baseLocation({ overriddenFields: ["watch"] })],
+      locations: [baseLocation({ overriddenFields: ["watch"], pendingRestart: true })],
       queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
     });
 
@@ -613,5 +613,32 @@ describe("StorageHealthPage", () => {
     expect(screen.getByText("READ-ONLY")).toBeInTheDocument();
     expect(screen.getByText(/Virtual staging namespace for offline agent ingest/)).toBeInTheDocument();
     expect(screen.getByText("42")).toBeInTheDocument();
+  });
+});
+
+describe("StorageHealthPage: pending restart", () => {
+  it("clears the PENDING RESTART chip once the restart has applied the override", async () => {
+    // After a restart the override is still there (overriddenFields), but
+    // nothing is pending any more: no chip, no restart button.
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ overriddenFields: ["sweep"], pendingRestart: false })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    renderWithClient(<StorageHealthPage />);
+    await waitFor(() => expect(screen.getByText("Scratch Mount")).toBeInTheDocument());
+
+    expect(screen.queryByText("PENDING RESTART")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
+  });
+
+  it("shows the chip and restart button while an edit awaits a restart", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ overriddenFields: ["sweep"], pendingRestart: true })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    renderWithClient(<StorageHealthPage />);
+
+    expect(await screen.findByText("PENDING RESTART")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restart to apply" })).toBeInTheDocument();
   });
 });
