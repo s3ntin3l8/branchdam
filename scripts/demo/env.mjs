@@ -15,7 +15,8 @@ import path from "node:path";
  */
 
 const PASSTHROUGH = ["PATH", "LANG", "LC_ALL", "TERM", "TZ"];
-const SECRET_KEY = /(SECRET|PASSWORD|_KEY|_TOKEN|_PAT)$|ENCRYPTION/;
+// Plural forms too (`*_KEYS`, `*_TOKENS`); MULLION_* is refused by prefix below.
+const SECRET_KEY = /(SECRETS?|PASSWORDS?|_KEYS?|_TOKENS?|_PATS?)$|ENCRYPTION/;
 const PATH_KEY = /(_DIR|_PATH|_FILE|_CONFIG)$/;
 const PATH_ALLOW = new Set(["PLAYWRIGHT_BROWSERS_PATH", "SCREENSHOTS_OUT_DIR"]);
 /** The default port of a real local branchDAM; a demo must never take it. */
@@ -61,6 +62,9 @@ export function demoConfigProblems(cfg, demoDir) {
   const [host, port] = String(cfg.listenAddr ?? "").split(":");
   if (host !== "127.0.0.1") problems.push("listenAddr must bind 127.0.0.1");
   if (RESERVED_PORTS.has(port)) problems.push(`port ${port} is reserved for a real instance`);
+  // DEMO_PORT comes from the developer's shell: only an unprivileged port is accepted.
+  if (!/^\d+$/.test(port ?? "") || Number(port) < 1024 || Number(port) > 65535)
+    problems.push(`port ${port} must be a number from 1024 to 65535`);
   mustBeInside("database.path", cfg.database?.path);
   mustBeInside("thumbnails.cacheDir", cfg.thumbnails?.cacheDir);
   mustBeInside("immich.exportPath", cfg.immich?.exportPath);

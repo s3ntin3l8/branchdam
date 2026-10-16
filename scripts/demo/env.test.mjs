@@ -53,6 +53,7 @@ describe("refuses a poisoned environment", () => {
     "a secret key": { BRANCHDAM_SECRET_KEY: "k" }, // pragma: allowlist secret
     "a bootstrap token": { ADMIN_BOOTSTRAP_PAT: "bdam_pat_x" }, // pragma: allowlist secret
     "Mullion session variables": { MULLION_HOOK_TOKEN: "t" }, // pragma: allowlist secret
+    "a plural key list": { IMMICH_API_KEYS: "k1,k2" }, // pragma: allowlist secret
     "HOME outside": { HOME: "/home/me" },
   }))
     it(name, () => assert.ok(demoEnvProblems({ ...safeEnv(), ...vars }, demoDir).length > 0));
@@ -66,6 +67,8 @@ describe("refuses an unsafe config", () => {
     "metadata write-back": (c) => (c.metadata.autoInherit = true),
     "binding all interfaces": (c) => (c.listenAddr = ":3975"),
     "the default port": (c) => (c.listenAddr = "127.0.0.1:8080"),
+    "a privileged port": (c) => (c.listenAddr = "127.0.0.1:22"),
+    "a non-numeric port": (c) => (c.listenAddr = "127.0.0.1:x"),
     "local auth": (c) => (c.auth.mode = "local"),
   };
   for (const [name, poison] of Object.entries(cases))

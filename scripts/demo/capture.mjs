@@ -33,7 +33,13 @@ const README_DIR = path.join(ROOT, "docs/screenshots");
 /** The richest version graph in the dataset: RAW, camera JPEG, graded export, EDL, proxy, review links. */
 const HERO_FILE = "DSC01101.ARW";
 
+/**
+ * The only writer of the `branchdam.theme` key in a capture. `colorScheme` and
+ * the stored theme must agree, so only an explicit dark or light is accepted
+ * (no "system", which would let the OS emulation decide).
+ */
 async function newContext(browser, theme, options) {
+  if (theme !== "dark" && theme !== "light") throw new Error(`capture theme must be dark or light, got ${theme}`);
   const context = await browser.newContext({ colorScheme: theme, extraHTTPHeaders: DEMO_HEADERS, ...options });
   // useTheme.ts reads a JSON string from this key before first paint.
   await context.addInitScript(

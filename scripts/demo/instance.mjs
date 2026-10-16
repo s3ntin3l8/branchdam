@@ -105,7 +105,8 @@ function buildServer(binary) {
 export async function startDemo({ keep = false, quiet = false } = {}) {
   await assertPortsFree([DEMO_PORT]);
   // A fixed path, so asset paths in captures read cleanly and identically on
-  // every run. Created exclusively: a second demo (or a leftover) is refused.
+  // every run. Created exclusively: mkdir(2) is atomic, so of two demos started
+  // at once exactly one gets EEXIST, and a leftover is refused too.
   const demoDir = path.join(tmpdir(), "branchdam-demo");
   try {
     mkdirSync(demoDir);
