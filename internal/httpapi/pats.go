@@ -335,12 +335,18 @@ func (s *Server) resolveUserIDFromPrincipal(ctx context.Context, p auth.Principa
 // if scopes was an empty slice, which the mint caller can guard
 // against -- but be defensive anyway).
 func decodeScopesFromJSON(s string) ([]string, error) {
+	// Never nil: patDTO.Scopes is a non-optional string[] on the wire,
+	// and an empty or "null" scopes_json (a hand-inserted row) must not
+	// put "scopes": null in front of the SPA's scopes.join().
+	scopes := []string{}
 	if s == "" {
-		return nil, nil
+		return scopes, nil
 	}
-	var scopes []string
 	if err := json.Unmarshal([]byte(s), &scopes); err != nil {
-		return nil, err
+		return []string{}, err
+	}
+	if scopes == nil {
+		scopes = []string{}
 	}
 	return scopes, nil
 }
