@@ -49,9 +49,11 @@ var (
 	// its file today may well have it by the next drain pass -- the
 	// workstation agent is still mid-copy. Left out of ProcessPending's
 	// isFatal set on purpose, so it goes through the normal retry/backoff
-	// path (maxRetries) instead of failing permanently on the first
-	// attempt; only marked FAILED once retries are exhausted with the
+	// path (RetryDelay, maxRetries) instead of failing permanently on the
+	// first attempt; only marked FAILED once retries are exhausted with the
 	// bytes still absent. Flagged by an independent review pass on #178.
+	// The exponential backoff is what lets it outlast a multi-minute copy:
+	// retried back to back, its attempts were spent within seconds.
 	ErrArchiveFileNotYetPresent = errors.New("agent: rebase target resolves to Tier 3 but the file does not exist there yet")
 
 	// ErrVirtualPathNotVirtual is fatal: the agent sent a filePath that
@@ -223,8 +225,37 @@ type RebaseResponse struct {
 	Status            string `json:"status"` // "REBASED" or "CREATED"
 }
 
-// DefaultMaxRetries is the default poison-pill retry ceiling before an event is marked FAILED.
-const DefaultMaxRetries = 3
+// Retry policy for transiently failing events. A retryable failure defers
+// the row (event_queue.next_attempt_at) by RetryDelay(attempts) instead of
+// retrying it on the very next drain pass, so a condition that clears in
+// minutes -- ErrArchiveFileNotYetPresent while the agent is still copying a
+// large file into the archive -- no longer exhausts the retry budget in
+// seconds. With these defaults an event is retried for roughly ten hours
+// (5s, 10s, 20s, ... capped at 1h) before it is marked FAILED.
+const (
+	// DefaultMaxRetries is the total number of attempts before a
+	// retryable event is marked FAILED.
+	DefaultMaxRetries = 20
+	// DefaultRetryBaseDelay is the deferral after the first failed attempt;
+	// each further failure doubles it.
+	DefaultRetryBaseDelay = 5 * time.Second
+	// DefaultRetryMaxDelay caps a single deferral.
+	DefaultRetryMaxDelay = time.Hour
+)
+
+// RetryDelay returns how long to defer an event after its attempts-th
+// failed attempt (1-based): DefaultRetryBaseDelay doubled per prior
+// failure, capped at DefaultRetryMaxDelay.
+func RetryDelay(attempts int) time.Duration {
+	d := DefaultRetryBaseDelay
+	for i := 1; i < attempts; i++ {
+		d *= 2
+		if d >= DefaultRetryMaxDelay {
+			return DefaultRetryMaxDelay
+		}
+	}
+	return d
+}
 
 // DrainStats tracks batch processing execution metrics.
 type DrainStats struct {

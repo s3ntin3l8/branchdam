@@ -2096,6 +2096,31 @@ type AgentRebaseOutput struct {
 	}
 }
 
+// agentContentConflictError is the 409 POST /api/v1/agent/rebase returns
+// when an unknown nodeUuid would be inserted with a fullHash a live node
+// already holds (ux_media_nodes_live_full_hash). It is the agent API's
+// apierr envelope (code HASH_CONFLICT) plus the existing node's UUID as an
+// extension field, so the device can adopt it instead of retrying an insert
+// that can never succeed.
+type agentContentConflictError struct {
+	apierr.Problem
+	ExistingNodeUUID string `json:"existingNodeUuid"`
+}
+
+func newAgentContentConflict(existingUUID string) error {
+	return &agentContentConflictError{
+		Problem: *apierr.New(http.StatusConflict, apierr.CodeHashConflict,
+			fmt.Sprintf("content already exists as node %s", existingUUID)),
+		ExistingNodeUUID: existingUUID,
+	}
+}
+
+// isLiveFullHashConflict reports whether err is a violation of
+// ux_media_nodes_live_full_hash (SQLite names the indexed column).
+func isLiveFullHashConflict(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: media_nodes.full_hash")
+}
+
 func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
@@ -2136,7 +2161,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		}
 		exists, err := s.guard.Exists(in.Body.TargetPath)
 		if err != nil {
-			return nil, apierr.New(http.StatusBadRequest, apierr.CodePathOutsideStorage, fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
+			// A failed stat is a server-side fault, not a bad path: code it
+			// as retryable so the agent doesn't give up on the rebase.
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
 		}
 		if !exists {
 			return nil, apierr.New(http.StatusBadRequest, apierr.CodeArchiveFileNotPresent, fmt.Sprintf("rebase to read-only tier %s refused for path %q: no file exists there yet", loc.Tier, in.Body.TargetPath))
@@ -2157,9 +2184,21 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	}
 
 	var retiredNode, notOwner, hashConflict bool
+	var contentConflictUUID string
 	out := &AgentRebaseOutput{}
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		existing, err := q.GetMediaNodeByUUID(ctx, in.Body.NodeUUID)
+		existing, aliased, err := agent.LookupNodeByUUID(ctx, q, p.Name, in.Body.NodeUUID)
+		if err == nil && aliased {
+			// This device's EVENT_NODE_CREATED for nodeUuid was
+			// content-deduplicated onto an existing node: the server
+			// already holds these bytes under that node, which is not
+			// the device's to re-point. Acknowledge with the canonical
+			// node's identity and change nothing.
+			out.Body.ID = existing.ID
+			out.Body.NodeUUID = existing.NodeUuid
+			out.Body.Status = "ALIASED"
+			return nil
+		}
 		if err == nil {
 			// An ARCHIVED node is a superseded version. RebaseNodePathByUUID
 			// sets lifecycle_state='ACTIVE' unconditionally with no
@@ -2238,6 +2277,16 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		indexingStatus := "INDEXED_SHALLOW"
 		var nullFullHash *string
 		if in.Body.FullHash != nil && *in.Body.FullHash != "" {
+			// A live node already holding these bytes would make the
+			// insert below fail on ux_media_nodes_live_full_hash -- that
+			// used to surface as a 500 on every retry. Answer 409 with
+			// the existing node's UUID instead.
+			if dup, dupErr := q.GetMediaNodeByFullHash(ctx, in.Body.FullHash); dupErr == nil {
+				contentConflictUUID = dup.NodeUuid
+				return nil
+			} else if !errors.Is(dupErr, sql.ErrNoRows) {
+				return dupErr
+			}
 			nullFullHash = in.Body.FullHash
 			indexingStatus = "INDEXED_FULL"
 		}
@@ -2270,6 +2319,13 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			UploadedByUserID:   sql.NullInt64{Int64: rebaseUserID, Valid: rebaseUserID != 0},
 		})
 		if err != nil {
+			// Lost a race with a concurrent insert of the same content.
+			if isLiveFullHashConflict(err) {
+				if dup, dupErr := q.GetMediaNodeByFullHash(ctx, in.Body.FullHash); dupErr == nil {
+					contentConflictUUID = dup.NodeUuid
+					return nil
+				}
+			}
 			return err
 		}
 		if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: in.Body.NodeUUID, AgentID: p.Name}); err != nil {
@@ -2296,6 +2352,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	if hashConflict {
 		return nil, apierr.New(http.StatusConflict, apierr.CodeHashConflict, "node already has a different fullHash")
 	}
+	if contentConflictUUID != "" {
+		return nil, newAgentContentConflict(contentConflictUUID)
+	}
 
 	return out, nil
 }
@@ -2319,6 +2378,11 @@ type AgentNodeStatusEntry struct {
 	// error, just nothing to report (e.g. the node was never scanned/synced,
 	// or the UUID is stale).
 	Found bool `json:"found"`
+	// CanonicalNodeUUID is set when NodeUUID itself has no media_nodes row
+	// but was recorded as an alias of an existing node by the calling
+	// device (its EVENT_NODE_CREATED was content-deduplicated). The other
+	// fields then describe that canonical node.
+	CanonicalNodeUUID string `json:"canonicalNodeUuid,omitempty"`
 	// LifecycleState/Tier are only meaningful when Found is true.
 	LifecycleState string `json:"lifecycleState,omitempty"`
 	Tier           string `json:"tier,omitempty"`
@@ -2351,7 +2415,8 @@ type AgentNodeStatusOutput struct {
 // read, which is what makes it safe to expose to the agent chain in the
 // first place.
 func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusInput) (*AgentNodeStatusOutput, error) {
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
+	p, ok := auth.From(ctx)
+	if !ok || p.Kind != auth.KindMachine {
 		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 	if len(in.Body.NodeUUIDs) == 0 {
@@ -2381,34 +2446,69 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 		fullHash       string
 	}
 	byUUID := make(map[string]nodeInfo, len(rows))
-	for _, row := range rows {
-		var tier string
-		if row.Tier.Valid {
-			tier = row.Tier.String
+	addRows := func(rows []sqlcgen.ListMediaNodeStatusesByUUIDsRow) {
+		for _, row := range rows {
+			var tier string
+			if row.Tier.Valid {
+				tier = row.Tier.String
+			}
+			var fullHash string
+			if row.FullHash != nil {
+				fullHash = *row.FullHash
+			}
+			byUUID[row.NodeUuid] = nodeInfo{
+				lifecycleState: row.LifecycleState,
+				tier:           tier,
+				// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
+				// exactly rather than additionally validating hex charset (the schema's own
+				// full_hash CHECK also enforces length only, not charset) -- this endpoint's
+				// contract is to answer identically to that predicate, not a stricter one,
+				// so a caller can't observe a divergence between the two. Low residual risk:
+				// hashing.FullHash (the only writer) always emits lowercase hex.
+				verified: row.FullHash != nil && len(*row.FullHash) == 64,
+				fullHash: fullHash,
+			}
 		}
-		var fullHash string
-		if row.FullHash != nil {
-			fullHash = *row.FullHash
+	}
+	addRows(rows)
+
+	// A UUID with no row of its own may be one of this device's aliases: its
+	// EVENT_NODE_CREATED was content-deduplicated onto an existing node.
+	// Report that node's status under the device's UUID (only the device's
+	// own aliases are followed, the same rule as agent.LookupNodeByUUID).
+	canonicalOf, err := s.agentNodeAliases(ctx, p.Name, in.Body.NodeUUIDs, func(uuid string) bool {
+		_, ok := byUUID[uuid]
+		return ok
+	})
+	if err != nil {
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "node status alias query failed", err)
+	}
+	if len(canonicalOf) > 0 {
+		canonical := make([]string, 0, len(canonicalOf))
+		for _, c := range canonicalOf {
+			canonical = append(canonical, c)
 		}
-		byUUID[row.NodeUuid] = nodeInfo{
-			lifecycleState: row.LifecycleState,
-			tier:           tier,
-			// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
-			// exactly rather than additionally validating hex charset (the schema's own
-			// full_hash CHECK also enforces length only, not charset) -- this endpoint's
-			// contract is to answer identically to that predicate, not a stricter one,
-			// so a caller can't observe a divergence between the two. Low residual risk:
-			// hashing.FullHash (the only writer) always emits lowercase hex.
-			verified: row.FullHash != nil && len(*row.FullHash) == 64,
-			fullHash: fullHash,
+		canonicalJSON, err := json.Marshal(canonical)
+		if err != nil {
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "node status alias query failed", err)
 		}
+		aliasRows, err := s.db.Reader.ListMediaNodeStatusesByUUIDs(ctx, string(canonicalJSON))
+		if err != nil {
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "node status query failed", err)
+		}
+		addRows(aliasRows)
 	}
 
 	out := &AgentNodeStatusOutput{}
 	out.Body.Statuses = make([]AgentNodeStatusEntry, 0, len(in.Body.NodeUUIDs))
 	for _, uuid := range in.Body.NodeUUIDs {
 		entry := AgentNodeStatusEntry{NodeUUID: uuid}
-		if info, ok := byUUID[uuid]; ok {
+		lookup := uuid
+		if c, ok := canonicalOf[uuid]; ok {
+			lookup = c
+			entry.CanonicalNodeUUID = c
+		}
+		if info, ok := byUUID[lookup]; ok {
 			entry.Found = true
 			entry.LifecycleState = info.lifecycleState
 			entry.Tier = info.tier
@@ -2418,6 +2518,36 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 		out.Body.Statuses = append(out.Body.Statuses, entry)
 	}
 
+	return out, nil
+}
+
+// agentNodeAliases maps each of uuids that has no media_nodes row (known
+// reports which do) to the canonical node_uuid that agentID's own alias
+// points at. Aliases recorded by another device are ignored.
+func (s *Server) agentNodeAliases(ctx context.Context, agentID string, uuids []string, known func(string) bool) (map[string]string, error) {
+	var missing []string
+	for _, u := range uuids {
+		if !known(u) {
+			missing = append(missing, u)
+		}
+	}
+	if len(missing) == 0 {
+		return nil, nil
+	}
+	missingJSON, err := json.Marshal(missing)
+	if err != nil {
+		return nil, err
+	}
+	aliases, err := s.db.Reader.ListNodeUUIDAliases(ctx, string(missingJSON))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(aliases))
+	for _, a := range aliases {
+		if a.AgentID == agentID {
+			out[a.AliasUuid] = a.NodeUuid
+		}
+	}
 	return out, nil
 }
 

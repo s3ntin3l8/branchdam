@@ -79,16 +79,17 @@ type DevicePairingKey struct {
 }
 
 type EventQueue struct {
-	ID          int64
-	EventUuid   string
-	AgentID     string
-	EventType   string
-	PayloadJson string
-	Status      string
-	ErrorLog    sql.NullString
-	CreatedAt   int64
-	ProcessedAt sql.NullInt64
-	RetryCount  int64
+	ID            int64
+	EventUuid     string
+	AgentID       string
+	EventType     string
+	PayloadJson   string
+	Status        string
+	ErrorLog      sql.NullString
+	CreatedAt     int64
+	ProcessedAt   sql.NullInt64
+	RetryCount    int64
+	NextAttemptAt int64
 }
 
 type LoginAudit struct {
@@ -182,6 +183,13 @@ type NodeMetadatum struct {
 	Source string
 	Key    string
 	Value  string
+}
+
+type NodeUuidAlias struct {
+	AliasUuid string
+	NodeUuid  string
+	AgentID   string
+	CreatedAt int64
 }
 
 type PasswordResetToken struct {

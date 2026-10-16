@@ -10,6 +10,21 @@ import (
 	"database/sql"
 )
 
+const countDueAgentEvents = `-- name: CountDueAgentEvents :one
+SELECT COUNT(*)
+FROM event_queue
+WHERE status = 'PENDING' AND next_attempt_at <= ?1
+`
+
+// PENDING rows ListPendingAgentEvents would claim right now. DrainAll stops
+// once this reaches 0 even if deferred rows remain PENDING.
+func (q *Queries) CountDueAgentEvents(ctx context.Context, nowUnix int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countDueAgentEvents, nowUnix)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countPendingAgentEvents = `-- name: CountPendingAgentEvents :one
 SELECT COUNT(*)
 FROM event_queue
@@ -77,22 +92,23 @@ func (q *Queries) EnqueueAgentEvent(ctx context.Context, arg EnqueueAgentEventPa
 }
 
 const getAgentEventByUUID = `-- name: GetAgentEventByUUID :one
-SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
+SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at, next_attempt_at
 FROM event_queue
 WHERE event_uuid = ?1
 `
 
 type GetAgentEventByUUIDRow struct {
-	ID          int64
-	EventUuid   string
-	AgentID     string
-	EventType   string
-	PayloadJson string
-	Status      string
-	RetryCount  int64
-	ErrorLog    sql.NullString
-	CreatedAt   int64
-	ProcessedAt sql.NullInt64
+	ID            int64
+	EventUuid     string
+	AgentID       string
+	EventType     string
+	PayloadJson   string
+	Status        string
+	RetryCount    int64
+	ErrorLog      sql.NullString
+	CreatedAt     int64
+	ProcessedAt   sql.NullInt64
+	NextAttemptAt int64
 }
 
 func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error) {
@@ -109,6 +125,7 @@ func (q *Queries) GetAgentEventByUUID(ctx context.Context, eventUuid string) (Ge
 		&i.ErrorLog,
 		&i.CreatedAt,
 		&i.ProcessedAt,
+		&i.NextAttemptAt,
 	)
 	return i, err
 }
@@ -194,29 +211,18 @@ func (q *Queries) GetLatestProcessedAgentEventByAgent(ctx context.Context, agent
 	return i, err
 }
 
-const incrementAgentEventRetry = `-- name: IncrementAgentEventRetry :exec
-UPDATE event_queue
-SET retry_count = retry_count + 1, error_log = ?2
-WHERE id = ?1
-`
-
-type IncrementAgentEventRetryParams struct {
-	ID       int64
-	ErrorLog sql.NullString
-}
-
-func (q *Queries) IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error {
-	_, err := q.db.ExecContext(ctx, incrementAgentEventRetry, arg.ID, arg.ErrorLog)
-	return err
-}
-
 const listPendingAgentEvents = `-- name: ListPendingAgentEvents :many
 SELECT id, event_uuid, agent_id, event_type, payload_json, status, retry_count, error_log, created_at, processed_at
 FROM event_queue
-WHERE status = 'PENDING'
+WHERE status = 'PENDING' AND next_attempt_at <= ?1
 ORDER BY created_at ASC, id ASC
-LIMIT ?1
+LIMIT ?2
 `
+
+type ListPendingAgentEventsParams struct {
+	NowUnix    int64
+	BatchLimit int64
+}
 
 type ListPendingAgentEventsRow struct {
 	ID          int64
@@ -231,8 +237,12 @@ type ListPendingAgentEventsRow struct {
 	ProcessedAt sql.NullInt64
 }
 
-func (q *Queries) ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listPendingAgentEvents, limit)
+// Claims only rows whose retry backoff has elapsed (next_attempt_at <= now,
+// unix seconds from the drainer's clock). A row deferred by
+// ScheduleAgentEventRetry stays PENDING but is skipped until then, so it
+// neither blocks the queue head nor burns its retry budget in seconds.
+func (q *Queries) ListPendingAgentEvents(ctx context.Context, arg ListPendingAgentEventsParams) ([]ListPendingAgentEventsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingAgentEvents, arg.NowUnix, arg.BatchLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -289,5 +299,24 @@ WHERE id = ?1
 
 func (q *Queries) MarkAgentEventProcessed(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, markAgentEventProcessed, id)
+	return err
+}
+
+const scheduleAgentEventRetry = `-- name: ScheduleAgentEventRetry :exec
+UPDATE event_queue
+SET retry_count = retry_count + 1, error_log = ?2, next_attempt_at = ?3
+WHERE id = ?1
+`
+
+type ScheduleAgentEventRetryParams struct {
+	ID            int64
+	ErrorLog      sql.NullString
+	NextAttemptAt int64
+}
+
+// Records one more failed attempt and defers the row until next_attempt_at
+// (unix seconds), computed by the drainer's exponential backoff.
+func (q *Queries) ScheduleAgentEventRetry(ctx context.Context, arg ScheduleAgentEventRetryParams) error {
+	_, err := q.db.ExecContext(ctx, scheduleAgentEventRetry, arg.ID, arg.ErrorLog, arg.NextAttemptAt)
 	return err
 }
