@@ -125,11 +125,25 @@ A Tier-1 node is eligible only if **all** of:
 - it's `ACTIVE` on a `prunable: true` (Tier-1-only) storage location,
 - its `mtime_unix` is older than that location's `cacheTtlHours`,
 - it has a *live* ancestor (`ACTIVE` or `HIDDEN`) on a `TIER3_MASTER_ARCHIVE` location with a
-  verified, non-`NULL`, 64-character `full_hash`, reached only through `CONFIRMED` or
+  verified, non-`NULL`, 64-character `full_hash` that the server computed itself (a scan, an
+  upload, or the background re-hash of a hash a paired device asserted -- see below), reached only through `CONFIRMED` or
   `AUTO_ACCEPTED` cache edges (`PROXY_OF`, `DERIVED_FROM`, `DUPLICATE_OF`) whose every
   intermediate node is also `ACTIVE` or `HIDDEN`,
 - it is not a project file (`.drp`, `.fcpxml`, `.edl`, `.prproj`, `.dam.json`) or an `.xmp`
   sidecar.
+
+**Agent-asserted hashes (#505).** A workstation or mobile agent that copies a file onto the
+archive itself reports its `fullHash` in an event; the server records that hash as *asserted*
+(`full_hash_provenance.source = 'AGENT'`) and it authorises no purge -- here or through the agent's
+own `node-status` -- until the background re-hash worker (`internal/rehash`) has read the file
+through the Guard's read path and matched it. The worker runs continuously, one file at a time in
+batches of 16 with a short pause between batches, and idles once nothing is left; a file it cannot
+read is retried after an hour. A **mismatch** is logged at `WARN` (`rehash: agent-asserted
+full_hash does not match the file`, with the node UUID, path and both hashes) and recorded as
+`rehash_state = 'MISMATCH'` with the computed value in `rehash_computed`; the stored `full_hash` is
+left as it is for you to investigate, and it never authorises pruning. Right after upgrading, every
+master a paired device created starts out asserted, so pruning of their caches pauses until the
+worker has re-read them.
 
 `PROJECT_SIDECAR` and `FINAL_EXPORT` edges never make a node prunable: a project file or sidecar
 is the *child* of the media it references, and an export is finished work, so neither can be

@@ -99,6 +99,16 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 					}); err != nil {
 						return err
 					}
+					if err := db.RecordFullHashSource(ctx, q, existing.ID, &r.FullHash, db.HashSourceServer); err != nil {
+						return fmt.Errorf("record full_hash provenance: %w", err)
+					}
+				}
+			} else if r.FullHash != "" && *existing.FullHash == r.FullHash {
+				// This pass recomputed the stored hash from the bytes and got
+				// the same value, so it is server-computed now even if a
+				// paired device asserted it first (#505).
+				if err := db.RecordFullHashSource(ctx, q, existing.ID, &r.FullHash, db.HashSourceServer); err != nil {
+					return fmt.Errorf("record full_hash provenance: %w", err)
 				}
 			}
 			// A node seen unchanged still backfills metadata: one indexed
@@ -225,6 +235,9 @@ func commitNoLiveNode(ctx context.Context, q *sqlcgen.Queries, locationID int64,
 				}); err != nil {
 					return err
 				}
+				if err := db.RecordFullHashSource(ctx, q, missing.ID, &r.FullHash, db.HashSourceServer); err != nil {
+					return fmt.Errorf("record full_hash provenance: %w", err)
+				}
 			} else if missing.FullHash != nil && *missing.FullHash != "" && missing.IndexingStatus != "INDEXED_FULL" {
 				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 					ID:       missing.ID,
@@ -350,6 +363,9 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 	node, err := q.InsertMediaNode(ctx, params)
 	if err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("insert media node: %w", err)
+	}
+	if err := db.RecordFullHashSource(ctx, q, node.ID, fullHash, db.HashSourceServer); err != nil {
+		return sqlcgen.MediaNode{}, fmt.Errorf("record full_hash provenance: %w", err)
 	}
 	if err := persistAllMetadata(ctx, q, node.ID, r, log); err != nil {
 		return sqlcgen.MediaNode{}, err

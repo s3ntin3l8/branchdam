@@ -330,6 +330,7 @@ type Querier interface {
 	// Returns just the qr_svg column for the ActiveQRSVG hot path. Skips
 	// the row-wide scan if all the caller wants is the bytes.
 	GetDevicePairingQRSVG(ctx context.Context, id int64) ([]byte, error)
+	GetFullHashProvenance(ctx context.Context, nodeID int64) (FullHashProvenance, error)
 	// Retrieves the most recent media node at a given path, including archived rows.
 	GetLatestNodeByPath(ctx context.Context, filePath string) (MediaNode, error)
 	GetLatestProcessedAgentEventByAgent(ctx context.Context, agentID string) (GetLatestProcessedAgentEventByAgentRow, error)
@@ -632,7 +633,10 @@ type Querier interface {
 	// pagination on /api/v1/edges/audit doesn't apply here.
 	ListLoginAudit(ctx context.Context, arg ListLoginAuditParams) ([]ListLoginAuditRow, error)
 	// Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
-	// Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
+	// Returns node_uuid, lifecycle_state, full_hash, storage location tier, and
+	// whether full_hash is server-computed (full_hash_provenance vouches for the
+	// current value with source = 'SERVER') -- the same predicate
+	// ListPrunableNodes applies to a Tier-3 ancestor (#505).
 	ListMediaNodeStatusesByUUIDs(ctx context.Context, nodeUuids string) ([]ListMediaNodeStatusesByUUIDsRow, error)
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
@@ -704,6 +708,10 @@ type Querier interface {
 	// #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
 	// (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
 	// TIER3_MASTER_ARCHIVE location has a verified (non-NULL, 64-hex) full_hash.
+	// "Verified" means server-computed (#505): full_hash_provenance must vouch
+	// for the ancestor's current full_hash with source = 'SERVER'. A hash a
+	// paired device only asserted authorises nothing until internal/rehash has
+	// re-read the file and matched it.
 	// "live" matches v_media_edges_resolved's own parent_alive definition --
 	// ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 	// vanished (MISSING) or archived Tier-3 master can never authorize a purge.
@@ -742,6 +750,16 @@ type Querier interface {
 	// written by internal/hashing.FullHash, which always emits lowercase hex.
 	ListPrunableNodes(ctx context.Context, arg ListPrunableNodesParams) ([]ListPrunableNodesRow, error)
 	ListRecentScanJobs(ctx context.Context, limit int64) ([]ScanJob, error)
+	// internal/rehash's claim query: up to batch_limit live Tier-3 nodes, in
+	// node id order after after_id, whose current full_hash is only
+	// agent-asserted and has not been re-hashed yet -- or whose last attempt
+	// failed to read the file (ERROR) before retry_before. A MISMATCH is
+	// terminal for that asserted value: re-reading the same bytes would only
+	// repeat it. A row whose full_hash no longer equals the node's vouches for
+	// nothing and is skipped. Driven from the AGENT partial index
+	// (ix_full_hash_provenance_agent) so a fully verified archive costs an
+	// empty index range per pass, not a media_nodes scan.
+	ListRehashCandidates(ctx context.Context, arg ListRehashCandidatesParams) ([]ListRehashCandidatesRow, error)
 	// Backs GET /api/v1/assets/{id}/sync-status: every remote_sync_state row for
 	// a node (both remotes), ordered by remote for a stable DTO.
 	ListRemoteSyncStateByNode(ctx context.Context, nodeID int64) ([]RemoteSyncState, error)
@@ -767,7 +785,10 @@ type Querier interface {
 	// stable across inserts (new users go to the END, not the middle).
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
 	// Walks ancestor lineage target->source for node ?1 and returns every live
-	// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash.
+	// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash --
+	// server-computed, exactly ListPrunableNodes' full_hash_provenance check
+	// (#505), so an asserted hash can't authorise the purge at Execute time
+	// either.
 	// The walk is ListPrunableNodes' exactly: only CONFIRMED and AUTO_ACCEPTED
 	// edges (NEEDS_REVIEW/REJECTED never authorise a purge), only the cache
 	// relationships PROXY_OF/DERIVED_FROM/DUPLICATE_OF (never PROJECT_SIDECAR or
@@ -817,6 +838,11 @@ type Querier interface {
 	// RowsAffected=0, which the caller treats as "code was already
 	// consumed".
 	MarkRecoveryCodeUsed(ctx context.Context, arg MarkRecoveryCodeUsedParams) (int64, error)
+	// The server re-read node ?1's bytes and they hash to the asserted value
+	// ?2: from now on that value is server-computed. Conditional on the row
+	// still vouching for ?2, so a hash that changed while the file was being
+	// read is never upgraded.
+	MarkRehashMatched(ctx context.Context, arg MarkRehashMatchedParams) (int64, error)
 	// Terminal failure: records the error, the attempt time, and increments
 	// retry_count -- what ResetRemoteSyncStateFailed's bound is measured against.
 	MarkRemoteSyncStateFailed(ctx context.Context, arg MarkRemoteSyncStateFailedParams) error
@@ -926,6 +952,18 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
+	// Records who computed node ?1's full_hash ?2: 'SERVER' (scanner, upload,
+	// or a scanner pass that recomputed the same value) or 'AGENT' (a paired
+	// device asserted it in an event or a rebase). Called next to every write
+	// of a new full_hash value; see 00041_full_hash_provenance.sql.
+	//
+	// Never downgrades: recording 'AGENT' for the hash a 'SERVER' row already
+	// vouches for keeps 'SERVER', since the server computed those exact bytes'
+	// hash itself. A new hash value replaces the row outright and resets the
+	// re-hash bookkeeping, which only ever described the old value. Recording
+	// 'SERVER' also clears it: the server has just computed this value from the
+	// bytes, which supersedes an earlier re-hash outcome.
+	RecordFullHashProvenance(ctx context.Context, arg RecordFullHashProvenanceParams) error
 	// node_trash_times: when each node was trashed (migration 00040). The
 	// trash purge worker ages .trash/ copies by this value instead of by file
 	// mtime, which a failed os.Chtimes in pipeline.moveToTrash left at the
@@ -935,6 +973,11 @@ type Querier interface {
 	// cascades over. Upsert: a node restored and trashed again restarts its
 	// retention window.
 	RecordNodeTrashed(ctx context.Context, nodeID int64) error
+	// A re-hash of node ?1's asserted value ?2 did not match: state ?3 is
+	// MISMATCH (the bytes hash to ?4 instead) or ERROR (the file could not be
+	// read; ?4 is NULL). The row stays 'AGENT', so the value keeps authorising
+	// nothing. Same ?2 condition as MarkRehashMatched.
+	RecordRehashFailure(ctx context.Context, arg RecordRehashFailureParams) (int64, error)
 	// pipeline.TrashAsset records each export it cascade-trashes with its master
 	// (keepExports=false), in the same transaction as the export's
 	// MarkNodeTrashed.

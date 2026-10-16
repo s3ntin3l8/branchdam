@@ -5697,7 +5697,7 @@ func TestAgentNodeStatus_ReportsLifecycleAndVerification(t *testing.T) {
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		// 1. Live, on the Tier-3 archive location, hash verified -> the
 		// exact predicate ListPrunableNodes uses to authorize a purge.
-		if _, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+		verified, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:          verifiedUUID,
 			StorageLocationID: 3, // archive, see serverWithGuard
 			FilePath:          filepath.Join(archive, "verified.mov"),
@@ -5706,7 +5706,12 @@ func TestAgentNodeStatus_ReportsLifecycleAndVerification(t *testing.T) {
 			LifecycleState:    "ACTIVE",
 			GraphStatus:       "UNLINKED",
 			IndexingStatus:    "INDEXED_SHALLOW",
-		}); err != nil {
+		})
+		if err != nil {
+			return err
+		}
+		// Server-computed (#505): only such a hash reports verified.
+		if err := db.RecordFullHashSource(ctx, q, verified.ID, &fullHash, db.HashSourceServer); err != nil {
 			return err
 		}
 
@@ -5728,7 +5733,7 @@ func TestAgentNodeStatus_ReportsLifecycleAndVerification(t *testing.T) {
 		// writing anything shorter than 64 hex chars structurally
 		// impossible -- see AGENTS.md), lifecycle ARCHIVED (superseded) --
 		// must report Found=true, LifecycleState=ARCHIVED, Verified=false.
-		_, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+		_, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid:          archivedLifecycleUUID,
 			StorageLocationID: 3,
 			FilePath:          filepath.Join(archive, "superseded.mov"),
@@ -5808,7 +5813,7 @@ func TestAgentNodeStatus_400NodeBatch_Performance(t *testing.T) {
 		for i := range uuids {
 			uuids[i] = fmt.Sprintf("018f0000-0000-7000-8000-%012d", i+1)
 			fullHash := fmt.Sprintf("%064x", i+1)
-			if _, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			n, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 				NodeUuid:          uuids[i],
 				StorageLocationID: 3, // archive
 				FilePath:          filepath.Join(archive, fmt.Sprintf("node-%04d.mov", i+1)),
@@ -5817,7 +5822,11 @@ func TestAgentNodeStatus_400NodeBatch_Performance(t *testing.T) {
 				LifecycleState:    "ACTIVE",
 				GraphStatus:       "UNLINKED",
 				IndexingStatus:    "INDEXED_SHALLOW",
-			}); err != nil {
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.RecordFullHashSource(ctx, q, n.ID, &fullHash, db.HashSourceServer); err != nil {
 				return err
 			}
 		}

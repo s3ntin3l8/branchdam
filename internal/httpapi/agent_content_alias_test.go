@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -123,6 +124,13 @@ func TestAgentRebase_MobileThenAgentDuplicateRebasesCleanly(t *testing.T) {
 	require.NoError(t, json.Unmarshal(upRec.Body.Bytes(), &up))
 	phoneNode, err := database.Reader.GetMediaNodeByUUID(ctx, up.NodeUUID)
 	require.NoError(t, err)
+	// The server hashed the upload itself. Backdate the row so a re-record
+	// by anything below would be visible.
+	prov, err := database.Reader.GetFullHashProvenance(ctx, phoneNode.ID)
+	require.NoError(t, err)
+	require.Equal(t, db.HashSourceServer, prov.Source)
+	_, err = database.ExecInTx(ctx, `UPDATE full_hash_provenance SET recorded_at = 1000 WHERE node_id = ?`, phoneNode.ID)
+	require.NoError(t, err)
 
 	// 2. The workstation agent ingests the same bytes from the card and
 	// announces them under its own UUID.
@@ -173,6 +181,13 @@ func TestAgentRebase_MobileThenAgentDuplicateRebasesCleanly(t *testing.T) {
 	creator, err := database.Reader.GetNodeCreator(ctx, up.NodeUUID)
 	require.NoError(t, err)
 	assert.Equal(t, aliasTestMobileID, creator)
+	// Neither the content-deduplicated EVENT_NODE_CREATED nor the aliased
+	// rebase (both carrying the workstation's fullHash assertion) touched
+	// the phone node's provenance: its hash is the server's own.
+	prov, err = database.Reader.GetFullHashProvenance(ctx, phoneNode.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.HashSourceServer, prov.Source)
+	assert.Equal(t, int64(1000), prov.RecordedAt)
 
 	// A retry of the same rebase is just as clean (idempotent).
 	rbRec2 := aliasPostJSON(t, h, aliasTestAgentKey, "/api/v1/agent/rebase", map[string]any{
@@ -257,4 +272,9 @@ func TestAgentRebase_UnknownUUIDWithExistingHashIs409(t *testing.T) {
 
 	_, err := database.Reader.GetMediaNodeByUUID(ctx, newUUID)
 	require.Error(t, err, "no node may be created for the conflicting UUID")
+	// Nor may the refused assertion be recorded against the existing node.
+	existing, err := database.Reader.GetMediaNodeByUUID(ctx, existingUUID)
+	require.NoError(t, err)
+	_, err = database.Reader.GetFullHashProvenance(ctx, existing.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
 }

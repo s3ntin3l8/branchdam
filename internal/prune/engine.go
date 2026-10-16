@@ -1,5 +1,7 @@
 // Package prune implements #61's TTL cache pruning engine: purging Tier-1
-// cache files whose Master Node has a verified full_hash on Tier 3.
+// cache files whose Master Node has a verified full_hash on Tier 3 --
+// server-computed per full_hash_provenance, never one a paired device only
+// asserted (#505; see internal/rehash).
 // Execute is the second (and last) real production caller of
 // storage.Guard.Remove.
 package prune

@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/zeebo/blake3"
 
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -540,6 +541,11 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			return insErr
 		}
 		insertedNode = archiveNode
+		// The server hashed these bytes itself while streaming them to
+		// disk, whoever sent them (#505).
+		if err := db.RecordFullHashSource(ctx, q, archiveNode.ID, nullFull, db.HashSourceServer); err != nil {
+			return fmt.Errorf("record full_hash provenance: %w", err)
+		}
 		if params.CreatorAgentID != "" {
 			if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: nodeUUIDStr, AgentID: params.CreatorAgentID}); err != nil {
 				return fmt.Errorf("record node creator: %w", err)

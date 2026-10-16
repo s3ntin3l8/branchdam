@@ -594,8 +594,15 @@ existing node and `storageLocationId`/`filePath` are empty.
 }
 ```
 
-`verified` mirrors `ListPrunableNodes`' own eligibility predicate exactly: `full_hash` non-NULL
-and 64 hex characters (BLAKE3-256). `fullHash` is the node's stored BLAKE3-256 `full_hash`, so a
+`verified` mirrors `ListPrunableNodes`' own eligibility predicate exactly: `full_hash` non-NULL,
+64 hex characters (BLAKE3-256), and **server-computed** (#505). A `fullHash` a device supplied in
+an `EVENT_NODE_CREATED`/`EVENT_PATH_REBASED` event or a `POST /agent/rebase` is only *asserted*:
+`verified` stays `false` for it until the server's background re-hash worker (`internal/rehash`)
+has re-read the file on the Tier-3 archive and matched it, which happens within minutes of the
+node landing there (a hash that does not match never becomes verified). Bytes sent through
+`POST /agent/upload` are hashed by the server while streaming and are verified at once. Clients
+that gate local deletion on `verified` therefore wait a little longer after an event-based ingest;
+nodes created before the upgrade by a paired device re-verify the same way. `fullHash` is the node's stored BLAKE3-256 `full_hash`, so a
 client about to delete its local copy can compare it with the hash it computed itself rather than
 trusting `verified` alone; it is omitted when the node is not found or has no full hash (added
 alongside the existing fields -- older clients simply ignore it). `found: false` is not an error

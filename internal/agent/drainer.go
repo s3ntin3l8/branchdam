@@ -612,6 +612,11 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 	if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: p.NodeUUID, AgentID: ev.AgentID}); err != nil {
 		return 0, fmt.Errorf("record node creator: %w", err)
 	}
+	// The device asserted this hash; it authorises nothing until
+	// internal/rehash re-reads the file (#505).
+	if err := db.RecordFullHashSource(ctx, q, inserted.ID, nullFullHash, db.HashSourceAgent); err != nil {
+		return 0, fmt.Errorf("record full_hash provenance: %w", err)
+	}
 
 	// GPS is deliberately not a promoted media_nodes column (see
 	// docs/schema.md's promoted-column list) -- it lands in node_metadata
@@ -1075,6 +1080,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 			}); err != nil {
 				return 0, err
 			}
+			if err := db.RecordFullHashSource(ctx, q, existing.ID, p.FullHash, db.HashSourceAgent); err != nil {
+				return 0, fmt.Errorf("record full_hash provenance: %w", err)
+			}
 		} else if existing.FullHash != nil && *existing.FullHash != "" && existing.IndexingStatus != "INDEXED_FULL" {
 			if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 				ID:       existing.ID,
@@ -1138,6 +1146,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 	if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: p.NodeUUID, AgentID: ev.AgentID}); err != nil {
 		return 0, fmt.Errorf("record node creator: %w", err)
+	}
+	if err := db.RecordFullHashSource(ctx, q, inserted.ID, nullFullHash, db.HashSourceAgent); err != nil {
+		return 0, fmt.Errorf("record full_hash provenance: %w", err)
 	}
 	return inserted.ID, nil
 }

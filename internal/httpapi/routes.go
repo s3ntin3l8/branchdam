@@ -23,6 +23,7 @@ import (
 	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -2289,6 +2290,11 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 				}); err != nil {
 					return err
 				}
+				// Asserted by the device: authorises nothing until
+				// internal/rehash re-reads the file (#505).
+				if err := db.RecordFullHashSource(ctx, q, existing.ID, in.Body.FullHash, db.HashSourceAgent); err != nil {
+					return err
+				}
 			} else if existing.FullHash != nil && *existing.FullHash != "" && existing.IndexingStatus != "INDEXED_FULL" {
 				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 					ID:       existing.ID,
@@ -2366,6 +2372,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: in.Body.NodeUUID, AgentID: p.Name}); err != nil {
 			return err
 		}
+		if err := db.RecordFullHashSource(ctx, q, newNode.ID, nullFullHash, db.HashSourceAgent); err != nil {
+			return err
+		}
 
 		out.Body.ID = newNode.ID
 		out.Body.NodeUUID = newNode.NodeUuid
@@ -2421,9 +2430,13 @@ type AgentNodeStatusEntry struct {
 	// LifecycleState/Tier are only meaningful when Found is true.
 	LifecycleState string `json:"lifecycleState,omitempty"`
 	Tier           string `json:"tier,omitempty"`
-	// Verified is true only when full_hash is non-NULL and 64 hex characters
-	// (BLAKE3-256) -- the same predicate ListPrunableNodes uses to decide a
-	// Tier-3 ancestor authorizes a purge. False whenever Found is false.
+	// Verified is true only when full_hash is non-NULL, 64 hex characters
+	// (BLAKE3-256) and server-computed: the server hashed the bytes itself
+	// (scan, upload) or re-read the file and matched an agent-asserted
+	// value (internal/rehash). A hash a device only asserted reads false
+	// until then (#505). The same predicate ListPrunableNodes uses to
+	// decide a Tier-3 ancestor authorizes a purge. False whenever Found is
+	// false.
 	Verified bool `json:"verified"`
 	// FullHash is the node's stored BLAKE3-256 full_hash, so a client about
 	// to reclaim its local copy can compare it with the hash it computed
@@ -2494,13 +2507,12 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 			byUUID[row.NodeUuid] = nodeInfo{
 				lifecycleState: row.LifecycleState,
 				tier:           tier,
-				// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
-				// exactly rather than additionally validating hex charset (the schema's own
-				// full_hash CHECK also enforces length only, not charset) -- this endpoint's
-				// contract is to answer identically to that predicate, not a stricter one,
-				// so a caller can't observe a divergence between the two. Low residual risk:
-				// hashing.FullHash (the only writer) always emits lowercase hex.
-				verified: row.FullHash != nil && len(*row.FullHash) == 64,
+				// Deliberately matching ListPrunableNodes' SQL predicate exactly: a
+				// 64-character full_hash (length only, like the schema's own CHECK)
+				// that full_hash_provenance vouches for as server-computed. This
+				// endpoint's contract is to answer identically to that predicate, not
+				// a stricter one, so a caller can't observe a divergence between the two.
+				verified: row.FullHash != nil && len(*row.FullHash) == 64 && row.HashServerVerified != 0,
 				fullHash: fullHash,
 			}
 		}
