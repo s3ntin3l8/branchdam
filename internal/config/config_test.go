@@ -375,3 +375,40 @@ func TestBootstrapPATResolvedVarKept(t *testing.T) {
 		t.Errorf("Admin.BootstrapPAT = %q, want s3cret-value", cfg.Admin.BootstrapPAT)
 	}
 }
+
+// TestLoadAuthMode pins auth.mode validation: the three documented modes
+// and an absent key load, and anything else fails Load with an error that
+// names the bad value and the key. Before this, an unknown mode (a typo,
+// or the wrong case) booted forward-only without a word in the log.
+func TestLoadAuthMode(t *testing.T) {
+	for _, mode := range []string{"", "forward", "local", "both"} {
+		t.Run("valid/"+mode, func(t *testing.T) {
+			body := "listenAddr: \":8080\"\n"
+			if mode != "" {
+				body += "auth:\n  mode: " + mode + "\n"
+			}
+			cfg, err := Load(writeConfig(t, body))
+			if err != nil {
+				t.Fatalf("Load(mode=%q): %v", mode, err)
+			}
+			want := mode
+			if want == "" {
+				want = "forward" // defaultConfig
+			}
+			if cfg.Auth.Mode != want {
+				t.Errorf("Auth.Mode = %q, want %q", cfg.Auth.Mode, want)
+			}
+		})
+	}
+	for _, mode := range []string{"Both", "lcoal", "forward-auth", "none"} {
+		t.Run("invalid/"+mode, func(t *testing.T) {
+			_, err := Load(writeConfig(t, "auth:\n  mode: "+mode+"\n"))
+			if err == nil {
+				t.Fatalf("Load(mode=%q) succeeded; want a validation error", mode)
+			}
+			if !strings.Contains(err.Error(), "auth.mode") || !strings.Contains(err.Error(), mode) {
+				t.Errorf("error %q should name auth.mode and the bad value %q", err, mode)
+			}
+		})
+	}
+}

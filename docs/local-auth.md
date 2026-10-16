@@ -43,7 +43,10 @@ no principal, so reads are refused as well as writes (in `forward` mode
 reads stay open by design: ForwardAuth is the gate).
 
 Empty / unset `auth.mode` is treated as `forward` (the default), so
-existing configs upgrade without modification.
+existing configs upgrade without modification. Any other value —
+including a different case such as `Both` — is a startup error
+(`config validation: auth.mode "Both" is not valid: ...`); it used to
+fall back to `forward` silently.
 
 ## 2. Required env: `BRANCHDAM_SECRET_KEY`
 
@@ -109,7 +112,7 @@ recover; a CLI bootstrap would lock that recovery behind shell access.
 | `Secure`      | `true` when the request reached us over TLS directly, or via `X-Forwarded-Proto: https` from a configured trusted proxy (see `http.trustedProxies` in `docs/configuration.md`); `false` only in plain-HTTP local dev |
 | `SameSite`    | `Lax`                                                   |
 | `Path`        | `/`                                                     |
-| Idle timeout  | `auth.local.idleTimeout`, default `24h`                 |
+| Idle timeout  | `auth.local.idleTimeout`, default `24h`; sliding, refreshed at most once a minute per session |
 | Absolute timeout | `auth.local.absoluteTimeout`, default `720h` (30d)    |
 
 `SameSite=Lax` is the same posture as the rest of the SPA: top-level

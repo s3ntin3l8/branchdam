@@ -509,3 +509,48 @@ func TestScopeSatisfied(t *testing.T) {
 		})
 	}
 }
+
+// TestRequirePAT_PrincipalIsTokenOwner pins the attribution half of the
+// PAT principal: it names the owner (username/email from Lookup), carries
+// the owner's users.id and AuthProviderPAT so internal/users resolves it
+// by id instead of provisioning a phantom user, and keeps a per-token
+// ExternalUID. An owner with no username falls back to "pat:<id>".
+func TestRequirePAT_PrincipalIsTokenOwner(t *testing.T) {
+	plaintext := mintTestToken(t)
+	for _, tc := range []struct {
+		username, wantName string
+	}{
+		{"alice", "alice"},
+		{"", "pat:42"},
+	} {
+		mw := &PATMiddleware{
+			Lookup: func(context.Context, string) (PATLookupResult, error) {
+				return PATLookupResult{UserID: 42, Scopes: []string{"*"}, Username: tc.username, Email: "a@example.com"}, nil
+			},
+			Pepper: patTestPepper,
+		}
+		var got Principal
+		var view LocalUserView
+		mw.RequirePAT(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			got, _ = From(r.Context())
+			view, _ = FromUser(r.Context())
+		})).ServeHTTP(httptest.NewRecorder(), func() *http.Request {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+			req.Header.Set("Authorization", "Bearer "+plaintext)
+			return req
+		}())
+
+		if got.UserID != 42 || got.AuthProvider != AuthProviderPAT {
+			t.Errorf("principal (UserID, AuthProvider) = (%d, %q), want (42, %q)", got.UserID, got.AuthProvider, AuthProviderPAT)
+		}
+		if got.Name != tc.wantName || got.Email != "a@example.com" {
+			t.Errorf("principal (Name, Email) = (%q, %q), want (%q, a@example.com)", got.Name, got.Email, tc.wantName)
+		}
+		if want := "pat:" + HashPrefix(hashTestToken(plaintext)); got.ExternalUID != want {
+			t.Errorf("ExternalUID = %q, want %q", got.ExternalUID, want)
+		}
+		if view.UserID != 42 {
+			t.Errorf("LocalUserView.UserID = %d, want 42", view.UserID)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,6 +30,23 @@ func validateStorageLocations(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+// validAuthModes lists every accepted auth.mode value. Mirrors
+// internal/auth's AuthMode constants (config can't import auth); empty is
+// accepted and means "forward".
+var validAuthModes = []string{"forward", "local", "both"}
+
+// validateAuthMode rejects an auth.mode the server doesn't recognise. An
+// unknown value used to fall through main's mode switch and boot
+// forward-only, silently: a typo such as "Both" or "lcoal" left local
+// login switched off with nothing in the log saying why.
+func validateAuthMode(cfg Config) error {
+	if cfg.Auth.Mode == "" || slices.Contains(validAuthModes, cfg.Auth.Mode) {
+		return nil
+	}
+	return fmt.Errorf("auth.mode %q is not valid: must be one of %q, %q or %q (empty means %q)",
+		cfg.Auth.Mode, validAuthModes[0], validAuthModes[1], validAuthModes[2], validAuthModes[0])
 }
 
 func validateSecretExpansion(cfg Config) error {
@@ -177,7 +195,8 @@ type Auth struct {
 	// unchanged), "local" (session cookie only), or "both" (either
 	// path authenticates; groups unioned; local wins on Name/Email
 	// collision). Empty defaults to "forward" so existing configs
-	// stay byte-identical at runtime.
+	// stay byte-identical at runtime. Any other value fails Load
+	// (validateAuthMode) -- values are case-sensitive.
 	Mode string `yaml:"mode"`
 
 	Local   AuthLocal   `yaml:"local"`
@@ -500,6 +519,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if err := validateStorageLocations(cfg); err != nil {
+		return cfg, fmt.Errorf("config validation: %w", err)
+	}
+
+	if err := validateAuthMode(cfg); err != nil {
 		return cfg, fmt.Errorf("config validation: %w", err)
 	}
 

@@ -335,3 +335,16 @@ func TestRouteWithConfig_BothMode_TrustedSourceHeadersAccepted(t *testing.T) {
 		assert.True(t, got.Authenticated)
 	}
 }
+
+func TestAuthModeValid(t *testing.T) {
+	for _, m := range []AuthMode{AuthModeForward, AuthModeLocal, AuthModeBoth} {
+		if !m.Valid() {
+			t.Errorf("%q.Valid() = false, want true", m)
+		}
+	}
+	for _, m := range []AuthMode{"", "Both", "forward ", "none"} {
+		if m.Valid() {
+			t.Errorf("%q.Valid() = true, want false", m)
+		}
+	}
+}

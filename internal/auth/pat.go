@@ -58,6 +58,10 @@ const (
 type PATLookupResult struct {
 	UserID int64
 	Scopes []string
+	// Username and Email are the owner's display fields, used for the
+	// Principal's Name/Email. Empty Username falls back to "pat:<id>".
+	Username string
+	Email    string
 }
 
 // PATMiddleware validates an `Authorization: Bearer bdam_pat_...`
@@ -182,17 +186,26 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 			return
 		}
 
-		// Build a Principal from the token's user. We don't have the
-		// user row here (Lookup returns UserID + scopes), so the
-		// Principal carries just enough for downstream RequireAdmin
-		// and audit attribution. Display fields (Name, Email,
-		// AuthProvider) are filled in by RequirePAT's caller if it
-		// wants richer audit output -- the typical admin route just
-		// needs is_admin=true and a non-empty ExternalUID.
+		// Build a Principal for the token's OWNER. AuthProvider=pat
+		// plus UserID is what internal/users.ResolveOrCreate keys on:
+		// it returns the owner's existing users row by id and never
+		// provisions one, so uploads, pairings, scans and actor_audit
+		// rows made with a PAT are attributed to the person who minted
+		// it. ExternalUID stays a per-token "pat:<hash prefix>" so the
+		// non-empty-ExternalUID guards downstream hold and logs can
+		// tell two tokens of the same owner apart; it is never used as
+		// a users lookup key for this provider.
+		name := result.Username
+		if name == "" {
+			name = fmt.Sprintf("pat:%d", result.UserID)
+		}
 		principal := Principal{
 			Kind:          KindUser,
-			Name:          fmt.Sprintf("pat:%d", result.UserID),
+			Name:          name,
+			Email:         result.Email,
 			ExternalUID:   fmt.Sprintf("pat:%s", HashPrefix(hash)),
+			AuthProvider:  AuthProviderPAT,
+			UserID:        result.UserID,
 			Authenticated: true,
 		}
 		if !scopeSatisfied(result.Scopes, m.Scope) {
@@ -554,7 +567,12 @@ func (s *PATService) Lookup(ctx context.Context, presented string) (PATLookupRes
 	if err != nil {
 		return PATLookupResult{}, fmt.Errorf("decode scopes: %w", err)
 	}
-	return PATLookupResult{UserID: row.UserID, Scopes: scopes}, nil
+	return PATLookupResult{
+		UserID:   row.UserID,
+		Scopes:   scopes,
+		Username: row.OwnerUsername,
+		Email:    row.OwnerEmail.String,
+	}, nil
 }
 
 // TouchLastUsed bumps the last_used_at column. Used as the

@@ -388,6 +388,13 @@ func main() {
 	// cookie in production is signed with a known key.
 	var localAuthDeps *httpapi.LocalAuthDeps
 	authMode := auth.AuthMode(cfg.Auth.Mode)
+	if authMode != "" && !authMode.Valid() {
+		// config.Load already rejects an unknown mode; this is the
+		// backstop so a config path that skips Load can't silently
+		// fall back to forward-only either.
+		log.Error("auth: unknown auth.mode -- refusing to boot. Use forward, local or both.", "mode", cfg.Auth.Mode)
+		os.Exit(1)
+	}
 	switch authMode {
 	case "":
 		authMode = auth.AuthModeForward

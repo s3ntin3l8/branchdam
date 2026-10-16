@@ -30,6 +30,18 @@ const (
 	AuthModeBoth AuthMode = "both"
 )
 
+// Valid reports whether m is one of the three recognised modes. The
+// empty string is NOT valid here; callers that accept "unset" (meaning
+// forward) check for it first. internal/config.validateAuthMode applies
+// the same set at load time.
+func (m AuthMode) Valid() bool {
+	switch m {
+	case AuthModeForward, AuthModeLocal, AuthModeBoth:
+		return true
+	}
+	return false
+}
+
 // ChainBuilder is the constructor shape for any auth chain -- takes a
 // `next` handler, returns a wrapped handler that runs identity work and
 // then calls next. BrowserChain and the local session middleware both

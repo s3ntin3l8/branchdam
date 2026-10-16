@@ -113,6 +113,17 @@ disabled_at IS NULL`. Demoting or disabling the owner invalidates all
 of their live tokens on the next request (401, identical to a revoked
 token) — the same live-authority posture the session middleware takes.
 
+**Attribution.** A PAT-authenticated request acts *as the token's
+owner*: the request Principal carries the owner's `users.id` and
+username (`auth_provider` `pat`), and the attribution layer
+(`internal/users.ResolveOrCreate`) returns that existing row by id —
+it never provisions a users row for a token. Uploads, scans, device
+pairings and `actor_audit` entries made with a PAT are therefore
+attributed to the person who minted it. (Before migration `00039`,
+each token lazily created a phantom `('authentik', 'pat:<hash
+prefix>')` user and was attributed to that; the migration re-points
+those rows at the owner and disables the phantoms.)
+
 `last_used_at` is bumped asynchronously, throttled to one write per
 60 seconds per token: an in-process per-token gate (`shouldTouch`)
 collapses a request burst before any goroutine is spawned, and the SQL
