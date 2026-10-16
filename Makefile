@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install-hooks web-stub web-ensure dev dev-api dev-web dev-all dev-config \
+.PHONY: help install-hooks web-stub web-ensure contract-fixtures dev dev-api dev-web dev-all dev-config \
 	demo screenshots screenshots-landing test-demo \
 	test test-coverage lint fmt vet tidy vulncheck build build-embed golangci-lint \
 	web-lint web-typecheck web-build web-test check check-web sqlc-generate sqlc-diff clean
@@ -133,6 +133,9 @@ web-test: web/node_modules ## Run vitest on web/
 
 check: lint test test-demo build golangci-lint ## Backend pre-PR gate (NOTE: lint/gofmt hooks rewrite files in the working tree)
 check-web: web-lint web-typecheck web-test web-build ## Frontend pre-PR gate
+
+contract-fixtures: web-stub ## Regenerate docs/contract/fixtures (agent API wire shapes) from the server DTOs
+	go test ./internal/httpapi/ -run 'TestContractFixtures$$' -count=1 -update-contract
 
 sqlc-generate: ## Regenerate internal/db/sqlcgen from internal/db/queries
 	sqlc generate

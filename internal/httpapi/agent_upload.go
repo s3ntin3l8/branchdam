@@ -10,6 +10,24 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 )
 
+// agentUploadHeaders names the request headers POST /api/v1/agent/upload
+// reads (the body is the raw file). One struct so the handler and the
+// contract fixture (docs/contract/fixtures/upload_request_headers.json)
+// can't disagree.
+var agentUploadHeaders = struct {
+	Filename         string
+	CameraModel      string
+	Blake3Hash       string
+	SourcePathHash   string
+	CaptureTimestamp string
+}{
+	Filename:         "X-Filename",
+	CameraModel:      "X-Camera-Model",
+	Blake3Hash:       "X-Blake3-Hash",
+	SourcePathHash:   "X-Source-Path-Hash",
+	CaptureTimestamp: "X-Capture-Timestamp",
+}
+
 type AgentUploadResponse struct {
 	NodeUUID     string `json:"nodeUuid"`
 	Status       string `json:"status"`
@@ -68,11 +86,11 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		agentUserID = s.resolveAgentUploadUserID(r.Context(), p.Name)
 	}
 
-	filename := r.Header.Get("X-Filename")
-	cameraModel := r.Header.Get("X-Camera-Model")
-	expectedBlake3 := r.Header.Get("X-Blake3-Hash")
-	sourcePathHash := r.Header.Get("X-Source-Path-Hash")
-	capturedAtHeader := r.Header.Get("X-Capture-Timestamp")
+	filename := r.Header.Get(agentUploadHeaders.Filename)
+	cameraModel := r.Header.Get(agentUploadHeaders.CameraModel)
+	expectedBlake3 := r.Header.Get(agentUploadHeaders.Blake3Hash)
+	sourcePathHash := r.Header.Get(agentUploadHeaders.SourcePathHash)
+	capturedAtHeader := r.Header.Get(agentUploadHeaders.CaptureTimestamp)
 	var capturedAtUnix int64
 	if capturedAtHeader != "" {
 		capturedAtUnix, _ = strconv.ParseInt(capturedAtHeader, 10, 64)
