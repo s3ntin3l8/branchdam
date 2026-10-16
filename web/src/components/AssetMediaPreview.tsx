@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api/client";
+import Dialog from "./Dialog";
 import Thumbnail from "./Thumbnail";
 import type { Asset, LineageResponse } from "../api/types";
 
@@ -33,18 +34,6 @@ function getVideoMimeType(ext: string): string {
 export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewProps) {
   const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
-
-  // Close lightbox on Escape key
-  useEffect(() => {
-    if (!isLightboxOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setIsLightboxOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isLightboxOpen]);
 
   // Find linked proxy / original from lineage
   let originalNode: Asset | undefined;
@@ -133,20 +122,27 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
           </video>
         </div>
       ) : isImage ? (
-        <div className="group relative flex max-h-[500px] min-h-[240px] items-center justify-center overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 p-2">
-          <img
-            src={api.streamUrl(activeAsset.id, version)}
+        // The inline preview is the generated thumbnail, not the master:
+        // a master can be tens of megabytes, and the detail page shouldn't
+        // download it just to show a 500px-tall preview. The full file is
+        // only streamed when the operator opens the lightbox.
+        <div
+          className="group relative flex max-h-[500px] min-h-[240px] items-center justify-center overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 p-2"
+          data-testid="asset-image-preview"
+        >
+          <Thumbnail
+            assetId={activeAsset.id}
+            thumbState={activeAsset.thumbState}
             alt={activeAsset.fileName}
-            className="max-h-[480px] max-w-full cursor-pointer rounded object-contain transition hover:opacity-95"
-            onClick={() => setIsLightboxOpen(true)}
-            data-testid="asset-image-preview"
+            version={version}
+            className="max-h-[480px] min-h-[200px] max-w-full rounded object-contain"
           />
           <button
             type="button"
             onClick={() => setIsLightboxOpen(true)}
-            className="absolute bottom-4 right-4 rounded-md border border-neutral-700 bg-neutral-900/80 px-3 py-1.5 text-xs text-neutral-200 opacity-0 shadow backdrop-blur transition hover:bg-neutral-800 group-hover:opacity-100"
+            className="absolute bottom-4 right-4 rounded-md border border-neutral-700 bg-neutral-900/80 px-3 py-1.5 text-xs text-neutral-200 shadow backdrop-blur transition hover:bg-neutral-800 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
           >
-            Enlarge
+            View full resolution
           </button>
         </div>
       ) : isAudio ? (
@@ -184,36 +180,33 @@ export default function AssetMediaPreview({ asset, lineage }: AssetMediaPreviewP
         </div>
       )}
 
-      {/* Lightbox Modal for Full-Resolution Image Inspection */}
+      {/* Lightbox for full-resolution inspection: the only place the
+          image master itself is streamed. */}
       {isLightboxOpen && isImage && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4"
-          onClick={() => setIsLightboxOpen(false)}
+        <Dialog
+          title={activeAsset.fileName}
+          onClose={() => setIsLightboxOpen(false)}
+          overlayClassName="z-50 bg-black/90"
+          panelClassName="flex max-h-[95vh] max-w-[95vw] flex-col items-center focus:outline-none"
+          headerClassName="mb-2 flex w-full items-center justify-end gap-3"
+          titleClassName="truncate text-xs font-normal text-neutral-400"
+          headerAction={
+            <button
+              type="button"
+              onClick={() => setIsLightboxOpen(false)}
+              className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700"
+              data-testid="lightbox-close-button"
+            >
+              Close (Esc)
+            </button>
+          }
         >
-          <div
-            className="relative flex max-h-[95vh] max-w-[95vw] flex-col items-center"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="absolute -top-10 right-0 flex items-center gap-3">
-              <span className="text-xs text-neutral-400">{activeAsset.fileName}</span>
-              <button
-                type="button"
-                onClick={() => setIsLightboxOpen(false)}
-                className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700"
-                data-testid="lightbox-close-button"
-              >
-                Close (ESC)
-              </button>
-            </div>
-            <img
-              src={api.streamUrl(activeAsset.id, version)}
-              alt={activeAsset.fileName}
-              className="max-h-[90vh] max-w-[90vw] rounded object-contain shadow-2xl"
-            />
-          </div>
-        </div>
+          <img
+            src={api.streamUrl(activeAsset.id, version)}
+            alt={activeAsset.fileName}
+            className="max-h-[88vh] max-w-[90vw] rounded object-contain shadow-2xl"
+          />
+        </Dialog>
       )}
     </div>
   );

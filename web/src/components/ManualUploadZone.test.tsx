@@ -199,7 +199,7 @@ describe("ManualUploadZone", () => {
     expect(screen.queryByText("This file is already in your library.")).not.toBeInTheDocument();
   });
 
-  it("links to nodeUuid if asset id is not present on dedup response", async () => {
+  it("does not link a node UUID as an asset id when the dedup response has no asset", async () => {
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
 
     const mockDedupResponse: WebUploadResponse = {
@@ -227,9 +227,10 @@ describe("ManualUploadZone", () => {
     expect(await screen.findAllByText(/fallback\.JPG/)).toHaveLength(2);
     expect(screen.getByText("Already in library")).toBeInTheDocument();
 
-    const links = screen.getAllByRole("link", { name: /view existing node/i });
-    expect(links.length).toBeGreaterThanOrEqual(1);
-    expect(links[0]).toHaveAttribute("href", "/assets/018f-uuid-fallback");
+    // /assets/:id takes a numeric id; a UUID link would land on "Invalid
+    // asset id", so the notice shows the UUID as text instead.
+    expect(screen.queryByRole("link", { name: /view existing node/i })).not.toBeInTheDocument();
+    expect(screen.getByText("018f-uuid-fallback")).toBeInTheDocument();
   });
 
   it("does not upload a queued file that was removed after Start was clicked", async () => {

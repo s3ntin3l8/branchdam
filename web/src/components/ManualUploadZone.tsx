@@ -319,8 +319,11 @@ export default function ManualUploadZone() {
       <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 space-y-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
-            <label className="mb-1 block text-xs font-medium text-neutral-300">Target Storage Location</label>
+            <label htmlFor="upload-target-location" className="mb-1 block text-xs font-medium text-neutral-300">
+              Target Storage Location
+            </label>
             <select
+              id="upload-target-location"
               value={selectedLocationId}
               disabled={loadingLocations || isProcessingQueue}
               onChange={(e) => setSelectedLocationId(e.target.value ? Number(e.target.value) : "")}
@@ -343,8 +346,8 @@ export default function ManualUploadZone() {
             </p>
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-medium text-neutral-300">Organization & Naming</label>
+          <fieldset>
+            <legend className="mb-1 block text-xs font-medium text-neutral-300">Organization & Naming</legend>
             <div className="space-y-2">
               <label className="flex items-center gap-2 text-xs text-neutral-300">
                 <input
@@ -373,6 +376,7 @@ export default function ManualUploadZone() {
               {!applyNamingTemplate && (
                 <input
                   type="text"
+                  aria-label="Subfolder"
                   placeholder="Optional subfolder (e.g. 2026/OldFootage)"
                   value={customSubdir}
                   disabled={isProcessingQueue}
@@ -381,7 +385,7 @@ export default function ManualUploadZone() {
                 />
               )}
             </div>
-          </div>
+          </fieldset>
         </div>
       </div>
 
@@ -566,13 +570,6 @@ export default function ManualUploadZone() {
                           {item.response?.asset?.id ? (
                             <Link
                               to={`/assets/${item.response.asset.id}`}
-                              className="text-sky-400 underline hover:text-sky-300"
-                            >
-                              View existing node →
-                            </Link>
-                          ) : item.response?.nodeUuid ? (
-                            <Link
-                              to={`/assets/${item.response.nodeUuid}`}
                               className="text-sky-400 underline hover:text-sky-300"
                             >
                               View existing node →

@@ -1,4 +1,5 @@
 import { INPUT_CLASS } from "./inputStyles";
+import { useFieldIds } from "./fieldContext";
 
 interface NumberFieldProps {
   value: number;
@@ -12,8 +13,11 @@ interface NumberFieldProps {
 // keystrokes, which would make clearing the field to type a new number
 // impossible.
 export function NumberField({ value, onChange, disabled }: NumberFieldProps) {
+  const ids = useFieldIds();
   return (
     <input
+      id={ids?.controlId}
+      aria-describedby={ids?.docId}
       type="number"
       value={Number.isNaN(value) ? "" : value}
       onChange={(e) => onChange(e.target.valueAsNumber)}

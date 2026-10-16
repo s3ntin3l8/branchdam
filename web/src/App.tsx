@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, NavLink, Outlet, useLocation } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEventStream } from "./hooks/useEventStream";
@@ -57,6 +57,26 @@ export function Layout() {
   const me = meQuery.data;
   const location = useLocation();
   const queryClient = useQueryClient();
+
+  // Below the md breakpoint the sidebar collapses behind a menu button in
+  // a top bar and opens as a drawer over the page. It closes on navigation
+  // (render-time state adjustment, same pattern as AssetListPage's filter
+  // reset), on Escape and on a click on the backdrop. At md and up it is
+  // always shown and navOpen has no effect.
+  const [navOpen, setNavOpen] = useState(false);
+  const [navPath, setNavPath] = useState(location.pathname);
+  if (location.pathname !== navPath) {
+    setNavPath(location.pathname);
+    setNavOpen(false);
+  }
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNavOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [navOpen]);
 
   // A failed /me keeps the last good data (TanStack Query retains it), so
   // "signed in" must also check the latest fetch didn't fail on auth.
@@ -156,10 +176,39 @@ export function Layout() {
   }
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen flex-col md:flex-row">
       <AuthErrorBanner />
-      <nav className="relative w-56 shrink-0 border-r border-neutral-800 p-4">
-        <div className="mb-6 flex items-center gap-2">
+      <header className="flex shrink-0 items-center justify-between border-b border-neutral-800 px-4 py-2 md:hidden">
+        <div className="flex items-center gap-2">
+          <BrandMark className="h-5 w-5 text-brand" />
+          <span className="text-lg font-semibold">
+            <span className="font-normal">branch</span>DAM
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setNavOpen((open) => !open)}
+          aria-controls="app-nav"
+          aria-expanded={navOpen}
+          aria-label={navOpen ? "Close navigation" : "Open navigation"}
+          className="rounded p-2 text-neutral-300 hover:bg-neutral-800"
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5">
+            {navOpen ? <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" /> : <path d="M3 6h14M3 10h14M3 14h14" strokeLinecap="round" />}
+          </svg>
+        </button>
+      </header>
+      {navOpen && (
+        <div className="fixed inset-0 z-30 bg-black/60 md:hidden" aria-hidden="true" onClick={() => setNavOpen(false)} />
+      )}
+      <nav
+        id="app-nav"
+        aria-label="Main"
+        className={`${
+          navOpen ? "fixed inset-y-0 left-0 z-40 block overflow-y-auto shadow-xl" : "hidden"
+        } w-56 shrink-0 border-r border-neutral-800 bg-neutral-950 p-4 md:relative md:z-auto md:block md:shadow-none`}
+      >
+        <div className="mb-6 hidden items-center gap-2 md:flex">
           <BrandMark className="h-5 w-5 text-brand" />
           <span className="text-lg font-semibold">
             <span className="font-normal">branch</span>DAM
@@ -199,7 +248,7 @@ export function Layout() {
           </div>
         )}
       </nav>
-      <main className="flex-1 overflow-auto">
+      <main className="min-w-0 flex-1 overflow-auto">
         <ErrorBoundary>
           <Outlet />
         </ErrorBoundary>

@@ -1,4 +1,6 @@
+import { useId } from "react";
 import type { SettingsFieldSource } from "../../api/types";
+import { FieldIdsContext } from "./fieldContext";
 
 function ProvenanceChip({ source }: { source: SettingsFieldSource }) {
   if (source === "override") {
@@ -33,13 +35,18 @@ interface FieldRowProps {
 }
 
 export function FieldRow({ fieldKey, label, doc, source, pendingRestart, readOnlyReason, children }: FieldRowProps) {
+  const baseId = useId();
+  const controlId = `${baseId}-control`;
+  const docId = doc ? `${baseId}-doc` : undefined;
   return (
     <div
       data-testid={fieldKey ? `field-row-${fieldKey}` : undefined}
       className="border-b border-neutral-800/60 py-3 last:border-b-0"
     >
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium text-neutral-200">{label}</span>
+        <label htmlFor={controlId} className="text-sm font-medium text-neutral-200">
+          {label}
+        </label>
         <ProvenanceChip source={source} />
         {pendingRestart && (
           <span className="rounded-full border border-amber-700/60 bg-amber-950/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-400">
@@ -47,8 +54,12 @@ export function FieldRow({ fieldKey, label, doc, source, pendingRestart, readOnl
           </span>
         )}
       </div>
-      {doc && <p className="mb-2 text-xs text-neutral-500">{doc}</p>}
-      {children}
+      {doc && (
+        <p id={docId} className="mb-2 text-xs text-neutral-500">
+          {doc}
+        </p>
+      )}
+      <FieldIdsContext.Provider value={{ controlId, docId }}>{children}</FieldIdsContext.Provider>
       {readOnlyReason && <p className="mt-1 text-xs text-neutral-600">{readOnlyReason}</p>}
     </div>
   );

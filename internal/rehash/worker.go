@@ -11,8 +11,11 @@
 //   - a mismatch is logged and recorded (MISMATCH, with the computed value),
 //     and the asserted hash keeps authorising nothing -- the stored
 //     media_nodes.full_hash is never replaced by what was read, since the
-//     archive copy may be the damaged one. It is re-read after
-//     MismatchRetryAfter, so restoring a good copy of the file verifies it;
+//     archive copy may be the damaged one. It is re-read on a doubling
+//     backoff -- DefaultMismatchRetryAfter after the first mismatch, then
+//     twice as long after each further one, capped at
+//     MaxMismatchRetryAfter -- so restoring a good copy of the file
+//     verifies it;
 //   - a read failure is recorded (ERROR) and retried after RetryAfter.
 //
 // Bounded: one file at a time, at most BatchSize files per claim query.
@@ -56,11 +59,19 @@ const DefaultBatchPause = 2 * time.Second
 const DefaultRetryAfter = time.Hour
 
 // DefaultMismatchRetryAfter is how long a file whose bytes did not match
-// the asserted hash waits before it is read again. Re-reading unchanged
-// bytes only repeats the MISMATCH, so this is long; it exists so that an
-// operator who restores a good copy onto the archive needs no database
-// edit for the master to verify.
+// the asserted hash waits before it is read again the first time. Each
+// further mismatch doubles the wait, up to MaxMismatchRetryAfter.
+// Re-reading unchanged bytes only repeats the MISMATCH, so the re-read
+// exists for one case: an operator who restores a good copy onto the
+// archive needs no database edit for the master to verify. A hash that
+// was simply wrong never matches, and the backoff keeps it from costing a
+// full read of the master every day for good.
 const DefaultMismatchRetryAfter = 24 * time.Hour
+
+// MaxMismatchRetryAfter caps the doubling MISMATCH backoff, and
+// WithMismatchRetryAfter clamps its base to it, so a mismatched master is
+// read again at most every 30 days.
+const MaxMismatchRetryAfter = 30 * 24 * time.Hour
 
 const (
 	stateMismatch = "MISMATCH"
@@ -120,11 +131,13 @@ func WithRetryAfter(d time.Duration) Option {
 	}
 }
 
-// WithMismatchRetryAfter overrides DefaultMismatchRetryAfter.
+// WithMismatchRetryAfter overrides DefaultMismatchRetryAfter. A value
+// above MaxMismatchRetryAfter is clamped to it, so the "at most every 30
+// days" re-read always holds.
 func WithMismatchRetryAfter(d time.Duration) Option {
 	return func(w *Worker) {
 		if d >= 0 {
-			w.mismatchRetryAfter = d
+			w.mismatchRetryAfter = min(d, MaxMismatchRetryAfter)
 		}
 	}
 }
@@ -225,10 +238,10 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 		return stats, errors.New("rehash: database or storage guard not configured")
 	}
 	rows, err := w.db.Reader.ListRehashCandidates(ctx, sqlcgen.ListRehashCandidatesParams{
-		AfterID:             w.cursor,
-		RetryBefore:         sql.NullInt64{Int64: w.now().Add(-w.retryAfter).Unix(), Valid: true},
-		MismatchRetryBefore: sql.NullInt64{Int64: w.now().Add(-w.mismatchRetryAfter).Unix(), Valid: true},
-		BatchLimit:          int64(w.batchSize),
+		AfterID:     w.cursor,
+		RetryBefore: sql.NullInt64{Int64: w.now().Add(-w.retryAfter).Unix(), Valid: true},
+		NowUnix:     sql.NullInt64{Int64: w.now().Unix(), Valid: true},
+		BatchLimit:  int64(w.batchSize),
 	})
 	if err != nil {
 		return stats, fmt.Errorf("list rehash candidates: %w", err)
@@ -249,6 +262,25 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
+// mismatchBackoff is how long a row waits after its mismatches-th
+// MISMATCH for the current asserted value: base, doubled for every
+// mismatch after the first, capped at MaxMismatchRetryAfter. The worker's
+// base never exceeds the cap (WithMismatchRetryAfter clamps it), so its
+// waits are always at most MaxMismatchRetryAfter; a larger base passed
+// straight in is returned as is, never shortened below it. Only
+// mismatches count -- the hourly ERROR retries of an unmounted share
+// don't (rehash_mismatches, 00042).
+func mismatchBackoff(base time.Duration, mismatches int64) time.Duration {
+	wait := base
+	for i := int64(1); i < mismatches && wait < MaxMismatchRetryAfter; i++ {
+		wait *= 2
+	}
+	if wait > MaxMismatchRetryAfter && base <= MaxMismatchRetryAfter {
+		wait = MaxMismatchRetryAfter
+	}
+	return wait
+}
+
 func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidatesRow, stats *Stats) error {
 	if row.FullHash == nil {
 		return nil // the claim query never returns one; defensive
@@ -266,10 +298,9 @@ func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidate
 		w.log.Warn("rehash: could not read agent-asserted master; will retry",
 			"nodeUuid", row.NodeUuid, "path", row.FilePath, "retryAfter", w.retryAfter, "err", hashErr)
 		return w.record(ctx, func(q *sqlcgen.Queries) (int64, error) {
-			return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
-				NodeID:      row.ID,
-				FullHash:    asserted,
-				RehashState: sql.NullString{String: stateError, Valid: true},
+			return q.RecordRehashError(ctx, sqlcgen.RecordRehashErrorParams{
+				NodeID:   row.ID,
+				FullHash: asserted,
 			})
 		})
 	case computed == asserted:
@@ -279,16 +310,17 @@ func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidate
 			return q.MarkRehashMatched(ctx, sqlcgen.MarkRehashMatchedParams{NodeID: row.ID, FullHash: asserted})
 		})
 	default:
+		wait := mismatchBackoff(w.mismatchRetryAfter, row.RehashMismatches+1)
 		stats.Mismatched++
 		w.log.Warn("rehash: agent-asserted full_hash does not match the file; it will not authorise pruning",
 			"nodeUuid", row.NodeUuid, "path", row.FilePath, "asserted", asserted, "computed", computed,
-			"rereadAfter", w.mismatchRetryAfter)
+			"rereadAfter", wait)
 		return w.record(ctx, func(q *sqlcgen.Queries) (int64, error) {
-			return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
+			return q.RecordRehashMismatch(ctx, sqlcgen.RecordRehashMismatchParams{
 				NodeID:         row.ID,
 				FullHash:       asserted,
-				RehashState:    sql.NullString{String: stateMismatch, Valid: true},
 				RehashComputed: sql.NullString{String: computed, Valid: true},
+				RehashRetryAt:  sql.NullInt64{Int64: w.now().Add(wait).Unix(), Valid: true},
 			})
 		})
 	}

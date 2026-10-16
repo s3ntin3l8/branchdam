@@ -1,18 +1,14 @@
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import Dialog from "./Dialog";
 
-// ConfirmDialog is the shared confirmation modal, extracted from
-// AssetDetailPage's original inline "Archive Asset" dialog (the only
-// role="dialog" implementation in the codebase that actually gated a
-// destructive action behind Cancel/Confirm). The repo has no dialog
-// primitive library -- see the three other hand-rolled patterns in
-// CompanionPairingsPage (QrModal), NodePickerModal, and
-// RestartServerButton's inline two-step confirm -- so this exists to give
-// future destructive actions one to reuse instead of hand-rolling a fourth.
-//
-// Intentionally NOT migrating those other call sites in this change; this
-// component's contract mirrors the one usage it was extracted from.
+// ConfirmDialog is the shared Cancel/Confirm modal for destructive actions,
+// built on the Dialog primitive (focus trap, Escape, labelled title). Focus
+// lands on Cancel when it opens -- the first focusable element -- so a
+// stray Enter never confirms. While the action is pending the dialog can't
+// be dismissed (Escape, backdrop and Cancel are all disabled), so the
+// result of an in-flight request is never lost.
 export interface ConfirmDialogProps {
-  titleId: string;
+  titleId?: string;
   title: string;
   body: ReactNode;
   confirmLabel: string;
@@ -36,27 +32,9 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !isPending) {
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isPending, onCancel]);
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
-    >
-      <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
-        <h3 id={titleId} className="text-base font-semibold text-neutral-100">
-          {title}
-        </h3>
+    <Dialog title={title} titleId={titleId} onClose={onCancel} dismissible={!isPending}>
+      <div className="space-y-4">
         <div className="text-xs text-neutral-300 leading-relaxed">{body}</div>
         {error !== undefined && error !== null && (
           <p className="text-xs text-red-400">
@@ -82,6 +60,6 @@ export default function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }

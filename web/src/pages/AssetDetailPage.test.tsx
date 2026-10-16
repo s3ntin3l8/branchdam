@@ -563,26 +563,36 @@ describe("AssetDetailPage sync status", () => {
 });
 
 describe("AssetDetailPage media preview", () => {
-  it("renders image stream preview and handles lightbox open/close", async () => {
-    vi.mocked(api.getAsset).mockResolvedValue(asset);
-    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+  // The inline preview is the thumbnail; the master is only streamed once
+  // the operator opens the lightbox.
+  it("previews images from the thumbnail and streams the master only in the lightbox", async () => {
+    const readyAsset: Asset = { ...asset, thumbState: "READY" };
+    vi.mocked(api.getAsset).mockResolvedValue(readyAsset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [readyAsset], edges: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
 
     renderWithClient();
-    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "proxy.jpg" })).toBeInTheDocument());
 
-    const img = screen.getByTestId("asset-image-preview");
-    expect(img).toBeInTheDocument();
-    expect(img).toHaveAttribute("src", "/api/v1/assets/42/stream");
+    const preview = screen.getByTestId("asset-image-preview");
+    expect(within(preview).getByRole("img", { name: "proxy.jpg" })).toHaveAttribute(
+      "src",
+      "/api/v1/assets/42/thumbnail",
+    );
+    expect(document.querySelector('img[src="/api/v1/assets/42/stream"]')).toBeNull();
 
-    const enlargeBtn = screen.getByRole("button", { name: /enlarge/i });
-    await userEvent.click(enlargeBtn);
+    await userEvent.click(screen.getByRole("button", { name: /view full resolution/i }));
 
-    const closeBtn = screen.getByTestId("lightbox-close-button");
-    expect(closeBtn).toBeInTheDocument();
+    const lightbox = screen.getByRole("dialog", { name: "proxy.jpg" });
+    expect(within(lightbox).getByRole("img", { name: "proxy.jpg" })).toHaveAttribute("src", "/api/v1/assets/42/stream");
 
-    await userEvent.click(closeBtn);
-    expect(screen.queryByTestId("lightbox-close-button")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("lightbox-close-button"));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /view full resolution/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("renders video player when asset has video extension", async () => {
@@ -641,5 +651,60 @@ describe("AssetDetailPage media preview", () => {
       "src",
       "/api/v1/assets/43/stream",
     );
+  });
+});
+
+describe("AssetDetailPage load errors", () => {
+  it("says the asset is not found only for a 404", async () => {
+    vi.mocked(api.getAsset).mockRejectedValue(Object.assign(new Error("asset not found"), { status: 404 }));
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+
+    renderWithClient();
+    expect(await screen.findByRole("heading", { name: "Asset not found" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+
+  it("reports other failures as a load error with a retry, not as not-found", async () => {
+    vi.mocked(api.getAsset).mockRejectedValueOnce(
+      Object.assign(new Error("internal server error"), { status: 500 }),
+    );
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+
+    renderWithClient();
+    expect(await screen.findByRole("heading", { name: "Couldn't load this asset" })).toBeInTheDocument();
+    expect(screen.getByText("internal server error")).toBeInTheDocument();
+    expect(screen.queryByText("Asset not found")).not.toBeInTheDocument();
+
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    await userEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(await screen.findByRole("heading", { name: "proxy.jpg" })).toBeInTheDocument();
+  });
+
+  it("explains a non-numeric id instead of fetching it", async () => {
+    vi.mocked(api.getAsset).mockClear();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/assets/018f-uuid-42"]}>
+          <Routes>
+            <Route path="/assets/:id" element={<AssetDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole("heading", { name: "Invalid asset id" })).toBeInTheDocument();
+    expect(api.getAsset).not.toHaveBeenCalled();
+  });
+
+  it("shows the size human-readable, with exact bytes on hover", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+
+    renderWithClient();
+    const size = await screen.findByText("12.1 KB");
+    expect(size).toHaveAttribute("title", `${(12345).toLocaleString()} bytes`);
   });
 });

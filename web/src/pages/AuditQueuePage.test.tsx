@@ -132,6 +132,29 @@ describe("AuditQueuePage", () => {
     expect(within(heuristicGroup).getByText('{"nested":{"deep":true}}')).toBeInTheDocument();
   });
 
+  it("groups flat rows under 'Other signals' when mixed with resolver groups", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 9, sourceNodeId: 1, targetNodeId: 2, relationshipType: "DERIVED_FROM",
+          confidence: 0.5, tier: 2, resolver: "filename_stem",
+          evidenceJson: JSON.stringify({ reason: "manual", filename_stem: { same_directory: true } }),
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 1, nodeUuid: "uuid-1", fileName: "a", filePath: "/a", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "b", filePath: "/b", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+    renderWithClient(<AuditQueuePage />);
+
+    const evidence = await screen.findByRole("region", { name: /evidence/i });
+    const other = within(evidence).getByRole("group", { name: "Other signals" });
+    expect(within(other).getByText("manual")).toBeInTheDocument();
+    const stem = within(evidence).getByRole("group", { name: "Filename stem" });
+    expect(within(stem).getByText("Same directory:")).toBeInTheDocument();
+  });
+
   it("falls back to the raw evidence string when it is not valid JSON", async () => {
     vi.mocked(api.listAuditQueue).mockResolvedValue({
       entries: [

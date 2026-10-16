@@ -12,7 +12,8 @@ import (
 
 const getFullHashProvenance = `-- name: GetFullHashProvenance :one
 SELECT node_id, full_hash, source, recorded_at, rehash_state,
-       rehash_checked_at, rehash_attempts, rehash_computed
+       rehash_checked_at, rehash_attempts, rehash_computed,
+       rehash_mismatches, rehash_retry_at
 FROM full_hash_provenance
 WHERE node_id = ?1
 `
@@ -29,13 +30,15 @@ func (q *Queries) GetFullHashProvenance(ctx context.Context, nodeID int64) (Full
 		&i.RehashCheckedAt,
 		&i.RehashAttempts,
 		&i.RehashComputed,
+		&i.RehashMismatches,
+		&i.RehashRetryAt,
 	)
 	return i, err
 }
 
 const listRehashCandidates = `-- name: ListRehashCandidates :many
 SELECT n.id, n.node_uuid, n.file_path, n.full_hash, n.size_bytes,
-       p.rehash_attempts
+       p.rehash_mismatches
 FROM full_hash_provenance p
 JOIN media_nodes n ON n.id = p.node_id
 JOIN storage_locations s ON s.id = n.storage_location_id
@@ -44,7 +47,7 @@ WHERE p.source = 'AGENT'
   AND p.full_hash = n.full_hash
   AND (p.rehash_state IS NULL
        OR (p.rehash_state = 'ERROR' AND p.rehash_checked_at < ?2)
-       OR (p.rehash_state = 'MISMATCH' AND p.rehash_checked_at < ?3))
+       OR (p.rehash_state = 'MISMATCH' AND p.rehash_retry_at <= ?3))
   AND s.tier = 'TIER3_MASTER_ARCHIVE'
   AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
 ORDER BY p.node_id
@@ -52,29 +55,30 @@ LIMIT ?4
 `
 
 type ListRehashCandidatesParams struct {
-	AfterID             int64
-	RetryBefore         sql.NullInt64
-	MismatchRetryBefore sql.NullInt64
-	BatchLimit          int64
+	AfterID     int64
+	RetryBefore sql.NullInt64
+	NowUnix     sql.NullInt64
+	BatchLimit  int64
 }
 
 type ListRehashCandidatesRow struct {
-	ID             int64
-	NodeUuid       string
-	FilePath       string
-	FullHash       *string
-	SizeBytes      int64
-	RehashAttempts int64
+	ID               int64
+	NodeUuid         string
+	FilePath         string
+	FullHash         *string
+	SizeBytes        int64
+	RehashMismatches int64
 }
 
 // internal/rehash's claim query: up to batch_limit live Tier-3 nodes, in
 // node id order after after_id, whose current full_hash is only
 // agent-asserted and has not been re-hashed yet -- or whose last attempt
 // failed to read the file (ERROR) before retry_before, or read bytes that
-// did not match (MISMATCH) before mismatch_retry_before. A MISMATCH is
-// re-read on the longer window so that restoring a good copy of the file
-// onto the archive verifies it without anyone editing the database; the
-// stored value is never replaced by what was read. A row whose full_hash
+// did not match (MISMATCH) and whose rehash_retry_at has come (now_unix).
+// A MISMATCH is re-read on a doubling backoff the worker records with it
+// (00042), so that restoring a good copy of the file onto the archive
+// verifies it without anyone editing the database; the stored value is
+// never replaced by what was read. A row whose full_hash
 // no longer equals the node's vouches for nothing and is skipped. Driven from the AGENT partial index
 // (ix_full_hash_provenance_agent) so a fully verified archive costs an
 // empty index range per pass, not a media_nodes scan.
@@ -82,7 +86,7 @@ func (q *Queries) ListRehashCandidates(ctx context.Context, arg ListRehashCandid
 	rows, err := q.db.QueryContext(ctx, listRehashCandidates,
 		arg.AfterID,
 		arg.RetryBefore,
-		arg.MismatchRetryBefore,
+		arg.NowUnix,
 		arg.BatchLimit,
 	)
 	if err != nil {
@@ -98,7 +102,7 @@ func (q *Queries) ListRehashCandidates(ctx context.Context, arg ListRehashCandid
 			&i.FilePath,
 			&i.FullHash,
 			&i.SizeBytes,
-			&i.RehashAttempts,
+			&i.RehashMismatches,
 		); err != nil {
 			return nil, err
 		}
@@ -117,6 +121,7 @@ const markRehashMatched = `-- name: MarkRehashMatched :execrows
 UPDATE full_hash_provenance
 SET source = 'SERVER', recorded_at = unixepoch(),
     rehash_state = NULL, rehash_computed = NULL,
+    rehash_mismatches = 0, rehash_retry_at = NULL,
     rehash_checked_at = unixepoch(), rehash_attempts = rehash_attempts + 1
 WHERE node_id = ?1 AND full_hash = ?2 AND source = 'AGENT'
 `
@@ -167,6 +172,14 @@ ON CONFLICT (node_id) DO UPDATE SET
         WHEN excluded.source = 'AGENT' AND full_hash_provenance.full_hash = excluded.full_hash THEN full_hash_provenance.rehash_computed
         ELSE NULL
     END,
+    rehash_mismatches = CASE
+        WHEN excluded.source = 'AGENT' AND full_hash_provenance.full_hash = excluded.full_hash THEN full_hash_provenance.rehash_mismatches
+        ELSE 0
+    END,
+    rehash_retry_at = CASE
+        WHEN excluded.source = 'AGENT' AND full_hash_provenance.full_hash = excluded.full_hash THEN full_hash_provenance.rehash_retry_at
+        ELSE NULL
+    END,
     full_hash = excluded.full_hash
 `
 
@@ -192,30 +205,59 @@ func (q *Queries) RecordFullHashProvenance(ctx context.Context, arg RecordFullHa
 	return err
 }
 
-const recordRehashFailure = `-- name: RecordRehashFailure :execrows
+const recordRehashError = `-- name: RecordRehashError :execrows
 UPDATE full_hash_provenance
-SET rehash_state = ?3, rehash_computed = ?4,
+SET rehash_state = 'ERROR', rehash_retry_at = NULL,
     rehash_checked_at = unixepoch(), rehash_attempts = rehash_attempts + 1
 WHERE node_id = ?1 AND full_hash = ?2 AND source = 'AGENT'
 `
 
-type RecordRehashFailureParams struct {
-	NodeID         int64
-	FullHash       string
-	RehashState    sql.NullString
-	RehashComputed sql.NullString
+type RecordRehashErrorParams struct {
+	NodeID   int64
+	FullHash string
 }
 
-// A re-hash of node ?1's asserted value ?2 did not match: state ?3 is
-// MISMATCH (the bytes hash to ?4 instead) or ERROR (the file could not be
-// read; ?4 is NULL). The row stays 'AGENT', so the value keeps authorising
-// nothing. Same ?2 condition as MarkRehashMatched.
-func (q *Queries) RecordRehashFailure(ctx context.Context, arg RecordRehashFailureParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, recordRehashFailure,
+// A re-hash of node ?1's asserted value ?2 could not read the file: ERROR,
+// retried after the worker's RetryAfter. ERROR keeps both an earlier
+// MISMATCH count and the last computed value: the count so a share that
+// flaps between reads doesn't restart the backoff, the computed hash so
+// the operator keeps the record of what the bytes last hashed to. The row
+// stays 'AGENT', so the value keeps authorising nothing. Same ?2 condition
+// as MarkRehashMatched.
+func (q *Queries) RecordRehashError(ctx context.Context, arg RecordRehashErrorParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordRehashError, arg.NodeID, arg.FullHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordRehashMismatch = `-- name: RecordRehashMismatch :execrows
+UPDATE full_hash_provenance
+SET rehash_state = 'MISMATCH', rehash_computed = ?3,
+    rehash_mismatches = rehash_mismatches + 1, rehash_retry_at = ?4,
+    rehash_checked_at = unixepoch(), rehash_attempts = rehash_attempts + 1
+WHERE node_id = ?1 AND full_hash = ?2 AND source = 'AGENT'
+`
+
+type RecordRehashMismatchParams struct {
+	NodeID         int64
+	FullHash       string
+	RehashComputed sql.NullString
+	RehashRetryAt  sql.NullInt64
+}
+
+// A re-hash of node ?1's asserted value ?2 read bytes that hash to ?3
+// instead: MISMATCH, counted in rehash_mismatches and not read again
+// before ?4 (unix seconds; the worker's doubling backoff). The row stays
+// 'AGENT', so the value keeps authorising nothing. Same ?2 condition as
+// MarkRehashMatched.
+func (q *Queries) RecordRehashMismatch(ctx context.Context, arg RecordRehashMismatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordRehashMismatch,
 		arg.NodeID,
 		arg.FullHash,
-		arg.RehashState,
 		arg.RehashComputed,
+		arg.RehashRetryAt,
 	)
 	if err != nil {
 		return 0, err
