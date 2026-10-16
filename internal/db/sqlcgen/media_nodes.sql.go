@@ -447,6 +447,38 @@ func (q *Queries) GetMediaNodeByUUID(ctx context.Context, nodeUuid string) (Medi
 	return i, err
 }
 
+const hasLiveNodeByFastHash = `-- name: HasLiveNodeByFastHash :one
+SELECT EXISTS(
+    SELECT 1
+    FROM media_nodes
+    WHERE fast_hash = ?1
+      AND lifecycle_state IN ('ACTIVE', 'HIDDEN')
+      AND (CAST(?2 AS INTEGER) = 0
+           OR size_bytes = 0
+           OR size_bytes = CAST(?2 AS INTEGER))
+) AS possible_match
+`
+
+type HasLiveNodeByFastHashParams struct {
+	FastHash  *string
+	SizeBytes int64
+}
+
+// Backs the fast-only pre-screen of GET /api/v1/agent/check-content:
+// does any live (ACTIVE or HIDDEN) node carry this xxHash64 fast_hash
+// (served by the partial index ix_media_nodes_fast_hash)? size_bytes = 0
+// means "unknown" on either side: a caller passes 0 when it has no size,
+// and a stored 0 (an agent event that omitted sizeBytes) is not allowed
+// to hide a candidate. Returns only a boolean -- never the node's identity
+// or path -- because a fast hash is not proof of content; the caller must
+// confirm with the full hash.
+func (q *Queries) HasLiveNodeByFastHash(ctx context.Context, arg HasLiveNodeByFastHashParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasLiveNodeByFastHash, arg.FastHash, arg.SizeBytes)
+	var possible_match bool
+	err := row.Scan(&possible_match)
+	return possible_match, err
+}
+
 const insertMediaNode = `-- name: InsertMediaNode :one
 INSERT INTO media_nodes (
     node_uuid, storage_location_id, file_path, file_name, file_ext,

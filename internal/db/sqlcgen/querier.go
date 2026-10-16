@@ -423,6 +423,15 @@ type Querier interface {
 	// authority at mint time. A token whose owner fails the check
 	// surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
 	GetUserPATByHash(ctx context.Context, hashedKey string) (UserPat, error)
+	// Backs the fast-only pre-screen of GET /api/v1/agent/check-content:
+	// does any live (ACTIVE or HIDDEN) node carry this xxHash64 fast_hash
+	// (served by the partial index ix_media_nodes_fast_hash)? size_bytes = 0
+	// means "unknown" on either side: a caller passes 0 when it has no size,
+	// and a stored 0 (an agent event that omitted sizeBytes) is not allowed
+	// to hide a candidate. Returns only a boolean -- never the node's identity
+	// or path -- because a fast hash is not proof of content; the caller must
+	// confirm with the full hash.
+	HasLiveNodeByFastHash(ctx context.Context, arg HasLiveNodeByFastHashParams) (bool, error)
 	InactivateResolveEdge(ctx context.Context, id int64) error
 	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
 	// actor_audit: append-only event log for admin actions that aren't
