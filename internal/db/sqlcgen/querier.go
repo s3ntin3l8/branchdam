@@ -14,6 +14,9 @@ type Querier interface {
 	// pairing_url is NULL (keyless server or pre-00034 legacy row). Last-4
 	// only -- never key material. No rows when every key is revoked/expired.
 	ActiveKeyPreviewForPairing(ctx context.Context, pairingID int64) (string, error)
+	// The device authenticated with rotation-minted key ?1 for the first
+	// time (00043). Zero rows when another request already adopted it.
+	AdoptRotatedKey(ctx context.Context, arg AdoptRotatedKeyParams) (int64, error)
 	AgentCreatedVirtualNode(ctx context.Context, arg AgentCreatedVirtualNodeParams) (bool, error)
 	// Step 1 of a version collision (docs/schema.md fix #3): archive the OLD
 	// row FIRST, before inserting the new one. The partial unique index
@@ -36,6 +39,11 @@ type Querier interface {
 	// pipeline.restoreTrashedAssetTx calls this next to UntrashNode. The row
 	// stays (rows are never deleted); a NULL trashed_at means "not trashed".
 	ClearNodeTrashed(ctx context.Context, nodeID int64) error
+	// Rotation (00043): only the pairing's newest key is ever delivered, so
+	// an earlier rotation's sealed copy (pairing ?1, any key but ?2) is
+	// dropped. The flag stays: a device that already received that key may
+	// still adopt it.
+	ClearSupersededRotationSecrets(ctx context.Context, arg ClearSupersededRotationSecretsParams) error
 	// Marks every open cascade row for export ?1 restored. Called whenever the
 	// export leaves TRASHED (restored with its master, or restored on its own),
 	// so a stale row can never resurrect a later, independent trash of it.
@@ -825,6 +833,10 @@ type Querier interface {
 	ManualRetryRemoteSyncState(ctx context.Context, arg ManualRetryRemoteSyncStateParams) error
 	MarkAgentEventFailed(ctx context.Context, arg MarkAgentEventFailedParams) error
 	MarkAgentEventProcessed(ctx context.Context, id int64) error
+	// Rotation (00043): flags the freshly minted key ?1 as awaiting adoption
+	// and stores its sealed plaintext ?2 (NULL on a keyless server) for
+	// delivery through the handshake.
+	MarkKeyAwaitingAdoption(ctx context.Context, arg MarkKeyAwaitingAdoptionParams) error
 	// Only live nodes go MISSING. A caller's earlier read (reader pool) can be
 	// stale by the time this write runs; without the guard a node that was
 	// trashed or archived in between was silently flipped to MISSING.
@@ -1083,6 +1095,14 @@ type Querier interface {
 	// be true for every relationship_type, not just DERIVED_FROM -- the thing
 	// the spec's deleted trigger (docs/schema.md fix #4) never did.
 	ResolvedEdgeParentMissing(ctx context.Context, id int64) (bool, error)
+	// Adoption (00043): revoke every still-active key of pairing ?1 older
+	// than the adopted key ?2, at ?3. Keys newer than it (a later rotation
+	// the device has not picked up yet) are left alone. Expired keys are
+	// skipped, matching RevokeAllKeysForPairing and the table's
+	// revoked_at <= expires_at CHECK.
+	RetireKeysOlderThan(ctx context.Context, arg RetireKeysOlderThanParams) (int64, error)
+	// Also drops any sealed rotation copy (00043): a revoked pairing's keys
+	// must never be delivered.
 	RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeysForPairingParams) error
 	// Used by admin "log out everywhere" action and by DisableUser's
 	// companion flow (future admin endpoint). Idempotent. Returns the

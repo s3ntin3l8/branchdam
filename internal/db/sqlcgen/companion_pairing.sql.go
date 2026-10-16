@@ -30,6 +30,50 @@ func (q *Queries) ActiveKeyPreviewForPairing(ctx context.Context, pairingID int6
 	return key_preview, err
 }
 
+const adoptRotatedKey = `-- name: AdoptRotatedKey :execrows
+UPDATE device_pairing_keys
+SET awaiting_adoption = 0, adopted_at = ?2, rotation_sealed_key = NULL
+WHERE id = ?1
+  AND awaiting_adoption = 1
+`
+
+type AdoptRotatedKeyParams struct {
+	ID        int64
+	AdoptedAt sql.NullInt64
+}
+
+// The device authenticated with rotation-minted key ?1 for the first
+// time (00043). Zero rows when another request already adopted it.
+func (q *Queries) AdoptRotatedKey(ctx context.Context, arg AdoptRotatedKeyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, adoptRotatedKey, arg.ID, arg.AdoptedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const clearSupersededRotationSecrets = `-- name: ClearSupersededRotationSecrets :exec
+UPDATE device_pairing_keys
+SET rotation_sealed_key = NULL
+WHERE pairing_id = ?1
+  AND id <> ?2
+  AND rotation_sealed_key IS NOT NULL
+`
+
+type ClearSupersededRotationSecretsParams struct {
+	PairingID int64
+	ID        int64
+}
+
+// Rotation (00043): only the pairing's newest key is ever delivered, so
+// an earlier rotation's sealed copy (pairing ?1, any key but ?2) is
+// dropped. The flag stays: a device that already received that key may
+// still adopt it.
+func (q *Queries) ClearSupersededRotationSecrets(ctx context.Context, arg ClearSupersededRotationSecretsParams) error {
+	_, err := q.db.ExecContext(ctx, clearSupersededRotationSecrets, arg.PairingID, arg.ID)
+	return err
+}
+
 const countDevicePairings = `-- name: CountDevicePairings :one
 SELECT COUNT(*) FROM device_pairings
 `
@@ -124,7 +168,7 @@ INSERT INTO device_pairing_keys (
     ?1, ?2, ?3, ?4
 )
 RETURNING id, pairing_id, key_lookup_hash, key_preview, created_at,
-          expires_at, revoked_at
+          expires_at, revoked_at, rotation_sealed_key, awaiting_adoption, adopted_at
 `
 
 type CreateDevicePairingKeyParams struct {
@@ -150,6 +194,9 @@ func (q *Queries) CreateDevicePairingKey(ctx context.Context, arg CreateDevicePa
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.RotationSealedKey,
+		&i.AwaitingAdoption,
+		&i.AdoptedAt,
 	)
 	return i, err
 }
@@ -234,7 +281,7 @@ func (q *Queries) GetDevicePairingByID(ctx context.Context, id int64) (DevicePai
 
 const getDevicePairingKeyByHash = `-- name: GetDevicePairingKeyByHash :one
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
-       k.expires_at, k.revoked_at
+       k.expires_at, k.revoked_at, k.rotation_sealed_key, k.awaiting_adoption, k.adopted_at
 FROM device_pairing_keys k
 JOIN device_pairings p ON p.id = k.pairing_id
 WHERE k.key_lookup_hash = ?1
@@ -258,13 +305,16 @@ func (q *Queries) GetDevicePairingKeyByHash(ctx context.Context, keyLookupHash s
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.RotationSealedKey,
+		&i.AwaitingAdoption,
+		&i.AdoptedAt,
 	)
 	return i, err
 }
 
 const getDevicePairingKeyByID = `-- name: GetDevicePairingKeyByID :one
 SELECT id, pairing_id, key_lookup_hash, key_preview, created_at,
-       expires_at, revoked_at
+       expires_at, revoked_at, rotation_sealed_key, awaiting_adoption, adopted_at
 FROM device_pairing_keys
 WHERE id = ?1
 `
@@ -280,6 +330,9 @@ func (q *Queries) GetDevicePairingKeyByID(ctx context.Context, id int64) (Device
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.RotationSealedKey,
+		&i.AwaitingAdoption,
+		&i.AdoptedAt,
 	)
 	return i, err
 }
@@ -407,7 +460,7 @@ func (q *Queries) ListDevicePairings(ctx context.Context, arg ListDevicePairings
 
 const listKeysByPairing = `-- name: ListKeysByPairing :many
 SELECT id, pairing_id, key_lookup_hash, key_preview, created_at,
-       expires_at, revoked_at
+       expires_at, revoked_at, rotation_sealed_key, awaiting_adoption, adopted_at
 FROM device_pairing_keys
 WHERE pairing_id = ?1
 ORDER BY created_at DESC, id DESC
@@ -430,6 +483,9 @@ func (q *Queries) ListKeysByPairing(ctx context.Context, pairingID int64) ([]Dev
 			&i.CreatedAt,
 			&i.ExpiresAt,
 			&i.RevokedAt,
+			&i.RotationSealedKey,
+			&i.AwaitingAdoption,
+			&i.AdoptedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -532,9 +588,28 @@ func (q *Queries) ListPairingSecrets(ctx context.Context) ([]ListPairingSecretsR
 	return items, nil
 }
 
+const markKeyAwaitingAdoption = `-- name: MarkKeyAwaitingAdoption :exec
+UPDATE device_pairing_keys
+SET awaiting_adoption = 1, rotation_sealed_key = ?2
+WHERE id = ?1
+`
+
+type MarkKeyAwaitingAdoptionParams struct {
+	ID                int64
+	RotationSealedKey sql.NullString
+}
+
+// Rotation (00043): flags the freshly minted key ?1 as awaiting adoption
+// and stores its sealed plaintext ?2 (NULL on a keyless server) for
+// delivery through the handshake.
+func (q *Queries) MarkKeyAwaitingAdoption(ctx context.Context, arg MarkKeyAwaitingAdoptionParams) error {
+	_, err := q.db.ExecContext(ctx, markKeyAwaitingAdoption, arg.ID, arg.RotationSealedKey)
+	return err
+}
+
 const newestActiveKeyForPairing = `-- name: NewestActiveKeyForPairing :one
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
-       k.expires_at, k.revoked_at
+       k.expires_at, k.revoked_at, k.rotation_sealed_key, k.awaiting_adoption, k.adopted_at
 FROM device_pairing_keys k
 WHERE k.pairing_id = ?1
   AND k.revoked_at IS NULL
@@ -573,13 +648,44 @@ func (q *Queries) NewestActiveKeyForPairing(ctx context.Context, arg NewestActiv
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.RotationSealedKey,
+		&i.AwaitingAdoption,
+		&i.AdoptedAt,
 	)
 	return i, err
 }
 
+const retireKeysOlderThan = `-- name: RetireKeysOlderThan :execrows
+UPDATE device_pairing_keys
+SET revoked_at = ?3, rotation_sealed_key = NULL, awaiting_adoption = 0
+WHERE pairing_id = ?1
+  AND id < ?2
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > ?3)
+`
+
+type RetireKeysOlderThanParams struct {
+	PairingID int64
+	ID        int64
+	RevokedAt sql.NullInt64
+}
+
+// Adoption (00043): revoke every still-active key of pairing ?1 older
+// than the adopted key ?2, at ?3. Keys newer than it (a later rotation
+// the device has not picked up yet) are left alone. Expired keys are
+// skipped, matching RevokeAllKeysForPairing and the table's
+// revoked_at <= expires_at CHECK.
+func (q *Queries) RetireKeysOlderThan(ctx context.Context, arg RetireKeysOlderThanParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, retireKeysOlderThan, arg.PairingID, arg.ID, arg.RevokedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeAllKeysForPairing = `-- name: RevokeAllKeysForPairing :exec
 UPDATE device_pairing_keys
-SET revoked_at = ?2
+SET revoked_at = ?2, rotation_sealed_key = NULL, awaiting_adoption = 0
 WHERE pairing_id = ?1
   AND revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > ?2)
@@ -590,6 +696,8 @@ type RevokeAllKeysForPairingParams struct {
 	RevokedAt sql.NullInt64
 }
 
+// Also drops any sealed rotation copy (00043): a revoked pairing's keys
+// must never be delivered.
 func (q *Queries) RevokeAllKeysForPairing(ctx context.Context, arg RevokeAllKeysForPairingParams) error {
 	_, err := q.db.ExecContext(ctx, revokeAllKeysForPairing, arg.PairingID, arg.RevokedAt)
 	return err

@@ -112,8 +112,8 @@ outcome lands in `event_queue.error_log`.
 ```
 
 `agentId` is required and must equal the agent id of the paired device that authenticated the
-request (`403 agent id mismatch` otherwise). `currentKeyId` is optional: when supplied and a newer
-active key exists for the device, the response carries `pendingRotation`.
+request (`403 agent id mismatch` otherwise). `currentKeyId` is accepted for backward
+compatibility and ignored: the server identifies the key from the request's `X-API-Key`.
 
 **Response (`AgentHandshakeOutput`):**
 ```json
@@ -124,13 +124,62 @@ active key exists for the device, the response carries `pendingRotation`.
   "acknowledgedEventUuid": "018f2345-6789-7abc-def0-123456789abc",
   "pendingEventsCount": 0,
   "namingTemplate": "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}",
-  "pendingRotation": {"keyId": 4, "apiKey": "", "previousKeyExpiresAtUnix": 0}
+  "currentKeyId": 3,
+  "pendingRotation": {
+    "keyId": 4,
+    "apiKey": "",
+    "sealedApiKey": "v1:3q2+7w8Ab...",
+    "previousKeyExpiresAtUnix": 1724071400
+  }
 }
 ```
 
-`namingTemplate` is the effective `ingest.namingTemplate`. `pendingRotation` is omitted unless the
-caller's `currentKeyId` is not the newest active key; it currently carries only `keyId` (the
-plaintext `apiKey` is blank -- the device must re-pair), so treat it as a hint.
+`namingTemplate` is the effective `ingest.namingTemplate`. `currentKeyId` is the id of the
+paired-device key this request authenticated with (omitted for any other caller).
+`pendingRotation` is omitted unless a newer active key exists for the device than the one the
+request used.
+
+### Key rotation delivery
+
+When an operator rotates a device's key (`POST /api/v1/companion/pairings/{id}/rotate`), every
+key the device holds keeps working until `previousKeyExpiresAtUnix` (the grace window, default
+24 h). The device picks the new key up from its next handshake and switches to it; it does not
+need to be re-paired.
+
+1. **Handshake with the current key.** The response carries `currentKeyId` and, while a rotation
+   is pending, `pendingRotation`:
+   - `keyId` -- the new key's id;
+   - `sealedApiKey` -- the new key, sealed so that only the holder of the key this request
+     authenticated with can open it (below). Omitted when the server cannot deliver it: it has no
+     `BRANCHDAM_SECRET_KEY` (the new key is then never stored), or the rotation happened before
+     delivery existed. Without it, the device must be re-paired by QR before the grace window ends;
+   - `apiKey` -- always `""`. The new key is never sent in the clear;
+   - `previousKeyExpiresAtUnix` -- when the current key stops working (`0` = no expiry set).
+   Two rotations before the device checks in deliver only the newest key.
+2. **Open `sealedApiKey`.** AES-256-GCM:
+   - key = `HMAC-SHA256(key = <current API key, UTF-8 bytes>, message = "branchdam-key-rotation-v1")`
+     (32 bytes);
+   - `sealedApiKey` = `"v1:"` + standard base64 (with padding) of `nonce (12 bytes) || ciphertext ||
+     tag (16 bytes)`; no associated data;
+   - the plaintext is the new API key (UTF-8).
+   Reference implementation: `internal/pairing.OpenRotatedKey`; a standard-library-only version is
+   in `internal/httpapi/agent_key_rotation_test.go`. A value that does not open (tag mismatch)
+   must be ignored; never fall back to anything else.
+3. **Persist the new key durably** (OS keychain/keystore, or the agent's config) *before* using it.
+4. **Adopt it** by sending the next request with the new key. The server's first successful key
+   lookup for a rotation-minted key adopts it: it revokes every older key of the pairing at once
+   (`KEY_ADOPTED` in the pairing audit log), without waiting for the grace window. From then on
+   the old key gets `401`. Any agent endpoint adopts; a handshake is the natural choice because it
+   also confirms `currentKeyId` = the new `keyId`.
+
+**Threat model.** The sealed copy opens for whoever holds the current key, and that holder can also
+adopt the new key. A leaked key can therefore be escalated to the newest key, and the legitimate
+device locked out mid-grace. Rotation alone does not evict a leaked key: revoke the pairing and
+re-pair the device.
+
+A device that misses the grace window entirely gets `401` on its old key and cannot fetch the new
+one; the operator re-pairs it (the pairing's credentials show the newest key). Client follow-ups:
+branchdam-agent (A17) and branchdam-mobile (M13).
 
 **Not a resume mechanism, despite the request fields' names.** `lastProcessedEventUuid` and
 `clientVersion` are accepted and parsed but never read by the handler
@@ -811,7 +860,7 @@ All management endpoints require an authenticated administrator session (`auth.R
 | `/api/v1/companion/pairings` | `POST` | Mint a new device pairing. Returns the plaintext API key (shown once) and QR pairing payload. Sets `owner_user_id` to the calling admin. |
 | `/api/v1/companion/pairings` | `GET` | List all registered companion device pairings, their enabled state, last seen timestamps, and client names. |
 | `/api/v1/companion/pairings/{id}` | `GET` | Retrieve details for a specific companion pairing. |
-| `/api/v1/companion/pairings/{id}/rotate` | `POST` | Rotate device API key. Invalidates previous key and returns a new plaintext token. |
+| `/api/v1/companion/pairings/{id}/rotate` | `POST` | Rotate device API key. Previous keys keep working for the grace window (or until the device adopts the new key -- see [Key rotation delivery](#key-rotation-delivery)); returns the new plaintext token. Errors: `404` unknown pairing; `409` revoked pairing (re-pair the device instead). |
 | `/api/v1/companion/pairings/{id}/revoke` | `POST` | Revoke device access immediately. Enforces a 401 Unauthorized response on subsequent agent calls. Errors: `404` unknown pairing. |
 | `/api/v1/companion/pairings/{id}/rename` | `POST` | Update a pairing's operator-facing `friendlyLabel`. Allowed on revoked pairings too (history rename is harmless). Empty labels are rejected (Huma `minLength` → 422). Audited as `LABEL_RENAMED`. |
 | `/api/v1/companion/pairings/{id}/credentials` | `GET` | Re-open the full credential set (QR SVG, pairing URL, parsed API key + preview) for an existing pairing's current key. Requires an authenticated admin session (`requireSettingsAdmin` — same gate as `GET /api/v1/settings`, stricter than the global `auth.RequireAdmin` GET bypass). Each successful read is audited fail-closed as `CREDENTIALS_REVEALED` before the response is served; response is `Cache-Control: private, no-store`. `keyPreview` is always the newest active key's last-4 from the DB (never key material). `apiKey`/`pairingUrl` are empty when the row has no sealed `pairing_url` (keyless server or pre-migration legacy row). `sealingEnabled` is whether a `BRANCHDAM_SECRET_KEY` box is configured on this server *right now* (not row provenance); with an empty `pairingUrl` the SPA uses it as `false` = keyless vs `true` = legacy row — rotate to seal. Errors: `404` unknown pairing; `410` revoked/expired (no active key); `409` sealed under a different `BRANCHDAM_SECRET_KEY`; `500` sealed credentials exist but no key is configured (same detail as `GET qr.svg` when the box is unset). |

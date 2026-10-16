@@ -129,6 +129,11 @@ var ErrPairingNotFound = errors.New("pairing: not found")
 // pairing was created in a future where qr_svg was a required field).
 var ErrNoActiveKey = errors.New("pairing: no active key")
 
+// ErrPairingRevoked is returned by RotateKey for a revoked pairing: a key
+// minted there could never authenticate or be adopted, so its sealed
+// delivery copy (00043) would never be cleared.
+var ErrPairingRevoked = errors.New("pairing: revoked")
+
 // ErrPairingNotRevoked is returned by DeletePairing when the caller
 // attempts to hard-delete a pairing that hasn't been revoked first.
 var ErrPairingNotRevoked = errors.New("pairing: not revoked")
@@ -344,6 +349,11 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 	return pairing, key, nil
 }
 
+// adoptKeyTimeout bounds KeyLookup's adoption write so authentication never
+// waits long on a busy writer; a timed-out adoption is retried by the
+// device's next request.
+const adoptKeyTimeout = 2 * time.Second
+
 // KeyLookup resolves an X-API-Key header value to the agent_id of the
 // device it authenticates AND the per-device HMAC signing key (issue
 // #453 PR C; auth.SigningKeyForAPIKey), or (auth.KeyLookupResult{}, nil) when no active key
@@ -366,6 +376,22 @@ func (s *Service) KeyLookup(ctx context.Context, presented string) (auth.KeyLook
 	pairing, err := s.db.Reader.GetDevicePairingByID(ctx, row.PairingID)
 	if err != nil {
 		return auth.KeyLookupResult{}, fmt.Errorf("lookup pairing: %w", err)
+	}
+	if row.AwaitingAdoption != 0 {
+		// First use of a rotation-minted key: the device has proved it
+		// holds the new key, so its older keys stop working now rather
+		// than at the end of the grace window. A failure here never fails
+		// authentication -- the key is valid either way, and the flag is
+		// still set, so the next request retries.
+		// Bounded: this is the auth path of every agent request, and the
+		// adoption tx waits for the single writer connection.
+		adoptCtx, cancel := context.WithTimeout(ctx, adoptKeyTimeout)
+		err := s.adoptKey(adoptCtx, row, pairing.AgentID)
+		cancel()
+		if err != nil {
+			s.log.Warn("pairing: adopting rotated key failed; will retry on next request",
+				"agentId", pairing.AgentID, "keyId", row.ID, "err", err)
+		}
 	}
 	// The signing key is auth.SigningKeyForAPIKey -- the raw presented
 	// key, the same key branchdam-agent and branchdam-mobile sign with
@@ -395,6 +421,18 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 		return nil, 0, fmt.Errorf("mint api key: %w", err)
 	}
 	hash := s.hashKey(plaintext)
+	// The device learns the new key from its next handshake (00043), so
+	// the plaintext is kept sealed at rest until it is adopted -- only with
+	// a box configured, like pairing_url; a keyless server stores nothing
+	// and its devices re-pair by QR.
+	var sealedForDelivery sql.NullString
+	if s.box != nil {
+		sealed, err := s.box.Seal(plaintext)
+		if err != nil {
+			return nil, 0, fmt.Errorf("seal rotated key: %w", err)
+		}
+		sealedForDelivery = sql.NullString{String: sealed, Valid: true}
+	}
 
 	var (
 		keyRow        sqlcgen.DevicePairingKey
@@ -408,6 +446,9 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 				return ErrPairingNotFound
 			}
 			return fmt.Errorf("load pairing: %w", err)
+		}
+		if existing.RevokedAt.Valid {
+			return ErrPairingRevoked
 		}
 		agentID = existing.AgentID
 		friendlyLabel = existing.FriendlyLabel
@@ -429,6 +470,18 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 			return fmt.Errorf("insert new key: %w", err)
 		}
 		keyRow = row
+		if err := q.MarkKeyAwaitingAdoption(ctx, sqlcgen.MarkKeyAwaitingAdoptionParams{
+			ID:                row.ID,
+			RotationSealedKey: sealedForDelivery,
+		}); err != nil {
+			return fmt.Errorf("mark key awaiting adoption: %w", err)
+		}
+		if err := q.ClearSupersededRotationSecrets(ctx, sqlcgen.ClearSupersededRotationSecretsParams{
+			PairingID: pairingID,
+			ID:        row.ID,
+		}); err != nil {
+			return fmt.Errorf("clear superseded rotation secrets: %w", err)
+		}
 
 		if err := q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
 			PairingID: pairingID,
@@ -493,6 +546,151 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 		PayloadURL: payloadStr,
 	}, expiresAt, nil
 
+}
+
+// adoptKey records that the device authenticated with rotation-minted key
+// row for the first time: the key is adopted (its sealed delivery copy
+// dropped) and every older still-active key of the pairing is revoked,
+// with a KEY_ADOPTED audit row. Idempotent: a concurrent adoption makes
+// AdoptRotatedKey match zero rows and this a no-op.
+func (s *Service) adoptKey(ctx context.Context, row sqlcgen.DevicePairingKey, agentID string) error {
+	now := s.nowFn()
+	return s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		n, err := q.AdoptRotatedKey(ctx, sqlcgen.AdoptRotatedKeyParams{
+			ID:        row.ID,
+			AdoptedAt: sql.NullInt64{Int64: now, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("adopt key: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+		retired, err := q.RetireKeysOlderThan(ctx, sqlcgen.RetireKeysOlderThanParams{
+			PairingID: row.PairingID,
+			ID:        row.ID,
+			RevokedAt: sql.NullInt64{Int64: now, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("retire older keys: %w", err)
+		}
+		return q.InsertPairingAudit(ctx, sqlcgen.InsertPairingAuditParams{
+			PairingID: row.PairingID,
+			Actor:     agentID,
+			Event:     audit.EventKeyAdopted,
+			Details:   mustJSON(map[string]any{"key_id": row.ID, "key_preview": row.KeyPreview, "retired_keys": retired}),
+			CreatedAt: now,
+		})
+	})
+}
+
+// RotationSealInfo is the HMAC-SHA256 message that derives a device's
+// rotation transport key from its current API key (docs/agent-api.md).
+const RotationSealInfo = "branchdam-key-rotation-v1"
+
+// rotationBox returns the secrets.Box that seals a rotated key for the
+// device holding currentKey: AES-256-GCM under
+// HMAC-SHA256(key = currentKey, message = RotationSealInfo). Only a
+// holder of currentKey can derive it, so the sealed value in a handshake
+// response is useless to anything that merely sees the response.
+func rotationBox(currentKey string) (*secrets.Box, error) {
+	mac := hmac.New(sha256.New, []byte(currentKey))
+	mac.Write([]byte(RotationSealInfo))
+	return secrets.NewBox(base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+}
+
+// SealForDevice seals newKey for the device that authenticates with
+// currentKey. The result uses secrets.Box's format: "v1:" followed by the
+// standard-base64 encoding of a 12-byte nonce, the ciphertext and the
+// 16-byte GCM tag.
+func SealForDevice(currentKey, newKey string) (string, error) {
+	box, err := rotationBox(currentKey)
+	if err != nil {
+		return "", err
+	}
+	return box.Seal(newKey)
+}
+
+// OpenRotatedKey is the client half of SealForDevice, kept here as the
+// reference implementation for clients and for tests.
+func OpenRotatedKey(currentKey, sealed string) (string, error) {
+	box, err := rotationBox(currentKey)
+	if err != nil {
+		return "", err
+	}
+	return box.Open(sealed)
+}
+
+// PendingRotation is what /agent/handshake reports about the requesting
+// key. CurrentKeyID is always set; KeyID is zero when the device is
+// already on its pairing's newest active key.
+type PendingRotation struct {
+	CurrentKeyID int64
+	KeyID        int64
+	// SealedAPIKey is the new key sealed for the device (SealForDevice),
+	// or empty when it cannot be delivered: the server has no
+	// BRANCHDAM_SECRET_KEY, or the rotation predates 00043. The device
+	// then has to be re-paired by QR.
+	SealedAPIKey string
+	// PreviousKeyExpiresAt is when the requesting key stops working
+	// unless the device adopts the new key first (0 = no expiry set).
+	PreviousKeyExpiresAt int64
+}
+
+// PendingRotationFor resolves presented -- the X-API-Key the request
+// authenticated with -- to its key row and reports whether a newer key
+// is waiting for the device, sealed for it. Returns (nil, nil) when
+// presented is not an active key of agentID's pairing. That is
+// defensive only: in production the agent auth chain admits nothing
+// but pairing keys (AgentChain.LookupKey is pairing.KeyLookup).
+func (s *Service) PendingRotationFor(ctx context.Context, agentID, presented string) (*PendingRotation, error) {
+	row, err := s.db.Reader.GetDevicePairingKeyByHash(ctx, s.hashKey(presented))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup key: %w", err)
+	}
+	pairing, err := s.db.Reader.GetDevicePairingByID(ctx, row.PairingID)
+	if err != nil {
+		return nil, fmt.Errorf("lookup pairing: %w", err)
+	}
+	if pairing.AgentID != agentID || pairing.RevokedAt.Valid {
+		return nil, nil
+	}
+	out := &PendingRotation{CurrentKeyID: row.ID}
+	newer, err := s.db.Reader.NewestActiveKeyForPairing(ctx, sqlcgen.NewestActiveKeyForPairingParams{
+		PairingID: row.PairingID,
+		ID:        row.ID,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup newest key: %w", err)
+	}
+	out.KeyID = newer.ID
+	if row.ExpiresAt.Valid {
+		out.PreviousKeyExpiresAt = row.ExpiresAt.Int64
+	}
+	if !newer.RotationSealedKey.Valid || s.box == nil {
+		return out, nil
+	}
+	plaintext, err := s.box.Open(newer.RotationSealedKey.String)
+	if err != nil {
+		// Wrong or changed BRANCHDAM_SECRET_KEY: report the rotation
+		// without the key, so the device falls back to re-pairing. The
+		// copy is kept: restoring the right secret key makes it
+		// deliverable again, and adoption, a newer rotation or a
+		// revoke clears it.
+		s.log.Warn("pairing: cannot open sealed rotated key; device must re-pair",
+			"agentId", agentID, "keyId", newer.ID, "err", err)
+		return out, nil
+	}
+	if out.SealedAPIKey, err = SealForDevice(presented, plaintext); err != nil {
+		return nil, fmt.Errorf("seal rotated key for device: %w", err)
+	}
+	return out, nil
 }
 
 // RevokePairing terminates pairingID: sets revoked_at on the pairing row

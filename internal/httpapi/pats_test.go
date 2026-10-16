@@ -361,3 +361,19 @@ func TestPAT_MintEmptyScopes400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code,
 		"empty scope list must 400, body: %s", rr.Body.String())
 }
+
+// TestDecodeScopesFromJSONNeverNil: patDTO.Scopes is a non-optional
+// string[] on the wire, so an empty, "null" or corrupt scopes_json must
+// still encode as [] rather than null.
+func TestDecodeScopesFromJSONNeverNil(t *testing.T) {
+	for _, in := range []string{"", "null", "[]", "not json"} {
+		got, _ := decodeScopesFromJSON(in)
+		if got == nil || len(got) != 0 {
+			t.Errorf("decodeScopesFromJSON(%q) = %#v, want empty non-nil slice", in, got)
+		}
+	}
+	got, err := decodeScopesFromJSON(`["admin","pats:write"]`)
+	if err != nil || len(got) != 2 || got[0] != "admin" || got[1] != "pats:write" {
+		t.Errorf("decodeScopesFromJSON(valid) = %v, %v", got, err)
+	}
+}

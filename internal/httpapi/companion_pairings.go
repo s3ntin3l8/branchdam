@@ -375,6 +375,9 @@ func (s *Server) handleRotatePairing(ctx context.Context, in *RotatePairingInput
 		if errors.Is(err, pairing.ErrPairingNotFound) {
 			return nil, huma.Error404NotFound("pairing not found")
 		}
+		if errors.Is(err, pairing.ErrPairingRevoked) {
+			return nil, huma.Error409Conflict("pairing is revoked; re-pair the device instead")
+		}
 		return nil, huma.Error500InternalServerError("rotate pairing", err)
 	}
 	out := &RotatePairingOutput{}

@@ -55,7 +55,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/immich` | Minimal Immich HTTP client for the external-library scan trigger; no DB access |
 | `internal/metadata` | Pure planning of which EXIF/XMP identity tags a child inherits from its parent |
 | `internal/naming` | Filename-stem normalization and the ingest naming template, shared by pipeline and graph |
-| `internal/pairing` | Per-device API key mint/rotate/revoke for agent auth; QR credential sealing |
+| `internal/pairing` | Per-device API key mint/rotate/revoke for agent auth; QR credential sealing; rotated-key delivery through the handshake and adoption on first use |
 | `internal/projectfile` | Tier-1 project-file parsers (`.dam.json`, `.drp`, `.fcpxml`, `.edl`, `.prproj`) |
 | `internal/qr` | SVG QR rendering for companion pairing |
 | `internal/rehash` | Background worker that re-reads agent-asserted Tier-3 `full_hash` values through `Guard.OpenRead` and marks matches server-computed (`full_hash_provenance`) |

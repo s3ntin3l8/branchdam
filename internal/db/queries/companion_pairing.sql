@@ -88,14 +88,14 @@ INSERT INTO device_pairing_keys (
     ?1, ?2, ?3, ?4
 )
 RETURNING id, pairing_id, key_lookup_hash, key_preview, created_at,
-          expires_at, revoked_at;
+          expires_at, revoked_at, rotation_sealed_key, awaiting_adoption, adopted_at;
 
 -- name: GetDevicePairingKeyByHash :one
 -- The hot path: KeyLookup runs this on every authenticated agent request.
 -- UNIQUE index on key_lookup_hash keeps it O(log n). Active means
 -- revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now).
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
-       k.expires_at, k.revoked_at
+       k.expires_at, k.revoked_at, k.rotation_sealed_key, k.awaiting_adoption, k.adopted_at
 FROM device_pairing_keys k
 JOIN device_pairings p ON p.id = k.pairing_id
 WHERE k.key_lookup_hash = ?1
@@ -106,13 +106,13 @@ LIMIT 1;
 
 -- name: GetDevicePairingKeyByID :one
 SELECT id, pairing_id, key_lookup_hash, key_preview, created_at,
-       expires_at, revoked_at
+       expires_at, revoked_at, rotation_sealed_key, awaiting_adoption, adopted_at
 FROM device_pairing_keys
 WHERE id = ?1;
 
 -- name: ListKeysByPairing :many
 SELECT id, pairing_id, key_lookup_hash, key_preview, created_at,
-       expires_at, revoked_at
+       expires_at, revoked_at, rotation_sealed_key, awaiting_adoption, adopted_at
 FROM device_pairing_keys
 WHERE pairing_id = ?1
 ORDER BY created_at DESC, id DESC;
@@ -125,7 +125,7 @@ ORDER BY created_at DESC, id DESC;
 -- Returns no rows (sql.ErrNoRows) when the caller is already on the
 -- newest active key.
 SELECT k.id, k.pairing_id, k.key_lookup_hash, k.key_preview, k.created_at,
-       k.expires_at, k.revoked_at
+       k.expires_at, k.revoked_at, k.rotation_sealed_key, k.awaiting_adoption, k.adopted_at
 FROM device_pairing_keys k
 WHERE k.pairing_id = ?1
   AND k.revoked_at IS NULL
@@ -164,8 +164,10 @@ WHERE pairing_id = ?1
   AND expires_at IS NULL;
 
 -- name: RevokeAllKeysForPairing :exec
+-- Also drops any sealed rotation copy (00043): a revoked pairing's keys
+-- must never be delivered.
 UPDATE device_pairing_keys
-SET revoked_at = ?2
+SET revoked_at = ?2, rotation_sealed_key = NULL, awaiting_adoption = 0
 WHERE pairing_id = ?1
   AND revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > ?2);
@@ -235,3 +237,43 @@ DELETE FROM device_pairing_keys WHERE pairing_id = ?1;
 
 -- name: DeleteDevicePairing :exec
 DELETE FROM device_pairings WHERE id = ?1;
+
+-- name: MarkKeyAwaitingAdoption :exec
+-- Rotation (00043): flags the freshly minted key ?1 as awaiting adoption
+-- and stores its sealed plaintext ?2 (NULL on a keyless server) for
+-- delivery through the handshake.
+UPDATE device_pairing_keys
+SET awaiting_adoption = 1, rotation_sealed_key = ?2
+WHERE id = ?1;
+
+-- name: ClearSupersededRotationSecrets :exec
+-- Rotation (00043): only the pairing's newest key is ever delivered, so
+-- an earlier rotation's sealed copy (pairing ?1, any key but ?2) is
+-- dropped. The flag stays: a device that already received that key may
+-- still adopt it.
+UPDATE device_pairing_keys
+SET rotation_sealed_key = NULL
+WHERE pairing_id = ?1
+  AND id <> ?2
+  AND rotation_sealed_key IS NOT NULL;
+
+-- name: AdoptRotatedKey :execrows
+-- The device authenticated with rotation-minted key ?1 for the first
+-- time (00043). Zero rows when another request already adopted it.
+UPDATE device_pairing_keys
+SET awaiting_adoption = 0, adopted_at = ?2, rotation_sealed_key = NULL
+WHERE id = ?1
+  AND awaiting_adoption = 1;
+
+-- name: RetireKeysOlderThan :execrows
+-- Adoption (00043): revoke every still-active key of pairing ?1 older
+-- than the adopted key ?2, at ?3. Keys newer than it (a later rotation
+-- the device has not picked up yet) are left alone. Expired keys are
+-- skipped, matching RevokeAllKeysForPairing and the table's
+-- revoked_at <= expires_at CHECK.
+UPDATE device_pairing_keys
+SET revoked_at = ?3, rotation_sealed_key = NULL, awaiting_adoption = 0
+WHERE pairing_id = ?1
+  AND id < ?2
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > ?3);
