@@ -141,8 +141,13 @@ batches of 16 with a short pause between batches, and idles once nothing is left
 read is retried after an hour. A **mismatch** is logged at `WARN` (`rehash: agent-asserted
 full_hash does not match the file`, with the node UUID, path and both hashes) and recorded as
 `rehash_state = 'MISMATCH'` with the computed value in `rehash_computed`; the stored `full_hash` is
-left as it is for you to investigate, and it never authorises pruning. Right after upgrading,
-every hash on a `TIER3_MASTER_ARCHIVE` location starts out asserted -- the server cannot tell an
+never replaced by what was read (the archive copy may be the damaged one), and it never authorises
+pruning. The file is read again once a day. To repair it, compare the archive copy with a known-good
+copy (the device's own hash is the stored value): if the archive copy is damaged, restore the good
+copy over it and the next daily read verifies the master. If the archive copy is right and the
+device's hash was wrong, the master stays unverified and its Tier-1 caches are kept, never purged.
+
+Right after upgrading, every hash on a `TIER3_MASTER_ARCHIVE` location starts out asserted -- the server cannot tell an
 older device's assertion from a hash it scanned -- so cache pruning pauses until the worker has
 re-read the archive once (a single sequential pass; each match is recorded as it goes).
 

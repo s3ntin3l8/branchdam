@@ -147,15 +147,18 @@ func TestMatchFlipsToServer(t *testing.T) {
 
 // TestMismatchStaysAgent: the bytes hash to something else. The asserted
 // value stays AGENT (authorising nothing), the computed value is kept for
-// an operator, media_nodes.full_hash is untouched, and the row is never
-// re-claimed for the same asserted value.
+// an operator, and media_nodes.full_hash is untouched. The row is only
+// re-read after the mismatch window, and restoring good bytes then
+// verifies it.
 func TestMismatchStaysAgent(t *testing.T) {
 	e := newEnv(t)
 	content := "what is really on disk"
 	asserted := hashOf(t, "what the agent claimed")
 	id := e.node(t, e.tier3ID, e.archive, "b.mov", strp(content), asserted, db.HashSourceAgent)
 
-	w := NewWorker(e.db, e.guard, nil, WithRetryAfter(0))
+	now := time.Now()
+	w := NewWorker(e.db, e.guard, nil, WithRetryAfter(0), WithMismatchRetryAfter(24*time.Hour),
+		WithClock(func() time.Time { return now }))
 	stats, err := w.ProcessBatch(context.Background())
 	if err != nil {
 		t.Fatalf("ProcessBatch: %v", err)
@@ -175,7 +178,29 @@ func TestMismatchStaysAgent(t *testing.T) {
 		t.Errorf("media_nodes.full_hash = %v, want the asserted value left in place", n.FullHash)
 	}
 	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats != (Stats{}) {
-		t.Errorf("second pass = %+v, %v; a MISMATCH must not be re-claimed", stats, err)
+		t.Errorf("pass inside the mismatch window = %+v, %v; a MISMATCH must not be re-claimed", stats, err)
+	}
+
+	// Past the window the same bytes are read again and still mismatch.
+	now = now.Add(25 * time.Hour)
+	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Mismatched != 1 {
+		t.Fatalf("pass after the mismatch window = %+v, %v; want the same mismatch again", stats, err)
+	}
+	if p := e.provenance(t, id); p.Source != db.HashSourceAgent || p.RehashAttempts != 2 {
+		t.Fatalf("provenance = %+v, want still AGENT after two attempts", p)
+	}
+
+	// An operator restores a good copy of the file: the next re-read after
+	// the window verifies the stored value, with no database edit.
+	if err := os.WriteFile(filepath.Join(e.archive, "b.mov"), []byte("what the agent claimed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(25 * time.Hour)
+	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Matched != 1 {
+		t.Fatalf("pass after restoring the file = %+v, %v; want one match", stats, err)
+	}
+	if p := e.provenance(t, id); p.Source != db.HashSourceServer || p.RehashState.Valid || p.RehashComputed.Valid {
+		t.Errorf("provenance = %+v, want SERVER with the mismatch cleared", p)
 	}
 }
 

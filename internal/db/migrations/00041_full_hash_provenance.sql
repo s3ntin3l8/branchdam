@@ -19,8 +19,9 @@
 -- rehash_* is internal/rehash's bookkeeping for an AGENT row: the last
 -- attempt time, how many attempts, and the outcome when it was not a match
 -- (MISMATCH: the bytes hash to rehash_computed, not the asserted value --
--- terminal for this asserted value; ERROR: the file could not be read, so
--- the worker retries later). A match flips source to 'SERVER' instead.
+-- re-read only after a day, so restoring a good copy verifies it; ERROR:
+-- the file could not be read, so the worker retries after an hour). A
+-- match flips source to 'SERVER' instead.
 CREATE TABLE full_hash_provenance (
     node_id           INTEGER PRIMARY KEY REFERENCES media_nodes(id) ON DELETE RESTRICT,
     full_hash         TEXT    NOT NULL CHECK (length(full_hash) = 64),

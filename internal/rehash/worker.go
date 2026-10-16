@@ -10,7 +10,9 @@
 //   - a match flips the row to 'SERVER', and the hash starts authorising;
 //   - a mismatch is logged and recorded (MISMATCH, with the computed value),
 //     and the asserted hash keeps authorising nothing -- the stored
-//     media_nodes.full_hash is left as it is for an operator to look at;
+//     media_nodes.full_hash is never replaced by what was read, since the
+//     archive copy may be the damaged one. It is re-read after
+//     MismatchRetryAfter, so restoring a good copy of the file verifies it;
 //   - a read failure is recorded (ERROR) and retried after RetryAfter.
 //
 // Bounded: one file at a time, at most BatchSize files per claim query.
@@ -53,6 +55,13 @@ const DefaultBatchPause = 2 * time.Second
 // share, permission error) waits before it is tried again.
 const DefaultRetryAfter = time.Hour
 
+// DefaultMismatchRetryAfter is how long a file whose bytes did not match
+// the asserted hash waits before it is read again. Re-reading unchanged
+// bytes only repeats the MISMATCH, so this is long; it exists so that an
+// operator who restores a good copy onto the archive needs no database
+// edit for the master to verify.
+const DefaultMismatchRetryAfter = 24 * time.Hour
+
 const (
 	stateMismatch = "MISMATCH"
 	stateError    = "ERROR"
@@ -65,10 +74,11 @@ type Worker struct {
 	guard *storage.Guard
 	log   *slog.Logger
 
-	batchSize  int
-	batchPause time.Duration
-	retryAfter time.Duration
-	now        func() time.Time
+	batchSize          int
+	batchPause         time.Duration
+	retryAfter         time.Duration
+	mismatchRetryAfter time.Duration
+	now                func() time.Time
 
 	// cursor is the last node id handled, so consecutive batches walk the
 	// candidates in id order instead of re-claiming a row that just failed.
@@ -110,6 +120,15 @@ func WithRetryAfter(d time.Duration) Option {
 	}
 }
 
+// WithMismatchRetryAfter overrides DefaultMismatchRetryAfter.
+func WithMismatchRetryAfter(d time.Duration) Option {
+	return func(w *Worker) {
+		if d >= 0 {
+			w.mismatchRetryAfter = d
+		}
+	}
+}
+
 // WithClock overrides time.Now, for tests of the ERROR retry window.
 func WithClock(now func() time.Time) Option {
 	return func(w *Worker) {
@@ -125,13 +144,14 @@ func NewWorker(database *db.DB, guard *storage.Guard, log *slog.Logger, opts ...
 		log = slog.New(slog.DiscardHandler)
 	}
 	w := &Worker{
-		db:         database,
-		guard:      guard,
-		log:        log,
-		batchSize:  DefaultBatchSize,
-		batchPause: DefaultBatchPause,
-		retryAfter: DefaultRetryAfter,
-		now:        time.Now,
+		db:                 database,
+		guard:              guard,
+		log:                log,
+		batchSize:          DefaultBatchSize,
+		batchPause:         DefaultBatchPause,
+		retryAfter:         DefaultRetryAfter,
+		mismatchRetryAfter: DefaultMismatchRetryAfter,
+		now:                time.Now,
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -197,16 +217,18 @@ func (w *Worker) run(ctx context.Context, interval time.Duration) {
 // ProcessBatch claims up to the batch size of candidates after the cursor
 // and re-hashes each one. When fewer than a full batch come back, the
 // cursor wraps to the start so the next pass sees rows that became
-// candidates behind it (and ERROR rows whose retry window has passed).
+// candidates behind it (and ERROR or MISMATCH rows whose retry window has
+// passed).
 func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 	var stats Stats
 	if w.db == nil || w.guard == nil {
 		return stats, errors.New("rehash: database or storage guard not configured")
 	}
 	rows, err := w.db.Reader.ListRehashCandidates(ctx, sqlcgen.ListRehashCandidatesParams{
-		AfterID:     w.cursor,
-		RetryBefore: sql.NullInt64{Int64: w.now().Add(-w.retryAfter).Unix(), Valid: true},
-		BatchLimit:  int64(w.batchSize),
+		AfterID:             w.cursor,
+		RetryBefore:         sql.NullInt64{Int64: w.now().Add(-w.retryAfter).Unix(), Valid: true},
+		MismatchRetryBefore: sql.NullInt64{Int64: w.now().Add(-w.mismatchRetryAfter).Unix(), Valid: true},
+		BatchLimit:          int64(w.batchSize),
 	})
 	if err != nil {
 		return stats, fmt.Errorf("list rehash candidates: %w", err)
@@ -259,7 +281,8 @@ func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidate
 	default:
 		stats.Mismatched++
 		w.log.Warn("rehash: agent-asserted full_hash does not match the file; it will not authorise pruning",
-			"nodeUuid", row.NodeUuid, "path", row.FilePath, "asserted", asserted, "computed", computed)
+			"nodeUuid", row.NodeUuid, "path", row.FilePath, "asserted", asserted, "computed", computed,
+			"rereadAfter", w.mismatchRetryAfter)
 		return w.record(ctx, func(q *sqlcgen.Queries) (int64, error) {
 			return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
 				NodeID:         row.ID,

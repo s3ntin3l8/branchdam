@@ -50,10 +50,12 @@ WHERE node_id = ?1;
 -- internal/rehash's claim query: up to batch_limit live Tier-3 nodes, in
 -- node id order after after_id, whose current full_hash is only
 -- agent-asserted and has not been re-hashed yet -- or whose last attempt
--- failed to read the file (ERROR) before retry_before. A MISMATCH is
--- terminal for that asserted value: re-reading the same bytes would only
--- repeat it. A row whose full_hash no longer equals the node's vouches for
--- nothing and is skipped. Driven from the AGENT partial index
+-- failed to read the file (ERROR) before retry_before, or read bytes that
+-- did not match (MISMATCH) before mismatch_retry_before. A MISMATCH is
+-- re-read on the longer window so that restoring a good copy of the file
+-- onto the archive verifies it without anyone editing the database; the
+-- stored value is never replaced by what was read. A row whose full_hash
+-- no longer equals the node's vouches for nothing and is skipped. Driven from the AGENT partial index
 -- (ix_full_hash_provenance_agent) so a fully verified archive costs an
 -- empty index range per pass, not a media_nodes scan.
 SELECT n.id, n.node_uuid, n.file_path, n.full_hash, n.size_bytes,
@@ -65,7 +67,8 @@ WHERE p.source = 'AGENT'
   AND p.node_id > sqlc.arg(after_id)
   AND p.full_hash = n.full_hash
   AND (p.rehash_state IS NULL
-       OR (p.rehash_state = 'ERROR' AND p.rehash_checked_at < sqlc.arg(retry_before)))
+       OR (p.rehash_state = 'ERROR' AND p.rehash_checked_at < sqlc.arg(retry_before))
+       OR (p.rehash_state = 'MISMATCH' AND p.rehash_checked_at < sqlc.arg(mismatch_retry_before)))
   AND s.tier = 'TIER3_MASTER_ARCHIVE'
   AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
 ORDER BY p.node_id

@@ -607,7 +607,9 @@ node landing there (a hash that does not match never becomes verified). Bytes se
 is the server's own, taken over the bytes as it received and wrote them, though not over a re-read
 of the stored file afterwards. Clients
 that gate local deletion on `verified` therefore wait a little longer after an event-based ingest;
-nodes created before the upgrade by a paired device re-verify the same way. `fullHash` is the node's stored BLAKE3-256 `full_hash`, so a
+Tier-3 masters that existed before the upgrade re-verify the same way. The worker reads Tier-3
+archive locations only: a device-asserted hash on any other tier stays `verified: false` until a
+scan of that location recomputes it. `fullHash` is the node's stored BLAKE3-256 `full_hash`, so a
 client about to delete its local copy can compare it with the hash it computed itself rather than
 trusting `verified` alone; it is omitted when the node is not found or has no full hash (added
 alongside the existing fields -- older clients simply ignore it). `found: false` is not an error

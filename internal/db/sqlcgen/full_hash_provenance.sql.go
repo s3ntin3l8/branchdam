@@ -43,17 +43,19 @@ WHERE p.source = 'AGENT'
   AND p.node_id > ?1
   AND p.full_hash = n.full_hash
   AND (p.rehash_state IS NULL
-       OR (p.rehash_state = 'ERROR' AND p.rehash_checked_at < ?2))
+       OR (p.rehash_state = 'ERROR' AND p.rehash_checked_at < ?2)
+       OR (p.rehash_state = 'MISMATCH' AND p.rehash_checked_at < ?3))
   AND s.tier = 'TIER3_MASTER_ARCHIVE'
   AND n.lifecycle_state IN ('ACTIVE', 'HIDDEN')
 ORDER BY p.node_id
-LIMIT ?3
+LIMIT ?4
 `
 
 type ListRehashCandidatesParams struct {
-	AfterID     int64
-	RetryBefore sql.NullInt64
-	BatchLimit  int64
+	AfterID             int64
+	RetryBefore         sql.NullInt64
+	MismatchRetryBefore sql.NullInt64
+	BatchLimit          int64
 }
 
 type ListRehashCandidatesRow struct {
@@ -68,14 +70,21 @@ type ListRehashCandidatesRow struct {
 // internal/rehash's claim query: up to batch_limit live Tier-3 nodes, in
 // node id order after after_id, whose current full_hash is only
 // agent-asserted and has not been re-hashed yet -- or whose last attempt
-// failed to read the file (ERROR) before retry_before. A MISMATCH is
-// terminal for that asserted value: re-reading the same bytes would only
-// repeat it. A row whose full_hash no longer equals the node's vouches for
-// nothing and is skipped. Driven from the AGENT partial index
+// failed to read the file (ERROR) before retry_before, or read bytes that
+// did not match (MISMATCH) before mismatch_retry_before. A MISMATCH is
+// re-read on the longer window so that restoring a good copy of the file
+// onto the archive verifies it without anyone editing the database; the
+// stored value is never replaced by what was read. A row whose full_hash
+// no longer equals the node's vouches for nothing and is skipped. Driven from the AGENT partial index
 // (ix_full_hash_provenance_agent) so a fully verified archive costs an
 // empty index range per pass, not a media_nodes scan.
 func (q *Queries) ListRehashCandidates(ctx context.Context, arg ListRehashCandidatesParams) ([]ListRehashCandidatesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listRehashCandidates, arg.AfterID, arg.RetryBefore, arg.BatchLimit)
+	rows, err := q.db.QueryContext(ctx, listRehashCandidates,
+		arg.AfterID,
+		arg.RetryBefore,
+		arg.MismatchRetryBefore,
+		arg.BatchLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
