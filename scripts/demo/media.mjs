@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -156,7 +156,7 @@ export function generateMedia(roots) {
       "-vf", "scale=640:-2,format=yuv420p", "-c:v", "libx264", "-r", "24",
       path.join(projectDir, `${lead}_proxy.mp4`),
     ]);
-    execFileSync("rm", ["-f", still]);
+    rmSync(still, { force: true });
     counts.proxy++;
   }
   return counts;

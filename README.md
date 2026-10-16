@@ -135,7 +135,8 @@ runs with a clean environment, keeps Immich and metadata write-back off, and
 deletes everything on Ctrl-C. `scripts/demo/env.mjs` enforces that, and
 `make test-demo` tests it. `make screenshots` regenerates `docs/screenshots/`
 from that demo; `make screenshots-landing OUT=<dir>` writes 2x stills plus a
-short loop. Both need `ffmpeg` and `exiftool`.
+short loop. Both need `ffmpeg`, `exiftool` and Playwright's Chromium (once:
+`cd web && npx playwright install chromium`).
 
 ---
 

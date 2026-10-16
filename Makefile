@@ -79,10 +79,10 @@ dev-all: web-ensure dev-config web/node_modules ## Run API + Vite together in on
 demo: web/node_modules ## Throwaway demo with synthetic media + lineage (scratch config/DB/storage, clean env, 127.0.0.1:3975); Ctrl-C deletes it
 	node scripts/demo/instance.mjs
 
-screenshots: web/node_modules ## Regenerate docs/screenshots (dark + light) from the demo; needs ffmpeg + exiftool
+screenshots: web/node_modules ## Regenerate docs/screenshots (dark + light) from the demo; needs ffmpeg, exiftool + Chromium (cd web && npx playwright install chromium)
 	node scripts/demo/capture.mjs
 
-screenshots-landing: web/node_modules ## Landing-page stills + loop into OUT (default ./landing-shots)
+screenshots-landing: web/node_modules ## Landing-page stills + loop into OUT (default ./landing-shots); same prerequisites as screenshots
 	node scripts/demo/capture.mjs --profile landing --out "$(or $(OUT),landing-shots)"
 
 test-demo: ## Tests for the demo's isolation guard

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { DEMO_HEADERS, startDemo } from "./instance.mjs";
+import { DEMO_HEADERS, assetsOf, startDemo } from "./instance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const { chromium } = createRequire(path.join(ROOT, "web/package.json"))("@playwright/test");
@@ -72,8 +72,7 @@ function shot(page, dir, name, element) {
 }
 
 async function heroAssetId(demo) {
-  const body = await demo.api("/api/v1/assets?limit=500");
-  const assets = body.assets ?? body.items ?? body;
+  const assets = assetsOf(await demo.api("/api/v1/assets?limit=500"));
   const hero = assets.find((a) => a.fileName === HERO_FILE);
   if (!hero) throw new Error(`demo asset ${HERO_FILE} not found`);
   return hero.id;
@@ -160,7 +159,13 @@ async function captureLanding(browser, demo, heroId) {
 }
 
 const demo = await startDemo({ quiet: true, keep: values.keep });
-const browser = await chromium.launch();
+let browser;
+try {
+  browser = await chromium.launch();
+} catch (err) {
+  await demo.stop();
+  throw new Error(`could not launch Chromium (once: cd web && npx playwright install chromium): ${err.message}`);
+}
 try {
   const heroId = await heroAssetId(demo);
   if (values.profile === "landing") await captureLanding(browser, demo, heroId);

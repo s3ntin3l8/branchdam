@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 
 /**
@@ -18,13 +17,8 @@ const PASSTHROUGH = ["PATH", "LANG", "LC_ALL", "TERM", "TZ"];
 // Plural forms too (`*_KEYS`, `*_TOKENS`); MULLION_* is refused by prefix below.
 const SECRET_KEY = /(SECRETS?|PASSWORDS?|_KEYS?|_TOKENS?|_PATS?)$|ENCRYPTION/;
 const PATH_KEY = /(_DIR|_PATH|_FILE|_CONFIG)$/;
-const PATH_ALLOW = new Set(["PLAYWRIGHT_BROWSERS_PATH", "SCREENSHOTS_OUT_DIR"]);
 /** The default port of a real local branchDAM; a demo must never take it. */
 const RESERVED_PORTS = new Set(["8080"]);
-
-export function playwrightBrowsersPath(parent = process.env) {
-  return parent.PLAYWRIGHT_BROWSERS_PATH ?? path.join(os.homedir(), ".cache", "ms-playwright");
-}
 
 /** A clean environment for a demo child process. */
 export function demoEnv(demoDir, vars = {}, parent = process.env) {
@@ -45,7 +39,7 @@ export function demoEnvProblems(env, demoDir) {
     if (value === undefined) continue;
     if (key.startsWith("MULLION_")) problems.push(`${key} must not reach the demo`);
     if (SECRET_KEY.test(key)) problems.push(`${key} looks like a real secret; the demo never sets it`);
-    if (PATH_KEY.test(key) && !PATH_ALLOW.has(key) && path.isAbsolute(value) && !inside(demoDir, value))
+    if (PATH_KEY.test(key) && path.isAbsolute(value) && !inside(demoDir, value))
       problems.push(`${key}=${value} is outside the demo dir`);
   }
   for (const key of ["HOME", "TMPDIR", "BRANCHDAM_CONFIG"])

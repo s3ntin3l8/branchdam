@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import { assertDemo, assertPortsFree, demoConfigProblems, demoEnv, demoEnvProblems } from "./env.mjs";
-import { retryOnConflict } from "./instance.mjs";
+import { spawn } from "node:child_process";
+import { assetsOf, hasExited, renderConfig, retryOnConflict, stopChild, waitFor } from "./instance.mjs";
 
 const demoDir = mkdtempSync(path.join(tmpdir(), "branchdam-demo-test-"));
 after(() => rmSync(demoDir, { recursive: true, force: true }));
@@ -128,5 +129,65 @@ describe("retryOnConflict", () => {
       /500/,
     );
     assert.equal(calls, 1);
+  });
+});
+
+describe("renderConfig", () => {
+  it("quotes every path, so YAML specials in it can't change the value", () => {
+    const tricky = inDemo("my: root #1");
+    const cfg = { ...safeConfig(), storageLocations: [{ name: "a", rootPath: tricky, tier: "PROJECTS", readOnly: false }] };
+    const out = renderConfig(cfg);
+    assert.ok(out.includes(`rootPath: ${JSON.stringify(tricky)}`));
+    assert.ok(out.includes(`path: ${JSON.stringify(cfg.database.path)}`));
+    assert.ok(!out.includes(`: ${tricky}`), "no unquoted path");
+  });
+});
+
+describe("assetsOf", () => {
+  it("accepts every response shape the API has used", () => {
+    const list = [{ id: 1 }];
+    assert.deepEqual(assetsOf({ assets: list }), list);
+    assert.deepEqual(assetsOf({ items: list }), list);
+    assert.deepEqual(assetsOf(list), list);
+    assert.deepEqual(assetsOf({}), []);
+  });
+});
+
+describe("stopChild", () => {
+  const exitOf = (child) => new Promise((r) => child.once("exit", r));
+
+  it("stops a running child", async () => {
+    const child = spawn("sleep", ["30"]);
+    await new Promise((r) => child.once("spawn", r));
+    await stopChild(child);
+    assert.ok(hasExited(child));
+  });
+
+  it("returns at once for a child killed by a signal (exitCode stays null)", async () => {
+    const child = spawn("sleep", ["30"]);
+    const exited = exitOf(child);
+    child.kill("SIGKILL");
+    await exited;
+    assert.equal(child.exitCode, null);
+    assert.ok(hasExited(child));
+    await stopChild(child); // would hang on a second "exit" listener before
+  });
+
+  it("returns at once for a child that never started", async () => {
+    const child = spawn(path.join(demoDir, "no-such-binary"));
+    const error = await new Promise((r) => child.once("error", r));
+    assert.equal(error.code, "ENOENT");
+    await stopChild(child);
+  });
+});
+
+describe("waitFor", () => {
+  it("fails fast when the fail callback reports a fatal condition", async () => {
+    const started = Date.now();
+    await assert.rejects(
+      waitFor(async () => false, "never", 60_000, { fail: () => new Error("the server exited (SIGKILL)") }),
+      /server exited/,
+    );
+    assert.ok(Date.now() - started < 1_000);
   });
 });

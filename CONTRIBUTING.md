@@ -30,7 +30,7 @@ See [`AGENTS.md`](AGENTS.md) for the full architecture and package tour.
 make check
 ```
 
-which is exactly `make lint && make test && make build && make golangci-lint` --
+which is exactly `make lint && make test && make test-demo && make build && make golangci-lint` --
 `golangci-lint` is `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run`
 (see the Makefile's `GOLANGCI_LINT_VERSION`). The `/v2` module path and the version pin both
 matter -- `.golangci.yml` declares `version: "2"`, and a floating `@latest` install could
@@ -42,7 +42,8 @@ Be precise about what each of these does and doesn't cover:
 - `make lint` is `pre-commit run --all-files` -- it only runs the `pre-commit`-staged hooks
   (gofmt, go vet, go mod tidy, sqlc-diff), **not** `go test` or `govulncheck` (those are
   `pre-push`-staged), and **not** `golangci-lint`. `make check` covers everything but
-  `govulncheck` (`lint` + `test` + `build` + `golangci-lint`); `make lint` alone does not.
+  `govulncheck` (`lint` + `test` + `test-demo` + `build` + `golangci-lint`); `make lint` alone does not.
+  `test-demo` runs the demo instance's isolation tests (`node --test scripts/demo/*.test.mjs`).
   `govulncheck` runs only from the `pre-push` hook or manually via `make vulncheck` (both
   install `govulncheck@latest`). Note `make lint`'s pre-commit hooks (`trailing-whitespace`,
   `end-of-file-fixer`, `mixed-line-ending`, `gofmt`) rewrite files in your working tree.
