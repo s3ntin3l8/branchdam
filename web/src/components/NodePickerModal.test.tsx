@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import NodePickerModal from "./NodePickerModal";
+import NodePickerModal, { NODE_PICKER_PAGE_SIZE } from "./NodePickerModal";
 import { api } from "../api/client";
-import type { Asset } from "../api/types";
+import type { Asset, AssetQueryParams } from "../api/types";
 
 vi.mock("../api/client", () => ({
   api: {
@@ -66,6 +66,28 @@ const mockAssets: Asset[] = [
   },
 ];
 
+// serverSearch stands in for GET /api/v1/assets: ?q= is a case-insensitive
+// file_name substring and limit/offset page the matches.
+function serverSearch(library: Asset[]) {
+  return async (params: AssetQueryParams = {}) => {
+    const q = params.q?.toLowerCase();
+    const matches = q ? library.filter((a) => a.fileName.toLowerCase().includes(q)) : library;
+    const offset = params.offset ?? 0;
+    const limit = params.limit ?? 50;
+    return { assets: matches.slice(offset, offset + limit), total: matches.length };
+  };
+}
+
+function makeAssets(n: number): Asset[] {
+  return Array.from({ length: n }, (_, i) => ({
+    ...mockAssets[0],
+    id: 1000 + i,
+    nodeUuid: `uuid-filler-${i}`,
+    fileName: `FILLER_${String(i).padStart(4, "0")}.JPG`,
+    filePath: `/storage/filler/FILLER_${String(i).padStart(4, "0")}.JPG`,
+  }));
+}
+
 describe("NodePickerModal", () => {
   it("does not render dialog when isOpen is false", () => {
     vi.mocked(api.listAssets).mockResolvedValue({ assets: mockAssets, total: 3 });
@@ -88,12 +110,12 @@ describe("NodePickerModal", () => {
     expect(await screen.findByText("DSC_0001.ARW")).toBeInTheDocument();
     expect(screen.getByText("DSC_0001_edit.JPG")).toBeInTheDocument();
     expect(screen.getByText("CLIP_9999.MP4")).toBeInTheDocument();
-    expect(screen.getByText(/showing 3 of 3 assets/i)).toBeInTheDocument();
+    expect(screen.getByText(/showing 1–3 of 3 assets/i)).toBeInTheDocument();
   });
 
-  it("filters candidate nodes by filename", async () => {
+  it("searches server-side by filename instead of filtering the loaded page", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.listAssets).mockResolvedValue({ assets: mockAssets, total: 3 });
+    vi.mocked(api.listAssets).mockImplementation(serverSearch(mockAssets));
     renderWithClient(
       <NodePickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
     );
@@ -102,61 +124,62 @@ describe("NodePickerModal", () => {
     const input = screen.getByPlaceholderText(/search by filename/i);
     await user.type(input, "CLIP");
 
+    await waitFor(() =>
+      expect(api.listAssets).toHaveBeenLastCalledWith({ limit: NODE_PICKER_PAGE_SIZE, offset: 0, q: "CLIP" })
+    );
+    await waitFor(() => expect(screen.queryByText("DSC_0001.ARW")).not.toBeInTheDocument());
     expect(screen.getByText("CLIP_9999.MP4")).toBeInTheDocument();
-    expect(screen.queryByText("DSC_0001.ARW")).not.toBeInTheDocument();
     expect(screen.queryByText("DSC_0001_edit.JPG")).not.toBeInTheDocument();
-    expect(screen.getByText(/showing 1 of 3 assets/i)).toBeInTheDocument();
+    expect(screen.getByText(/showing 1–1 of 1 asset/i)).toBeInTheDocument();
   });
 
-  it("filters candidate nodes by camera model", async () => {
+  it("finds an asset that is not on the first page of the library", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.listAssets).mockResolvedValue({ assets: mockAssets, total: 3 });
+    // 150 filler assets ahead of the one we want: the old picker loaded a
+    // single limit=100 page and filtered it client-side, so it could never
+    // show the 151st.
+    const library = [...makeAssets(150), { ...mockAssets[2], id: 9001, fileName: "DEEP_ARCHIVE.MP4" }];
+    vi.mocked(api.listAssets).mockImplementation(serverSearch(library));
     renderWithClient(
       <NodePickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
     );
 
-    await screen.findByText("DSC_0001.ARW");
-    const input = screen.getByPlaceholderText(/search by filename/i);
-    await user.type(input, "Canon");
+    await screen.findByText("FILLER_0000.JPG");
+    await user.type(screen.getByPlaceholderText(/search by filename/i), "deep");
 
-    expect(screen.getByText("DSC_0001_edit.JPG")).toBeInTheDocument();
-    expect(screen.queryByText("DSC_0001.ARW")).not.toBeInTheDocument();
-    expect(screen.queryByText("CLIP_9999.MP4")).not.toBeInTheDocument();
-  });
+    await waitFor(() =>
+      expect(api.listAssets).toHaveBeenLastCalledWith(expect.objectContaining({ q: "deep", offset: 0 }))
+    );
+    expect(await screen.findByText("DEEP_ARCHIVE.MP4")).toBeInTheDocument();
+  }, 20_000);
 
-  it("filters candidate nodes by UUID", async () => {
+  it("pages through results with Previous/Next", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.listAssets).mockResolvedValue({ assets: mockAssets, total: 3 });
+    vi.mocked(api.listAssets).mockImplementation(serverSearch(makeAssets(60)));
     renderWithClient(
       <NodePickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
     );
 
-    await screen.findByText("DSC_0001.ARW");
-    const input = screen.getByPlaceholderText(/search by filename/i);
-    await user.type(input, "gamma-303");
+    await screen.findByText("FILLER_0000.JPG");
+    expect(screen.getByText(/showing 1–25 of 60 assets/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
 
-    expect(screen.getByText("CLIP_9999.MP4")).toBeInTheDocument();
-    expect(screen.queryByText("DSC_0001.ARW")).not.toBeInTheDocument();
-  });
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("FILLER_0025.JPG")).toBeInTheDocument();
+    expect(api.listAssets).toHaveBeenLastCalledWith({ limit: NODE_PICKER_PAGE_SIZE, offset: 25, q: undefined });
 
-  it("filters candidate nodes by numeric ID", async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.listAssets).mockResolvedValue({ assets: mockAssets, total: 3 });
-    renderWithClient(
-      <NodePickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
-    );
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("FILLER_0050.JPG")).toBeInTheDocument();
+    expect(screen.getByText(/showing 51–60 of 60 assets/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
 
-    await screen.findByText("DSC_0001.ARW");
-    const input = screen.getByPlaceholderText(/search by filename/i);
-    await user.type(input, "101");
-
-    expect(screen.getByText("DSC_0001.ARW")).toBeInTheDocument();
-    expect(screen.queryByText("DSC_0001_edit.JPG")).not.toBeInTheDocument();
-  });
+    await user.click(screen.getByRole("button", { name: "Previous page" }));
+    expect(await screen.findByText("FILLER_0025.JPG")).toBeInTheDocument();
+  }, 20_000);
 
   it("shows empty search state and clears search on clear button click", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.listAssets).mockResolvedValue({ assets: mockAssets, total: 3 });
+    vi.mocked(api.listAssets).mockImplementation(serverSearch(mockAssets));
     renderWithClient(
       <NodePickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
     );
@@ -165,12 +188,12 @@ describe("NodePickerModal", () => {
     const input = screen.getByPlaceholderText(/search by filename/i);
     await user.type(input, "nonexistent");
 
-    expect(screen.getByText(/no assets matching/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no assets matching/i)).toBeInTheDocument();
 
     const clearBtn = screen.getByRole("button", { name: "Clear search" });
     await user.click(clearBtn);
 
-    expect(screen.getByText("DSC_0001.ARW")).toBeInTheDocument();
+    expect(await screen.findByText("DSC_0001.ARW")).toBeInTheDocument();
     expect(screen.getByText("DSC_0001_edit.JPG")).toBeInTheDocument();
   });
 

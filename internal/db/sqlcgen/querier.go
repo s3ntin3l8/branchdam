@@ -80,13 +80,18 @@ type Querier interface {
 	// Counterpart to ListLoginAudit -- must apply identical WHERE so
 	// pagination totals match the visible rows.
 	CountLoginAudit(ctx context.Context, arg CountLoginAuditParams) (int64, error)
-	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
+	// Count of live nodes, matching ListMediaNodes' ARCHIVED/TRASHED and
+	// superseded exclusions with no search applied.
 	CountMediaNodes(ctx context.Context) (int64, error)
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
 	// makes it fall back to interface{} for every param.
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
+	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes
+	// by excluding ARCHIVED and superseded rows and applying the same optional
+	// name_query (NULL = no search).
+	CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error)
 	// Last-admin guard for DisableUser / SetAdmin(false): the number of
 	// enabled source='local' admins other than ?1. Only source='local' rows
 	// count -- they are the accounts that can log in with a password and
@@ -135,6 +140,9 @@ type Querier interface {
 	// login form. The boot-provisioned 'system' attribution sentinel is not a
 	// login account and must not close first-run setup.
 	CountUsers(ctx context.Context) (int64, error)
+	// Total for ListUsers under the same optional filters (name_query,
+	// ids_json); see ListUsers for their semantics.
+	CountUsersFiltered(ctx context.Context, arg CountUsersFilteredParams) (int64, error)
 	// Lazy-provisioning insert. The caller resolves auth_provider +
 	// external_uid from the Principal; username/email/is_admin are
 	// denormalized display fields refreshed on every ResolveOrCreate.
@@ -655,7 +663,21 @@ type Querier interface {
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
+	// p carries the search/sort params as a one-row derived table: sqlc's
+	// SQLite engine neither rewrites a param inside ORDER BY nor survives a
+	// LIKE ... ESCAPE clause, so both go through p's columns instead.
+	// name_query is a plain case-insensitive substring of file_name (instr, so
+	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
+	// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// an unknown value falls through every CASE to the id DESC tiebreak.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
+	// p carries the search/sort params as a one-row derived table: sqlc's
+	// SQLite engine neither rewrites a param inside ORDER BY nor survives a
+	// LIKE ... ESCAPE clause, so both go through p's columns instead.
+	// name_query is a plain case-insensitive substring of file_name (instr, so
+	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
+	// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// an unknown value falls through every CASE to the id DESC tiebreak.
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -800,6 +822,14 @@ type Querier interface {
 	ListUserPATs(ctx context.Context, arg ListUserPATsParams) ([]UserPat, error)
 	// Paginated user list for the admin UI. Order by id ASC so paging is
 	// stable across inserts (new users go to the END, not the middle).
+	// Optional filters, carried in the one-row derived table p (sqlc's
+	// SQLite engine types a CAST param reliably; a bare narg inside instr()
+	// or json_each() would come back as interface{}):
+	//   name_query: case-insensitive substring of username or email
+	//     (instr, so % and _ are literal; lower() folds ASCII only).
+	//   ids_json: a JSON array of user ids -- the asset list resolves the
+	//     uploader names on whatever page it shows, not just the first page
+	//     of users.
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
 	// Walks ancestor lineage target->source for node ?1 and returns every live
 	// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash --

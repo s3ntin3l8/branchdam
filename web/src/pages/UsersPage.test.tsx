@@ -15,6 +15,7 @@ const meMock = vi.fn<() => Promise<Me>>();
 const listUsersMock = vi.fn<(params?: {
   limit?: number;
   offset?: number;
+  q?: string;
 }) => Promise<ListUsersResponse>>();
 const createUserMock = vi.fn<(input: unknown) => Promise<unknown>>();
 const adminResetPasswordMock = vi.fn<(userId: number) => Promise<unknown>>();
@@ -26,7 +27,7 @@ const revokeUserSessionsMock = vi.fn<(userId: number) => Promise<unknown>>();
 vi.mock("../api/client", () => ({
   api: {
     me: () => meMock(),
-    listUsers: (params?: { limit?: number; offset?: number }) => listUsersMock(params),
+    listUsers: (params?: { limit?: number; offset?: number; q?: string }) => listUsersMock(params),
     createUser: (input: unknown) => createUserMock(input),
     adminResetPassword: (userId: number) => adminResetPasswordMock(userId),
     disableUser: (userId: number) => disableUserMock(userId),
@@ -531,5 +532,45 @@ describe("UsersPage dialogs", () => {
 
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("UsersPage server-side search", () => {
+  it("searches every user on the server, not just the loaded page", async () => {
+    const user = userEvent.setup();
+    // Stand-in for /api/v1/users: the first page holds alice only, and
+    // "zoe" lives on a later page that a client-side filter never sees.
+    listUsersMock.mockImplementation(async (params) => {
+      const all = [makeUser({ id: 1, username: "alice" }), makeUser({ id: 40, username: "zoe", email: "zoe@example.com" })];
+      if (params?.q) {
+        const matches = all.filter((u) => u.username.includes(params.q!));
+        return { users: matches, total: matches.length };
+      }
+      return { users: all.slice(0, 1), total: 40 };
+    });
+
+    renderPage();
+    await screen.findByText("alice");
+    await user.type(screen.getByRole("searchbox", { name: "Search users" }), "zoe");
+
+    await waitFor(() => expect(listUsersMock).toHaveBeenLastCalledWith({ limit: 25, offset: 0, q: "zoe" }));
+    expect(await screen.findByText("zoe")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("alice")).not.toBeInTheDocument());
+  });
+
+  it("returns to the first page when the search changes", async () => {
+    const user = userEvent.setup();
+    listUsersMock.mockImplementation(async (params) => ({
+      users: [makeUser({ id: (params?.offset ?? 0) + 1, username: `user-at-${params?.offset ?? 0}` })],
+      total: 60,
+    }));
+
+    renderPage();
+    await screen.findByText("user-at-0");
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("user-at-25");
+
+    await user.type(screen.getByRole("searchbox", { name: "Search users" }), "user");
+    await waitFor(() => expect(listUsersMock).toHaveBeenLastCalledWith({ limit: 25, offset: 0, q: "user" }));
   });
 });

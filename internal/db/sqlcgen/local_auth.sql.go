@@ -51,6 +51,31 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const countUsersFiltered = `-- name: CountUsersFiltered :one
+SELECT COUNT(*)
+FROM users u
+CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query,
+                   CAST(?2 AS TEXT) AS ids_json) AS p
+WHERE (p.name_query IS NULL
+       OR instr(lower(u.username), lower(p.name_query)) > 0
+       OR instr(lower(COALESCE(u.email, '')), lower(p.name_query)) > 0)
+  AND (p.ids_json IS NULL OR u.id IN (SELECT value FROM json_each(p.ids_json)))
+`
+
+type CountUsersFilteredParams struct {
+	NameQuery sql.NullString
+	IdsJson   sql.NullString
+}
+
+// Total for ListUsers under the same optional filters (name_query,
+// ids_json); see ListUsers for their semantics.
+func (q *Queries) CountUsersFiltered(ctx context.Context, arg CountUsersFilteredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUsersFiltered, arg.NameQuery, arg.IdsJson)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createForwardJITUser = `-- name: CreateForwardJITUser :one
 INSERT INTO users (
     username, email, password_hash, is_admin, source, created_at, created_by,
@@ -458,13 +483,21 @@ SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.source, u.creat
        CASE WHEN mc.user_id IS NOT NULL THEN 1 ELSE 0 END AS mfa_enabled
 FROM users u
 LEFT JOIN mfa_credentials mc ON mc.user_id = u.id
+CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
+                   CAST(?4 AS TEXT) AS ids_json) AS p
+WHERE (p.name_query IS NULL
+       OR instr(lower(u.username), lower(p.name_query)) > 0
+       OR instr(lower(COALESCE(u.email, '')), lower(p.name_query)) > 0)
+  AND (p.ids_json IS NULL OR u.id IN (SELECT value FROM json_each(p.ids_json)))
 ORDER BY u.id ASC
 LIMIT ?1 OFFSET ?2
 `
 
 type ListUsersParams struct {
-	Limit  int64
-	Offset int64
+	Limit     int64
+	Offset    int64
+	NameQuery sql.NullString
+	IdsJson   sql.NullString
 }
 
 type ListUsersRow struct {
@@ -485,8 +518,22 @@ type ListUsersRow struct {
 
 // Paginated user list for the admin UI. Order by id ASC so paging is
 // stable across inserts (new users go to the END, not the middle).
+// Optional filters, carried in the one-row derived table p (sqlc's
+// SQLite engine types a CAST param reliably; a bare narg inside instr()
+// or json_each() would come back as interface{}):
+//
+//	name_query: case-insensitive substring of username or email
+//	  (instr, so % and _ are literal; lower() folds ASCII only).
+//	ids_json: a JSON array of user ids -- the asset list resolves the
+//	  uploader names on whatever page it shows, not just the first page
+//	  of users.
 func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error) {
-	rows, err := q.db.QueryContext(ctx, listUsers, arg.Limit, arg.Offset)
+	rows, err := q.db.QueryContext(ctx, listUsers,
+		arg.Limit,
+		arg.Offset,
+		arg.NameQuery,
+		arg.IdsJson,
+	)
 	if err != nil {
 		return nil, err
 	}

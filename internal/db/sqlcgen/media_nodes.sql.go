@@ -55,7 +55,8 @@ WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
 `
 
-// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
+// Count of live nodes, matching ListMediaNodes' ARCHIVED/TRASHED and
+// superseded exclusions with no search applied.
 func (q *Queries) CountMediaNodes(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countMediaNodes)
 	var count int64
@@ -66,15 +67,18 @@ func (q *Queries) CountMediaNodes(ctx context.Context) (int64, error) {
 const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
 SELECT COUNT(*)
 FROM media_nodes
-WHERE (lifecycle_state = ?1 OR ?1 IS NULL)
-  AND (camera_model = ?2 OR ?2 IS NULL)
-  AND (graph_status = ?3 OR ?3 IS NULL)
-  AND (storage_location_id = ?4 OR ?4 IS NULL)
-  AND (uploaded_by_user_id = ?5 OR ?5 IS NULL)
+CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query) AS p
+WHERE (lifecycle_state = ?2 OR ?2 IS NULL)
+  AND (camera_model = ?3 OR ?3 IS NULL)
+  AND (graph_status = ?4 OR ?4 IS NULL)
+  AND (storage_location_id = ?5 OR ?5 IS NULL)
+  AND (uploaded_by_user_id = ?6 OR ?6 IS NULL)
   AND superseded_by IS NULL
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
 `
 
 type CountMediaNodesFilteredParams struct {
+	NameQuery         sql.NullString
 	LifecycleState    sql.NullString
 	CameraModel       sql.NullString
 	GraphStatus       sql.NullString
@@ -88,12 +92,32 @@ type CountMediaNodesFilteredParams struct {
 // makes it fall back to interface{} for every param.
 func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countMediaNodesFiltered,
+		arg.NameQuery,
 		arg.LifecycleState,
 		arg.CameraModel,
 		arg.GraphStatus,
 		arg.StorageLocationID,
 		arg.UploadedByUserID,
 	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countMediaNodesSearch = `-- name: CountMediaNodesSearch :one
+SELECT COUNT(*)
+FROM media_nodes
+CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query) AS p
+WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+  AND superseded_by IS NULL
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+`
+
+// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes
+// by excluding ARCHIVED and superseded rows and applying the same optional
+// name_query (NULL = no search).
+func (q *Queries) CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMediaNodesSearch, nameQuery)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -1047,22 +1071,50 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
+CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
+                   CAST(?4 AS TEXT) AS sort_key) AS p
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-ORDER BY id DESC
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+ORDER BY
+  -- Each CASE yields NULL for every other sort, so only one key is live.
+  -- captured_at_unix NULLs sort last in both directions.
+  CASE WHEN p.sort_key IN ('captured_asc', 'captured_desc') THEN captured_at_unix IS NULL END ASC,
+  CASE WHEN p.sort_key = 'name_asc' THEN file_name COLLATE NOCASE END ASC,
+  CASE WHEN p.sort_key = 'name_desc' THEN file_name COLLATE NOCASE END DESC,
+  CASE WHEN p.sort_key = 'created_asc' THEN created_at END ASC,
+  CASE WHEN p.sort_key = 'created_desc' THEN created_at END DESC,
+  CASE WHEN p.sort_key = 'captured_asc' THEN captured_at_unix END ASC,
+  CASE WHEN p.sort_key = 'captured_desc' THEN captured_at_unix END DESC,
+  CASE WHEN p.sort_key IN ('name_asc', 'created_asc', 'captured_asc') THEN id END ASC,
+  id DESC
 LIMIT ?1 OFFSET ?2
 `
 
 type ListMediaNodesParams struct {
-	Limit  int64
-	Offset int64
+	Limit     int64
+	Offset    int64
+	NameQuery sql.NullString
+	Sort      string
 }
 
 // Backs GET /api/v1/assets. Excludes archived rows by default -- an
 // archived node is reachable via its successor's superseded history, not
 // the main asset list.
+// p carries the search/sort params as a one-row derived table: sqlc's
+// SQLite engine neither rewrites a param inside ORDER BY nor survives a
+// LIKE ... ESCAPE clause, so both go through p's columns instead.
+// name_query is a plain case-insensitive substring of file_name (instr, so
+// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
+// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+// an unknown value falls through every CASE to the id DESC tiebreak.
 func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error) {
-	rows, err := q.db.QueryContext(ctx, listMediaNodes, arg.Limit, arg.Offset)
+	rows, err := q.db.QueryContext(ctx, listMediaNodes,
+		arg.Limit,
+		arg.Offset,
+		arg.NameQuery,
+		arg.Sort,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1126,19 +1178,35 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
-  AND (camera_model = ?4 OR ?4 IS NULL)
-  AND (graph_status = ?5 OR ?5 IS NULL)
-  AND (storage_location_id = ?6 OR ?6 IS NULL)
-  AND (uploaded_by_user_id = ?7 OR ?7 IS NULL)
+CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
+                   CAST(?4 AS TEXT) AS sort_key) AS p
+WHERE (lifecycle_state = ?5 OR ?5 IS NULL)
+  AND (camera_model = ?6 OR ?6 IS NULL)
+  AND (graph_status = ?7 OR ?7 IS NULL)
+  AND (storage_location_id = ?8 OR ?8 IS NULL)
+  AND (uploaded_by_user_id = ?9 OR ?9 IS NULL)
   AND superseded_by IS NULL
-ORDER BY id DESC
+  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0)
+ORDER BY
+  -- Each CASE yields NULL for every other sort, so only one key is live.
+  -- captured_at_unix NULLs sort last in both directions.
+  CASE WHEN p.sort_key IN ('captured_asc', 'captured_desc') THEN captured_at_unix IS NULL END ASC,
+  CASE WHEN p.sort_key = 'name_asc' THEN file_name COLLATE NOCASE END ASC,
+  CASE WHEN p.sort_key = 'name_desc' THEN file_name COLLATE NOCASE END DESC,
+  CASE WHEN p.sort_key = 'created_asc' THEN created_at END ASC,
+  CASE WHEN p.sort_key = 'created_desc' THEN created_at END DESC,
+  CASE WHEN p.sort_key = 'captured_asc' THEN captured_at_unix END ASC,
+  CASE WHEN p.sort_key = 'captured_desc' THEN captured_at_unix END DESC,
+  CASE WHEN p.sort_key IN ('name_asc', 'created_asc', 'captured_asc') THEN id END ASC,
+  id DESC
 LIMIT ?1 OFFSET ?2
 `
 
 type ListMediaNodesFilteredParams struct {
 	Limit             int64
 	Offset            int64
+	NameQuery         sql.NullString
+	Sort              string
 	LifecycleState    sql.NullString
 	CameraModel       sql.NullString
 	GraphStatus       sql.NullString
@@ -1146,6 +1214,13 @@ type ListMediaNodesFilteredParams struct {
 	UploadedByUserID  sql.NullInt64
 }
 
+// p carries the search/sort params as a one-row derived table: sqlc's
+// SQLite engine neither rewrites a param inside ORDER BY nor survives a
+// LIKE ... ESCAPE clause, so both go through p's columns instead.
+// name_query is a plain case-insensitive substring of file_name (instr, so
+// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
+// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+// an unknown value falls through every CASE to the id DESC tiebreak.
 // Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 // sqlc's SQLite type inference only picks up the column's own (nullable)
 // type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -1154,6 +1229,8 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 	rows, err := q.db.QueryContext(ctx, listMediaNodesFiltered,
 		arg.Limit,
 		arg.Offset,
+		arg.NameQuery,
+		arg.Sort,
 		arg.LifecycleState,
 		arg.CameraModel,
 		arg.GraphStatus,

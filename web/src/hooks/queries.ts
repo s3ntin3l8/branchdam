@@ -18,12 +18,15 @@ export function useMe() {
 // /api/v1/users is admin-only and returns 503 in deployments without
 // attribution wired; the SPA tolerates that as "empty cache".
 export function useUsers(
-  params: { limit?: number; offset?: number } = {},
-  options: { enabled?: boolean } = {}
+  params: import("../api/types").ListUsersParams = {},
+  options: { enabled?: boolean; keepPreviousData?: boolean } = {}
 ) {
   return useQuery({
     queryKey: ["users", params],
     queryFn: () => api.listUsers(params),
+    // A search/paging caller keeps showing the last result while the next
+    // one loads instead of flashing the loading state on every keystroke.
+    placeholderData: options.keepPreviousData ? keepPreviousData : undefined,
     // Non-admins get 403 from this admin-only endpoint, and every 401/403
     // makes Layout re-check /api/v1/me -- callers that can't know the user
     // is an admin must gate on useMe().isAdmin.
@@ -205,10 +208,15 @@ export function useRestartServer() {
   });
 }
 
-export function useAssets(params: import("../api/types").AssetQueryParams = {}) {
+export function useAssets(
+  params: import("../api/types").AssetQueryParams = {},
+  options: { enabled?: boolean; keepPreviousData?: boolean } = {}
+) {
   return useQuery({
     queryKey: ["assets", params],
     queryFn: () => api.listAssets(params),
+    enabled: options.enabled ?? true,
+    placeholderData: options.keepPreviousData ? keepPreviousData : undefined,
   });
 }
 

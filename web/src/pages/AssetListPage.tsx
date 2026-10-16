@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, Link } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useAssetFacets, useAssets, useDeleteAsset, useMe, useRestoreAsset, useStorageLocations, useUsers } from "../hooks/queries";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
-import type { Asset } from "../api/types";
+import type { Asset, AssetSort } from "../api/types";
 
 const statusColor: Record<string, string> = {
   LINKED: "text-emerald-400 font-medium",
@@ -15,6 +15,19 @@ const statusColor: Record<string, string> = {
 };
 
 const PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 300;
+
+// The server's whitelist (internal/httpapi's ListAssetsInput.Sort). A
+// ?sort= outside it falls back to "newest" here instead of a 422.
+const SORT_OPTIONS: { value: AssetSort; label: string }[] = [
+  { value: "newest", label: "Newest first" },
+  { value: "name_asc", label: "Name (A-Z)" },
+  { value: "name_desc", label: "Name (Z-A)" },
+  { value: "created_desc", label: "Indexed (newest)" },
+  { value: "created_asc", label: "Indexed (oldest)" },
+  { value: "captured_desc", label: "Captured (newest)" },
+  { value: "captured_asc", label: "Captured (oldest)" },
+];
 
 // canTrash reports whether a row may be trashed, individually or as part of
 // the bulk selection. ARCHIVED/TRASHED rows are already out (they offer
@@ -37,6 +50,9 @@ export default function AssetListPage() {
   const lifecycleState = (searchParams.get("lifecycleState") as Asset["lifecycleState"]) || "";
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
   const myUploads = searchParams.get("myUploads") === "true";
+  const q = searchParams.get("q") || "";
+  const rawSort = searchParams.get("sort") || "newest";
+  const sort: AssetSort = SORT_OPTIONS.some((o) => o.value === rawSort) ? (rawSort as AssetSort) : "newest";
   const parsedPage = Number(searchParams.get("page") || "1");
   const page = Number.isFinite(parsedPage) ? Math.max(1, Math.floor(parsedPage)) : 1;
 
@@ -51,21 +67,6 @@ export default function AssetListPage() {
   // would silently show an empty list, which is misleading -- treat
   // the toggle as off in that case.
   const effectiveMyUploads = myUploads && myUserID > 0;
-  // Users cache (admin-only /api/v1/users). Used to render the
-  // "Uploaded by" column -- a row-level lookup against the cache is
-  // cheaper than embedding the full user in every asset row, and
-  // matches the SPA's existing pattern for resolving location /
-  // camera labels. Returns 503 in deployments without attribution
-  // wired; the SPA tolerates that as "empty users cache".
-  const { data: usersData } = useUsers({}, { enabled: meData?.isAdmin === true });
-  const usersByID = new Map<number, string>();
-  for (const u of usersData?.users ?? []) {
-    usersByID.set(u.id, u.username);
-  }
-  const formatUploadedBy = (id: number | undefined): string => {
-    if (id === undefined || id === 0) return "—";
-    return usersByID.get(id) ?? `#${id}`;
-  };
   const { data, isLoading, isError, error } = useAssets({
     limit: PAGE_SIZE,
     offset,
@@ -75,13 +76,77 @@ export default function AssetListPage() {
     lifecycleState: lifecycleState || undefined,
     unlinkedOnly: unlinkedOnly || undefined,
     uploadedByUserId: effectiveMyUploads ? myUserID : undefined,
+    q: q || undefined,
+    sort: sort === "newest" ? undefined : sort,
   });
 
   const cameraModels = facetsData?.cameraModels ?? [];
   const locations = locsData?.locations ?? [];
-  const assets = data?.assets ?? [];
+  const assets = useMemo(() => data?.assets ?? [], [data?.assets]);
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // "Uploaded by" names (admin-only /api/v1/users). Asks for exactly the
+  // uploader ids on THIS page via ?ids=, so names resolve on every page --
+  // not only for users that happen to fall in the first page of /users.
+  // Returns 503 in deployments without attribution wired; the SPA
+  // tolerates that as "no names" and falls back to #id.
+  const uploaderIds = useMemo(
+    () =>
+      Array.from(new Set(assets.map((a) => a.uploadedByUserId).filter((id): id is number => !!id))).sort(
+        (a, b) => a - b
+      ),
+    [assets]
+  );
+  const { data: usersData } = useUsers(
+    { ids: uploaderIds, limit: Math.min(200, Math.max(1, uploaderIds.length)) },
+    { enabled: meData?.isAdmin === true && uploaderIds.length > 0 }
+  );
+  const usersByID = new Map<number, string>();
+  for (const u of usersData?.users ?? []) {
+    usersByID.set(u.id, u.username);
+  }
+  const formatUploadedBy = (id: number | undefined): string => {
+    if (id === undefined || id === 0) return "—";
+    return usersByID.get(id) ?? `#${id}`;
+  };
+
+  // The search box edits local state and commits to ?q= after a short
+  // pause (or on Enter), so typing doesn't refetch per keystroke. A ?q=
+  // change from elsewhere (Clear Filters, back/forward) resets the box.
+  const [searchInput, setSearchInput] = useState(q);
+  const [prevQ, setPrevQ] = useState(q);
+  if (q !== prevQ) {
+    setPrevQ(q);
+    setSearchInput(q);
+  }
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    },
+    []
+  );
+  const commitSearch = (value: string) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = null;
+    const next = value.trim();
+    // Functional update: the debounce fires after the render that
+    // scheduled it, so read the CURRENT params, not this closure's.
+    setSearchParams((prev) => {
+      if ((prev.get("q") || "") === next) return prev;
+      const nextParams = new URLSearchParams(prev);
+      nextParams.set("page", "1");
+      if (next) nextParams.set("q", next);
+      else nextParams.delete("q");
+      return nextParams;
+    });
+  };
+  const onSearchChange = (value: string) => {
+    setSearchInput(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => commitSearch(value), SEARCH_DEBOUNCE_MS);
+  };
 
   const queryClient = useQueryClient();
   const deleteAsset = useDeleteAsset();
@@ -261,11 +326,18 @@ export default function AssetListPage() {
     setSearchParams(nextParams);
   };
 
+  // Sort is a view preference, not a filter: Clear Filters keeps it.
   const clearFilters = () => {
-    setSearchParams(new URLSearchParams());
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = null;
+    const nextParams = new URLSearchParams();
+    if (sort !== "newest") nextParams.set("sort", sort);
+    setSearchParams(nextParams);
   };
 
-  const hasActiveFilters = Boolean(cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState);
+  const hasActiveFilters = Boolean(
+    q || cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState
+  );
 
   return (
     <div className="p-6 space-y-6">
@@ -290,6 +362,42 @@ export default function AssetListPage() {
       {/* FILTERS PANEL */}
       <div className="rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 space-y-4 text-xs">
         <div className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px]">Filters</div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+          {/* Server-side filename search (?q=) over the whole library. */}
+          <form
+            role="search"
+            className="sm:col-span-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              commitSearch(searchInput);
+            }}
+          >
+            <label htmlFor="asset-search" className="block text-neutral-400 mb-1">Search</label>
+            <input
+              id="asset-search"
+              type="search"
+              value={searchInput}
+              onChange={(e) => onSearchChange(e.target.value)}
+              placeholder="Search by filename…"
+              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-neutral-500"
+            />
+          </form>
+          <div>
+            <label htmlFor="asset-sort" className="block text-neutral-400 mb-1">Sort</label>
+            <select
+              id="asset-sort"
+              value={sort}
+              onChange={(e) => updateFilters({ sort: e.target.value === "newest" ? null : e.target.value })}
+              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none focus:border-neutral-500"
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
           {/* Camera Model */}
           <div>
@@ -446,7 +554,7 @@ export default function AssetListPage() {
         <div className="p-6 text-red-400">Failed to load assets: {String(error)}</div>
       ) : assets.length === 0 ? (
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
-          No assets match the selected filters.
+          {q ? <>No assets match &ldquo;{q}&rdquo; with the selected filters.</> : "No assets match the selected filters."}
         </div>
       ) : (
         <>
