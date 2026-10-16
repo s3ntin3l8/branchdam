@@ -172,6 +172,11 @@ need to be re-paired.
    the old key gets `401`. Any agent endpoint adopts; a handshake is the natural choice because it
    also confirms `currentKeyId` = the new `keyId`.
 
+**Threat model.** The sealed copy opens for whoever holds the current key, and that holder can also
+adopt the new key. A leaked key can therefore be escalated to the newest key, and the legitimate
+device locked out mid-grace. Rotation alone does not evict a leaked key: revoke the pairing and
+re-pair the device.
+
 A device that misses the grace window entirely gets `401` on its old key and cannot fetch the new
 one; the operator re-pairs it (the pairing's credentials show the newest key). Client follow-ups:
 branchdam-agent (A17) and branchdam-mobile (M13).

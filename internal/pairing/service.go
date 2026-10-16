@@ -622,7 +622,9 @@ type PendingRotation struct {
 // PendingRotationFor resolves presented -- the X-API-Key the request
 // authenticated with -- to its key row and reports whether a newer key
 // is waiting for the device, sealed for it. Returns (nil, nil) when
-// presented is not an active key of agentID's pairing (e.g. a PAT).
+// presented is not an active key of agentID's pairing. That is
+// defensive only: in production the agent auth chain admits nothing
+// but pairing keys (AgentChain.LookupKey is pairing.KeyLookup).
 func (s *Service) PendingRotationFor(ctx context.Context, agentID, presented string) (*PendingRotation, error) {
 	row, err := s.db.Reader.GetDevicePairingKeyByHash(ctx, s.hashKey(presented))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -659,7 +661,10 @@ func (s *Service) PendingRotationFor(ctx context.Context, agentID, presented str
 	plaintext, err := s.box.Open(newer.RotationSealedKey.String)
 	if err != nil {
 		// Wrong or changed BRANCHDAM_SECRET_KEY: report the rotation
-		// without the key, so the device falls back to re-pairing.
+		// without the key, so the device falls back to re-pairing. The
+		// copy is kept: restoring the right secret key makes it
+		// deliverable again, and adoption, a newer rotation or a
+		// revoke clears it.
 		s.log.Warn("pairing: cannot open sealed rotated key; device must re-pair",
 			"agentId", agentID, "keyId", newer.ID, "err", err)
 		return out, nil

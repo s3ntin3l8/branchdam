@@ -148,3 +148,27 @@ func TestRevokePairingClearsSealedRotationCopy(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, sealedFor(), "revoke must clear the sealed rotation copy")
 }
+
+// TestPendingRotationWithUnopenableSealedCopy: when the stored copy no
+// longer opens (BRANCHDAM_SECRET_KEY changed since the rotation), the
+// handshake still reports the rotation's keyId but no sealedApiKey, so
+// the device falls back to re-pairing instead of getting an error.
+func TestPendingRotationWithUnopenableSealedCopy(t *testing.T) {
+	ctx := context.Background()
+	svc, database := newTestServiceWithBox(t, testBox(t))
+	p, k1, err := svc.CreatePairing(ctx, "dev", "test", 0, rotPayload)
+	require.NoError(t, err)
+	k2, _, err := svc.RotateKey(ctx, p.ID, "test", 60, rotPayload)
+	require.NoError(t, err)
+
+	otherBox, err := secrets.NewBox("ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=")
+	require.NoError(t, err)
+	restarted := NewService(database, nil, testPepper[:], otherBox)
+
+	rot, err := restarted.PendingRotationFor(ctx, p.AgentID, k1.Plaintext)
+	require.NoError(t, err)
+	require.NotNil(t, rot)
+	assert.Equal(t, k1.ID, rot.CurrentKeyID)
+	assert.Equal(t, k2.ID, rot.KeyID)
+	assert.Empty(t, rot.SealedAPIKey, "an unopenable copy must not be delivered")
+}
