@@ -39,6 +39,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
 	"github.com/s3ntin3l8/branchdam/internal/prune"
+	"github.com/s3ntin3l8/branchdam/internal/rehash"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
 	"github.com/s3ntin3l8/branchdam/internal/settings"
 	"github.com/s3ntin3l8/branchdam/internal/sse"
@@ -319,10 +320,17 @@ func main() {
 
 	trashWorker := prune.NewTrashWorker(guard, func() int {
 		return settingsStore.Effective().Trash.RetentionDays
-	}, log, prune.WithTrashTimes(pipeline.TrashTimeLookup(database)))
+	}, log, prune.WithTrashTimes(pipeline.TrashTimeLookup(database, log)))
 	trashWorker.Start(ctx, 0)
 
 	thumbWorker, thumbCache := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)
+
+	// Re-hashes Tier-3 masters whose full_hash a paired device only
+	// asserted, so they can authorise pruning again (#505). Reads go
+	// through guard.OpenRead; always started, an idle pass is one indexed
+	// query.
+	rehashWorker := rehash.NewWorker(database, guard, log)
+	rehashWorker.Start(ctx, 0)
 
 	spa, err := web.Dist()
 	if err != nil {
@@ -543,7 +551,7 @@ func main() {
 		WriteTimeout:      time.Duration(cfg.HTTP.WriteTimeoutSecs) * time.Second,
 	}
 
-	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichSupervisor, drainer, thumbWorker, pool, &dbUnsafeToClose)
+	runErr := run(ctx, stop, log, httpServer, supervisor, sweeper, scanTracker, immichSupervisor, drainer, thumbWorker, rehashWorker, pool, &dbUnsafeToClose)
 	closeDatabase(log, database, dbUnsafeToClose)
 	if runErr != nil {
 		log.Error("run", "err", runErr)
@@ -589,7 +597,8 @@ func main() {
 // though it never successfully started serving (#123).
 func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpServer *http.Server,
 	supervisor *pipeline.WatcherSupervisor, sweeper *pipeline.SweeperSupervisor, scanTracker *pipeline.ScanTracker,
-	immichSupervisor *sync.Supervisor, drainer *agent.Drainer, thumbWorker *thumbs.Worker, pool *workers.Pool[string], dbUnsafeToClose *bool,
+	immichSupervisor *sync.Supervisor, drainer *agent.Drainer, thumbWorker *thumbs.Worker, rehashWorker *rehash.Worker,
+	pool *workers.Pool[string], dbUnsafeToClose *bool,
 ) error {
 	// Buffered so the goroutine never blocks sending its result, whether or
 	// not run() is still around to receive it by the time it does.
@@ -677,6 +686,14 @@ func run(ctx context.Context, stop context.CancelFunc, log *slog.Logger, httpSer
 		// holds the writer DB connection (each node's SetThumbState is its
 		// own transaction) and must finish before db.Close.
 		if !waitBounded(joinCtx, log, "thumbWorker.Wait()", thumbWorker.Wait) {
+			*dbUnsafeToClose = true
+		}
+	}
+	if rehashWorker != nil {
+		// The in-flight file hash aborts on ctx.Done without recording
+		// anything; Wait joins the loop (each outcome its own short
+		// writer transaction) before db.Close.
+		if !waitBounded(joinCtx, log, "rehashWorker.Wait()", rehashWorker.Wait) {
 			*dbUnsafeToClose = true
 		}
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
 // TestDrainer_ContentDedupRecordsAliasAndFollowUpEventsResolveIt: a
@@ -129,4 +130,81 @@ func TestDrainer_PathRebasedUnknownUUIDWithExistingHashAliases(t *testing.T) {
 		return err
 	}))
 	require.Equal(t, int64(1), count)
+}
+
+// TestDrainer_AliasedPathRebasedIsAcknowledgedBeforeTargetValidation: an
+// EVENT_PATH_REBASED for a UUID this device had content-deduplicated onto
+// an existing node changes nothing, so it is acknowledged whatever its
+// target is. The alias is resolved before resolveRebaseTarget, so neither a
+// read-only non-Tier-3 target nor a Tier-3 target whose file is not there
+// yet fails the event (both used to be refused first).
+func TestDrainer_AliasedPathRebasedIsAcknowledgedBeforeTargetValidation(t *testing.T) {
+	env := setupTestDB(t)
+	ctx := context.Background()
+
+	roDir := filepath.Join(t.TempDir(), "readonly-import")
+	require.NoError(t, os.MkdirAll(roDir, 0o755))
+	resRoDir, err := filepath.EvalSymlinks(roDir)
+	require.NoError(t, err)
+	var roLoc sqlcgen.StorageLocation
+	require.NoError(t, env.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		roLoc, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: 1,
+		})
+		return err
+	}))
+	guard := storage.NewGuard([]storage.Location{
+		{ID: env.locID1, Name: "local_staging", RootPath: env.staging, Tier: "TIER0_LOCAL_STAGING"},
+		{ID: env.locID3, Name: "archive", RootPath: env.archive, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: true},
+		{ID: roLoc.ID, Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: true},
+	})
+	drainer := agent.NewDrainer(env.db, guard, nil)
+	drainer.SetMaxRetries(1) // a refusal would show up as Failed on this one pass
+
+	hash := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	phoneUUID := uuid.New().String()
+	enqueueEventAs(t, env.db, "phone-1", agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: phoneUUID, FilePath: filepath.Join(env.staging, "PXL_0002.dng"), FullHash: &hash,
+	})
+	wsUUID := uuid.New().String()
+	enqueueEventAs(t, env.db, "ws-1", agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: wsUUID, FilePath: filepath.Join(env.staging, "DSC0002.dng"), FullHash: &hash,
+	})
+	stats, err := drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed)
+	require.Equal(t, 0, stats.Failed)
+	before := nodeState(t, env.db, phoneUUID)
+
+	readOnlyTarget := filepath.Join(resRoDir, "DSC0002.dng")
+	require.NoError(t, os.WriteFile(readOnlyTarget, []byte("bytes"), 0o644))
+	enqueueEventAs(t, env.db, "ws-1", agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID: wsUUID, TargetFilePath: readOnlyTarget, FullHash: &hash,
+	})
+	enqueueEventAs(t, env.db, "ws-1", agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID: wsUUID, TargetFilePath: filepath.Join(env.archive, "not-copied-yet.dng"), FullHash: &hash,
+	})
+	stats, err = drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed)
+	require.Equal(t, 0, stats.Failed, "an aliased rebase must be acknowledged, not refused on its target")
+
+	after := nodeState(t, env.db, phoneUUID)
+	require.Equal(t, before.FilePath, after.FilePath)
+	require.Equal(t, before.StorageLocationID, after.StorageLocationID)
+
+	// The same read-only target is still refused for a node the device
+	// created itself, so the ordering change only exempts aliases.
+	ownUUID := uuid.New().String()
+	enqueueEventAs(t, env.db, "ws-1", agent.EventNodeCreated, agent.NodeCreatedPayload{
+		NodeUUID: ownUUID, FilePath: filepath.Join(env.staging, "own.dng"),
+	})
+	enqueueEventAs(t, env.db, "ws-1", agent.EventPathRebased, agent.PathRebasedPayload{
+		NodeUUID: ownUUID, TargetFilePath: readOnlyTarget,
+	})
+	stats, err = drainer.DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.Processed, "the node create")
+	require.Equal(t, 1, stats.Failed, "the rebase onto the read-only target")
 }

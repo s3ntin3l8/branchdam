@@ -58,6 +58,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/pairing` | Per-device API key mint/rotate/revoke for agent auth; QR credential sealing |
 | `internal/projectfile` | Tier-1 project-file parsers (`.dam.json`, `.drp`, `.fcpxml`, `.edl`, `.prproj`) |
 | `internal/qr` | SVG QR rendering for companion pairing |
+| `internal/rehash` | Background worker that re-reads agent-asserted Tier-3 `full_hash` values through `Guard.OpenRead` and marks matches server-computed (`full_hash_provenance`) |
 | `internal/secrets` | `BRANCHDAM_SECRET_KEY`-based encryption of secret settings values (`secrets.Box`) |
 | `internal/settings` | `app_settings` UI overrides on top of `config.yaml`; field registry and live/restart apply modes |
 | `internal/sse` | Server-Sent Events hub ("something changed, re-fetch") |
@@ -73,7 +74,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 4. **Header Isolation**: `internal/auth.BrowserChain` is the ONLY code permitted to read `X-Authentik-*` headers (`TestNoDirectAuthentikHeaderReads`). Agent routes unconditionally strip them.
 5. **Agent Paths Untrusted**: `storage_location_id` on agent DTOs is ignored and re-derived from `storage.Guard.Resolve(filePath)`.
 6. **Audit Priority**: Human `CONFIRMED`/`REJECTED` edge review states permanently outrank automated resolvers.
-7. **Pruning TOCTOU Protections**: Tier-1 pruning requires a verified, live Tier-3 master with a 64-character `full_hash`, reached only through `CONFIRMED` or `AUTO_ACCEPTED` cache edges (`PROXY_OF`, `DERIVED_FROM`, `DUPLICATE_OF`) whose every node is `ACTIVE` or `HIDDEN` (a `NEEDS_REVIEW` edge is an unreviewed guess, and `PROJECT_SIDECAR`/`FINAL_EXPORT` children are not copies of the master; none of them ever authorises a purge). Project files and `.xmp` sidecars are never prune candidates. `prune.Execute` re-verifies disk presence (`os.Lstat`) and mtime/size for both candidates and Tier-3 ancestors immediately before calling `Guard.Remove`.
+7. **Pruning TOCTOU Protections**: Tier-1 pruning requires a live Tier-3 master whose 64-character `full_hash` is server-verified -- `full_hash_provenance` records `SERVER` for the node's current value (computed by a scan or upload, or re-hashed and matched by `internal/rehash`); a hash a paired device only asserted authorises nothing, here or in agent `node-status` `verified` (#505) -- reached only through `CONFIRMED` or `AUTO_ACCEPTED` cache edges (`PROXY_OF`, `DERIVED_FROM`, `DUPLICATE_OF`) whose every node is `ACTIVE` or `HIDDEN` (a `NEEDS_REVIEW` edge is an unreviewed guess, and `PROJECT_SIDECAR`/`FINAL_EXPORT` children are not copies of the master; none of them ever authorises a purge). Project files and `.xmp` sidecars are never prune candidates. `prune.Execute` re-verifies disk presence (`os.Lstat`) and mtime/size for both candidates and Tier-3 ancestors immediately before calling `Guard.Remove`.
 8. **Immich Supervisor**: Immich sync worker joins on graceful shutdown and refuses to start new workers once shutdown begins.
 9. **Process Re-exec on Restart**: `POST /api/v1/restart` re-execs the binary (`syscall.Exec`) after graceful HTTP drain, gated to admin groups.
 

@@ -186,6 +186,10 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 				if resolveErr != nil || !loc.IsVirtual {
 					return resolveSnapshotConflict{message: "Resolve virtual storage location unavailable"}
 				}
+				// A Resolve timeline is a virtual node: there are no bytes to
+				// hash, so it deliberately stores no full_hash and is always
+				// INDEXED_SHALLOW (as applyVirtualNodeCreated's virtual nodes
+				// are), not pipeline.IndexingStatusFor's has-a-hash rule.
 				node, err = q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 					NodeUuid: tl.NodeUUID, StorageLocationID: loc.ID,
 					FilePath: tl.FilePath, FileName: tl.DisplayName, FileExt: "",

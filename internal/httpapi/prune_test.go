@@ -106,6 +106,10 @@ func pruneTestServer(t *testing.T, cacheTTLHours int) (*Server, *db.DB, int64, s
 		if err != nil {
 			return err
 		}
+		// Scanned by the server, so its hash is server-computed (#505).
+		if err := db.RecordFullHashSource(context.Background(), q, master.ID, &fullHash, db.HashSourceServer); err != nil {
+			return err
+		}
 
 		candidate, err = q.InsertMediaNode(context.Background(), sqlcgen.InsertMediaNodeParams{
 			NodeUuid: "uuid-proxy", StorageLocationID: tier1ID,

@@ -589,6 +589,12 @@ WHERE media_nodes.id IN (SELECT ancestor_id FROM ancestors)
   AND media_nodes.lifecycle_state IN ('ACTIVE', 'HIDDEN')
   AND media_nodes.full_hash IS NOT NULL
   AND length(media_nodes.full_hash) = 64
+  AND EXISTS (
+    SELECT 1 FROM full_hash_provenance p
+    WHERE p.node_id = media_nodes.id
+      AND p.source = 'SERVER'
+      AND p.full_hash = media_nodes.full_hash
+  )
 `
 
 type ListVerifiedTier3AncestorsRow struct {
@@ -600,7 +606,10 @@ type ListVerifiedTier3AncestorsRow struct {
 }
 
 // Walks ancestor lineage target->source for node ?1 and returns every live
-// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash.
+// ancestor on a TIER3_MASTER_ARCHIVE location with a verified full_hash --
+// server-computed, exactly ListPrunableNodes' full_hash_provenance check
+// (#505), so an asserted hash can't authorise the purge at Execute time
+// either.
 // The walk is ListPrunableNodes' exactly: only CONFIRMED and AUTO_ACCEPTED
 // edges (NEEDS_REVIEW/REJECTED never authorise a purge), only the cache
 // relationships PROXY_OF/DERIVED_FROM/DUPLICATE_OF (never PROJECT_SIDECAR or

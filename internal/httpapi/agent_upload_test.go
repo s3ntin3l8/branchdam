@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
 
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
@@ -77,6 +78,12 @@ func TestAgentUploadStreaming(t *testing.T) {
 	creator, err := database.Reader.GetNodeCreator(context.Background(), resp.NodeUUID)
 	require.NoError(t, err)
 	assert.Equal(t, "test-device", creator)
+	// The server hashed the streamed bytes itself, so the hash is
+	// server-computed even though a device sent them (#505).
+	prov, err := database.Reader.GetFullHashProvenance(context.Background(), node.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.HashSourceServer, prov.Source)
+	assert.Equal(t, expectedHash, prov.FullHash)
 
 	// A second upload of identical bytes dedups onto the existing node; it
 	// must not hand that node to whichever device uploaded the duplicate.

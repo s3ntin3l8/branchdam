@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -123,6 +124,13 @@ func TestAgentRebase_MobileThenAgentDuplicateRebasesCleanly(t *testing.T) {
 	require.NoError(t, json.Unmarshal(upRec.Body.Bytes(), &up))
 	phoneNode, err := database.Reader.GetMediaNodeByUUID(ctx, up.NodeUUID)
 	require.NoError(t, err)
+	// The server hashed the upload itself. Backdate the row so a re-record
+	// by anything below would be visible.
+	prov, err := database.Reader.GetFullHashProvenance(ctx, phoneNode.ID)
+	require.NoError(t, err)
+	require.Equal(t, db.HashSourceServer, prov.Source)
+	_, err = database.ExecInTx(ctx, `UPDATE full_hash_provenance SET recorded_at = 1000 WHERE node_id = ?`, phoneNode.ID)
+	require.NoError(t, err)
 
 	// 2. The workstation agent ingests the same bytes from the card and
 	// announces them under its own UUID.
@@ -173,6 +181,13 @@ func TestAgentRebase_MobileThenAgentDuplicateRebasesCleanly(t *testing.T) {
 	creator, err := database.Reader.GetNodeCreator(ctx, up.NodeUUID)
 	require.NoError(t, err)
 	assert.Equal(t, aliasTestMobileID, creator)
+	// Neither the content-deduplicated EVENT_NODE_CREATED nor the aliased
+	// rebase (both carrying the workstation's fullHash assertion) touched
+	// the phone node's provenance: its hash is the server's own.
+	prov, err = database.Reader.GetFullHashProvenance(ctx, phoneNode.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.HashSourceServer, prov.Source)
+	assert.Equal(t, int64(1000), prov.RecordedAt)
 
 	// A retry of the same rebase is just as clean (idempotent).
 	rbRec2 := aliasPostJSON(t, h, aliasTestAgentKey, "/api/v1/agent/rebase", map[string]any{
@@ -257,4 +272,92 @@ func TestAgentRebase_UnknownUUIDWithExistingHashIs409(t *testing.T) {
 
 	_, err := database.Reader.GetMediaNodeByUUID(ctx, newUUID)
 	require.Error(t, err, "no node may be created for the conflicting UUID")
+	// Nor may the refused assertion be recorded against the existing node.
+	existing, err := database.Reader.GetMediaNodeByUUID(ctx, existingUUID)
+	require.NoError(t, err)
+	_, err = database.Reader.GetFullHashProvenance(ctx, existing.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}
+
+// TestAgentRebase_AliasedUUIDIsAcknowledgedBeforeTargetValidation: POST
+// /agent/rebase for a UUID this device had content-deduplicated onto an
+// existing node changes nothing, so it answers ALIASED whatever the target
+// is. The alias is resolved before the read-only / Tier-3 target checks,
+// which used to refuse it first (READ_ONLY_TARGET for a read-only non-Tier-3
+// target, ARCHIVE_FILE_NOT_PRESENT for a Tier-3 path not copied yet).
+func TestAgentRebase_AliasedUUIDIsAcknowledgedBeforeTargetValidation(t *testing.T) {
+	srv, database, guard, staging, archive := aliasTestServer(t)
+	h := srv.Handler()
+	ctx := context.Background()
+
+	roDir := filepath.Join(t.TempDir(), "readonly-import")
+	require.NoError(t, os.MkdirAll(roDir, 0o755))
+	resRoDir, err := filepath.EvalSymlinks(roDir)
+	require.NoError(t, err)
+	var roLoc sqlcgen.StorageLocation
+	require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		var err error
+		roLoc, err = q.UpsertStorageLocation(ctx, sqlcgen.UpsertStorageLocationParams{
+			Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: 1,
+		})
+		return err
+	}))
+	stagingLoc, err := guard.Resolve(staging)
+	require.NoError(t, err)
+	archiveLoc, err := guard.Resolve(archive)
+	require.NoError(t, err)
+	require.NoError(t, guard.ReloadLocations([]storage.Location{stagingLoc, archiveLoc, {
+		ID: roLoc.ID, Name: "readonly_import", RootPath: resRoDir, Tier: "TIER2_EXPORTS", ReadOnly: true,
+	}}))
+
+	fullHash := "2222222222222222222222222222222222222222222222222222222222222222"
+	phoneUUID := "018f9a00-0000-7000-8000-00000000c001"
+	agentUUID := "018f9a00-0000-7000-8000-00000000c002"
+	for _, ev := range []struct{ key, agentID, eventUUID, nodeUUID, name string }{
+		{aliasTestMobileKey, aliasTestMobileID, "018f9a00-0000-7000-8000-00000000e101", phoneUUID, "PXL_0001.jpg"},
+		{aliasTestAgentKey, aliasTestWorkstation, "018f9a00-0000-7000-8000-00000000e102", agentUUID, "DSC0001.jpg"},
+	} {
+		payload, err := json.Marshal(agent.NodeCreatedPayload{
+			NodeUUID: ev.nodeUUID, FilePath: filepath.Join(staging, ev.name), FullHash: &fullHash,
+		})
+		require.NoError(t, err)
+		rec := aliasPostJSON(t, h, ev.key, "/api/v1/agent/events", map[string]any{
+			"eventUuid": ev.eventUUID, "agentId": ev.agentID, "eventType": agent.EventNodeCreated, "payload": string(payload),
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	stats, err := agent.NewDrainer(database, guard, nil).DrainAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.Processed)
+	phoneNode, err := database.Reader.GetMediaNodeByUUID(ctx, phoneUUID)
+	require.NoError(t, err)
+
+	readOnlyTarget := filepath.Join(resRoDir, "DSC0001.jpg")
+	require.NoError(t, os.WriteFile(readOnlyTarget, []byte("bytes"), 0o644))
+	for name, target := range map[string]string{
+		"read-only non-Tier-3 target":   readOnlyTarget,
+		"Tier-3 target not present yet": filepath.Join(archive, "not-copied-yet.jpg"),
+	} {
+		rec := aliasPostJSON(t, h, aliasTestAgentKey, "/api/v1/agent/rebase", map[string]any{
+			"nodeUuid": agentUUID, "targetPath": target, "fullHash": fullHash,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", name, rec.Body.String())
+		var rb AgentRebaseOutput
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rb.Body))
+		assert.Equal(t, "ALIASED", rb.Body.Status, name)
+		assert.Equal(t, phoneUUID, rb.Body.NodeUUID, name)
+		assert.Equal(t, phoneNode.ID, rb.Body.ID, name)
+	}
+	after, err := database.Reader.GetMediaNodeByUUID(ctx, phoneUUID)
+	require.NoError(t, err)
+	assert.Equal(t, phoneNode.FilePath, after.FilePath)
+	assert.Equal(t, phoneNode.StorageLocationID, after.StorageLocationID)
+
+	// Another device does not see through the workstation's alias, so its
+	// rebase of the same UUID has its target validated and refused as before.
+	rec := aliasPostJSON(t, h, aliasTestMobileKey, "/api/v1/agent/rebase", map[string]any{
+		"nodeUuid": agentUUID, "targetPath": readOnlyTarget,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "READ_ONLY_TARGET")
 }

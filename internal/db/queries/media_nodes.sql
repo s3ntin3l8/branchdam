@@ -441,6 +441,10 @@ WHERE node_uuid = ?1;
 -- #61's TTL cache pruning eligibility: a Tier-1 node past its TTL
 -- (mtime_unix < cutoff_unix) is only a candidate if a LIVE ancestor on a
 -- TIER3_MASTER_ARCHIVE location has a verified (non-NULL, 64-hex) full_hash.
+-- "Verified" means server-computed (#505): full_hash_provenance must vouch
+-- for the ancestor's current full_hash with source = 'SERVER'. A hash a
+-- paired device only asserted authorises nothing until internal/rehash has
+-- re-read the file and matched it.
 -- "live" matches v_media_edges_resolved's own parent_alive definition --
 -- ACTIVE or HIDDEN, deliberately not the looser "!= ARCHIVED" -- so a
 -- vanished (MISSING) or archived Tier-3 master can never authorize a purge.
@@ -509,12 +513,15 @@ WHERE n.storage_location_id = ?1
     FROM lineage l
     JOIN media_nodes m ON m.id = l.id
     JOIN storage_locations s ON s.id = m.storage_location_id
+    JOIN full_hash_provenance p ON p.node_id = m.id
     WHERE l.root = n.id
       AND l.id <> n.id
       AND s.tier = 'TIER3_MASTER_ARCHIVE'
       AND m.lifecycle_state IN ('ACTIVE', 'HIDDEN')
       AND m.full_hash IS NOT NULL
       AND length(m.full_hash) = 64
+      AND p.source = 'SERVER'
+      AND p.full_hash = m.full_hash
   )
 ORDER BY n.id;
 
@@ -634,8 +641,15 @@ LIMIT 1;
 
 -- name: ListMediaNodeStatusesByUUIDs :many
 -- Backs POST /api/v1/agent/node-status: bulk status check for a batch of UUIDs.
--- Returns node_uuid, lifecycle_state, full_hash (for verification check), and storage location tier.
-SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier
+-- Returns node_uuid, lifecycle_state, full_hash, storage location tier, and
+-- whether full_hash is server-computed (full_hash_provenance vouches for the
+-- current value with source = 'SERVER') -- the same predicate
+-- ListPrunableNodes applies to a Tier-3 ancestor (#505).
+SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier,
+       CAST(EXISTS (
+           SELECT 1 FROM full_hash_provenance p
+           WHERE p.node_id = n.id AND p.source = 'SERVER' AND p.full_hash = n.full_hash
+       ) AS INTEGER) AS hash_server_verified
 FROM media_nodes n
 LEFT JOIN storage_locations s ON s.id = n.storage_location_id
 WHERE n.node_uuid IN (SELECT value FROM json_each(CAST(sqlc.arg(node_uuids) AS TEXT)));

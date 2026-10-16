@@ -286,7 +286,7 @@ func New(d Deps) *Server {
 	if cfg := cfgProvider.Effective(); cfg != nil {
 		if len(cfg.HTTP.TrustedProxies) == 0 {
 			log.Warn("http: trustedProxies is empty -- if unset, X-Forwarded-* headers are trusted from any source (backward-compat default); an explicit [] denies all forwarded headers. Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
-			if cfg.Auth.Mode == "both" {
+			if auth.AuthMode(cfg.Auth.Mode) == auth.AuthModeBoth {
 				log.Error("auth: mode \"both\" with empty http.trustedProxies -- forward-auth identity headers are IGNORED (forward-auth login disabled; local login still works). Set http.trustedProxies to your ForwardAuth proxy's IP/CIDR to enable forward identity.")
 			}
 		}

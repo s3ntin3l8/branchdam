@@ -1021,7 +1021,7 @@ func TestRunReturnsErrorOnBindFailure(t *testing.T) {
 	pool.Run(ctx)
 
 	var dbUnsafeToClose bool
-	runErr := run(ctx, cancel, log, httpServer, nil, nil, scanTracker, nil, drainer, nil, pool, &dbUnsafeToClose)
+	runErr := run(ctx, cancel, log, httpServer, nil, nil, scanTracker, nil, drainer, nil, nil, pool, &dbUnsafeToClose)
 
 	if runErr == nil {
 		t.Fatal("run() = nil, want a non-nil error surfacing the bind failure")

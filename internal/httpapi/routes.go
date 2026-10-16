@@ -23,6 +23,7 @@ import (
 	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -2156,6 +2157,19 @@ func isLiveFullHashConflict(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: media_nodes.full_hash")
 }
 
+// aliasedRebaseOutput is POST /agent/rebase's answer for a UUID this device
+// had content-deduplicated onto an existing node (its EVENT_NODE_CREATED
+// named bytes the server already held): that node is not the device's to
+// re-point, so the rebase is acknowledged with the canonical node's
+// identity and changes nothing.
+func aliasedRebaseOutput(canonical sqlcgen.MediaNode) *AgentRebaseOutput {
+	out := &AgentRebaseOutput{}
+	out.Body.ID = canonical.ID
+	out.Body.NodeUUID = canonical.NodeUuid
+	out.Body.Status = "ALIASED"
+	return out
+}
+
 func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
@@ -2172,6 +2186,22 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	}
 	if in.Body.TargetPath == "" {
 		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "targetPath is required")
+	}
+
+	// Resolve an alias before validating the target: an aliased UUID's
+	// rebase changes nothing, so it is acknowledged (ALIASED) whatever the
+	// target is, instead of being refused as READ_ONLY_TARGET or
+	// ARCHIVE_FILE_NOT_PRESENT first. The drainer's EVENT_PATH_REBASED
+	// handler orders it the same way. This read sits outside the
+	// transaction below because the target checks (guard.Exists stats the
+	// archive) should not hold the single writer connection; alias rows are
+	// never deleted, so a UUID found aliased here is still aliased there,
+	// and an alias recorded in between is caught by the same check inside
+	// the transaction.
+	if canonical, aliased, lookupErr := agent.LookupNodeByUUID(ctx, s.db.Reader, p.Name, in.Body.NodeUUID); lookupErr == nil && aliased {
+		return aliasedRebaseOutput(canonical), nil
+	} else if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "rebase node lookup failed", lookupErr)
 	}
 
 	if s.guard == nil {
@@ -2224,14 +2254,8 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, aliased, err := agent.LookupNodeByUUID(ctx, q, p.Name, in.Body.NodeUUID)
 		if err == nil && aliased {
-			// This device's EVENT_NODE_CREATED for nodeUuid was
-			// content-deduplicated onto an existing node: the server
-			// already holds these bytes under that node, which is not
-			// the device's to re-point. Acknowledge with the canonical
-			// node's identity and change nothing.
-			out.Body.ID = existing.ID
-			out.Body.NodeUUID = existing.NodeUuid
-			out.Body.Status = "ALIASED"
+			// Aliased since the pre-check above (see aliasedRebaseOutput).
+			out = aliasedRebaseOutput(existing)
 			return nil
 		}
 		if err == nil {
@@ -2289,6 +2313,11 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 				}); err != nil {
 					return err
 				}
+				// Asserted by the device: authorises nothing until
+				// internal/rehash re-reads the file (#505).
+				if err := db.RecordFullHashSource(ctx, q, existing.ID, in.Body.FullHash, db.HashSourceAgent); err != nil {
+					return err
+				}
 			} else if existing.FullHash != nil && *existing.FullHash != "" && existing.IndexingStatus != "INDEXED_FULL" {
 				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 					ID:       existing.ID,
@@ -2309,7 +2338,6 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		}
 
 		// Unknown node: agent is the source of truth for an offline staged file; create node!
-		indexingStatus := "INDEXED_SHALLOW"
 		var nullFullHash *string
 		if in.Body.FullHash != nil && *in.Body.FullHash != "" {
 			// A live node already holding these bytes would make the
@@ -2323,7 +2351,6 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 				return dupErr
 			}
 			nullFullHash = in.Body.FullHash
-			indexingStatus = "INDEXED_FULL"
 		}
 		var rebaseUserID int64
 		if pairing, pairErr := q.GetDevicePairingByAgentID(ctx, p.Name); pairErr == nil && pairing.UserID.Valid {
@@ -2340,7 +2367,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			FastHash:           in.Body.FastHash,
 			FullHash:           nullFullHash,
 			Phash:              sql.NullInt64{},
-			IndexingStatus:     indexingStatus,
+			IndexingStatus:     pipeline.IndexingStatusFor(nullFullHash),
 			GraphStatus:        "UNLINKED",
 			LifecycleState:     "ACTIVE",
 			OriginalDocumentID: sql.NullString{},
@@ -2364,6 +2391,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			return err
 		}
 		if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: in.Body.NodeUUID, AgentID: p.Name}); err != nil {
+			return err
+		}
+		if err := db.RecordFullHashSource(ctx, q, newNode.ID, nullFullHash, db.HashSourceAgent); err != nil {
 			return err
 		}
 
@@ -2421,9 +2451,13 @@ type AgentNodeStatusEntry struct {
 	// LifecycleState/Tier are only meaningful when Found is true.
 	LifecycleState string `json:"lifecycleState,omitempty"`
 	Tier           string `json:"tier,omitempty"`
-	// Verified is true only when full_hash is non-NULL and 64 hex characters
-	// (BLAKE3-256) -- the same predicate ListPrunableNodes uses to decide a
-	// Tier-3 ancestor authorizes a purge. False whenever Found is false.
+	// Verified is true only when full_hash is non-NULL, 64 hex characters
+	// (BLAKE3-256) and server-computed: the server hashed the bytes itself
+	// (scan, upload) or re-read the file and matched an agent-asserted
+	// value (internal/rehash). A hash a device only asserted reads false
+	// until then (#505). The same predicate ListPrunableNodes uses to
+	// decide a Tier-3 ancestor authorizes a purge. False whenever Found is
+	// false.
 	Verified bool `json:"verified"`
 	// FullHash is the node's stored BLAKE3-256 full_hash, so a client about
 	// to reclaim its local copy can compare it with the hash it computed
@@ -2494,13 +2528,12 @@ func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusI
 			byUUID[row.NodeUuid] = nodeInfo{
 				lifecycleState: row.LifecycleState,
 				tier:           tier,
-				// Length-only check, deliberately matching ListPrunableNodes' SQL predicate
-				// exactly rather than additionally validating hex charset (the schema's own
-				// full_hash CHECK also enforces length only, not charset) -- this endpoint's
-				// contract is to answer identically to that predicate, not a stricter one,
-				// so a caller can't observe a divergence between the two. Low residual risk:
-				// hashing.FullHash (the only writer) always emits lowercase hex.
-				verified: row.FullHash != nil && len(*row.FullHash) == 64,
+				// Deliberately matching ListPrunableNodes' SQL predicate exactly: a
+				// 64-character full_hash (length only, like the schema's own CHECK)
+				// that full_hash_provenance vouches for as server-computed. This
+				// endpoint's contract is to answer identically to that predicate, not
+				// a stricter one, so a caller can't observe a divergence between the two.
+				verified: row.FullHash != nil && len(*row.FullHash) == 64 && row.HashServerVerified != 0,
 				fullHash: fullHash,
 			}
 		}

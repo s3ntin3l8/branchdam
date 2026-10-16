@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/zeebo/blake3"
 
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -521,7 +522,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			MtimeUnix:          time.Now().Unix(),
 			FastHash:           nullFast,
 			FullHash:           nullFull,
-			IndexingStatus:     pipeline.IndexingStatusFor(computedBlake3),
+			IndexingStatus:     pipeline.IndexingStatusFor(nullFull),
 			GraphStatus:        "UNLINKED",
 			LifecycleState:     "ACTIVE",
 			FilenameStem:       sql.NullString{String: stem, Valid: stem != ""},
@@ -540,6 +541,11 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			return insErr
 		}
 		insertedNode = archiveNode
+		// The server hashed these bytes itself while streaming them to
+		// disk, whoever sent them (#505).
+		if err := db.RecordFullHashSource(ctx, q, archiveNode.ID, nullFull, db.HashSourceServer); err != nil {
+			return fmt.Errorf("record full_hash provenance: %w", err)
+		}
 		if params.CreatorAgentID != "" {
 			if err := q.SetNodeCreator(ctx, sqlcgen.SetNodeCreatorParams{NodeUuid: nodeUUIDStr, AgentID: params.CreatorAgentID}); err != nil {
 				return fmt.Errorf("record node creator: %w", err)
@@ -566,6 +572,10 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		}
 
 		if exportCreated && exportLoc != nil && exportUUIDStr != "" {
+			// The export hardlink/copy stores no full_hash, so it does not
+			// conflict with the ux_media_nodes_live_full_hash unique index on
+			// the master archive node; its indexing status follows from that.
+			var exportFullHash *string
 			exportNode, expInsErr := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 				NodeUuid:          exportUUIDStr,
 				StorageLocationID: exportLoc.ID,
@@ -575,16 +585,14 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				SizeBytes:         bytesWritten,
 				MtimeUnix:         time.Now().Unix(),
 				FastHash:          nullFast,
-				// FullHash is left nil for export hardlinks/copies so they do not conflict
-				// with the ux_media_nodes_live_full_hash unique index on the master archive node.
-				FullHash:         nil,
-				IndexingStatus:   pipeline.IndexingStatusFor(""),
-				GraphStatus:      "LINKED",
-				LifecycleState:   "ACTIVE",
-				FilenameStem:     sql.NullString{String: stem, Valid: stem != ""},
-				CapturedAtUnix:   sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
-				CameraModel:      cameraModelDB,
-				UploadedByUserID: sql.NullInt64{Int64: params.UserID, Valid: params.UserID != 0},
+				FullHash:          exportFullHash,
+				IndexingStatus:    pipeline.IndexingStatusFor(exportFullHash),
+				GraphStatus:       "LINKED",
+				LifecycleState:    "ACTIVE",
+				FilenameStem:      sql.NullString{String: stem, Valid: stem != ""},
+				CapturedAtUnix:    sql.NullInt64{Int64: capturedAtUnix, Valid: capturedAtUnix > 0},
+				CameraModel:       cameraModelDB,
+				UploadedByUserID:  sql.NullInt64{Int64: params.UserID, Valid: params.UserID != 0},
 			})
 			if expInsErr != nil {
 				return fmt.Errorf("insert export media node: %w", expInsErr)

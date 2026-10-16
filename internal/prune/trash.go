@@ -25,7 +25,8 @@ type TrashPruneResult struct {
 
 // TrashTimeFunc reports when the .trash/ copy at path (inside the storage
 // location rooted at locRoot) was trashed, as recorded in the database --
-// pipeline.TrashTimeLookup is the production implementation. known=false
+// pipeline.TrashTimeLookup is the production implementation (it logs each
+// known=false at DEBUG with the path and parsed node_uuid). known=false
 // means no TRASHED node owns the file, and the purge falls back to the
 // file's mtime. A non-nil error skips the file for this pass: a DB hiccup
 // must never turn into an early unlink.

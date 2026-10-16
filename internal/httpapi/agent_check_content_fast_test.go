@@ -42,8 +42,11 @@ func seedCheckContentNode(t *testing.T, database *db.DB, archive, nodeUUID, fast
 		if fullHash != "" {
 			params.FullHash = &fullHash
 		}
-		_, err := q.InsertMediaNode(ctx, params)
-		return err
+		n, err := q.InsertMediaNode(ctx, params)
+		if err != nil {
+			return err
+		}
+		return db.RecordFullHashSource(ctx, q, n.ID, params.FullHash, db.HashSourceServer)
 	})
 	require.NoError(t, err)
 }

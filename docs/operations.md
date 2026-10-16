@@ -125,11 +125,31 @@ A Tier-1 node is eligible only if **all** of:
 - it's `ACTIVE` on a `prunable: true` (Tier-1-only) storage location,
 - its `mtime_unix` is older than that location's `cacheTtlHours`,
 - it has a *live* ancestor (`ACTIVE` or `HIDDEN`) on a `TIER3_MASTER_ARCHIVE` location with a
-  verified, non-`NULL`, 64-character `full_hash`, reached only through `CONFIRMED` or
+  verified, non-`NULL`, 64-character `full_hash` that the server computed itself (a scan, an
+  upload, or the background re-hash of a hash a paired device asserted -- see below), reached only through `CONFIRMED` or
   `AUTO_ACCEPTED` cache edges (`PROXY_OF`, `DERIVED_FROM`, `DUPLICATE_OF`) whose every
   intermediate node is also `ACTIVE` or `HIDDEN`,
 - it is not a project file (`.drp`, `.fcpxml`, `.edl`, `.prproj`, `.dam.json`) or an `.xmp`
   sidecar.
+
+**Agent-asserted hashes (#505).** A workstation or mobile agent that copies a file onto the
+archive itself reports its `fullHash` in an event; the server records that hash as *asserted*
+(`full_hash_provenance.source = 'AGENT'`) and it authorises no purge -- here or through the agent's
+own `node-status` -- until the background re-hash worker (`internal/rehash`) has read the file
+through the Guard's read path and matched it. The worker runs continuously, one file at a time in
+batches of 16 with a short pause between batches, and idles once nothing is left; a file it cannot
+read is retried after an hour. A **mismatch** is logged at `WARN` (`rehash: agent-asserted
+full_hash does not match the file`, with the node UUID, path and both hashes) and recorded as
+`rehash_state = 'MISMATCH'` with the computed value in `rehash_computed`; the stored `full_hash` is
+never replaced by what was read (the archive copy may be the damaged one), and it never authorises
+pruning. The file is read again once a day. To repair it, compare the archive copy with a known-good
+copy (the device's own hash is the stored value): if the archive copy is damaged, restore the good
+copy over it and the next daily read verifies the master. If the archive copy is right and the
+device's hash was wrong, the master stays unverified and its Tier-1 caches are kept, never purged.
+
+Right after upgrading, every hash on a `TIER3_MASTER_ARCHIVE` location starts out asserted -- the server cannot tell an
+older device's assertion from a hash it scanned -- so cache pruning pauses until the worker has
+re-read the archive once (a single sequential pass; each match is recorded as it goes).
 
 `PROJECT_SIDECAR` and `FINAL_EXPORT` edges never make a node prunable: a project file or sidecar
 is the *child* of the media it references, and an export is finished work, so neither can be

@@ -1756,10 +1756,15 @@ func TestCommitDoesNotResurrectLogicallyTrashedFile(t *testing.T) {
 }
 
 func TestIndexingStatusFor(t *testing.T) {
-	if got := IndexingStatusFor("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); got != "INDEXED_FULL" {
+	full := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if got := IndexingStatusFor(&full); got != "INDEXED_FULL" {
 		t.Errorf("with full hash: %q, want INDEXED_FULL", got)
 	}
-	if got := IndexingStatusFor(""); got != "INDEXED_SHALLOW" {
-		t.Errorf("without full hash: %q, want INDEXED_SHALLOW", got)
+	if got := IndexingStatusFor(nil); got != "INDEXED_SHALLOW" {
+		t.Errorf("nil full hash: %q, want INDEXED_SHALLOW", got)
+	}
+	empty := ""
+	if got := IndexingStatusFor(&empty); got != "INDEXED_SHALLOW" {
+		t.Errorf("empty full hash: %q, want INDEXED_SHALLOW", got)
 	}
 }

@@ -61,6 +61,10 @@ type nodeSpec struct {
 	mtimeUnix  int64
 	fullHash   *string
 	lifecycle  string // defaults to ACTIVE
+	// hashSource is the full_hash_provenance source recorded for fullHash:
+	// db.HashSourceServer (the default, as a scan records it) or
+	// db.HashSourceAgent (asserted by a paired device, #505).
+	hashSource string
 }
 
 func seedNode(t *testing.T, database *db.DB, spec nodeSpec) sqlcgen.MediaNode {
@@ -82,6 +86,13 @@ func seedNode(t *testing.T, database *db.DB, spec nodeSpec) sqlcgen.MediaNode {
 			IndexingStatus: "INDEXED_SHALLOW", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
 		})
 		if err != nil {
+			return err
+		}
+		hashSource := spec.hashSource
+		if hashSource == "" {
+			hashSource = db.HashSourceServer
+		}
+		if err := db.RecordFullHashSource(context.Background(), q, n.ID, spec.fullHash, hashSource); err != nil {
 			return err
 		}
 		if lifecycle != "ACTIVE" {
@@ -191,6 +202,15 @@ func TestPlanExcludesUnverifiedNode(t *testing.T) {
 			name: "ancestor has no full_hash",
 			buildAncestor: func(t *testing.T, database *db.DB, tier3LocID int64) (int64, string) {
 				n := seedNode(t, database, nodeSpec{locationID: tier3LocID, path: "/archive/c.jpg", mtimeUnix: oldMtime, fullHash: nil})
+				return n.ID, "AUTO_ACCEPTED"
+			},
+		},
+		{
+			// #505: a hash a paired device only asserted is not verified,
+			// however well-formed it is.
+			name: "ancestor full_hash is agent-asserted",
+			buildAncestor: func(t *testing.T, database *db.DB, tier3LocID int64) (int64, string) {
+				n := seedNode(t, database, nodeSpec{locationID: tier3LocID, path: "/archive/e.jpg", mtimeUnix: oldMtime, fullHash: hash64("ee"), hashSource: db.HashSourceAgent})
 				return n.ID, "AUTO_ACCEPTED"
 			},
 		},
@@ -543,6 +563,61 @@ func TestExecuteAbortsWhenNoLongerEligible(t *testing.T) {
 	}
 	if after.LifecycleState != "ACTIVE" {
 		t.Errorf("lifecycle_state = %q, want ACTIVE (unchanged)", after.LifecycleState)
+	}
+}
+
+// TestExecuteRefusesAgentAssertedAncestor covers #505 at Execute time: a
+// live Tier-3 ancestor whose full_hash was only asserted by a paired device
+// -- or whose server-computed provenance no longer matches the node's
+// current hash -- does not authorise the purge, even though the hash is a
+// well-formed 64-character value on an ACTIVE master.
+func TestExecuteRefusesAgentAssertedAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		// rewrite replaces the node's full_hash after its provenance was
+		// recorded, without recording a new one.
+		rewrite bool
+	}{
+		{name: "agent-asserted", source: db.HashSourceAgent},
+		{name: "server row vouches for an older hash", source: db.HashSourceServer, rewrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openTestDB(t)
+			root := t.TempDir()
+			archive := t.TempDir()
+			filePath := filepath.Join(root, "proxy.jpg")
+			if err := os.WriteFile(filePath, []byte("proxy content"), 0o644); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+			tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+			tier3ID := seedLocation(t, database, "t3", archive, "TIER3_MASTER_ARCHIVE", true, false)
+			guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH"}})
+
+			master := seedNode(t, database, nodeSpec{locationID: tier3ID, path: filepath.Join(archive, "master.jpg"), mtimeUnix: oldMtime, fullHash: hash64("asserted"), hashSource: tc.source})
+			if tc.rewrite {
+				if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+					return q.UpdateMediaNodeFullHash(context.Background(), sqlcgen.UpdateMediaNodeFullHashParams{ID: master.ID, FullHash: hash64("rewritten")})
+				}); err != nil {
+					t.Fatalf("rewrite full_hash: %v", err)
+				}
+			}
+			node := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+			seedEdge(t, database, master.ID, node.ID, "AUTO_ACCEPTED")
+
+			if got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix); err != nil || len(got) != 0 {
+				t.Fatalf("Plan = %+v, %v; want no candidates", got, err)
+			}
+			results := Execute(context.Background(), database, guard, []Candidate{
+				{NodeID: node.ID, FilePath: node.FilePath, FileName: node.FileName, StorageLocationID: tier1ID},
+			}, cutoffUnix)
+			if len(results) != 1 || results[0].Purged || !errors.Is(results[0].Err, ErrNoLongerEligible) {
+				t.Fatalf("results = %+v, want a single ErrNoLongerEligible refusal", results)
+			}
+			if _, err := os.Stat(filePath); err != nil {
+				t.Errorf("file gone after a refused purge (stat err = %v)", err)
+			}
+		})
 	}
 }
 

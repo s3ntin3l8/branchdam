@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/indexer"
 	"github.com/s3ntin3l8/branchdam/internal/storage"
@@ -551,6 +552,9 @@ func (w *WatcherSupervisor) rebaseIfMoved(ctx context.Context, loc storage.Locat
 					FullHash: &result.FullHash,
 				}); err != nil {
 					return err
+				}
+				if err := db.RecordFullHashSource(ctx, q, n.ID, &result.FullHash, db.HashSourceServer); err != nil {
+					return fmt.Errorf("record full_hash provenance: %w", err)
 				}
 			} else if n.FullHash != nil && *n.FullHash != "" && n.IndexingStatus != "INDEXED_FULL" {
 				if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{

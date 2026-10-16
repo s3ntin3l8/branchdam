@@ -92,6 +92,17 @@ type EventQueue struct {
 	NextAttemptAt int64
 }
 
+type FullHashProvenance struct {
+	NodeID          int64
+	FullHash        string
+	Source          string
+	RecordedAt      int64
+	RehashState     sql.NullString
+	RehashCheckedAt sql.NullInt64
+	RehashAttempts  int64
+	RehashComputed  sql.NullString
+}
+
 type LoginAudit struct {
 	ID                int64
 	UserID            sql.NullInt64
