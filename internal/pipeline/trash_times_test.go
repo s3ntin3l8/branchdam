@@ -69,7 +69,7 @@ func TestTrashPurge_UsesRecordedTrashTimeNotMtime(t *testing.T) {
 	old := time.Now().Add(-365 * 24 * time.Hour)
 	require.NoError(t, os.Chtimes(trashCopy, old, old))
 
-	lookup := TrashTimeLookup(database)
+	lookup := TrashTimeLookup(database, nil)
 	res, err := prune.PurgeTrash(ctx, guard, root, 30, time.Now().UTC(), lookup)
 	require.NoError(t, err)
 	assert.Empty(t, res.Errors)
@@ -103,7 +103,7 @@ func TestTrashPurge_FreshMtimeDoesNotOutliveRecordedTime(t *testing.T) {
 	_, err = database.ExecInTx(ctx, `UPDATE node_trash_times SET trashed_at = ? WHERE node_id = ?`,
 		time.Now().Add(-40*24*time.Hour).Unix(), nodeID)
 	require.NoError(t, err)
-	res, err := prune.PurgeTrash(ctx, guard, root, 30, time.Now().UTC(), TrashTimeLookup(database))
+	res, err := prune.PurgeTrash(ctx, guard, root, 30, time.Now().UTC(), TrashTimeLookup(database, nil))
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.FilesPurged)
 	assert.NoFileExists(t, trashCopy)
@@ -146,7 +146,7 @@ func TestTrashTimeLookup_UnknownFilesFallBack(t *testing.T) {
 	root := t.TempDir()
 	guard := newTrashTestGuard(t, root)
 	nodeID, path := seedTrashTimesNode(t, database, root)
-	lookup := TrashTimeLookup(database)
+	lookup := TrashTimeLookup(database, nil)
 	rel, _ := filepath.Rel(root, path)
 	trashCopy := trashPathFor(root, rel, trashTimesNodeUUID)
 

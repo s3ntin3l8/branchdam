@@ -10,7 +10,10 @@ import (
 const (
 	// HashSourceServer marks a full_hash the server computed from the bytes
 	// itself: a scan, an upload it streamed, or internal/rehash's re-read.
-	// Only these authorise Tier-1 pruning and node-status "verified".
+	// Only these authorise Tier-1 pruning and node-status "verified". It
+	// records who computed the value, not how: an upload's hash is taken
+	// over the received stream as it is written, not over a re-read of the
+	// stored file (see pipeline.IndexingStatusFor).
 	HashSourceServer = "SERVER"
 	// HashSourceAgent marks a full_hash a paired device asserted (an agent
 	// event or POST /api/v1/agent/rebase). It authorises nothing until

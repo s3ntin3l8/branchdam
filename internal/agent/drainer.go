@@ -506,11 +506,6 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		fileExt = filepath.Ext(p.FilePath)
 	}
 
-	indexingStatus := "INDEXED_SHALLOW"
-	if p.FullHash != nil && *p.FullHash != "" {
-		indexingStatus = "INDEXED_FULL"
-	}
-
 	var nullFastHash *string
 	if p.FastHash != nil && *p.FastHash != "" {
 		nullFastHash = p.FastHash
@@ -582,7 +577,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		FastHash:           nullFastHash,
 		FullHash:           nullFullHash,
 		Phash:              nullPhash,
-		IndexingStatus:     indexingStatus,
+		IndexingStatus:     pipeline.IndexingStatusFor(nullFullHash),
 		GraphStatus:        "UNLINKED",
 		LifecycleState:     "ACTIVE",
 		OriginalDocumentID: nullOrigDocID,
@@ -1009,6 +1004,24 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		return 0, fmt.Errorf("%w: missing targetFilePath in path rebased payload", ErrMalformedPayload)
 	}
 
+	// Resolve an alias before validating the target: an aliased UUID's
+	// rebase changes nothing, so it is acknowledged whatever the target is
+	// (handleAgentRebase answers it the same way, ALIASED). Validating
+	// first would refuse it as a read-only or not-yet-present target and
+	// fail an event that could never have done anything.
+	existing, aliased, lookupErr := LookupNodeByUUID(ctx, q, ev.AgentID, p.NodeUUID)
+	if lookupErr == nil && aliased {
+		// The device's EVENT_NODE_CREATED was content-deduplicated onto an
+		// existing node: the server already holds these bytes under that
+		// node, which is not the device's to re-point. Acknowledge.
+		d.log.Info("agent: EVENT_PATH_REBASED for a content-deduplicated uuid, canonical node left untouched",
+			"nodeUuid", p.NodeUUID, "canonicalUuid", existing.NodeUuid)
+		return 0, nil
+	}
+	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		return 0, fmt.Errorf("lookup node for rebase: %w", lookupErr)
+	}
+
 	// storage_location_id always comes from Guard.Resolve(TargetFilePath),
 	// never from the payload -- see NodeCreatedPayload.StorageLocationID.
 	// Resolve failure and a nil guard are both refused, matching
@@ -1032,16 +1045,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		mtime = time.Now().Unix()
 	}
 
-	existing, aliased, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.NodeUUID)
-	if err == nil && aliased {
-		// The device's EVENT_NODE_CREATED was content-deduplicated onto an
-		// existing node: the server already holds these bytes under that
-		// node, which is not the device's to re-point. Acknowledge.
-		d.log.Info("agent: EVENT_PATH_REBASED for a content-deduplicated uuid, canonical node left untouched",
-			"nodeUuid", p.NodeUUID, "canonicalUuid", existing.NodeUuid)
-		return 0, nil
-	}
-	if err == nil {
+	if lookupErr == nil {
 		// Existing node: rebase path in place. Refuse an ARCHIVED node for
 		// the same reason as applyNodeMoved -- RebaseNodePathByUUID would
 		// resurrect a superseded version.
@@ -1093,13 +1097,9 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		}
 		return 0, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("lookup node for rebase: %w", err)
-	}
 
 	// Unknown node_uuid: agent is the source of truth for an offline staged file; create node!
 	fileExt := filepath.Ext(p.TargetFilePath)
-	indexingStatus := "INDEXED_SHALLOW"
 	var nullFullHash *string
 	if p.FullHash != nil && *p.FullHash != "" {
 		// Same content dedup as applyNodeCreated: a live node already
@@ -1113,7 +1113,6 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 			return 0, fmt.Errorf("lookup node by full_hash: %w", dupErr)
 		}
 		nullFullHash = p.FullHash
-		indexingStatus = "INDEXED_FULL"
 	}
 
 	agentUserID := d.resolveAgentUserID(ctx, q, ev.AgentID)
@@ -1128,7 +1127,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		FastHash:           p.FastHash,
 		FullHash:           nullFullHash,
 		Phash:              sql.NullInt64{},
-		IndexingStatus:     indexingStatus,
+		IndexingStatus:     pipeline.IndexingStatusFor(nullFullHash),
 		GraphStatus:        "UNLINKED",
 		LifecycleState:     "ACTIVE",
 		OriginalDocumentID: sql.NullString{},

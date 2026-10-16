@@ -527,7 +527,10 @@ field of the envelope:
 The response `status` is `REBASED` for an existing node, `CREATED` when an unknown `nodeUuid` was
 inserted, or `ALIASED` when `nodeUuid` is this device's alias of an existing node (its
 `EVENT_NODE_CREATED` was content-deduplicated, §3): nothing is changed, `id`/`nodeUuid` name the
-existing node and `storageLocationId`/`filePath` are empty.
+existing node and `storageLocationId`/`filePath` are empty. The alias is resolved before
+`targetPath` is checked, so an aliased rebase is acknowledged whatever its target, never refused
+with `READ_ONLY_TARGET` or `ARCHIVE_FILE_NOT_PRESENT`; `EVENT_PATH_REBASED` for an aliased UUID is
+likewise acknowledged without checking its target.
 
 **Request (`AgentRebaseInput`):**
 ```json
@@ -600,7 +603,9 @@ an `EVENT_NODE_CREATED`/`EVENT_PATH_REBASED` event or a `POST /agent/rebase` is 
 `verified` stays `false` for it until the server's background re-hash worker (`internal/rehash`)
 has re-read the file on the Tier-3 archive and matched it, which happens within minutes of the
 node landing there (a hash that does not match never becomes verified). Bytes sent through
-`POST /agent/upload` are hashed by the server while streaming and are verified at once. Clients
+`POST /agent/upload` are hashed by the server while streaming and are verified at once: the hash
+is the server's own, taken over the bytes as it received and wrote them, though not over a re-read
+of the stored file afterwards. Clients
 that gate local deletion on `verified` therefore wait a little longer after an event-based ingest;
 nodes created before the upgrade by a paired device re-verify the same way. `fullHash` is the node's stored BLAKE3-256 `full_hash`, so a
 client about to delete its local copy can compare it with the hash it computed itself rather than

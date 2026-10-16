@@ -2157,6 +2157,19 @@ func isLiveFullHashConflict(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: media_nodes.full_hash")
 }
 
+// aliasedRebaseOutput is POST /agent/rebase's answer for a UUID this device
+// had content-deduplicated onto an existing node (its EVENT_NODE_CREATED
+// named bytes the server already held): that node is not the device's to
+// re-point, so the rebase is acknowledged with the canonical node's
+// identity and changes nothing.
+func aliasedRebaseOutput(canonical sqlcgen.MediaNode) *AgentRebaseOutput {
+	out := &AgentRebaseOutput{}
+	out.Body.ID = canonical.ID
+	out.Body.NodeUUID = canonical.NodeUuid
+	out.Body.Status = "ALIASED"
+	return out
+}
+
 func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
@@ -2173,6 +2186,22 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	}
 	if in.Body.TargetPath == "" {
 		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "targetPath is required")
+	}
+
+	// Resolve an alias before validating the target: an aliased UUID's
+	// rebase changes nothing, so it is acknowledged (ALIASED) whatever the
+	// target is, instead of being refused as READ_ONLY_TARGET or
+	// ARCHIVE_FILE_NOT_PRESENT first. The drainer's EVENT_PATH_REBASED
+	// handler orders it the same way. This read sits outside the
+	// transaction below because the target checks (guard.Exists stats the
+	// archive) should not hold the single writer connection; alias rows are
+	// never deleted, so a UUID found aliased here is still aliased there,
+	// and an alias recorded in between is caught by the same check inside
+	// the transaction.
+	if canonical, aliased, lookupErr := agent.LookupNodeByUUID(ctx, s.db.Reader, p.Name, in.Body.NodeUUID); lookupErr == nil && aliased {
+		return aliasedRebaseOutput(canonical), nil
+	} else if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "rebase node lookup failed", lookupErr)
 	}
 
 	if s.guard == nil {
@@ -2225,14 +2254,8 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, aliased, err := agent.LookupNodeByUUID(ctx, q, p.Name, in.Body.NodeUUID)
 		if err == nil && aliased {
-			// This device's EVENT_NODE_CREATED for nodeUuid was
-			// content-deduplicated onto an existing node: the server
-			// already holds these bytes under that node, which is not
-			// the device's to re-point. Acknowledge with the canonical
-			// node's identity and change nothing.
-			out.Body.ID = existing.ID
-			out.Body.NodeUUID = existing.NodeUuid
-			out.Body.Status = "ALIASED"
+			// Aliased since the pre-check above (see aliasedRebaseOutput).
+			out = aliasedRebaseOutput(existing)
 			return nil
 		}
 		if err == nil {
@@ -2315,7 +2338,6 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		}
 
 		// Unknown node: agent is the source of truth for an offline staged file; create node!
-		indexingStatus := "INDEXED_SHALLOW"
 		var nullFullHash *string
 		if in.Body.FullHash != nil && *in.Body.FullHash != "" {
 			// A live node already holding these bytes would make the
@@ -2329,7 +2351,6 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 				return dupErr
 			}
 			nullFullHash = in.Body.FullHash
-			indexingStatus = "INDEXED_FULL"
 		}
 		var rebaseUserID int64
 		if pairing, pairErr := q.GetDevicePairingByAgentID(ctx, p.Name); pairErr == nil && pairing.UserID.Valid {
@@ -2346,7 +2367,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 			FastHash:           in.Body.FastHash,
 			FullHash:           nullFullHash,
 			Phash:              sql.NullInt64{},
-			IndexingStatus:     indexingStatus,
+			IndexingStatus:     pipeline.IndexingStatusFor(nullFullHash),
 			GraphStatus:        "UNLINKED",
 			LifecycleState:     "ACTIVE",
 			OriginalDocumentID: sql.NullString{},

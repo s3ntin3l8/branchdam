@@ -306,14 +306,29 @@ func skipDuplicateContent(ctx context.Context, q *sqlcgen.Queries, r Result, sel
 	return true, nil
 }
 
-// IndexingStatusFor is the indexing_status a freshly inserted node gets
-// for the full hash it was indexed with: INDEXED_FULL once the BLAKE3
-// content hash is known, INDEXED_SHALLOW (fast hash and metadata only)
-// otherwise. The scanner and the upload engine both insert through this
-// rule, so an uploaded file -- whose full hash is computed in-stream --
-// is indistinguishable from the same file found by a scan.
-func IndexingStatusFor(fullHash string) string {
-	if fullHash != "" {
+// IndexingStatusFor is the indexing_status a freshly inserted node gets for
+// the full_hash value it is stored with: INDEXED_FULL once a BLAKE3 content
+// hash is stored, INDEXED_SHALLOW (fast hash and metadata only) when
+// fullHash is nil or empty. Every media_nodes insert passes the exact value
+// it writes to full_hash, so the two columns cannot disagree: the scanner,
+// the upload engine, the agent drainer's EVENT_NODE_CREATED and
+// EVENT_PATH_REBASED inserts, and POST /api/v1/agent/rebase all go through
+// this rule, and an uploaded file is indistinguishable from the same file
+// found by a scan.
+//
+// INDEXED_FULL says only that a full hash is known, not who computed it or
+// from what. The scanner hashes the file it reads from disk; the upload
+// engine hashes the received stream while writing it (an io.MultiWriter
+// over the file and the hasher), not a re-read of the file once it is on
+// disk; and an agent insert stores a hash the device merely asserted.
+// full_hash_provenance (migration 00041) is what tells these apart, and
+// only by who computed the value: SERVER for the scanner and the upload
+// engine (the server hashed those bytes itself, so no device can assert a
+// wrong value for them), AGENT for a device's assertion until
+// internal/rehash re-reads the file. Neither column records an on-disk
+// re-read of an upload.
+func IndexingStatusFor(fullHash *string) string {
+	if fullHash != nil && *fullHash != "" {
 		return "INDEXED_FULL"
 	}
 	return "INDEXED_SHALLOW"
@@ -325,11 +340,11 @@ func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r 
 		return sqlcgen.MediaNode{}, fmt.Errorf("mint node_uuid: %w", err)
 	}
 
-	indexingStatus := IndexingStatusFor(r.FullHash)
 	var fullHash *string
 	if r.FullHash != "" {
 		fullHash = &r.FullHash
 	}
+	indexingStatus := IndexingStatusFor(fullHash)
 
 	params := sqlcgen.InsertMediaNodeParams{
 		NodeUuid:           id.String(),

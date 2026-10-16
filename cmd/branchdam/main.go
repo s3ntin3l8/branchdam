@@ -320,7 +320,7 @@ func main() {
 
 	trashWorker := prune.NewTrashWorker(guard, func() int {
 		return settingsStore.Effective().Trash.RetentionDays
-	}, log, prune.WithTrashTimes(pipeline.TrashTimeLookup(database)))
+	}, log, prune.WithTrashTimes(pipeline.TrashTimeLookup(database, log)))
 	trashWorker.Start(ctx, 0)
 
 	thumbWorker, thumbCache := startThumbWorker(ctx, &cfg, database, guard, prober, log, hub)

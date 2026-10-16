@@ -342,23 +342,34 @@ func markUntrashed(ctx context.Context, q *sqlcgen.Queries, nodeID int64) error 
 // must be TRASHED now, have a recorded trash time, and map back to exactly
 // this path via trashPathFor. Anything else -- legacy 8-char names, a
 // restored or rebased node, a file nobody owns -- reports known=false and
-// the worker falls back to the file's mtime.
-func TrashTimeLookup(database *db.DB) func(ctx context.Context, locRoot, path string) (time.Time, bool, error) {
+// the worker falls back to the file's mtime. Each such fallback is logged
+// at DEBUG (path, the node_uuid parsed from the name if any, and why), so a
+// copy purged by mtime instead of by its recorded trash time can be traced.
+// A nil log discards.
+func TrashTimeLookup(database *db.DB, log *slog.Logger) func(ctx context.Context, locRoot, path string) (time.Time, bool, error) {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	return func(ctx context.Context, locRoot, path string) (time.Time, bool, error) {
+		unknown := func(nodeUUID, reason string) (time.Time, bool, error) {
+			log.DebugContext(ctx, "trash purge: no recorded trash time for .trash/ copy, aging it by mtime",
+				"path", path, "nodeUuid", nodeUUID, "reason", reason)
+			return time.Time{}, false, nil
+		}
 		nodeUUID, ok := nodeUUIDFromTrashName(path)
 		if !ok {
-			return time.Time{}, false, nil
+			return unknown("", "no node_uuid in file name")
 		}
 		row, err := database.Reader.GetTrashedNodeTrashTime(ctx, nodeUUID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return time.Time{}, false, nil
+			return unknown(nodeUUID, "no TRASHED node with a recorded trash time")
 		}
 		if err != nil {
 			return time.Time{}, false, fmt.Errorf("look up trash time for %s: %w", nodeUUID, err)
 		}
 		rel, err := filepath.Rel(locRoot, row.FilePath)
 		if err != nil || !filepath.IsLocal(rel) || trashPathFor(locRoot, rel, nodeUUID) != filepath.Clean(path) {
-			return time.Time{}, false, nil
+			return unknown(nodeUUID, "node's trash path is not this file")
 		}
 		return time.Unix(row.TrashedAt.Int64, 0).UTC(), true, nil
 	}
