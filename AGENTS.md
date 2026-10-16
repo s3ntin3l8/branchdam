@@ -45,7 +45,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/graph` | Edge resolvers (Tier 1 sidecars, Tier 2 stems/XMP, Tier 3 heuristics), cycle checks |
 | `internal/auth` | `Principal` + `BrowserChain`/`AgentChain` (sole reader of `X-Authentik-*`) |
 | `internal/sync` | `remote_sync_state` machine, Immich library scan trigger worker |
-| `internal/prune` | TTL cache pruning engine with strict TOCTOU disk checks |
+| `internal/prune` | TTL cache pruning engine with strict TOCTOU disk checks; `.trash/` retention purge aged by the recorded `node_trash_times.trashed_at` |
 | `internal/httpapi` | Huma v2 routes, middleware chain, SSE handler |
 | `internal/agent` | Server side of the agent contract: `event_queue` draining, handshake support, path rebasing |
 | `internal/apierr` | The agent API's single error envelope: problem+json plus a stable machine-readable `code` (table in `docs/agent-api.md`) |

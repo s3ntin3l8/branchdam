@@ -198,7 +198,7 @@ Any other `${VAR}` is whatever your `config.yaml` references (e.g. `IMMICH_API_U
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `retentionDays` | int | `30` | Number of days deleted files are safely preserved under `.trash/` in their storage location before permanent background prune. `0` disables automated unlinking. Only writable locations are purged; a `readOnly` location is never touched. Editable live via web UI settings. |
+| `retentionDays` | int | `30` | Number of days deleted files are safely preserved under `.trash/` in their storage location before permanent background prune. Counted from when the asset was trashed, as recorded in the database (`node_trash_times`); only a `.trash/` file that no trashed asset owns is aged by its mtime. `0` disables automated unlinking. Only writable locations are purged; a `readOnly` location is never touched. Editable live via web UI settings. |
 
 ## `immich`
 

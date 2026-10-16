@@ -521,7 +521,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			MtimeUnix:          time.Now().Unix(),
 			FastHash:           nullFast,
 			FullHash:           nullFull,
-			IndexingStatus:     "INDEXED_SHALLOW",
+			IndexingStatus:     pipeline.IndexingStatusFor(computedBlake3),
 			GraphStatus:        "UNLINKED",
 			LifecycleState:     "ACTIVE",
 			FilenameStem:       sql.NullString{String: stem, Valid: stem != ""},
@@ -578,7 +578,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				// FullHash is left nil for export hardlinks/copies so they do not conflict
 				// with the ux_media_nodes_live_full_hash unique index on the master archive node.
 				FullHash:         nil,
-				IndexingStatus:   "INDEXED_SHALLOW",
+				IndexingStatus:   pipeline.IndexingStatusFor(""),
 				GraphStatus:      "LINKED",
 				LifecycleState:   "ACTIVE",
 				FilenameStem:     sql.NullString{String: stem, Valid: stem != ""},

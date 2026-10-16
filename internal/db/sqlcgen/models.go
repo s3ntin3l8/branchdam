@@ -185,6 +185,11 @@ type NodeMetadatum struct {
 	Value  string
 }
 
+type NodeTrashTime struct {
+	NodeID    int64
+	TrashedAt sql.NullInt64
+}
+
 type NodeUuidAlias struct {
 	AliasUuid string
 	NodeUuid  string

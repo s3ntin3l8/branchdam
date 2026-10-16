@@ -293,16 +293,28 @@ func skipDuplicateContent(ctx context.Context, q *sqlcgen.Queries, r Result, sel
 	return true, nil
 }
 
+// IndexingStatusFor is the indexing_status a freshly inserted node gets
+// for the full hash it was indexed with: INDEXED_FULL once the BLAKE3
+// content hash is known, INDEXED_SHALLOW (fast hash and metadata only)
+// otherwise. The scanner and the upload engine both insert through this
+// rule, so an uploaded file -- whose full hash is computed in-stream --
+// is indistinguishable from the same file found by a scan.
+func IndexingStatusFor(fullHash string) string {
+	if fullHash != "" {
+		return "INDEXED_FULL"
+	}
+	return "INDEXED_SHALLOW"
+}
+
 func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, uploadedByUserID int64, log *slog.Logger) (sqlcgen.MediaNode, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("mint node_uuid: %w", err)
 	}
 
-	indexingStatus := "INDEXED_SHALLOW"
+	indexingStatus := IndexingStatusFor(r.FullHash)
 	var fullHash *string
 	if r.FullHash != "" {
-		indexingStatus = "INDEXED_FULL"
 		fullHash = &r.FullHash
 	}
 

@@ -69,7 +69,7 @@ func TestAgentUploadStreaming(t *testing.T) {
 	// Verify node in database
 	node, err := database.Reader.GetMediaNodeByUUID(context.Background(), resp.NodeUUID)
 	require.NoError(t, err)
-	assert.Equal(t, "INDEXED_SHALLOW", node.IndexingStatus)
+	assert.Equal(t, "INDEXED_FULL", node.IndexingStatus, "full hash computed in-stream: same status the scanner assigns")
 	assert.Equal(t, expectedHash, *node.FullHash)
 
 	// The uploading device becomes the node's recorded creator, so it can

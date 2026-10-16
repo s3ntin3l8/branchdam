@@ -75,7 +75,7 @@ When a user deletes a photo or video:
 - Upon processing the event:
   1. **Instant Gallery Purge**: Any Immich export linked by a reviewed (`AUTO_ACCEPTED` or `CONFIRMED`) edge is moved into `.trash/` immediately, its remote sync state is purged, and an Immich library rescan is triggered so the deleted item vanishes from galleries right away. Restoring the master restores exactly the exports its deletion took.
   2. **Soft-Delete Isolation**: The master file is safely moved into `.trash/<rel_path>` inside the storage location rather than permanently unlinked.
-  3. **30-Day Automated Retention**: A background pruning worker regularly scans `.trash/` across all storage locations and unlinks files older than `trash.retentionDays` (configurable via web UI settings, default: 30 days).
+  3. **30-Day Automated Retention**: A background pruning worker regularly scans `.trash/` across all storage locations and unlinks files trashed more than `trash.retentionDays` ago (measured from the trash time recorded in the database, not the file's mtime) (configurable via web UI settings, default: 30 days).
 
 ---
 

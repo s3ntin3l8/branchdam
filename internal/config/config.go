@@ -8,12 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/naming"
 )
 
@@ -32,21 +33,22 @@ func validateStorageLocations(cfg Config) error {
 	return nil
 }
 
-// validAuthModes lists every accepted auth.mode value. Mirrors
-// internal/auth's AuthMode constants (config can't import auth); empty is
-// accepted and means "forward".
-var validAuthModes = []string{"forward", "local", "both"}
-
 // validateAuthMode rejects an auth.mode the server doesn't recognise. An
 // unknown value used to fall through main's mode switch and boot
 // forward-only, silently: a typo such as "Both" or "lcoal" left local
 // login switched off with nothing in the log saying why.
 func validateAuthMode(cfg Config) error {
-	if cfg.Auth.Mode == "" || slices.Contains(validAuthModes, cfg.Auth.Mode) {
+	// Empty is accepted and means forward, the first of auth.ValidAuthModes.
+	if cfg.Auth.Mode == "" || auth.AuthMode(cfg.Auth.Mode).Valid() {
 		return nil
 	}
-	return fmt.Errorf("auth.mode %q is not valid: must be one of %q, %q or %q (empty means %q)",
-		cfg.Auth.Mode, validAuthModes[0], validAuthModes[1], validAuthModes[2], validAuthModes[0])
+	modes := auth.ValidAuthModes()
+	names := make([]string, len(modes))
+	for i, m := range modes {
+		names[i] = strconv.Quote(string(m))
+	}
+	return fmt.Errorf("auth.mode %q is not valid: must be one of %s (empty means %q)",
+		cfg.Auth.Mode, strings.Join(names, ", "), modes[0])
 }
 
 func validateSecretExpansion(cfg Config) error {

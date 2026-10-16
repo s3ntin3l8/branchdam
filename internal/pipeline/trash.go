@@ -15,8 +15,10 @@
 //   - TRASHED is set by TrashAsset. The bytes have been moved into
 //     <storage_root>/.trash/<rel_path> (with a collision suffix if a prior
 //     trashed copy of the same relative path already lives there) and the
-//     row's lifecycle_state is recorded as TRASHED. A 30-day TTL pruner is
-//     responsible for the final unlink; until then, the file is restorable.
+//     row's lifecycle_state is recorded as TRASHED, with the trash time in
+//     node_trash_times. A 30-day TTL pruner (internal/prune's TrashWorker,
+//     aging copies by that recorded time) is responsible for the final
+//     unlink; until then, the file is restorable.
 //
 // TRASHED vs ARCHIVED:
 //
@@ -41,6 +43,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -180,8 +184,8 @@ func trashAssetTx(
 		}
 	}
 
-	if err := q.MarkNodeTrashed(ctx, loaded.ID); err != nil {
-		return sqlcgen.MediaNode{}, fmt.Errorf("mark node trashed: %w", err)
+	if err := markTrashed(ctx, q, loaded.ID); err != nil {
+		return sqlcgen.MediaNode{}, err
 	}
 
 	if err := q.DeleteRemoteSyncStateForNode(ctx, loaded.ID); err != nil {
@@ -286,8 +290,8 @@ func restoreTrashedAssetTx(
 		}
 	}
 
-	if err := q.UntrashNode(ctx, loaded.ID); err != nil {
-		return sqlcgen.MediaNode{}, fmt.Errorf("untrash node: %w", err)
+	if err := markUntrashed(ctx, q, loaded.ID); err != nil {
+		return sqlcgen.MediaNode{}, err
 	}
 	// If this node was itself cascade-trashed as some master's export, it
 	// is back now: close that cascade so the master's later restore cannot
@@ -305,6 +309,87 @@ func restoreTrashedAssetTx(
 		return sqlcgen.MediaNode{}, fmt.Errorf("reload node %d: %w", loaded.ID, err)
 	}
 	return updated, nil
+}
+
+// markTrashed flips nodeID to TRASHED and records when, in the caller's
+// transaction. node_trash_times.trashed_at -- not the .trash/ copy's mtime
+// -- is what the purge worker ages the copy by (see TrashTimeLookup).
+func markTrashed(ctx context.Context, q *sqlcgen.Queries, nodeID int64) error {
+	if err := q.MarkNodeTrashed(ctx, nodeID); err != nil {
+		return fmt.Errorf("mark node trashed: %w", err)
+	}
+	if err := q.RecordNodeTrashed(ctx, nodeID); err != nil {
+		return fmt.Errorf("record trash time: %w", err)
+	}
+	return nil
+}
+
+// markUntrashed is markTrashed's inverse: ACTIVE again, trash time cleared.
+func markUntrashed(ctx context.Context, q *sqlcgen.Queries, nodeID int64) error {
+	if err := q.UntrashNode(ctx, nodeID); err != nil {
+		return fmt.Errorf("untrash node: %w", err)
+	}
+	if err := q.ClearNodeTrashed(ctx, nodeID); err != nil {
+		return fmt.Errorf("clear trash time: %w", err)
+	}
+	return nil
+}
+
+// TrashTimeLookup returns the purge worker's view of the DB
+// (prune.TrashTimeFunc): when the .trash/ copy at path, inside the
+// storage location rooted at locRoot, was trashed. The owning node is
+// found by the full node_uuid moveToTrash embeds in the copy's name and
+// must be TRASHED now, have a recorded trash time, and map back to exactly
+// this path via trashPathFor. Anything else -- legacy 8-char names, a
+// restored or rebased node, a file nobody owns -- reports known=false and
+// the worker falls back to the file's mtime.
+func TrashTimeLookup(database *db.DB) func(ctx context.Context, locRoot, path string) (time.Time, bool, error) {
+	return func(ctx context.Context, locRoot, path string) (time.Time, bool, error) {
+		nodeUUID, ok := nodeUUIDFromTrashName(path)
+		if !ok {
+			return time.Time{}, false, nil
+		}
+		row, err := database.Reader.GetTrashedNodeTrashTime(ctx, nodeUUID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, false, nil
+		}
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("look up trash time for %s: %w", nodeUUID, err)
+		}
+		rel, err := filepath.Rel(locRoot, row.FilePath)
+		if err != nil || !filepath.IsLocal(rel) || trashPathFor(locRoot, rel, nodeUUID) != filepath.Clean(path) {
+			return time.Time{}, false, nil
+		}
+		return time.Unix(row.TrashedAt.Int64, 0).UTC(), true, nil
+	}
+}
+
+// nodeUUIDFromTrashName extracts the node_uuid trashPathFor embeds in a
+// .trash/ file name: <stem>.<uuid><ext>, or <name>.<uuid> for a file with
+// no extension (whose uuid then reads as the extension).
+func nodeUUIDFromTrashName(path string) (string, bool) {
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	if id := strings.TrimPrefix(ext, "."); isUUID(id) {
+		return id, true
+	}
+	stem := strings.TrimSuffix(base, ext)
+	const n = 36 // canonical UUID length
+	if len(stem) <= n || stem[len(stem)-n-1] != '.' {
+		return "", false
+	}
+	if id := stem[len(stem)-n:]; isUUID(id) {
+		return id, true
+	}
+	return "", false
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // trashPathFor returns the .trash/ location for a node's copy of relPath:
@@ -429,6 +514,10 @@ func moveToTrashLogged(guard *storage.Guard, rootPath, filePath, nodeUUID string
 		return fmt.Errorf("rename %s -> %s: %w", filePath, trashPath, err)
 	}
 	ml.record(filePath, trashPath)
+	// The retention clock is node_trash_times.trashed_at (markTrashed),
+	// not this mtime. Stamping it still keeps the purge's mtime fallback
+	// -- for copies no TRASHED node owns -- counting from the move, so a
+	// failure here is only worth a warning.
 	now := time.Now().UTC()
 	if chErr := guard.Chtimes(trashPath, now, now); chErr != nil {
 		log.Warn("stamp trash mtime", "path", trashPath, "err", chErr)
@@ -589,8 +678,8 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 				return fmt.Errorf("move export to trash: %w", err)
 			}
 		}
-		if err := q.MarkNodeTrashed(ctx, exp.ID); err != nil {
-			return fmt.Errorf("mark export trashed: %w", err)
+		if err := markTrashed(ctx, q, exp.ID); err != nil {
+			return fmt.Errorf("export: %w", err)
 		}
 		if err := q.RecordTrashCascade(ctx, sqlcgen.RecordTrashCascadeParams{ParentNodeID: parentID, ExportNodeID: exp.ID}); err != nil {
 			return fmt.Errorf("record trash cascade: %w", err)
@@ -658,8 +747,8 @@ func restoreLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storag
 				}
 			}
 		}
-		if err := q.UntrashNode(ctx, exp.ID); err != nil {
-			return fmt.Errorf("untrash export: %w", err)
+		if err := markUntrashed(ctx, q, exp.ID); err != nil {
+			return fmt.Errorf("export: %w", err)
 		}
 	}
 	return nil

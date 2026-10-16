@@ -99,7 +99,11 @@ func TestWebUpload_MultipartSuccess(t *testing.T) {
 	node, err := database.Reader.GetMediaNodeByUUID(context.Background(), resp.NodeUUID)
 	require.NoError(t, err)
 	assert.Equal(t, archiveLoc.ID, node.StorageLocationID)
-	assert.Equal(t, "INDEXED_SHALLOW", node.IndexingStatus)
+	// The upload engine computes the BLAKE3 full hash in-stream, so the
+	// node is INDEXED_FULL -- what the scanner assigns to a file it has
+	// fully hashed (pipeline.IndexingStatusFor) -- not INDEXED_SHALLOW.
+	assert.Equal(t, "INDEXED_FULL", node.IndexingStatus)
+	assert.Equal(t, "INDEXED_FULL", resp.Asset.IndexingStatus)
 	assert.NotNil(t, node.FastHash)
 	assert.Equal(t, resp.Blake3Hash, *node.FullHash)
 }
