@@ -167,7 +167,7 @@ WHERE pairing_id = ?1
 -- Also drops any sealed rotation copy (00043): a revoked pairing's keys
 -- must never be delivered.
 UPDATE device_pairing_keys
-SET revoked_at = ?2, rotation_sealed_key = NULL
+SET revoked_at = ?2, rotation_sealed_key = NULL, awaiting_adoption = 0
 WHERE pairing_id = ?1
   AND revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > ?2);
@@ -272,7 +272,7 @@ WHERE id = ?1
 -- skipped, matching RevokeAllKeysForPairing and the table's
 -- revoked_at <= expires_at CHECK.
 UPDATE device_pairing_keys
-SET revoked_at = ?3, rotation_sealed_key = NULL
+SET revoked_at = ?3, rotation_sealed_key = NULL, awaiting_adoption = 0
 WHERE pairing_id = ?1
   AND id < ?2
   AND revoked_at IS NULL

@@ -657,7 +657,7 @@ func (q *Queries) NewestActiveKeyForPairing(ctx context.Context, arg NewestActiv
 
 const retireKeysOlderThan = `-- name: RetireKeysOlderThan :execrows
 UPDATE device_pairing_keys
-SET revoked_at = ?3, rotation_sealed_key = NULL
+SET revoked_at = ?3, rotation_sealed_key = NULL, awaiting_adoption = 0
 WHERE pairing_id = ?1
   AND id < ?2
   AND revoked_at IS NULL
@@ -685,7 +685,7 @@ func (q *Queries) RetireKeysOlderThan(ctx context.Context, arg RetireKeysOlderTh
 
 const revokeAllKeysForPairing = `-- name: RevokeAllKeysForPairing :exec
 UPDATE device_pairing_keys
-SET revoked_at = ?2, rotation_sealed_key = NULL
+SET revoked_at = ?2, rotation_sealed_key = NULL, awaiting_adoption = 0
 WHERE pairing_id = ?1
   AND revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > ?2)

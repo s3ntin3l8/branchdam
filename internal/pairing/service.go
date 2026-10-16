@@ -129,6 +129,11 @@ var ErrPairingNotFound = errors.New("pairing: not found")
 // pairing was created in a future where qr_svg was a required field).
 var ErrNoActiveKey = errors.New("pairing: no active key")
 
+// ErrPairingRevoked is returned by RotateKey for a revoked pairing: a key
+// minted there could never authenticate or be adopted, so its sealed
+// delivery copy (00043) would never be cleared.
+var ErrPairingRevoked = errors.New("pairing: revoked")
+
 // ErrPairingNotRevoked is returned by DeletePairing when the caller
 // attempts to hard-delete a pairing that hasn't been revoked first.
 var ErrPairingNotRevoked = errors.New("pairing: not revoked")
@@ -344,6 +349,11 @@ func (s *Service) CreatePairing(ctx context.Context, friendlyLabel, actor string
 	return pairing, key, nil
 }
 
+// adoptKeyTimeout bounds KeyLookup's adoption write so authentication never
+// waits long on a busy writer; a timed-out adoption is retried by the
+// device's next request.
+const adoptKeyTimeout = 2 * time.Second
+
 // KeyLookup resolves an X-API-Key header value to the agent_id of the
 // device it authenticates AND the per-device HMAC signing key (issue
 // #453 PR C; auth.SigningKeyForAPIKey), or (auth.KeyLookupResult{}, nil) when no active key
@@ -373,7 +383,12 @@ func (s *Service) KeyLookup(ctx context.Context, presented string) (auth.KeyLook
 		// than at the end of the grace window. A failure here never fails
 		// authentication -- the key is valid either way, and the flag is
 		// still set, so the next request retries.
-		if err := s.adoptKey(ctx, row, pairing.AgentID); err != nil {
+		// Bounded: this is the auth path of every agent request, and the
+		// adoption tx waits for the single writer connection.
+		adoptCtx, cancel := context.WithTimeout(ctx, adoptKeyTimeout)
+		err := s.adoptKey(adoptCtx, row, pairing.AgentID)
+		cancel()
+		if err != nil {
 			s.log.Warn("pairing: adopting rotated key failed; will retry on next request",
 				"agentId", pairing.AgentID, "keyId", row.ID, "err", err)
 		}
@@ -431,6 +446,9 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 				return ErrPairingNotFound
 			}
 			return fmt.Errorf("load pairing: %w", err)
+		}
+		if existing.RevokedAt.Valid {
+			return ErrPairingRevoked
 		}
 		agentID = existing.AgentID
 		friendlyLabel = existing.FriendlyLabel

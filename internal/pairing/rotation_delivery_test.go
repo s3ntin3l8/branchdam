@@ -147,6 +147,34 @@ func TestRevokePairingClearsSealedRotationCopy(t *testing.T) {
 	_, err = svc.RevokePairing(ctx, p.ID, "test")
 	require.NoError(t, err)
 	assert.False(t, sealedFor(), "revoke must clear the sealed rotation copy")
+	keys, err := svc.ListKeys(ctx, p.ID)
+	require.NoError(t, err)
+	for _, k := range keys {
+		assert.Zero(t, k.AwaitingAdoption, "revoked key %d still reads as awaiting adoption", k.ID)
+	}
+}
+
+// TestRotateKeyRefusesRevokedPairing: a key minted on a revoked pairing
+// could never authenticate or be adopted, so its sealed copy would stay
+// at rest forever. RotateKey refuses and writes nothing.
+func TestRotateKeyRefusesRevokedPairing(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestServiceWithBox(t, testBox(t))
+	p, _, err := svc.CreatePairing(ctx, "dev", "test", 0, rotPayload)
+	require.NoError(t, err)
+	_, err = svc.RevokePairing(ctx, p.ID, "test")
+	require.NoError(t, err)
+	before, err := svc.ListKeys(ctx, p.ID)
+	require.NoError(t, err)
+
+	_, _, err = svc.RotateKey(ctx, p.ID, "test", 60, rotPayload)
+	require.ErrorIs(t, err, ErrPairingRevoked)
+	after, err := svc.ListKeys(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Len(t, after, len(before), "a refused rotation must not mint a key")
+	for _, k := range after {
+		assert.False(t, k.RotationSealedKey.Valid)
+	}
 }
 
 // TestPendingRotationWithUnopenableSealedCopy: when the stored copy no

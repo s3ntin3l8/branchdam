@@ -1,14 +1,20 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/s3ntin3l8/branchdam/internal/config"
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/pairing"
+	"github.com/s3ntin3l8/branchdam/internal/sse"
 )
 
 // assertRotationSecretsCleared checks no key of the pairing still holds a
@@ -19,6 +25,7 @@ func assertRotationSecretsCleared(t *testing.T, svc *pairing.Service, pairingID 
 	require.NoError(t, err)
 	for _, k := range keys {
 		assert.False(t, k.RotationSealedKey.Valid, "key %d still holds a sealed rotation copy", k.ID)
+		assert.Zero(t, k.AwaitingAdoption, "key %d still reads as awaiting adoption", k.ID)
 	}
 }
 
@@ -74,4 +81,35 @@ func pairingOpen(t *testing.T, currentKey, sealed string) string {
 	require.NoError(t, err)
 	require.Equal(t, plain, openSealedRotationKey(t, currentKey, sealed))
 	return plain
+}
+
+// TestHandshakePendingRotationLookupFailureIs500: a DB failure while
+// resolving the pending rotation is a 500 in the agent error envelope
+// (INTERNAL_ERROR), not a handshake that silently drops the hint.
+func TestHandshakePendingRotationLookupFailureIs500(t *testing.T) {
+	mainDB, err := db.Open(context.Background(), t.TempDir()+"/main.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mainDB.Close() })
+	pairDB, err := db.Open(context.Background(), t.TempDir()+"/pairing.db")
+	require.NoError(t, err)
+	require.NoError(t, pairDB.Close()) // every pairing lookup now fails
+
+	srv := New(Deps{
+		Config:         &config.Config{Agent: config.Agent{}},
+		DB:             mainDB,
+		Hub:            sse.New(),
+		Version:        "test",
+		Pairing:        pairing.NewService(pairDB, nil, nil, nil),
+		agentKeyLookup: NewStubAgentKeyLookup(map[string]string{"stub-key": "pixel"}),
+	})
+	body, err := json.Marshal(map[string]any{"agentId": "pixel"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/handshake", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "stub-key")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body=%s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"INTERNAL_ERROR"`)
 }

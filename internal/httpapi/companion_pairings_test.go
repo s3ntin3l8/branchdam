@@ -169,6 +169,13 @@ func TestCompanionPairings_CreateListGetRevoke(t *testing.T) {
 		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/revoke", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
+	// Rotate-after-revoke is refused: the new key could never authenticate
+	// or be adopted, so its sealed delivery copy would never be cleared.
+	rec = doAdmin(t, srv, http.MethodPost,
+		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID)+"/rotate",
+		map[string]int{"graceMinutes": 60})
+	require.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
+
 	// Get-after-revoke still works but body shows revoked_at set
 	rec = doAdmin(t, srv, http.MethodGet,
 		"/api/v1/companion/pairings/"+pairingIDStr(created.PairingID), nil)
