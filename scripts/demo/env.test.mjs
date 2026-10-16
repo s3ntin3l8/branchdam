@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import { assertDemo, assertPortsFree, demoConfigProblems, demoEnv, demoEnvProblems } from "./env.mjs";
+import { retryOnConflict } from "./instance.mjs";
 
 const demoDir = mkdtempSync(path.join(tmpdir(), "branchdam-demo-test-"));
 after(() => rmSync(demoDir, { recursive: true, force: true }));
@@ -88,5 +89,41 @@ describe("assertPortsFree", () => {
     await new Promise((r) => server.once("listening", r));
     await assert.rejects(assertPortsFree([server.address().port]), /already in use/);
     server.close();
+  });
+});
+
+describe("retryOnConflict", () => {
+  const httpError = (status) => Object.assign(new Error(`-> ${status}`), { status });
+
+  it("retries while the scan is still running (409)", async () => {
+    let calls = 0;
+    const result = await retryOnConflict(
+      async () => {
+        if (++calls < 3) throw httpError(409);
+        return "started";
+      },
+      { delayMs: 1 },
+    );
+    assert.equal(result, "started");
+    assert.equal(calls, 3);
+  });
+
+  it("gives up after the last attempt", async () => {
+    await assert.rejects(
+      retryOnConflict(async () => Promise.reject(httpError(409)), { attempts: 2, delayMs: 1 }),
+      /409/,
+    );
+  });
+
+  it("does not retry other errors", async () => {
+    let calls = 0;
+    await assert.rejects(
+      retryOnConflict(async () => {
+        calls++;
+        throw httpError(500);
+      }),
+      /500/,
+    );
+    assert.equal(calls, 1);
   });
 });

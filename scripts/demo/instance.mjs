@@ -62,7 +62,7 @@ ${locations}
 `;
 }
 
-async function waitFor(check, what, timeoutMs = 120_000) {
+async function waitFor(check, what, timeoutMs = 300_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
@@ -74,6 +74,22 @@ async function waitFor(check, what, timeoutMs = 120_000) {
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(`timed out waiting for ${what}${last ? `: ${last}` : ""}`);
+}
+
+/**
+ * Runs `start` until it stops failing with HTTP 409. POST /api/v1/scan answers
+ * 409 while a scan is still running for that location (ErrScanAlreadyRunning),
+ * which a slow runner can hit even after the jobs list looked idle.
+ */
+export async function retryOnConflict(start, { attempts = 30, delayMs = 2000 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await start();
+    } catch (err) {
+      if (err.status !== 409 || attempt >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
 }
 
 /** Builds web/dist (embedded into the binary) if needed, then the server binary. */
@@ -140,7 +156,11 @@ export async function startDemo({ keep = false, quiet = false } = {}) {
       ...options,
       headers: { "Content-Type": "application/json", ...DEMO_HEADERS, ...options.headers },
     });
-    if (!res.ok) throw new Error(`${options.method ?? "GET"} ${pathname} -> ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const err = new Error(`${options.method ?? "GET"} ${pathname} -> ${res.status} ${await res.text()}`);
+      err.status = res.status;
+      throw err;
+    }
     const text = await res.text();
     return text ? JSON.parse(text) : undefined;
   };
@@ -168,16 +188,17 @@ export async function startDemo({ keep = false, quiet = false } = {}) {
       locations: Array.isArray(b) ? b : (b.locations ?? b.items ?? []),
     }));
     const scannable = locations.filter((l) => !String(l.tier).startsWith("TIER0"));
+    const idle = async () => (await api("/api/v1/jobs")).jobs.every((j) => j.state !== "RUNNING");
     for (let pass = 0; pass < 2; pass++) {
       for (const loc of scannable) {
-        await api("/api/v1/scan", {
-          method: "POST",
-          body: JSON.stringify({ storageLocationId: loc.id, differential: false }),
-        });
-        await waitFor(async () => {
-          const { jobs } = await api("/api/v1/jobs");
-          return jobs.every((j) => j.state !== "RUNNING");
-        }, `the ${loc.name} scan`);
+        await waitFor(idle, `idle jobs before the ${loc.name} scan`);
+        await retryOnConflict(() =>
+          api("/api/v1/scan", {
+            method: "POST",
+            body: JSON.stringify({ storageLocationId: loc.id, differential: false }),
+          }),
+        );
+        await waitFor(idle, `the ${loc.name} scan`);
       }
     }
     // Let the thumbnail worker catch up before anyone looks.
