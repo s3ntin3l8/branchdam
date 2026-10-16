@@ -32,17 +32,22 @@ CREATE TABLE full_hash_provenance (
     rehash_computed   TEXT    CHECK (rehash_computed IS NULL OR length(rehash_computed) = 64)
 );
 
--- Conservative backfill: a node a paired device created (it has a
--- node_creators row) holds a hash the device may only have asserted, so it
--- starts as AGENT and internal/rehash re-verifies it. Every other hash came
--- from the scanner or a server-side upload. Device uploads through
--- /api/v1/agent/upload were in fact hashed by the server too, but they also
--- carry a node_creators row and cannot be told apart here; re-hashing them
--- costs one read and changes nothing else. Agent pruning pauses for those
--- nodes until their re-hash completes.
+-- Conservative backfill: who computed an existing hash is unknown, so any
+-- hash that could authorise a purge starts as AGENT and internal/rehash
+-- re-verifies it. That is every node on a TIER3_MASTER_ARCHIVE location:
+-- node_creators (00035) marks only nodes a device created since #503, and
+-- before that the drainer and POST /api/v1/agent/rebase stored
+-- device-asserted hashes on nodes that carry no node_creators row, which
+-- nothing here can tell apart from scanned ones. A device-created node on
+-- any tier is AGENT too. Everything else (scanned or uploaded, off Tier 3)
+-- is SERVER; such rows never authorise a purge either way. Re-hashing a
+-- hash the server did compute costs one read and changes nothing else, but
+-- cache pruning pauses until the worker has re-read the archive once.
 INSERT INTO full_hash_provenance (node_id, full_hash, source)
 SELECT n.id, n.full_hash,
        CASE WHEN EXISTS (SELECT 1 FROM node_creators c WHERE c.node_uuid = n.node_uuid)
+              OR EXISTS (SELECT 1 FROM storage_locations s
+                         WHERE s.id = n.storage_location_id AND s.tier = 'TIER3_MASTER_ARCHIVE')
             THEN 'AGENT' ELSE 'SERVER' END
 FROM media_nodes n
 WHERE n.full_hash IS NOT NULL AND length(n.full_hash) = 64;

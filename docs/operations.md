@@ -141,9 +141,10 @@ batches of 16 with a short pause between batches, and idles once nothing is left
 read is retried after an hour. A **mismatch** is logged at `WARN` (`rehash: agent-asserted
 full_hash does not match the file`, with the node UUID, path and both hashes) and recorded as
 `rehash_state = 'MISMATCH'` with the computed value in `rehash_computed`; the stored `full_hash` is
-left as it is for you to investigate, and it never authorises pruning. Right after upgrading, every
-master a paired device created starts out asserted, so pruning of their caches pauses until the
-worker has re-read them.
+left as it is for you to investigate, and it never authorises pruning. Right after upgrading,
+every hash on a `TIER3_MASTER_ARCHIVE` location starts out asserted -- the server cannot tell an
+older device's assertion from a hash it scanned -- so cache pruning pauses until the worker has
+re-read the archive once (a single sequential pass; each match is recorded as it goes).
 
 `PROJECT_SIDECAR` and `FINAL_EXPORT` edges never make a node prunable: a project file or sidecar
 is the *child* of the media it references, and an export is finished work, so neither can be
