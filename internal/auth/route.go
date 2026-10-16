@@ -30,16 +30,17 @@ const (
 	AuthModeBoth AuthMode = "both"
 )
 
-// Valid reports whether m is one of the three recognised modes. The
-// empty string is NOT valid here; callers that accept "unset" (meaning
-// forward) check for it first. internal/config.validateAuthMode applies
-// the same set at load time.
+// ValidAuthModes lists the recognised modes, forward (the default) first.
+// internal/config.validateAuthMode applies the same list at load time.
+func ValidAuthModes() []AuthMode {
+	return []AuthMode{AuthModeForward, AuthModeLocal, AuthModeBoth}
+}
+
+// Valid reports whether m is one of the recognised modes. The empty
+// string is NOT valid here; callers that accept "unset" (meaning forward)
+// check for it first.
 func (m AuthMode) Valid() bool {
-	switch m {
-	case AuthModeForward, AuthModeLocal, AuthModeBoth:
-		return true
-	}
-	return false
+	return slices.Contains(ValidAuthModes(), m)
 }
 
 // ChainBuilder is the constructor shape for any auth chain -- takes a

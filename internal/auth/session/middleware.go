@@ -149,6 +149,18 @@ func (m *Middleware) shouldTouch(sessionID, lastSeen int64, now time.Time) bool 
 	return true
 }
 
+// releaseTouch drops the claim shouldTouch took at now for sessionID, so
+// a touch that failed (an aborted request's context, a busy writer) does
+// not suppress the next request's touch for the rest of the window. A
+// newer claim is left alone.
+func (m *Middleware) releaseTouch(sessionID int64, now time.Time) {
+	m.touchMu.Lock()
+	defer m.touchMu.Unlock()
+	if at, ok := m.lastTouch[sessionID]; ok && at.Equal(now) {
+		delete(m.lastTouch, sessionID)
+	}
+}
+
 // CookieName returns the resolved cookie name.
 func (m *Middleware) CookieName() string { return m.cfg.CookieName }
 
@@ -234,6 +246,7 @@ func (m *Middleware) Middleware(next http.Handler) http.Handler {
 			newIdle := now.Add(m.cfg.IdleTimeout)
 			if touchErr := m.users.TouchSession(r.Context(), session.ID, now, newIdle); touchErr != nil {
 				m.log.Warn("session: touch failed", "sessionID", session.ID, "err", touchErr.Error())
+				m.releaseTouch(session.ID, now)
 			}
 		}
 

@@ -165,3 +165,20 @@ func TestShouldTouch_CollapsesConcurrentBurst(t *testing.T) {
 	// A recent persisted last_seen_at suppresses the touch outright.
 	assert.False(t, m.shouldTouch(9, now.Add(-time.Second).Unix(), now))
 }
+
+// TestReleaseTouch_FailedTouchDoesNotSuppressTheNext: a touch whose write
+// failed gives its claim back, so the next request retries instead of
+// waiting out the window; a newer claim is not dropped by an old release.
+func TestReleaseTouch_FailedTouchDoesNotSuppressTheNext(t *testing.T) {
+	m := New(nil, Config{})
+	now := time.Unix(1_800_000_000, 0)
+	stale := now.Add(-2 * sessionTouchInterval).Unix()
+
+	assert.True(t, m.shouldTouch(7, stale, now))
+	assert.False(t, m.shouldTouch(7, stale, now.Add(time.Second)), "claimed")
+	m.releaseTouch(7, now)
+	assert.True(t, m.shouldTouch(7, stale, now.Add(2*time.Second)), "released after a failed touch")
+
+	m.releaseTouch(7, now) // stale release: the claim at now+2s stays
+	assert.False(t, m.shouldTouch(7, stale, now.Add(3*time.Second)))
+}
