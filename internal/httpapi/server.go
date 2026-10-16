@@ -363,6 +363,10 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	humaConfig := huma.DefaultConfig("branchDAM", s.version)
+	// Agent routes answer with one error envelope (internal/apierr). Prepended
+	// so it sees Huma's raw *ErrorModel before the schema-link transformer
+	// rewrites it.
+	humaConfig.Transformers = append([]huma.Transformer{agentErrorCodeTransformer}, humaConfig.Transformers...)
 	if !exposeOpenAPI {
 		humaConfig.OpenAPIPath = ""
 		humaConfig.DocsPath = ""

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/s3ntin3l8/branchdam/internal/agent"
+	"github.com/s3ntin3l8/branchdam/internal/apierr"
 	auditPkg "github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/config"
@@ -1862,19 +1863,19 @@ type AgentEventOutput struct {
 func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*AgentEventOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 	// Cross-check body.agentId against the Principal, same as
 	// handleAgentHandshake -- stops a paired device from attributing
 	// events to another device.
 	if in.Body.AgentID != p.Name {
-		return nil, huma.Error403Forbidden("agent id mismatch", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAgentIDMismatch, "agent id mismatch")
 	}
 
 	eventUUID := in.Body.EventUUID
 	if eventUUID != "" {
 		if _, err := uuid.Parse(eventUUID); err != nil {
-			return nil, huma.Error400BadRequest("invalid eventUuid format", err)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "invalid eventUuid format", err)
 		}
 		// Idempotency check: if this event_uuid was already enqueued for this agent, return 202 Accepted
 		// with the existing event id without inserting a duplicate row.
@@ -1884,18 +1885,18 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 		})
 		if err == nil {
 			if existing.EventType != in.Body.EventType {
-				return nil, huma.Error409Conflict("eventUuid already exists with different eventType", nil)
+				return nil, apierr.New(http.StatusConflict, apierr.CodeEventConflict, "eventUuid already exists with different eventType")
 			}
 			out := &AgentEventOutput{}
 			out.Body.EventID = existing.EventUuid
 			return out, nil
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, huma.Error500InternalServerError("lookup agent event", err)
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "lookup agent event", err)
 		}
 	} else {
 		id, err := uuid.NewV7()
 		if err != nil {
-			return nil, huma.Error500InternalServerError("mint event id", err)
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "mint event id", err)
 		}
 		eventUUID = id.String()
 	}
@@ -1918,14 +1919,14 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 				AgentID:   in.Body.AgentID,
 			}); lookupErr == nil {
 				if existing.EventType != in.Body.EventType {
-					return nil, huma.Error409Conflict("eventUuid already exists with different eventType", nil)
+					return nil, apierr.New(http.StatusConflict, apierr.CodeEventConflict, "eventUuid already exists with different eventType")
 				}
 				out := &AgentEventOutput{}
 				out.Body.EventID = existing.EventUuid
 				return out, nil
 			}
 		}
-		return nil, huma.Error500InternalServerError("enqueue agent event", fmt.Errorf("%w", err))
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "enqueue agent event", fmt.Errorf("%w", err))
 	}
 
 	out := &AgentEventOutput{}
@@ -1976,14 +1977,14 @@ type pendingRotationDTO struct {
 func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInput) (*AgentHandshakeOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 
 	// Cross-check: a paired device's body.agentId must match the agent_id
 	// attached to its Principal (set by AgentChain via pairing.KeyLookup).
 	// A mismatch means a device is spoofing another's identity in the body.
 	if in.Body.AgentID != "" && in.Body.AgentID != p.Name {
-		return nil, huma.Error403Forbidden("agent id mismatch", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAgentIDMismatch, "agent id mismatch")
 	}
 
 	var pendingCount int64
@@ -2005,7 +2006,7 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 		return nil
 	})
 	if err != nil {
-		return nil, huma.Error500InternalServerError("handshake query failed", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "handshake query failed", err)
 	}
 
 	namingTpl := naming.DefaultPathTemplate
@@ -2055,7 +2056,7 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 			// fall through to a successful handshake with no rotation
 			// hint, because that would mask a DB outage on every
 			// subsequent handshake.
-			return nil, huma.Error500InternalServerError("lookup newest key", err)
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "lookup newest key", err)
 		}
 	}
 
@@ -2098,28 +2099,28 @@ type AgentRebaseOutput struct {
 func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*AgentRebaseOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 	if in.Body.NodeUUID == "" {
-		return nil, huma.Error400BadRequest("nodeUuid is required", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "nodeUuid is required")
 	}
 	if !agent.ValidNodeUUID(in.Body.NodeUUID) {
-		return nil, huma.Error400BadRequest("nodeUuid must be a UUID", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "nodeUuid must be a UUID")
 	}
 	if in.Body.FullHash != nil && *in.Body.FullHash != "" && !agent.ValidFullHash(*in.Body.FullHash) {
-		return nil, huma.Error400BadRequest("fullHash must be 64 lowercase hex characters", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "fullHash must be 64 lowercase hex characters")
 	}
 	if in.Body.TargetPath == "" {
-		return nil, huma.Error400BadRequest("targetPath is required", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "targetPath is required")
 	}
 
 	if s.guard == nil {
-		return nil, huma.Error500InternalServerError("storage guard unconfigured", nil)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeStorageNotConfigured, "storage guard unconfigured")
 	}
 
 	loc, err := s.guard.Resolve(in.Body.TargetPath)
 	if err != nil {
-		return nil, huma.Error400BadRequest(fmt.Sprintf("invalid target path %q: %v", in.Body.TargetPath, err), err)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodePathOutsideStorage, fmt.Sprintf("invalid target path %q: %v", in.Body.TargetPath, err), err)
 	}
 	// Issue #167: a read-only target is refused unless it is specifically
 	// TIER3_MASTER_ARCHIVE and the file already exists there (spec §9's
@@ -2131,14 +2132,14 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	// policy on the event-driven rebase paths.
 	if loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE" {
 		if loc.Tier != "TIER3_MASTER_ARCHIVE" {
-			return nil, huma.Error400BadRequest(fmt.Sprintf("rebase to read-only tier %s refused for path %q", loc.Tier, in.Body.TargetPath), nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeReadOnlyTarget, fmt.Sprintf("rebase to read-only tier %s refused for path %q", loc.Tier, in.Body.TargetPath))
 		}
 		exists, err := s.guard.Exists(in.Body.TargetPath)
 		if err != nil {
-			return nil, huma.Error400BadRequest(fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodePathOutsideStorage, fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
 		}
 		if !exists {
-			return nil, huma.Error400BadRequest(fmt.Sprintf("rebase to read-only tier %s refused for path %q: no file exists there yet", loc.Tier, in.Body.TargetPath), nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeArchiveFileNotPresent, fmt.Sprintf("rebase to read-only tier %s refused for path %q: no file exists there yet", loc.Tier, in.Body.TargetPath))
 		}
 	}
 
@@ -2283,17 +2284,17 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		return nil
 	})
 	if err != nil {
-		return nil, huma.Error500InternalServerError("rebase operation failed", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "rebase operation failed", err)
 	}
 	if retiredNode {
 		// ARCHIVED or TRASHED: both read as "no live asset with this UUID".
-		return nil, huma.Error404NotFound("asset not found")
+		return nil, apierr.New(http.StatusNotFound, apierr.CodeNodeNotFound, "asset not found")
 	}
 	if notOwner {
-		return nil, huma.Error403Forbidden("node was not created by this device", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeNotNodeOwner, "node was not created by this device")
 	}
 	if hashConflict {
-		return nil, huma.Error409Conflict("node already has a different fullHash", nil)
+		return nil, apierr.New(http.StatusConflict, apierr.CodeHashConflict, "node already has a different fullHash")
 	}
 
 	return out, nil
@@ -2351,26 +2352,26 @@ type AgentNodeStatusOutput struct {
 // first place.
 func (s *Server) handleAgentNodeStatus(ctx context.Context, in *AgentNodeStatusInput) (*AgentNodeStatusOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 	if len(in.Body.NodeUUIDs) == 0 {
-		return nil, huma.Error400BadRequest("nodeUuids must not be empty", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "nodeUuids must not be empty")
 	}
 	if len(in.Body.NodeUUIDs) > agentNodeStatusMaxUUIDs {
-		return nil, huma.Error400BadRequest(fmt.Sprintf("nodeUuids must not exceed %d per request", agentNodeStatusMaxUUIDs), nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, fmt.Sprintf("nodeUuids must not exceed %d per request", agentNodeStatusMaxUUIDs))
 	}
 	if s.db == nil || s.db.Reader == nil {
-		return nil, huma.Error500InternalServerError("database not available", nil)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "database not available")
 	}
 
 	uuidsJSON, err := json.Marshal(in.Body.NodeUUIDs)
 	if err != nil {
-		return nil, huma.Error400BadRequest("invalid nodeUuids", err)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "invalid nodeUuids", err)
 	}
 
 	rows, err := s.db.Reader.ListMediaNodeStatusesByUUIDs(ctx, string(uuidsJSON))
 	if err != nil {
-		return nil, huma.Error500InternalServerError("node status query failed", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "node status query failed", err)
 	}
 
 	type nodeInfo struct {
@@ -2465,26 +2466,26 @@ func isHexChars(s string, length int) bool {
 
 func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckContentInput) (*AgentCheckContentOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 
 	fullHash := strings.ToLower(strings.TrimSpace(in.FullHash))
 	fastHash := strings.ToLower(strings.TrimSpace(in.FastHash))
 	if fullHash == "" && fastHash == "" {
-		return nil, huma.Error400BadRequest("fullHash or fastHash is required", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "fullHash or fastHash is required")
 	}
 	if fullHash != "" && !isHexChars(fullHash, 64) {
-		return nil, huma.Error400BadRequest("fullHash must be 64 hexadecimal characters", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "fullHash must be 64 hexadecimal characters")
 	}
 	if fastHash != "" && !isHexChars(fastHash, 16) {
-		return nil, huma.Error400BadRequest("fastHash must be 16 hexadecimal characters", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "fastHash must be 16 hexadecimal characters")
 	}
 	if in.SizeBytes < 0 {
-		return nil, huma.Error400BadRequest("sizeBytes must not be negative", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "sizeBytes must not be negative")
 	}
 
 	if s.db == nil {
-		return nil, huma.Error500InternalServerError("database not available", nil)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "database not available")
 	}
 
 	if fullHash == "" {
@@ -2493,7 +2494,7 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 			SizeBytes: in.SizeBytes,
 		})
 		if err != nil {
-			return nil, huma.Error500InternalServerError("fast hash query failed", err)
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "fast hash query failed", err)
 		}
 		return &AgentCheckContentOutput{
 			Body: AgentCheckContentResult{Found: false, PossibleMatch: possible},
@@ -2507,7 +2508,7 @@ func (s *Server) handleAgentCheckContent(ctx context.Context, in *AgentCheckCont
 				Body: AgentCheckContentResult{Found: false},
 			}, nil
 		}
-		return nil, huma.Error500InternalServerError("full hash query failed", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "full hash query failed", err)
 	}
 
 	return &AgentCheckContentOutput{
@@ -2551,13 +2552,13 @@ type AgentSourceStatusOutput struct {
 
 func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceStatusInput) (*AgentSourceStatusOutput, error) {
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 
 	sph := strings.ToLower(strings.TrimSpace(in.SourcePathHash))
 	sp := strings.ToLower(strings.TrimSpace(in.SourcePath))
 	if sph != "" && sp != "" && sph != sp {
-		return nil, huma.Error400BadRequest("conflicting sourcePath and sourcePathHash query parameters", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "conflicting sourcePath and sourcePathHash query parameters")
 	}
 
 	sourceHash := sph
@@ -2565,11 +2566,11 @@ func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceSta
 		sourceHash = sp
 	}
 	if !isHexChars(sourceHash, 64) {
-		return nil, huma.Error400BadRequest("sourcePathHash (or sourcePath) query parameter must be 64 hexadecimal characters (SHA-256)", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "sourcePathHash (or sourcePath) query parameter must be 64 hexadecimal characters (SHA-256)")
 	}
 
 	if s.db == nil {
-		return nil, huma.Error500InternalServerError("database not available", nil)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "database not available")
 	}
 
 	node, err := s.db.Reader.GetMediaNodeBySourcePathHash(ctx, &sourceHash)
@@ -2579,7 +2580,7 @@ func (s *Server) handleAgentSourceStatus(ctx context.Context, in *AgentSourceSta
 				Body: AgentSourceStatusResult{Tracked: false},
 			}, nil
 		}
-		return nil, huma.Error500InternalServerError("source path hash query failed", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "source path hash query failed", err)
 	}
 
 	return &AgentSourceStatusOutput{
@@ -2637,13 +2638,13 @@ type AgentTelemetryOutput struct {
 func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInput) (*AgentTelemetryOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 	// Same cross-check as handleAgentEvent: telemetry is upserted keyed on
 	// agent_id, so without it a paired device could overwrite (or plant)
 	// another device's dashboard row.
 	if in.Body.AgentID != p.Name {
-		return nil, huma.Error403Forbidden("agent id mismatch", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAgentIDMismatch, "agent id mismatch")
 	}
 
 	prunedCountsJSON := "{}"
@@ -2680,7 +2681,7 @@ func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInp
 		return err
 	})
 	if err != nil {
-		return nil, huma.Error500InternalServerError("persist agent telemetry", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "persist agent telemetry", err)
 	}
 
 	if s.hub != nil {

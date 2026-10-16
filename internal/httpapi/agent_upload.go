@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/s3ntin3l8/branchdam/internal/apierr"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 )
 
@@ -55,7 +56,7 @@ func (s *Server) resolveAgentUploadUserID(ctx context.Context, agentID string) i
 func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	p, ok := auth.From(r.Context())
 	if !ok || (p.Kind != auth.KindMachine && !p.Authenticated) {
-		s.writeJSONError(w, http.StatusForbidden, "authentication required")
+		writeUploadProblem(w, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "authentication required"))
 		return
 	}
 
