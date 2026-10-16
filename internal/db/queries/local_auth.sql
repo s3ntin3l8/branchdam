@@ -80,12 +80,38 @@ RETURNING id, username, email, password_hash, is_admin, source, created_at, crea
 -- name: ListUsers :many
 -- Paginated user list for the admin UI. Order by id ASC so paging is
 -- stable across inserts (new users go to the END, not the middle).
+-- Optional filters, carried in the one-row derived table p (sqlc's
+-- SQLite engine types a CAST param reliably; a bare narg inside instr()
+-- or json_each() would come back as interface{}):
+--   name_query: case-insensitive substring of username or email
+--     (instr, so % and _ are literal; lower() folds ASCII only).
+--   ids_json: a JSON array of user ids -- the asset list resolves the
+--     uploader names on whatever page it shows, not just the first page
+--     of users.
 SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.source, u.created_at, u.created_by, u.disabled_at, u.auth_provider, u.external_uid, u.last_seen_at,
        CASE WHEN mc.user_id IS NOT NULL THEN 1 ELSE 0 END AS mfa_enabled
 FROM users u
 LEFT JOIN mfa_credentials mc ON mc.user_id = u.id
+CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
+                   CAST(sqlc.narg('ids_json') AS TEXT) AS ids_json) AS p
+WHERE (p.name_query IS NULL
+       OR instr(lower(u.username), lower(p.name_query)) > 0
+       OR instr(lower(COALESCE(u.email, '')), lower(p.name_query)) > 0)
+  AND (p.ids_json IS NULL OR u.id IN (SELECT value FROM json_each(p.ids_json)))
 ORDER BY u.id ASC
 LIMIT ?1 OFFSET ?2;
+
+-- name: CountUsersFiltered :one
+-- Total for ListUsers under the same optional filters (name_query,
+-- ids_json); see ListUsers for their semantics.
+SELECT COUNT(*)
+FROM users u
+CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
+                   CAST(sqlc.narg('ids_json') AS TEXT) AS ids_json) AS p
+WHERE (p.name_query IS NULL
+       OR instr(lower(u.username), lower(p.name_query)) > 0
+       OR instr(lower(COALESCE(u.email, '')), lower(p.name_query)) > 0)
+  AND (p.ids_json IS NULL OR u.id IN (SELECT value FROM json_each(p.ids_json)));
 
 -- name: CreateSession :one
 -- Inserts a new session row. cookie_id is 32 random bytes hex-encoded

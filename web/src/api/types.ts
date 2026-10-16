@@ -556,7 +556,22 @@ export interface AssetQueryParams {
   // The "My uploads" filter passes the request's own id; 0 / undefined
   // disables the filter.
   uploadedByUserId?: number;
+  // q is a case-insensitive file_name substring, matched server-side
+  // across the whole table (not just the loaded page).
+  q?: string;
+  // sort is one of the server's whitelisted orders; omitted = "newest"
+  // (id DESC, the historical order).
+  sort?: AssetSort;
 }
+
+export type AssetSort =
+  | "newest"
+  | "name_asc"
+  | "name_desc"
+  | "created_asc"
+  | "created_desc"
+  | "captured_asc"
+  | "captured_desc";
 
 export interface JobsQueryParams {
   limit?: number;
@@ -696,6 +711,16 @@ export interface AttributionUser {
   source?: string;
   disabledAt?: number;
   mfaEnabled?: boolean;
+}
+
+// GET /api/v1/users query. q searches username/email server-side; ids
+// restricts the result to specific users (the asset list resolves the
+// uploader names on its current page this way).
+export interface ListUsersParams {
+  limit?: number;
+  offset?: number;
+  q?: string;
+  ids?: number[];
 }
 
 export interface ListUsersResponse {

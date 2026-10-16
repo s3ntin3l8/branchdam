@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import Dialog from "./Dialog";
 import { useAssets } from "../hooks/queries";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import Thumbnail from "./Thumbnail";
 import type { Asset } from "../api/types";
 
@@ -12,9 +13,15 @@ export interface NodePickerModalProps {
   title?: string;
 }
 
+// One page of candidates. The search runs server-side (?q= on
+// /api/v1/assets, a filename substring), so the picker reaches every asset
+// in the library -- not just whatever the first page happened to hold.
+export const NODE_PICKER_PAGE_SIZE = 25;
+
 // NodePickerModal mounts its dialog only while open, so each opening starts
-// with an empty search and the Dialog primitive handles focus (into the
-// search box on open, back to the opener on close), the Tab trap and Escape.
+// with an empty search on the first page and the Dialog primitive handles
+// focus (into the search box on open, back to the opener on close), the Tab
+// trap and Escape.
 export default function NodePickerModal(props: NodePickerModalProps) {
   if (!props.isOpen) return null;
   return <NodePickerDialog {...props} />;
@@ -27,23 +34,28 @@ function NodePickerDialog({
   title = "Select Asset Node",
 }: NodePickerModalProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [page, setPage] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const { data, isLoading, isError, error } = useAssets({ limit: 100 });
-  const assets = useMemo(() => data?.assets ?? [], [data?.assets]);
-
-  const filteredAssets = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return assets;
-    return assets.filter((asset) => {
-      const idMatch = String(asset.id).toLowerCase().includes(q);
-      const uuidMatch = asset.nodeUuid.toLowerCase().includes(q);
-      const fileMatch = asset.fileName.toLowerCase().includes(q);
-      const pathMatch = asset.filePath.toLowerCase().includes(q);
-      const cameraMatch = asset.cameraModel?.toLowerCase().includes(q) ?? false;
-      return idMatch || uuidMatch || fileMatch || pathMatch || cameraMatch;
-    });
-  }, [assets, searchQuery]);
+  const debouncedQuery = useDebouncedValue(searchQuery.trim(), 300);
+  // A new query starts from the first page ("adjust state when a prop
+  // changes" -- no effect round-trip).
+  const [prevQuery, setPrevQuery] = useState(debouncedQuery);
+  if (debouncedQuery !== prevQuery) {
+    setPrevQuery(debouncedQuery);
+    setPage(0);
+  }
+  const { data, isLoading, isError, error, isFetching } = useAssets(
+    {
+      limit: NODE_PICKER_PAGE_SIZE,
+      offset: page * NODE_PICKER_PAGE_SIZE,
+      q: debouncedQuery || undefined,
+    },
+    { keepPreviousData: true }
+  );
+  const assets = data?.assets ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / NODE_PICKER_PAGE_SIZE));
 
   return (
     <Dialog
@@ -73,7 +85,7 @@ function NodePickerDialog({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by filename, camera model, path, or UUID…"
+              placeholder="Search by filename…"
               aria-label="Search assets"
               className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 pr-8 text-sm text-neutral-100 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
@@ -107,21 +119,21 @@ function NodePickerDialog({
             </div>
           )}
 
-          {!isLoading && !isError && assets.length === 0 && (
+          {!isLoading && !isError && assets.length === 0 && !debouncedQuery && (
             <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
               No assets found in library.
             </div>
           )}
 
-          {!isLoading && !isError && assets.length > 0 && filteredAssets.length === 0 && (
+          {!isLoading && !isError && assets.length === 0 && debouncedQuery && (
             <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
-              No assets matching &ldquo;{searchQuery}&rdquo;
+              No assets matching &ldquo;{debouncedQuery}&rdquo;
             </div>
           )}
 
           {!isLoading &&
             !isError &&
-            filteredAssets.map((asset) => {
+            assets.map((asset) => {
               const isSelected =
                 selectedAssetId !== undefined &&
                 (String(asset.id) === String(selectedAssetId) || asset.nodeUuid === String(selectedAssetId));
@@ -190,20 +202,45 @@ function NodePickerDialog({
 
         {/* Footer */}
         <div className="mt-4 flex items-center justify-between border-t border-neutral-800 pt-3 text-xs text-neutral-400">
-          <div>
-            {!isLoading && !isError && (
+          <div aria-live="polite">
+            {!isLoading && !isError && total > 0 && (
               <span>
-                Showing {filteredAssets.length} of {assets.length} assets
+                Showing {page * NODE_PICKER_PAGE_SIZE + 1}–{page * NODE_PICKER_PAGE_SIZE + assets.length} of {total}{" "}
+                {total === 1 ? "asset" : "assets"}
+                {isFetching ? " (updating…)" : ""}
               </span>
             )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700"
-          >
-            Cancel
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Previous page"
+              disabled={page === 0 || isLoading}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <span className="font-mono">
+              {page + 1} / {totalPages}
+            </span>
+            <button
+              type="button"
+              aria-label="Next page"
+              disabled={page + 1 >= totalPages || isLoading}
+              onClick={() => setPage((p) => p + 1)}
+              className="rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40"
+            >
+              Next
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded bg-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-700"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
     </Dialog>
   );

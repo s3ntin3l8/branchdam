@@ -97,14 +97,16 @@ is preferred over a failed response with no audit trail.
 | `POST /api/v1/prune` (execute) | Writes `actor_audit('prune.executed')`. |
 | `POST /api/v1/companion/pairings` | Sets `device_pairings.user_id` from the creating request's resolved user id. |
 | `GET /api/v1/audit?type=activity\|login` | Merged actor_audit + login_audit read. |
-| `GET /api/v1/users` | Admin-only read of the users table. |
+| `GET /api/v1/users` | Admin-only read of the users table. `?q=` is a case-insensitive username/email substring and `?ids=1,2,3` restricts it to specific users; `total` honours both. |
 | `GET /api/v1/assets?uploadedByUserId=N` | "My uploads" filter. |
 
 ## SPA
 
 - `AssetListPage`: "My Uploads" checkbox (disabled when the request
   has no resolved attribution id), "Uploaded by" column with per-row
-  username resolution via `/api/v1/users`.
+  username resolution via `/api/v1/users?ids=` for exactly the
+  uploaders on the page being shown (every page, not only the first
+  page of users).
 - `Me.attributionUserId` plumbed through `useMe()`; the SPA pins it
   on the assets query for the filter.
 

@@ -655,7 +655,9 @@ func (s *Service) PendingRotationFor(ctx context.Context, agentID, presented str
 	if err != nil {
 		return nil, fmt.Errorf("lookup pairing: %w", err)
 	}
-	if pairing.AgentID != agentID || pairing.RevokedAt.Valid {
+	// A revoked pairing never gets here: GetDevicePairingKeyByHash only
+	// matches keys of unrevoked pairings (p.revoked_at IS NULL in SQL).
+	if pairing.AgentID != agentID {
 		return nil, nil
 	}
 	out := &PendingRotation{CurrentKeyID: row.ID}

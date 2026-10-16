@@ -25,6 +25,7 @@ import type {
   LineageResponse,
   ListPairingsResponse,
   ListPatsResponse,
+  ListUsersParams,
   ListUsersResponse,
   LoginInput,
   LoginResponse,
@@ -141,10 +142,12 @@ export const api = {
   // pairing UI's "Owned by" selector, the asset list's "uploaded by"
   // display, and the Users administration page. Returns 503 when the
   // server hasn't wired attribution -- matches the route's 503 contract.
-  listUsers: (params: { limit?: number; offset?: number } = {}) => {
+  listUsers: (params: ListUsersParams = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
+    if (params.q?.trim()) qs.set("q", params.q.trim());
+    if (params.ids && params.ids.length > 0) qs.set("ids", params.ids.join(","));
     const q = qs.toString();
     return request<ListUsersResponse>(`/api/v1/users${q ? `?${q}` : ""}`);
   },
@@ -266,6 +269,8 @@ export const api = {
     if (params.lifecycleState) qs.set("lifecycleState", params.lifecycleState);
     if (params.unlinkedOnly) qs.set("unlinkedOnly", "true");
     if (params.uploadedByUserId) qs.set("uploadedByUserId", String(params.uploadedByUserId));
+    if (params.q?.trim()) qs.set("q", params.q.trim());
+    if (params.sort && params.sort !== "newest") qs.set("sort", params.sort);
     return request<{ assets: Asset[]; total: number }>(`/api/v1/assets?${qs.toString()}`);
   },
   getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),

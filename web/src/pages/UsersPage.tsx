@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   useAdminResetPassword,
@@ -10,6 +10,7 @@ import {
   useUpdateUser,
   useUsers,
 } from "../hooks/queries";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { ApiError } from "../api/client";
 import type { AttributionUser } from "../api/types";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -52,7 +53,19 @@ export default function UsersPage() {
   const navigate = useNavigate();
   const pageSize = 25;
   const { data: me } = useMe();
-  const { data, isLoading, error } = useUsers({ limit: pageSize, offset: page * pageSize });
+  // Search runs server-side (?q= on /api/v1/users, username or email) so
+  // it covers every user, not just the loaded page. A new query starts
+  // again from the first page.
+  const debouncedSearch = useDebouncedValue(search.trim(), 300);
+  const [prevSearch, setPrevSearch] = useState(debouncedSearch);
+  if (debouncedSearch !== prevSearch) {
+    setPrevSearch(debouncedSearch);
+    setPage(0);
+  }
+  const { data, isLoading, error } = useUsers(
+    { limit: pageSize, offset: page * pageSize, q: debouncedSearch || undefined },
+    { keepPreviousData: true }
+  );
 
   const createUserMutation = useCreateUser();
   const resetPasswordMutation = useAdminResetPassword();
@@ -229,16 +242,7 @@ export default function UsersPage() {
   const total = data?.total || 0;
   const totalPages = Math.ceil(total / pageSize);
 
-  const filteredUsers = useMemo(() => {
-    const list = data?.users || [];
-    if (!search.trim()) return list;
-    const q = search.toLowerCase();
-    return list.filter(
-      (u) =>
-        u.username.toLowerCase().includes(q) ||
-        (u.email && u.email.toLowerCase().includes(q)),
-    );
-  }, [data?.users, search]);
+  const filteredUsers = data?.users ?? [];
 
   return (
     <div className="p-6">
@@ -269,7 +273,7 @@ export default function UsersPage() {
           aria-label="Search users"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search users by name, username, or email…"
+          placeholder="Search users by username or email…"
           className="w-full max-w-sm rounded border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm text-neutral-100 placeholder-neutral-500 focus:border-brand focus:outline-none"
         />
       </div>
@@ -293,7 +297,7 @@ export default function UsersPage() {
         </div>
       ) : filteredUsers.length === 0 ? (
         <div className="rounded border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-400">
-          No users found.
+          {debouncedSearch ? <>No users match &ldquo;{debouncedSearch}&rdquo;.</> : "No users found."}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-neutral-800">

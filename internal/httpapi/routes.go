@@ -412,6 +412,25 @@ type ListAssetsInput struct {
 	// "My uploads" filter pins it to the request's own id via the
 	// /api/v1/me + /api/v1/users round-trip. 0 disables the filter.
 	UploadedByUserID int64 `query:"uploadedByUserId" default:"0"`
+	// Q is a case-insensitive substring match on file_name (ASCII case
+	// folding only -- SQLite's lower()). Leading/trailing whitespace is
+	// trimmed; an empty q disables the filter. % and _ are literal.
+	Q string `query:"q" maxLength:"256"`
+	// Sort picks the list order from a fixed whitelist; anything else is
+	// a 422 from Huma's enum validation before the handler runs. The
+	// default ("" / newest) keeps the historical id DESC order. Every
+	// sort tiebreaks on id so paging stays stable.
+	Sort string `query:"sort" enum:"newest,name_asc,name_desc,created_asc,created_desc,captured_asc,captured_desc" default:"newest"`
+}
+
+// nameQueryParam normalises ListAssetsInput.Q / ListUsersInput.Q into
+// the nullable name_query the sqlc queries take: NULL when blank.
+func nameQueryParam(q string) sql.NullString {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: q, Valid: true}
 }
 
 type ListAssetsOutput struct {
@@ -451,16 +470,27 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 
 	hasFilters := lifecycleState.Valid || graphStatus.Valid || cameraModel.Valid || storageLocationID.Valid || uploadedByUserID.Valid
 
+	// q and sort apply on both paths, so a search alone keeps the
+	// unfiltered path's ARCHIVED/TRASHED exclusion rather than switching
+	// to the filtered path's "every lifecycle state" semantics.
+	nameQuery := nameQueryParam(in.Q)
+	sortKey := in.Sort
+	if sortKey == "" {
+		sortKey = "newest"
+	}
+
 	var rows []sqlcgen.MediaNode
 	var total int64
 	var err error
 
 	if !hasFilters {
-		rows, err = s.db.Reader.ListMediaNodes(ctx, sqlcgen.ListMediaNodesParams{Limit: in.Limit, Offset: in.Offset})
+		rows, err = s.db.Reader.ListMediaNodes(ctx, sqlcgen.ListMediaNodesParams{
+			Limit: in.Limit, Offset: in.Offset, NameQuery: nameQuery, Sort: sortKey,
+		})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("list assets", err)
 		}
-		total, err = s.db.Reader.CountMediaNodes(ctx)
+		total, err = s.db.Reader.CountMediaNodesSearch(ctx, nameQuery)
 		if err != nil {
 			total = int64(len(rows))
 		}
@@ -468,6 +498,8 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		params := sqlcgen.ListMediaNodesFilteredParams{
 			Limit:             in.Limit,
 			Offset:            in.Offset,
+			NameQuery:         nameQuery,
+			Sort:              sortKey,
 			LifecycleState:    lifecycleState,
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
@@ -479,6 +511,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			return nil, huma.Error500InternalServerError("list filtered assets", err)
 		}
 		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{
+			NameQuery:         nameQuery,
 			LifecycleState:    lifecycleState,
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
@@ -3742,6 +3775,14 @@ func (s *Server) listLoginAudit(ctx context.Context, in *AuditInput) ([]auditEnt
 type ListUsersInput struct {
 	Limit  int64 `query:"limit" default:"50" minimum:"1" maximum:"200"`
 	Offset int64 `query:"offset" default:"0" minimum:"0"`
+	// Q is a case-insensitive substring match on username or email, so
+	// the Users page searches the whole table, not just the loaded page.
+	Q string `query:"q" maxLength:"256"`
+	// IDs restricts the result to these user ids (comma-separated). The
+	// asset list passes the uploader ids on its current page, so the
+	// "Uploaded by" column resolves names on every page rather than only
+	// for users that happen to fall in the first page of /users.
+	IDs []int64 `query:"ids" maxItems:"200"`
 }
 
 type attributionUserDTO struct {
@@ -3780,14 +3821,28 @@ func (s *Server) handleListUsers(ctx context.Context, in *ListUsersInput) (*List
 	if s.attribution == nil {
 		return nil, huma.Error503ServiceUnavailable("attribution service not configured")
 	}
+	nameQuery := nameQueryParam(in.Q)
+	var idsJSON sql.NullString
+	if len(in.IDs) > 0 {
+		b, err := json.Marshal(in.IDs)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("encode user ids", err)
+		}
+		idsJSON = sql.NullString{String: string(b), Valid: true}
+	}
 	rows, err := s.db.Reader.ListUsers(ctx, sqlcgen.ListUsersParams{
-		Limit:  in.Limit,
-		Offset: in.Offset,
+		Limit:     in.Limit,
+		Offset:    in.Offset,
+		NameQuery: nameQuery,
+		IdsJson:   idsJSON,
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list users", err)
 	}
-	total, err := s.db.Reader.CountAttributionUsers(ctx)
+	total, err := s.db.Reader.CountUsersFiltered(ctx, sqlcgen.CountUsersFilteredParams{
+		NameQuery: nameQuery,
+		IdsJson:   idsJSON,
+	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("count users", err)
 	}
