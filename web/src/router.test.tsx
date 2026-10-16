@@ -21,6 +21,7 @@ describe("routeConfig", () => {
     expect(childPaths).not.toContain("login");
     expect(childPaths).not.toContain("password-reset");
     expect(childPaths).toContain("mfa/setup");
+    expect(childPaths).toContain("account");
 
     const passwordResetRoute = routeConfig.find((route) => route.path === "/password-reset");
     expect(passwordResetRoute?.element).toBeDefined();
@@ -193,6 +194,13 @@ describe("auth shell routing", () => {
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Go to assets" })).toHaveAttribute("href", "/");
     // Still inside the shell.
+    expect(screen.getByRole("link", { name: "Audit Queue" })).toBeInTheDocument();
+  });
+
+  it("renders the lazily loaded /account page inside the shell", async () => {
+    server.signedIn = true;
+    renderAt("/account");
+    expect(await screen.findByRole("heading", { name: "Account security" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Audit Queue" })).toBeInTheDocument();
   });
 

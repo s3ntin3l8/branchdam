@@ -5,6 +5,7 @@
 //
 //	POST /api/v1/mfa/setup      -- session user, sets pending secret
 //	POST /api/v1/mfa/enable     -- session user, promotes pending->active
+//	                               and marks the calling session verified
 //	POST /api/v1/mfa/disable    -- session user, requires password + TOTP
 //	POST /api/v1/mfa/challenge  -- half-auth session, TOTP or recovery code
 //
@@ -21,10 +22,12 @@ package httpapi
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/qr"
 )
 
 func (s *Server) registerMFARoutes(mux *http.ServeMux) {
@@ -65,10 +68,19 @@ func (s *Server) handleMFASetup(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "setup MFA: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// qrSvg renders the same otpauth URI as a scannable QR code, so the
+	// SPA can show it without a client-side QR library. It carries
+	// exactly the secret already in otpauthURI, in the same response;
+	// nothing is persisted or logged. A render failure only drops the
+	// QR -- the URI is still enough to enrol by hand.
+	body := map[string]any{
 		"otpauthURI": result.OtpauthURI,
 		"asciiQR":    result.ASCIIQR,
-	})
+	}
+	if svg, err := qr.RenderSVG(result.OtpauthURI, 0); err == nil {
+		body["qrSvg"] = string(svg)
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleMFAEnable(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +109,17 @@ func (s *Server) handleMFAEnable(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "enable MFA: "+err.Error())
 		return
+	}
+	// The caller just proved possession of the new second factor, so
+	// the session they enrolled from counts as MFA-verified. Without
+	// this, the session that enrolled is half-authed from the next
+	// request on: MFAGate blocks every API call and the SPA swaps the
+	// page for the challenge form while the one-time recovery codes are
+	// still on screen. MFA is already enabled at this point, so a
+	// failure here is only logged and the codes are still returned --
+	// they are the only copy, and the worst case is one extra challenge.
+	if err := s.markSessionMFAVerified(r); err != nil {
+		s.log.Warn("mfa enable: could not mark the enrolling session verified", "userID", localUser.UserID, "err", err.Error())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
@@ -236,28 +259,44 @@ func (s *Server) handleMFAChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Mark session as MFA-verified.
-	cookie, err := r.Cookie(s.localAuth.sessionMw.CookieName())
-	if err != nil || cookie.Value == "" {
-		writeJSONError(w, http.StatusUnauthorized, "no session cookie")
-		return
-	}
-	cookieID, err := s.localAuth.users.VerifyCookieValue(cookie.Value)
-	if err != nil || cookieID == "" {
-		writeJSONError(w, http.StatusUnauthorized, "invalid session cookie")
-		return
-	}
-	session, err := s.localAuth.users.GetSessionByCookieID(r.Context(), cookieID)
-	if err != nil {
-		writeJSONError(w, http.StatusUnauthorized, "session not found")
-		return
-	}
-	if err := s.localAuth.users.SetSessionMFAVerified(r.Context(), session.ID); err != nil {
+	if err := s.markSessionMFAVerified(r); err != nil {
+		var se *sessionLookupError
+		if errors.As(err, &se) {
+			writeJSONError(w, http.StatusUnauthorized, se.msg)
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "mark MFA verified: "+err.Error())
 		return
 	}
 
 	s.localAuth.users.WriteLoginAudit(r.Context(), sql.NullInt64{Int64: localUser.UserID, Valid: true}, "", source, "ok", ip, r.UserAgent(), "{}")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// sessionLookupError is markSessionMFAVerified's "the request carries no
+// usable session" failure (the challenge handler maps it to 401), as
+// opposed to a database error writing the verified stamp (500).
+type sessionLookupError struct{ msg string }
+
+func (e *sessionLookupError) Error() string { return e.msg }
+
+// markSessionMFAVerified stamps mfa_verified_at on the session the
+// request's cookie names. Used by the challenge (second factor answered
+// at login) and by enable (second factor proven while enrolling).
+func (s *Server) markSessionMFAVerified(r *http.Request) error {
+	cookie, err := r.Cookie(s.localAuth.sessionMw.CookieName())
+	if err != nil || cookie.Value == "" {
+		return &sessionLookupError{msg: "no session cookie"}
+	}
+	cookieID, err := s.localAuth.users.VerifyCookieValue(cookie.Value)
+	if err != nil || cookieID == "" {
+		return &sessionLookupError{msg: "invalid session cookie"}
+	}
+	session, err := s.localAuth.users.GetSessionByCookieID(r.Context(), cookieID)
+	if err != nil {
+		return &sessionLookupError{msg: "session not found"}
+	}
+	return s.localAuth.users.SetSessionMFAVerified(r.Context(), session.ID)
 }
 
 func (s *Server) handleMFASetupNoLocal(w http.ResponseWriter, _ *http.Request) {

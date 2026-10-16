@@ -317,9 +317,10 @@ function LoginForm({
           data-testid="reset-sent"
           className="mt-3 rounded border border-emerald-800 bg-emerald-950 p-3 text-xs text-emerald-300"
         >
-          <p className="font-medium">If an account exists, an operator has been notified.</p>
+          <p className="font-medium">If that address matches an account, a reset link is on its way.</p>
           <p className="mt-1 text-emerald-300/80">
-            Check the admin "Pending password resets" panel or the server logs for the token.
+            No email after a few minutes? This server may not send email: ask an administrator to
+            reset your password from the Users page.
           </p>
           <button
             type="button"
@@ -344,7 +345,7 @@ function LoginForm({
           className="mt-3 space-y-2 rounded border border-neutral-800 bg-neutral-950/40 p-3"
         >
           <p className="text-xs text-neutral-400">
-            Enter your email. If an account exists, the operator will be notified with a reset token.
+            Enter your account's email address and we'll send you a link to choose a new password.
           </p>
           <input
             type="email"
@@ -362,7 +363,7 @@ function LoginForm({
               disabled={resetPending || !resetEmail}
               className="flex-1 rounded bg-brand-dark px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
-              {resetPending ? "Notifying…" : "Notify operator"}
+              {resetPending ? "Sending…" : "Send reset link"}
             </button>
             <button
               type="button"

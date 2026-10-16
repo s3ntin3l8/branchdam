@@ -47,8 +47,9 @@ const loadingFallback = <div className="p-6 text-neutral-400">Loading…</div>;
 // shell: a signed-out visitor sees a standalone card, with no sidebar,
 // /me probe or SSE stream. Every other route is a Layout child, and
 // Layout redirects a signed-out visitor to /login in local/both auth mode
-// (see Layout's doc comment). /mfa/setup stays inside the shell -- it is
-// for a signed-in user enrolling a second factor.
+// (see Layout's doc comment). /account and /mfa/setup stay inside the
+// shell -- they are for a signed-in user managing their own second
+// factor and tokens.
 export const routeConfig: RouteObject[] = [
   {
     path: "/login",
@@ -76,6 +77,9 @@ export const routeConfig: RouteObject[] = [
       { path: "companion", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading pairings…</div>}><CompanionPairingsPage /></Suspense> },
       { path: "audit-log", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading audit log…</div>}><AuditLogPage /></Suspense> },
       { path: "users", element: <Suspense fallback={<div className="p-6 text-neutral-400">Loading users…</div>}><UsersPage /></Suspense> },
+      // The data router's own route-level lazy loading: no module-level
+      // React.lazy component, and the route renders once the chunk is in.
+      { path: "account", lazy: () => import("./pages/AccountPage").then((m) => ({ Component: m.default })) },
       { path: "mfa/setup", element: <Suspense fallback={loadingFallback}><MfaSetupPage /></Suspense> },
       { path: "*", element: <NotFoundPage /> },
     ],

@@ -194,6 +194,12 @@ type MeOutput struct {
 		// AND the current session has been MFA-verified. The SPA
 		// uses this to know that the challenge step is complete.
 		MFAVerified bool `json:"mfaVerified,omitempty"`
+		// MFAEnabled is true when the local user has a TOTP second
+		// factor enrolled, whatever the session's state. The account
+		// page uses it to offer "set up" or "disable"; MFAVerified
+		// alone can't say, because a session verified before the user
+		// disabled MFA keeps its verified stamp.
+		MFAEnabled bool `json:"mfaEnabled,omitempty"`
 	}
 }
 
@@ -218,7 +224,8 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 			// form on page load / reload (review suggestion, PR #459).
 			if s.localAuth != nil && s.localAuth.mfa != nil {
 				out.Body.MFAVerified = localView.MFAVerified
-				if !localView.MFAVerified && s.localAuth.mfa.HasMFA(ctx, localView.UserID) {
+				out.Body.MFAEnabled = s.localAuth.mfa.HasMFA(ctx, localView.UserID)
+				if !localView.MFAVerified && out.Body.MFAEnabled {
 					out.Body.MFARequired = true
 				}
 			}

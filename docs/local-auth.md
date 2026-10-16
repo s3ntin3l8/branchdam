@@ -349,13 +349,16 @@ before pushing; both gates must be green. For new env vars, update
 
 ## 10. TOTP multi-factor authentication
 
-Local users can enroll a TOTP authenticator (`internal/httpapi/mfa_handlers.go`). All four
-endpoints are `POST`, need a local session, and return `503` when local auth isn't configured:
+Local users can enroll a TOTP authenticator (`internal/httpapi/mfa_handlers.go`). The endpoints
+are self-service: any local user, admin or not, manages their own second factor, from the SPA's
+**Account security** page (`/account`, in the account menu). `GET /api/v1/me` reports
+`mfaEnabled` for a local user with MFA enrolled. All four endpoints are `POST`, need a local
+session, and return `503` when local auth isn't configured:
 
 | Endpoint | Body | Effect |
 |---|---|---|
-| `/api/v1/mfa/setup` | none | Stores a pending secret and returns `otpauthURI` + `asciiQR`. `409` if MFA is already enabled. |
-| `/api/v1/mfa/enable` | `{"code"}` | Verifies a code from the authenticator, activates MFA and returns `recoveryCodes` once (never shown again). |
+| `/api/v1/mfa/setup` | none | Stores a pending secret and returns `otpauthURI`, `asciiQR` and `qrSvg` (an SVG QR code of the same URI). `409` if MFA is already enabled. |
+| `/api/v1/mfa/enable` | `{"code"}` | Verifies a code from the authenticator, activates MFA, marks the calling session MFA-verified and returns `recoveryCodes` once (never shown again). |
 | `/api/v1/mfa/disable` | `{"password","code"}` | Requires the current password and a valid code; rate-limited per IP (`429` + `Retry-After`). |
 | `/api/v1/mfa/challenge` | `{"code"}` | Completes login for a half-authenticated session with a TOTP **or** recovery code; rate-limited per IP; `401` on a bad code, `400` if already verified. |
 

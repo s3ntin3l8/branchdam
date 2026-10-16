@@ -98,6 +98,52 @@ export function useRevokeUserSessions() {
   });
 }
 
+// useMfaDisable removes the caller's own TOTP factor (password + current
+// code). /me carries mfaEnabled, so it is re-fetched on success.
+export function useMfaDisable() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.mfaDisable,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+}
+
+// usePats lists the caller's personal access tokens, revoked ones
+// included. PATs are admin-only, so callers gate on useMe().isAdmin.
+export function usePats(options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: ["pats"],
+    queryFn: () => api.listPats({ limit: 200 }),
+    enabled: options.enabled ?? true,
+    retry: (failureCount, error) => {
+      if (error instanceof ApiError && [401, 403, 404].includes(error.status)) return false;
+      return failureCount < 2;
+    },
+  });
+}
+
+export function useCreatePat() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.createPat,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pats"] });
+    },
+  });
+}
+
+export function useRevokePat() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.revokePat(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pats"] });
+    },
+  });
+}
+
 export function useAudit(params: import("../api/types").AuditQueryParams = {}) {
   return useQuery({
     queryKey: ["audit", params],

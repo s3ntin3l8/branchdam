@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 import type { ReactNode } from "react";
 import type { Me } from "../api/types";
@@ -16,12 +17,17 @@ const baseMe: Me = {
 };
 
 // UserMenu now hosts a useMutation (api.logout) for local-auth sign-out,
-// so tests need a QueryClient. The wrapper is intentionally lightweight --
-// no QueryClientProvider hooks are exercised here, only the trigger-click
-// surface that opens the popover.
+// so tests need a QueryClient, and a router for its Account security
+// link. The wrapper is intentionally lightweight -- no QueryClientProvider
+// hooks are exercised here, only the trigger-click surface that opens the
+// popover.
 function withQueryClient(node: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={qc}>{node}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{node}</MemoryRouter>
+    </QueryClientProvider>
+  );
 }
 
 describe("UserMenu", () => {
@@ -138,6 +144,17 @@ describe("UserMenu", () => {
     await user.click(trigger);
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     await user.click(trigger);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("links to the account security page for every user", async () => {
+    const user = userEvent.setup();
+    render(withQueryClient(<UserMenu me={{ ...baseMe, isAdmin: false, isLocal: true, localUserId: 7 }} />));
+    await user.click(screen.getByRole("button", { name: /alice liddell/i }));
+
+    const link = screen.getByRole("link", { name: "Account security" });
+    expect(link.getAttribute("href")).toBe("/account");
+    await user.click(link);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
