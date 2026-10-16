@@ -222,6 +222,12 @@ export interface CreateEdgeInput {
 
 export interface InheritMetadataResponse {
   inherited: Record<string, string>;
+  // Set on a ?dryRun=1 response: `inherited` is then the planned tag set
+  // and nothing was written. parentId/parentFileName name the winning
+  // parent the tags would come from (dry runs only).
+  dryRun?: boolean;
+  parentId?: number;
+  parentFileName?: string;
 }
 
 export type SyncStatus =

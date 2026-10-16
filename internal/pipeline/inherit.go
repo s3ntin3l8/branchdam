@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strconv"
@@ -31,6 +32,18 @@ var (
 	ErrIsProjectFile    = errors.New("cannot inherit metadata into a project file")
 	ErrNoParent         = errors.New("asset has no resolved parent edge to inherit from")
 	ErrIneligibleParent = errors.New("cannot inherit from a Tier-3-resolved or non-ancestry (duplicate/sidecar) parent edge")
+	// ErrChildMissing: the child is MISSING, so there is no file at its
+	// recorded path to write the tags into.
+	ErrChildMissing = errors.New("asset is MISSING: its file is not on disk")
+	// ErrChildTrashed: the child is TRASHED, so its file was moved into
+	// .trash/ and is no longer at its recorded path either.
+	ErrChildTrashed = errors.New("asset is TRASHED: restore it before inheriting metadata")
+	// ErrChildFileNotFound: the row is live but its file is not at the
+	// recorded path (deleted out of band before a scan marked it MISSING).
+	ErrChildFileNotFound = errors.New("asset's file is not on disk at its recorded path")
+	// ErrChildFileUnreadable: the file is there but cannot be opened
+	// (permissions, ...), which exiftool's write would fail on too.
+	ErrChildFileUnreadable = errors.New("asset's file cannot be opened at its recorded path")
 )
 
 // ErrParentUnavailable indicates that the parent asset is in an archived or missing state.
@@ -297,39 +310,108 @@ type InheritDeps struct {
 	Log    *slog.Logger
 }
 
-// InheritMetadata copies identity metadata (EXIF/XMP) from child's winning
-// parent edge into the child file on disk, then updates size_bytes, mtime_unix,
-// fast_hash, and node_metadata in SQLite.
-func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[string]string, error) {
+// InheritPlan is what InheritMetadata would write into a child's file:
+// the winning parent and the exact tag set metadata.Plan produced for it.
+// Tags is empty when the child already carries everything the parent could
+// give it (the no-op short-circuit below), in which case nothing is written.
+type InheritPlan struct {
+	Child  sqlcgen.MediaNode
+	Parent sqlcgen.MediaNode
+	Tags   map[string]string
+}
+
+// PlanInheritMetadata runs every eligibility check and the tag planning
+// step of InheritMetadata -- including the storage.Guard write check, so a
+// preview of a read-only location is refused the same way the real write
+// would be -- but writes nothing: no exiftool subprocess, no file change,
+// no SQLite row. It backs ?dryRun=1 on POST /assets/{id}/inherit-metadata,
+// letting the SPA show the operator exactly which tags would be stamped
+// into the file before asking them to confirm the in-place rewrite.
+func PlanInheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (*InheritPlan, error) {
+	child, err := loadInheritChild(ctx, deps, childID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := planInheritFor(ctx, deps, child)
+	if err != nil {
+		return nil, err
+	}
+	// A non-empty plan needs the write to be possible; refuse the preview
+	// the same way the write does, so it never promises a write the
+	// confirm would then refuse.
+	if len(plan.Tags) > 0 {
+		if err := checkTagWritePossible(deps, child); err != nil {
+			return nil, err
+		}
+	}
+	return plan, nil
+}
+
+// checkTagWritePossible reports why the tag write could not run: no
+// exiftool, or no file exiftool could open at the child's recorded path
+// (Guard.CheckWrite resolves by path prefix only, so a row still ACTIVE
+// whose file was removed out of band, before a scan marked it MISSING,
+// gets this far). Opening the file follows symlinks the way exiftool
+// does, so a dangling link counts as missing, and it fails on a file the
+// process may not read.
+func checkTagWritePossible(deps InheritDeps, child sqlcgen.MediaNode) error {
+	if deps.Prober == nil || !deps.Prober.HasExiftool() {
+		return probe.ErrToolUnavailable
+	}
+	f, err := os.Open(child.FilePath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return ErrChildFileNotFound
+	case err != nil:
+		return fmt.Errorf("%w: %w", ErrChildFileUnreadable, err)
+	}
+	_ = f.Close()
+	return nil
+}
+
+// loadInheritChild loads the child node and runs the checks both the plan
+// and the write paths make before touching parent edges: the node exists
+// and isn't ARCHIVED, MISSING or TRASHED, isn't a project file, and its location
+// accepts writes.
+func loadInheritChild(ctx context.Context, deps InheritDeps, childID int64) (sqlcgen.MediaNode, error) {
 	if deps.DB == nil {
-		return nil, errors.New("database is nil")
+		return sqlcgen.MediaNode{}, errors.New("database is nil")
 	}
 	child, err := deps.DB.Reader.GetMediaNodeByID(ctx, childID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNodeNotFound
+		return child, ErrNodeNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get asset: %w", err)
+		return child, fmt.Errorf("get asset: %w", err)
 	}
 	if child.LifecycleState == "ARCHIVED" {
-		return nil, ErrNodeNotFound
+		return child, ErrNodeNotFound
+	}
+	if child.LifecycleState == "MISSING" {
+		return child, ErrChildMissing
+	}
+	if child.LifecycleState == "TRASHED" {
+		return child, ErrChildTrashed
 	}
 
 	// Refuse project archive files
 	if _, ok := projectfile.GetParser(child.FilePath); ok {
-		return nil, ErrIsProjectFile
+		return child, ErrIsProjectFile
 	}
 
 	// Guard check
 	if deps.Guard != nil {
 		if err := deps.Guard.CheckWrite(child.FilePath); err != nil {
-			return nil, err
+			return child, err
 		}
 	}
+	return child, nil
+}
 
-	unlock := globalNodeLocker.lock(child.ID)
-	defer unlock()
-
+// planInheritFor is the parent-selection and tag-planning half of
+// PlanInheritMetadata, split out so InheritMetadata can run it under the
+// per-node lock after its own pre-lock checks.
+func planInheritFor(ctx context.Context, deps InheritDeps, child sqlcgen.MediaNode) (*InheritPlan, error) {
 	parents, err := deps.DB.Reader.ListEdgesByTarget(ctx, child.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list parent edges: %w", err)
@@ -369,11 +451,34 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 	// do not spawn an exiftool write or rewrite the file on disk. Return empty map
 	// so callers accurately observe that no tags were written.
 	if child.DerivedFromID.Valid && child.DerivedFromID.String == parent.NodeUuid && len(tags) <= 2 {
-		return map[string]string{}, nil
+		tags = map[string]string{}
+	}
+	return &InheritPlan{Child: child, Parent: parent, Tags: tags}, nil
+}
+
+// InheritMetadata copies identity metadata (EXIF/XMP) from child's winning
+// parent edge into the child file on disk, then updates size_bytes, mtime_unix,
+// fast_hash, and node_metadata in SQLite.
+func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[string]string, error) {
+	child, err := loadInheritChild(ctx, deps, childID)
+	if err != nil {
+		return nil, err
 	}
 
-	if deps.Prober == nil {
-		return nil, probe.ErrToolUnavailable
+	unlock := globalNodeLocker.lock(child.ID)
+	defer unlock()
+
+	plan, err := planInheritFor(ctx, deps, child)
+	if err != nil {
+		return nil, err
+	}
+	parent, tags := plan.Parent, plan.Tags
+	if len(tags) == 0 {
+		return tags, nil
+	}
+
+	if err := checkTagWritePossible(deps, child); err != nil {
+		return nil, err
 	}
 
 	// Detach write and refresh context from caller/request context so client

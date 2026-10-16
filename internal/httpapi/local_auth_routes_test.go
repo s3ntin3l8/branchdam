@@ -63,7 +63,7 @@ func localAuthTestServer(t *testing.T) *Server {
 	pool := workers.New[string](2, 16)
 	pool.Run(ctx)
 
-	return New(Deps{
+	srv := New(Deps{
 		Config:  &config.Config{Agent: config.Agent{}, Auth: config.Auth{Mode: string(auth.AuthModeLocal)}},
 		DB:      database,
 		Prober:  probe.New(),
@@ -81,6 +81,11 @@ func localAuthTestServer(t *testing.T) *Server {
 		},
 
 		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	// A password-reset request finishes on a background goroutine that
+	// writes the database; wait for it before the database is closed and
+	// the temp dir removed (cleanups run last-registered first).
+	t.Cleanup(srv.waitPasswordResetJobs)
+	return srv
 }
 
 const usersCookieTestBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -294,7 +299,7 @@ func localAuthTestServerWithGroups(t *testing.T, groups []string) *Server {
 	pool := workers.New[string](2, 16)
 	pool.Run(ctx)
 
-	return New(Deps{
+	srv := New(Deps{
 		Config: &config.Config{
 			Agent: config.Agent{},
 			Auth:  config.Auth{Mode: string(auth.AuthModeLocal)},
@@ -316,6 +321,11 @@ func localAuthTestServerWithGroups(t *testing.T, groups []string) *Server {
 		},
 
 		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
+	// A password-reset request finishes on a background goroutine that
+	// writes the database; wait for it before the database is closed and
+	// the temp dir removed (cleanups run last-registered first).
+	t.Cleanup(srv.waitPasswordResetJobs)
+	return srv
 }
 
 func TestLocalAuthAdminRoutes_RejectsNonAdminPrincipal(t *testing.T) {

@@ -133,6 +133,11 @@ func inheritTestServer(t *testing.T, rootPath string) (*Server, *db.DB, sqlcgen.
 		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	parent := seedInheritNode(t, database, locID, filepath.Join(resolved, "parent.jpg"), "uuid-parent")
+	// The child's file exists, as for a live node; tests that need a
+	// specific payload overwrite it.
+	if err := os.WriteFile(filepath.Join(resolved, "child.jpg"), []byte("child"), 0o600); err != nil {
+		t.Fatalf("write child file: %v", err)
+	}
 	child := seedInheritNode(t, database, locID, filepath.Join(resolved, "child.jpg"), "uuid-child")
 	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
@@ -459,6 +464,91 @@ func TestInheritMetadataRefusesProjectFileChild(t *testing.T) {
 	if got := rr.Body.String(); !strings.Contains(got, "project file") {
 		t.Errorf("body = %q, want it to mention the project file refusal", got)
 	}
+}
+
+// TestInheritMetadataDryRunWritesNothing covers ?dryRun=1: the SPA's
+// confirmation preview. It must report the tags the real call would stamp
+// (and which parent they come from) while leaving both the file on disk and
+// the media_nodes row byte-for-byte untouched -- and it must still refuse a
+// read-only location, so the preview never promises a write the confirm
+// click would then be denied.
+func TestInheritMetadataDryRunWritesNothing(t *testing.T) {
+	fakeExiftoolOnPath(t)
+	root := t.TempDir()
+	srv, database, parent, child := inheritTestServer(t, root)
+	resolved, _ := filepath.EvalSymlinks(root)
+	childBytes := []byte("not really a jpeg, but nothing may read or rewrite it")
+	if err := os.WriteFile(filepath.Join(resolved, "child.jpg"), childBytes, 0o600); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+		return q.InsertNodeMetadata(context.Background(), sqlcgen.InsertNodeMetadataParams{
+			NodeID: parent.ID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+		})
+	}); err != nil {
+		t.Fatalf("seed parent metadata: %v", err)
+	}
+	before, err := database.Reader.GetMediaNodeByID(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("get child before: %v", err)
+	}
+
+	rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata?dryRun=1", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Inherited      map[string]string `json:"inherited"`
+		DryRun         bool              `json:"dryRun"`
+		ParentID       int64             `json:"parentId"`
+		ParentFileName string            `json:"parentFileName"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !body.DryRun {
+		t.Errorf("dryRun = false, want true")
+	}
+	if body.Inherited["EXIF:Make"] != "SONY" {
+		t.Errorf("planned EXIF:Make = %q, want SONY (body %s)", body.Inherited["EXIF:Make"], rr.Body.String())
+	}
+	if body.Inherited["XMP-xmpMM:DerivedFrom"] != "uuid-parent" {
+		t.Errorf("planned XMP-xmpMM:DerivedFrom = %q, want uuid-parent", body.Inherited["XMP-xmpMM:DerivedFrom"])
+	}
+	if body.ParentID != parent.ID || body.ParentFileName != "parent.jpg" {
+		t.Errorf("parent = (%d, %q), want (%d, parent.jpg)", body.ParentID, body.ParentFileName, parent.ID)
+	}
+
+	got, err := os.ReadFile(filepath.Join(resolved, "child.jpg"))
+	if err != nil {
+		t.Fatalf("read child after: %v", err)
+	}
+	if !bytes.Equal(got, childBytes) {
+		t.Errorf("child file changed on a dry run")
+	}
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("get child after: %v", err)
+	}
+	if after.DerivedFromID != before.DerivedFromID || after.SizeBytes != before.SizeBytes ||
+		after.MtimeUnix != before.MtimeUnix || *after.FastHash != *before.FastHash || after.ThumbState != before.ThumbState {
+		t.Errorf("child row changed on a dry run: before %+v, after %+v", before, after)
+	}
+	meta, err := database.Reader.ListNodeMetadata(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("list child metadata: %v", err)
+	}
+	if len(meta) != 0 {
+		t.Errorf("child node_metadata gained %d rows on a dry run", len(meta))
+	}
+
+	t.Run("read-only location still 409s", func(t *testing.T) {
+		srv.guard = storage.NewGuard([]storage.Location{{ID: child.StorageLocationID, Name: "inherit-t2", RootPath: resolved, Tier: "TIER2_EXPORTS", ReadOnly: true}})
+		rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata?dryRun=1", nil)
+		if rr.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409, body = %s", rr.Code, rr.Body.String())
+		}
+	})
 }
 
 // TestInheritMetadataRefreshesNodeStateAfterWrite is the happy-path test:
@@ -5967,4 +6057,131 @@ func TestAgentRebase_RejectsMalformedNodeUUIDAndHash(t *testing.T) {
 			t.Errorf("%s: status = %d, want 400, body = %s", name, rr.Code, rr.Body.String())
 		}
 	}
+}
+
+// fakeExiftoolOnPath puts a do-nothing "exiftool" first on PATH so a
+// probe.New() built afterwards reports exiftool as available. Only for
+// paths that never run it (the dry run plans from stored metadata).
+func fakeExiftoolOnPath(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "exiftool"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake exiftool: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestInheritMetadataDryRunRefusesWhatTheWriteWould: the preview must not
+// promise a write the confirm click would be denied -- neither without
+// exiftool nor for a MISSING or TRASHED child whose file is not at its
+// recorded path.
+func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
+	seedParentMake := func(t *testing.T, database *db.DB, parentID int64) {
+		t.Helper()
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.InsertNodeMetadata(context.Background(), sqlcgen.InsertNodeMetadataParams{
+				NodeID: parentID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+			})
+		}); err != nil {
+			t.Fatalf("seed parent metadata: %v", err)
+		}
+	}
+
+	t.Run("no exiftool", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Errorf("%q: status = %d, want 503, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("MISSING child", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.MarkNodeMissing(context.Background(), child.ID)
+		}); err != nil {
+			t.Fatalf("mark child MISSING: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "MISSING") {
+				t.Errorf("%q: status = %d, want 409 naming MISSING, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("ACTIVE child whose file is gone", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := os.Remove(child.FilePath); err != nil {
+			t.Fatalf("remove child file: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not on disk") {
+				t.Errorf("%q: status = %d, want 409 naming the missing file, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("ACTIVE child whose path is a dangling symlink", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := os.Remove(child.FilePath); err != nil {
+			t.Fatalf("remove child file: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(filepath.Dir(child.FilePath), "gone.jpg"), child.FilePath); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not on disk") {
+				t.Errorf("%q: status = %d, want 409 naming the missing file, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("ACTIVE child whose file cannot be opened", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses file modes")
+		}
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := os.Chmod(child.FilePath, 0); err != nil {
+			t.Fatalf("chmod child file: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(child.FilePath, 0o600) })
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "cannot be opened") {
+				t.Errorf("%q: status = %d, want 409 naming the unopenable file, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("TRASHED child", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.MarkNodeTrashed(context.Background(), child.ID)
+		}); err != nil {
+			t.Fatalf("mark child TRASHED: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "TRASHED") {
+				t.Errorf("%q: status = %d, want 409 naming TRASHED, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
 }

@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useNavigate, type NavigateFunction } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import AssetDetailPage from "./AssetDetailPage";
 import { api } from "../api/client";
@@ -62,7 +62,64 @@ function renderWithClient() {
   );
 }
 
+const otherAsset: Asset = { ...asset, id: 43, fileName: "a43.jpg", filePath: "/mnt/scratch/a43.jpg" };
+
+// renderAt42AfterVisiting43 renders the page at /assets/43 first, then
+// navigates to /assets/42: 43 is then in the query cache, so navigating back
+// to it renders straight away with no loading state in between -- the case
+// where the page instance (and its controls' local state) is reused.
+async function renderAt42AfterVisiting43() {
+  vi.mocked(api.getAsset).mockImplementation(async (id: number) => (id === 43 ? otherAsset : asset));
+  vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+  vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+  let navigate: NavigateFunction | undefined;
+  function NavigateProbe() {
+    navigate = useNavigate();
+    return null;
+  }
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <MemoryRouter initialEntries={["/assets/43"]}>
+        <NavigateProbe />
+        <Routes>
+          <Route path="/assets/:id" element={<AssetDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
+  const goTo = async (path: string) => {
+    await act(async () => {
+      await navigate?.(path);
+    });
+  };
+  await goTo("/assets/42");
+  await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+  return goTo;
+}
+
 describe("AssetDetailPage purge control", () => {
+  // A purge planned for 42 must not survive a navigation to 43, where
+  // Confirm Purge would execute 43 under 42's candidate list.
+  it("drops a planned purge when navigating to another asset", async () => {
+    vi.mocked(api.pruneCache).mockReset();
+    vi.mocked(api.pruneCache).mockResolvedValueOnce({
+      executed: false,
+      candidates: [{ nodeId: 42, filePath: asset.filePath, sizeBytes: asset.sizeBytes, purged: false }],
+    });
+    const goTo = await renderAt42AfterVisiting43();
+
+    await userEvent.click(await screen.findByRole("button", { name: /purge cache/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /confirm purge/i })).toBeInTheDocument());
+
+    await goTo("/assets/43");
+    await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: /confirm purge/i })).not.toBeInTheDocument();
+    expect(api.pruneCache).toHaveBeenCalledTimes(1);
+  });
+
   it("checks eligibility then executes on confirm", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
@@ -193,53 +250,142 @@ describe("AssetDetailPage trash control", () => {
   });
 });
 
-describe("AssetDetailPage inherit-metadata control", () => {
-  it("reports how many tags were inherited, excluding the always-emitted identity tags", async () => {
-    vi.mocked(api.getAsset).mockResolvedValue(asset);
+describe("AssetDetailPage MISSING asset", () => {
+  it("offers neither Trash nor Free Up Space for a MISSING asset", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue({ ...asset, lifecycleState: "MISSING" });
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
-    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
-      inherited: {
-        "EXIF:Make": "SONY",
-        "EXIF:LensModel": "FE 24-70mm F2.8 GM",
-        "XMP-dc:Identifier": "uuid-child",
-        "XMP-xmpMM:DerivedFrom": "uuid-parent",
-      },
-    });
 
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
-    const button = await screen.findByRole("button", { name: /inherit metadata/i });
-    await userEvent.click(button);
-
-    await waitFor(() => expect(api.inheritMetadata).toHaveBeenCalledWith(42));
-    await waitFor(() => expect(screen.getByText("Inherited 2 tags.")).toBeInTheDocument());
+    expect(screen.getByText("Missing on disk")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^trash$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /free up space/i })).not.toBeInTheDocument();
+    // Its file is gone, so there is nothing to write inherited tags into.
+    expect(screen.queryByRole("button", { name: /inherit metadata/i })).not.toBeInTheDocument();
   });
+});
 
-  it("reports nothing new when only identity tags come back", async () => {
+describe("AssetDetailPage TRASHED asset", () => {
+  it("does not offer Inherit Metadata for a TRASHED asset", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue({ ...asset, lifecycleState: "TRASHED" });
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    // Its file was moved into .trash/: Restore first, then inherit.
+    expect(screen.getByRole("button", { name: /restore asset/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /inherit metadata/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("AssetDetailPage inherit-metadata control", () => {
+  function mockPage() {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
     vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+  }
+  const plannedTags = {
+    "EXIF:Make": "SONY",
+    "EXIF:LensModel": "FE 24-70mm F2.8 GM",
+    "XMP-dc:Identifier": "uuid-child",
+    "XMP-xmpMM:DerivedFrom": "uuid-parent",
+  };
+
+  // The endpoint rewrites the file in place: the button must only ask the
+  // server for a dry-run plan, show it, and write nothing until Confirm.
+  it("previews the planned tags with a dry run and writes only on confirm", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
+    vi.mocked(api.inheritMetadata)
+      .mockResolvedValueOnce({ inherited: plannedTags, dryRun: true, parentId: 7, parentFileName: "master.arw" })
+      .mockResolvedValueOnce({ inherited: plannedTags });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Inherit Metadata" });
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
+    expect(api.inheritMetadata).toHaveBeenCalledWith(42, { dryRun: true });
+    expect(within(dialog).getByText("master.arw")).toBeInTheDocument();
+    expect(within(dialog).getByText("EXIF:LensModel")).toBeInTheDocument();
+    expect(within(dialog).getByText("FE 24-70mm F2.8 GM")).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Write Tags" }));
+
+    await waitFor(() => expect(api.inheritMetadata).toHaveBeenCalledTimes(2));
+    expect(api.inheritMetadata).toHaveBeenLastCalledWith(42);
+    await waitFor(() => expect(screen.getByText("Inherited 2 tags.")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  // React reuses the page across /assets/:id changes, so the preview must
+  // be scoped to the asset: one opened on 42 must not survive a navigation
+  // to 43, where Write Tags would write 43 under 42's previewed plan.
+  it("drops an open preview when navigating to another asset", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
     vi.mocked(api.inheritMetadata).mockResolvedValueOnce({
-      inherited: { "XMP-dc:Identifier": "uuid-child" },
+      inherited: plannedTags,
+      dryRun: true,
+      parentId: 7,
+      parentFileName: "master.arw",
     });
+    const goTo = await renderAt42AfterVisiting43();
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+    await screen.findByRole("dialog", { name: "Inherit Metadata" });
+
+    await goTo("/assets/43");
+    await waitFor(() => expect(screen.getByText("a43.jpg")).toBeInTheDocument());
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes nothing when the preview is cancelled", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
+    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({ inherited: plannedTags, dryRun: true });
+
+    renderWithClient();
+    await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
+
+    await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
+    const dialog = await screen.findByRole("dialog", { name: "Inherit Metadata" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
+    expect(api.inheritMetadata).toHaveBeenCalledWith(42, { dryRun: true });
+  });
+
+  it("reports nothing new, without a dialog, when the dry run plans no tags", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
+    vi.mocked(api.inheritMetadata).mockResolvedValueOnce({ inherited: {}, dryRun: true });
 
     renderWithClient();
     await waitFor(() => expect(screen.getByText("proxy.jpg")).toBeInTheDocument());
 
     await userEvent.click(await screen.findByRole("button", { name: /inherit metadata/i }));
     await waitFor(() => expect(screen.getByText("Nothing new to inherit.")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.inheritMetadata).toHaveBeenCalledTimes(1);
   });
 
   // The server's 409/422/503 responses carry the actual reason (no resolved
   // parent, read-only location, exiftool unavailable, ...) -- surfaced
   // as-is rather than re-derived client-side, since the eligibility rules
-  // are the server's, not the SPA's, to own.
-  it("surfaces the server's error message on failure", async () => {
-    vi.mocked(api.getAsset).mockResolvedValue(asset);
-    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
-    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [prunableLocation] });
+  // are the server's, not the SPA's, to own. The dry run runs the same
+  // checks, so the refusal arrives before any confirm is offered.
+  it("surfaces the server's error message from the dry run", async () => {
+    vi.mocked(api.inheritMetadata).mockReset();
+    mockPage();
     vi.mocked(api.inheritMetadata).mockRejectedValueOnce(
       new Error("asset has no resolved parent edge to inherit from"),
     );
@@ -251,6 +397,7 @@ describe("AssetDetailPage inherit-metadata control", () => {
     await waitFor(() =>
       expect(screen.getByText(/asset has no resolved parent edge to inherit from/i)).toBeInTheDocument(),
     );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("hides the control for an ARCHIVED asset", async () => {

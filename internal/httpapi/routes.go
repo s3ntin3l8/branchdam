@@ -1077,12 +1077,20 @@ func (s *Server) handleSyncRetry(ctx context.Context, in *SyncRetryInput) (*Sync
 // --- /api/v1/assets/{id}/inherit-metadata ---
 
 type InheritMetadataInput struct {
-	ID int64 `path:"id"`
+	ID     int64 `path:"id"`
+	DryRun bool  `query:"dryRun" doc:"Report the tags that would be written without touching the file or the database"`
 }
 
 type InheritMetadataOutput struct {
 	Body struct {
 		Inherited map[string]string `json:"inherited"`
+		// DryRun echoes the request flag; on a dry run Inherited is the
+		// planned tag set and nothing was written.
+		DryRun bool `json:"dryRun,omitempty"`
+		// ParentID / ParentFileName name the winning parent the tags come
+		// from. Set on dry runs only, for the confirmation preview.
+		ParentID       int64  `json:"parentId,omitempty"`
+		ParentFileName string `json:"parentFileName,omitempty"`
 	}
 }
 
@@ -1120,14 +1128,42 @@ func (s *Server) autoInherit(ctx context.Context, childNodeID int64) {
 // is called BEFORE any exiftool subprocess, and a read-only location (Tier 3
 // is writable by default; readOnly: true is opt-in for archive-only
 // deployments) or a Tier-3-resolved parent edge is refused with 409.
+//
+// With ?dryRun=1 the same eligibility checks run (including the Guard write
+// check) and the planned tags are returned, but nothing is written.
 func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataInput) (*InheritMetadataOutput, error) {
-	tags, err := pipeline.InheritMetadata(ctx, s.inheritDeps(), in.ID)
+	out := &InheritMetadataOutput{}
+	var tags map[string]string
+	var err error
+	if in.DryRun {
+		var plan *pipeline.InheritPlan
+		if plan, err = pipeline.PlanInheritMetadata(ctx, s.inheritDeps(), in.ID); err == nil {
+			tags = plan.Tags
+			out.Body.DryRun = true
+			out.Body.ParentID = plan.Parent.ID
+			out.Body.ParentFileName = plan.Parent.FileName
+		}
+	} else {
+		tags, err = pipeline.InheritMetadata(ctx, s.inheritDeps(), in.ID)
+	}
 	if err != nil {
 		if errors.Is(err, pipeline.ErrNodeNotFound) {
 			return nil, huma.Error404NotFound("asset not found")
 		}
 		if errors.Is(err, pipeline.ErrIsProjectFile) {
 			return nil, huma.Error409Conflict("cannot inherit metadata into a project file")
+		}
+		if errors.Is(err, pipeline.ErrChildMissing) {
+			return nil, huma.Error409Conflict("asset is MISSING: its file is not on disk")
+		}
+		if errors.Is(err, pipeline.ErrChildTrashed) {
+			return nil, huma.Error409Conflict("asset is TRASHED: restore it before inheriting metadata")
+		}
+		if errors.Is(err, pipeline.ErrChildFileNotFound) {
+			return nil, huma.Error409Conflict("asset's file is not on disk at its recorded path")
+		}
+		if errors.Is(err, pipeline.ErrChildFileUnreadable) {
+			return nil, huma.Error409Conflict("asset's file cannot be opened at its recorded path")
 		}
 		var roErr *storage.ErrReadOnlyTier
 		if errors.As(err, &roErr) {
@@ -1153,7 +1189,6 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		return nil, huma.Error500InternalServerError("inherit metadata", err)
 	}
 
-	out := &InheritMetadataOutput{}
 	out.Body.Inherited = tags
 	return out, nil
 }

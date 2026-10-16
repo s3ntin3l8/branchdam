@@ -286,4 +286,73 @@ describe("ManualUploadZone", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(api.uploadFile).toHaveBeenCalledTimes(1);
   });
+
+  it("cancels one in-flight upload and carries on with the next file", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
+    vi.mocked(api.uploadFile).mockReset();
+    const signals: AbortSignal[] = [];
+    vi.mocked(api.uploadFile).mockImplementation(
+      (file, _o, _p, sig) =>
+        new Promise<WebUploadResponse>((resolve, reject) => {
+          if (sig) signals.push(sig);
+          if (file.name === "b.jpg") {
+            resolve({ status: "UPLOADED" } as WebUploadResponse);
+            return;
+          }
+          sig?.addEventListener("abort", () => reject(new DOMException("Upload aborted", "AbortError")));
+        })
+    );
+
+    renderWithClient(<ManualUploadZone />);
+    await screen.findByRole("combobox");
+    const input = document.querySelector('input[type="file"]:not([webkitdirectory])') as HTMLInputElement;
+    await userEvent.upload(input, [
+      new File(["a"], "a.jpg", { type: "image/jpeg" }),
+      new File(["b"], "b.jpg", { type: "image/jpeg" }),
+    ]);
+    await userEvent.click(await screen.findByRole("button", { name: /start upload/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel upload of a.jpg" }));
+
+    expect(signals[0].aborted).toBe(true);
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    // The run moves on to b.jpg rather than stopping.
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(api.uploadFile).toHaveBeenCalledTimes(2);
+    // The cancelled file stays queued for retry and can be removed again.
+    expect(screen.getByRole("button", { name: "Remove a.jpg from upload queue" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /start upload/i })).toBeEnabled());
+  });
+
+  it("Cancel All aborts the in-flight upload and leaves the rest queued", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: mockLocations });
+    vi.mocked(api.uploadFile).mockReset();
+    let signal: AbortSignal | undefined;
+    vi.mocked(api.uploadFile).mockImplementation(
+      (_f, _o, _p, sig) =>
+        new Promise<WebUploadResponse>((_resolve, reject) => {
+          signal = sig;
+          sig?.addEventListener("abort", () => reject(new DOMException("Upload aborted", "AbortError")));
+        })
+    );
+
+    renderWithClient(<ManualUploadZone />);
+    await screen.findByRole("combobox");
+    const input = document.querySelector('input[type="file"]:not([webkitdirectory])') as HTMLInputElement;
+    await userEvent.upload(input, [
+      new File(["a"], "a.jpg", { type: "image/jpeg" }),
+      new File(["b"], "b.jpg", { type: "image/jpeg" }),
+    ]);
+    await userEvent.click(await screen.findByRole("button", { name: /start upload/i }));
+    await waitFor(() => expect(api.uploadFile).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel All" }));
+
+    expect(signal?.aborted).toBe(true);
+    await waitFor(() => expect(screen.getByRole("button", { name: /start upload/i })).toBeEnabled());
+    expect(screen.queryByRole("button", { name: "Cancel All" })).not.toBeInTheDocument();
+    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+    expect(screen.getByText("Queued")).toBeInTheDocument();
+    expect(api.uploadFile).toHaveBeenCalledTimes(1);
+  });
 });
