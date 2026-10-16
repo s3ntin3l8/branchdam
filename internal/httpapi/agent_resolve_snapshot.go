@@ -7,11 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
 
+	"github.com/s3ntin3l8/branchdam/internal/apierr"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
@@ -82,45 +83,45 @@ func validResolveScopeID(id string) bool {
 func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotInput) (*ResolveSnapshotOutput, error) {
 	p, ok := auth.From(ctx)
 	if !ok || p.Kind != auth.KindMachine {
-		return nil, huma.Error403Forbidden("agent machine principal required", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAuthForbidden, "agent machine principal required")
 	}
 	b := in.Body
 	// Cross-check body.agentId against the Principal -- paired devices
 	// cannot submit a Resolve snapshot attributed to another device.
 	if b.AgentID != p.Name {
-		return nil, huma.Error403Forbidden("agent id mismatch", nil)
+		return nil, apierr.New(http.StatusForbidden, apierr.CodeAgentIDMismatch, "agent id mismatch")
 	}
 	if !validResolveScopeID(b.ScopeID) || (b.RetireScopeID != "" && !validResolveScopeID(b.RetireScopeID)) {
-		return nil, huma.Error400BadRequest("scopeId must be a lowercase SHA-256 hex digest", nil)
+		return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "scopeId must be a lowercase SHA-256 hex digest")
 	}
 	if len(b.Memberships) > maxResolveSnapshotMemberships || len(b.Timelines) > maxResolveSnapshotMemberships || len(b.LegacyTimelineNodeUUIDs) > maxResolveSnapshotMemberships {
-		return nil, huma.Error413RequestEntityTooLarge("Resolve snapshot exceeds 10000 entries; no edges changed", nil)
+		return nil, apierr.New(http.StatusRequestEntityTooLarge, apierr.CodePayloadTooLarge, "Resolve snapshot exceeds 10000 entries; no edges changed")
 	}
 	if s.guard == nil {
-		return nil, huma.Error409Conflict("virtual storage guard is not configured", nil)
+		return nil, apierr.New(http.StatusConflict, apierr.CodeStorageNotConfigured, "virtual storage guard is not configured")
 	}
 
 	timelines := make(map[string]ResolveSnapshotTimeline, len(b.Timelines))
 	timelineNodes := make(map[string]bool, len(b.Timelines))
 	for _, tl := range b.Timelines {
 		if tl.TimelineID == "" || tl.DisplayName == "" || tl.FilePath == "" || !json.Valid(tl.EvidenceJSON) {
-			return nil, huma.Error400BadRequest("invalid Resolve timeline", nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "invalid Resolve timeline")
 		}
 		timelineUUID, err := uuid.Parse(tl.NodeUUID)
 		if err != nil {
-			return nil, huma.Error400BadRequest("invalid Resolve timeline nodeUuid", err)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "invalid Resolve timeline nodeUuid", err)
 		}
 		tl.NodeUUID = timelineUUID.String()
 		if _, exists := timelines[tl.TimelineID]; exists {
-			return nil, huma.Error400BadRequest("duplicate Resolve timelineId", nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "duplicate Resolve timelineId")
 		}
 		if timelineNodes[tl.NodeUUID] {
-			return nil, huma.Error400BadRequest("duplicate Resolve timeline nodeUuid", nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "duplicate Resolve timeline nodeUuid")
 		}
 		timelineNodes[tl.NodeUUID] = true
 		loc, err := s.guard.Resolve(tl.FilePath)
 		if err != nil || !loc.IsVirtual {
-			return nil, huma.Error409Conflict("Resolve timeline path must resolve to virtual storage", err)
+			return nil, apierr.New(http.StatusConflict, apierr.CodePathOutsideStorage, "Resolve timeline path must resolve to virtual storage", err)
 		}
 		timelines[tl.TimelineID] = tl
 	}
@@ -130,11 +131,11 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 	seen := make(map[string]bool, len(b.Memberships))
 	for _, m := range b.Memberships {
 		if _, exists := timelines[m.TimelineID]; !exists || m.MediaFilePath == "" {
-			return nil, huma.Error400BadRequest("membership references an unknown timeline or empty path", nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "membership references an unknown timeline or empty path")
 		}
 		key := m.TimelineID + "\x00" + m.MediaFilePath
 		if seen[key] {
-			return nil, huma.Error400BadRequest("duplicate Resolve membership", nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "duplicate Resolve membership")
 		}
 		seen[key] = true
 		if m.SourceNodeUUID == "" {
@@ -146,14 +147,14 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 		}
 		sourceUUID, err := uuid.Parse(m.SourceNodeUUID)
 		if err != nil || !json.Valid(m.EvidenceJSON) {
-			return nil, huma.Error400BadRequest("resolved membership needs UUID and JSON evidence", err)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "resolved membership needs UUID and JSON evidence", err)
 		}
 		m.SourceNodeUUID = sourceUUID.String()
 		if resolvedSources[m.TimelineID] == nil {
 			resolvedSources[m.TimelineID] = make(map[string]bool)
 		}
 		if resolvedSources[m.TimelineID][m.SourceNodeUUID] {
-			return nil, huma.Error400BadRequest("duplicate Resolve source membership for timeline", nil)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "duplicate Resolve source membership for timeline")
 		}
 		resolvedSources[m.TimelineID][m.SourceNodeUUID] = true
 		var ev struct {
@@ -161,7 +162,7 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 			TimelineID    string `json:"timelineId"`
 		}
 		if err := json.Unmarshal(m.EvidenceJSON, &ev); err != nil || ev.MediaFilePath != m.MediaFilePath || ev.TimelineID != m.TimelineID {
-			return nil, huma.Error400BadRequest("Resolve evidence path/timeline does not match membership", err)
+			return nil, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "Resolve evidence path/timeline does not match membership", err)
 		}
 		if desired[m.TimelineID] == nil {
 			desired[m.TimelineID] = make(map[string]ResolveSnapshotMembership)
@@ -277,9 +278,9 @@ func (s *Server) handleResolveSnapshot(ctx context.Context, in *ResolveSnapshotI
 	if err != nil {
 		var conflict resolveSnapshotConflict
 		if errors.As(err, &conflict) {
-			return nil, huma.Error409Conflict(conflict.message, nil)
+			return nil, apierr.New(http.StatusConflict, apierr.CodeSnapshotConflict, conflict.message)
 		}
-		return nil, huma.Error500InternalServerError("Resolve snapshot rolled back", err)
+		return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "Resolve snapshot rolled back", err)
 	}
 	return out, nil
 }

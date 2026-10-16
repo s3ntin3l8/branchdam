@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/apierr"
 )
 
 // KeyLookupResult is what AgentConfig.LookupKey returns for an
@@ -123,6 +125,9 @@ type AgentConfig struct {
 }
 
 // AgentChainWithConfig builds the agent auth middleware using the supplied AgentConfig.
+// Every rejection is an apierr problem+json body with a stable code
+// (AUTH_NOT_CONFIGURED, AUTH_INVALID_KEY, AUTH_INVALID_SIGNATURE, ...); the
+// HTTP statuses are unchanged from the earlier text/plain responses.
 // When SignedRequests is true, it verifies X-Timestamp, X-Nonce, and X-Signature
 // (HMAC-SHA256 over method\nrequestURI\nnonce\ntimestamp\nbody, where requestURI
 // is path plus raw query, keyed by the per-device signing key -- the raw
@@ -170,13 +175,13 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 			stripAuthentikHeaders(r)
 
 			if cfg.LookupKey == nil {
-				http.Error(w, "agent authentication is not configured", http.StatusServiceUnavailable)
+				apierr.Write(w, apierr.New(http.StatusServiceUnavailable, apierr.CodeAuthNotConfigured, "agent authentication is not configured"))
 				return
 			}
 
 			provided := r.Header.Get(apiKeyHeader)
 			if provided == "" {
-				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+				apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidKey, "invalid or missing "+apiKeyHeader))
 				return
 			}
 			// Companion Pairing is the only authentication path.
@@ -187,11 +192,11 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 			result, lookupErr := cfg.LookupKey(r.Context(), provided)
 			if lookupErr != nil {
 				log.Error("auth: agent key lookup failed", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", lookupErr.Error())
-				http.Error(w, "internal error", http.StatusInternalServerError)
+				apierr.Write(w, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "internal error"))
 				return
 			}
 			if result.AgentID == "" {
-				http.Error(w, "invalid or missing "+apiKeyHeader, http.StatusUnauthorized)
+				apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidKey, "invalid or missing "+apiKeyHeader))
 				return
 			}
 			principal := Principal{Kind: KindMachine, Name: result.AgentID}
@@ -209,14 +214,14 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 
 				if tsStr == "" || nonce == "" || sig == "" {
 					log.Warn("auth: agent signature rejected", "reason", "missing_header", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
-					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidSignature, "invalid or missing signature"))
 					return
 				}
 
 				tsNano, err := strconv.ParseInt(tsStr, 10, 64)
 				if err != nil {
 					log.Warn("auth: agent signature rejected", "reason", "bad_timestamp_format", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
-					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidSignature, "invalid or missing signature"))
 					return
 				}
 
@@ -225,7 +230,7 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				skew := now.Sub(reqTime)
 				if skew > window || skew < -window {
 					log.Warn("auth: agent signature rejected", "reason", "clock_skew", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "skew", skew.String(), "window", window.String())
-					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidSignature, "invalid or missing signature"))
 					return
 				}
 
@@ -243,11 +248,11 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 						var maxBytesErr *http.MaxBytesError
 						if errors.As(readErr, &maxBytesErr) {
 							log.Warn("auth: agent signature rejected", "reason", "body_too_large", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "limitBytes", maxBody)
-							http.Error(w, "request body exceeds signed body limit", http.StatusRequestEntityTooLarge)
+							apierr.Write(w, apierr.New(http.StatusRequestEntityTooLarge, apierr.CodePayloadTooLarge, "request body exceeds signed body limit"))
 							return
 						}
 						log.Warn("auth: agent signature rejected", "reason", "body_read_error", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path), "err", readErr.Error())
-						http.Error(w, "failed to read request body", http.StatusBadRequest)
+						apierr.Write(w, apierr.New(http.StatusBadRequest, apierr.CodeValidationFailed, "failed to read request body"))
 						return
 					}
 					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -269,7 +274,7 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 				// the cross-device authority issue.
 				if signingKey == nil {
 					log.Error("auth: agent signature rejected (paired-path lookup returned nil signing key)", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
-					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidSignature, "invalid or missing signature"))
 					return
 				}
 				mac := hmac.New(sha256.New, signingKey)
@@ -279,14 +284,14 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 
 				if !constantTimeEqual(sig, expectedSig) {
 					log.Warn("auth: agent signature rejected", "reason", "signature_mismatch", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
-					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidSignature, "invalid or missing signature"))
 					return
 				}
 
 				expiresAt := reqTime.Add(window)
 				if !cache.CheckAndRecord(nonce, expiresAt, now) {
 					log.Warn("auth: agent signature rejected", "reason", "replayed_nonce", "remoteAddr", r.RemoteAddr, "method", r.Method, "path", sanitizeForLog(r.URL.Path))
-					http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+					apierr.Write(w, apierr.New(http.StatusUnauthorized, apierr.CodeAuthInvalidSignature, "invalid or missing signature"))
 					return
 				}
 			}

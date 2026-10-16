@@ -45,8 +45,57 @@ tampering, not the key's secrecy (use TLS for that).
 
 Paths in `agent.skipSignaturePaths` (default: `/api/v1/agent/upload`, whose body is the binary
 stream) skip the signature check; the API key check always runs. A missing, stale, replayed or
-mismatched signature returns `401 invalid or missing signature`; a signed body over
-`agent.signedMaxBodyBytes` returns `413`.
+mismatched signature returns `401 invalid or missing signature` (`AUTH_INVALID_SIGNATURE`); a signed
+body over `agent.signedMaxBodyBytes` returns `413` (`PAYLOAD_TOO_LARGE`).
+
+---
+
+## Errors
+
+Every error from an `/api/v1/agent/*` route -- the handlers, the agent auth middleware in front of
+them, and the raw `POST /api/v1/agent/upload` stream -- is one envelope: an RFC 9457
+`application/problem+json` body (Huma's error model) plus a stable, machine-readable `code`:
+
+```json
+{
+  "title": "Conflict",
+  "status": 409,
+  "detail": "node already has a different fullHash",
+  "code": "HASH_CONFLICT"
+}
+```
+
+Classify a failure by `code` (and HTTP status) only. `detail` is human-readable text whose wording
+may change; `errors[]` may carry extra per-field detail. Upload error bodies additionally keep the
+legacy `"error"` field (same text as `detail`) for clients written before the envelope. HTTP status
+codes are unchanged from before the envelope existed. Codes are append-only: a published code never
+changes meaning. A client that receives a code it doesn't know should fall back to the HTTP status.
+The constants live in `internal/apierr`.
+
+| Code | Status | Raised when | Retry? |
+|---|---|---|---|
+| `AUTH_NOT_CONFIGURED` | 503 | The server has no device-key lookup (Companion Pairing) wired; no agent request can authenticate. | Yes, later (server-side fix) |
+| `AUTH_INVALID_KEY` | 401 | `X-API-Key` missing, unknown or revoked. | No -- re-pair the device |
+| `AUTH_INVALID_SIGNATURE` | 401 | Signed requests are on and `X-Timestamp`/`X-Nonce`/`X-Signature` is missing, malformed, outside the replay window, replayed or wrong. | Yes, with a fresh nonce/timestamp (check the clock) |
+| `AUTH_FORBIDDEN` | 403 | Authenticated, but not as a paired agent device. | No |
+| `AGENT_ID_MISMATCH` | 403 | Body `agentId` is not the authenticated device's agent id. | No |
+| `NOT_NODE_OWNER` | 403 | The node exists but was not created by the calling device. | No |
+| `VALIDATION_FAILED` | 400, 422 | Malformed body, schema violation or an invalid field (UUID, hash, missing value, bad filename, ...). | No |
+| `PATH_OUTSIDE_STORAGE` | 400, 409 | A path does not resolve to a configured storage location or escapes one (409 on resolve-snapshot: timeline path not in virtual storage). | No |
+| `READ_ONLY_TARGET` | 400, 403 | The target location is read-only (400 on rebase, 403 on upload). | No |
+| `ARCHIVE_FILE_NOT_PRESENT` | 400 | A Tier-3 rebase target has no file yet. | Yes, once the archive copy has finished |
+| `CHECKSUM_MISMATCH` | 400 | Uploaded bytes don't match `X-Blake3-Hash`. | Yes, re-send the bytes |
+| `NODE_NOT_FOUND` | 404 | No live node with that UUID (an `ARCHIVED` superseded version or a `TRASHED` node included). | No |
+| `HASH_CONFLICT` | 409 | The node already has a different `fullHash`. | No |
+| `EVENT_UUID_CONFLICT` | 409 | `eventUuid` was already used with a different `eventType`. | No |
+| `SNAPSHOT_CONFLICT` | 409 | A Resolve snapshot conflicts with existing graph state; nothing changed. | No (fix the snapshot) |
+| `PAYLOAD_TOO_LARGE` | 413 | Body over the signed-body limit, a Resolve snapshot over 10 000 entries, or an upload over 50 GB. | No |
+| `STORAGE_NOT_CONFIGURED` | 409, 500, 503 | The server lacks storage configuration the request needs (no storage guard, no virtual location, no writable location). | Yes, later (server-side fix) |
+| `INTERNAL_ERROR` | 500 | Unexpected server-side failure (database, key lookup, ...). | Yes |
+| `SERVICE_UNAVAILABLE`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `ERROR` | 503, 403, 404, 409, other | Fallbacks for an error raised without a specific code (e.g. by the HTTP framework itself). | By status |
+
+Event processing errors (§2) are not HTTP errors: `POST /api/v1/agent/events` answers `202` and the
+outcome lands in `event_queue.error_log`.
 
 ---
 
@@ -433,9 +482,11 @@ header is also read.
 > finish copying before calling this. Any other read-only tier has no such exemption and is
 > always refused.
 
-Errors: `400` for an invalid `nodeUuid`/`fullHash`/target path or a refused read-only/missing
-Tier-3 target; `403` if the node was not created by the calling device; `404` for an `ARCHIVED`
-or `TRASHED` node; `409` if the node already has a different `fullHash`. The response `status` is `REBASED`
+Errors (codes per [Errors](#errors)): `400` for an invalid `nodeUuid`/`fullHash`
+(`VALIDATION_FAILED`), a target path outside storage (`PATH_OUTSIDE_STORAGE`), a read-only target
+(`READ_ONLY_TARGET`) or a Tier-3 target whose file is not there yet (`ARCHIVE_FILE_NOT_PRESENT`);
+`403` if the node was not created by the calling device (`NOT_NODE_OWNER`); `404` for an `ARCHIVED`
+or `TRASHED` node (`NODE_NOT_FOUND`); `409` if the node already has a different `fullHash` (`HASH_CONFLICT`). The response `status` is `REBASED`
 for an existing node or `CREATED` when an unknown `nodeUuid` was inserted.
 
 **Request (`AgentRebaseInput`):**

@@ -48,6 +48,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/prune` | TTL cache pruning engine with strict TOCTOU disk checks |
 | `internal/httpapi` | Huma v2 routes, middleware chain, SSE handler |
 | `internal/agent` | Server side of the agent contract: `event_queue` draining, handshake support, path rebasing |
+| `internal/apierr` | The agent API's single error envelope: problem+json plus a stable machine-readable `code` (table in `docs/agent-api.md`) |
 | `internal/audit` | `actor_audit` log writes/reads for admin actions (scan, settings, prune, restart, pairing lifecycle) |
 | `internal/djisrt` | Parses a DJI `.srt` flight-telemetry sidecar down to one representative GPS point |
 | `internal/email` | Outbound email `Notifier` (`smtp` or `log` provider) for password-reset links |
