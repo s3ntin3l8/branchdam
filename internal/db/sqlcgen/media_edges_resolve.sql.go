@@ -118,6 +118,28 @@ func (q *Queries) RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams
 	return target_node_id, err
 }
 
+const resetMediaEdgeReview = `-- name: ResetMediaEdgeReview :one
+UPDATE media_edges
+SET review_state = 'NEEDS_REVIEW', reviewed_at = NULL, reviewed_by = NULL, updated_at = unixepoch()
+WHERE id = ?1 AND review_state IN ('CONFIRMED', 'REJECTED')
+RETURNING target_node_id
+`
+
+// Backs POST /api/v1/edges/{id}/reset-review: hands a human decision
+// (CONFIRMED/REJECTED) back to the review queue as NEEDS_REVIEW. The
+// review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
+// is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
+// states, and only a human decision is a human's to undo. reviewed_at /
+// reviewed_by are cleared: the schema only requires them for
+// CONFIRMED/REJECTED, and keeping them would claim a review that no longer
+// stands (the actor_audit row written by the handler keeps the history).
+func (q *Queries) ResetMediaEdgeReview(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, resetMediaEdgeReview, id)
+	var target_node_id int64
+	err := row.Scan(&target_node_id)
+	return target_node_id, err
+}
+
 const resolvedEdgeParentMissing = `-- name: ResolvedEdgeParentMissing :one
 SELECT parent_missing FROM v_media_edges_resolved WHERE id = ?1
 `

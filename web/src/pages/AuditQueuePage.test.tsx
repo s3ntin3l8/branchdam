@@ -288,8 +288,10 @@ describe("AuditQueuePage", () => {
     vi.mocked(api.rejectEdge).mockRejectedValue(new Error("Network disconnect"));
 
     renderWithClient(<AuditQueuePage />);
-    const button = await screen.findByRole("button", { name: /reject/i });
+    const button = await screen.findByRole("button", { name: /^reject$/i });
     await userEvent.click(button);
+    // Reject is gated behind a confirm step; the failure shows in that dialog.
+    await userEvent.click(await screen.findByRole("button", { name: "Reject Edge" }));
 
     expect(await screen.findByText(/Failed to reject edge: Error: Network disconnect/i)).toBeInTheDocument();
   });
@@ -521,15 +523,16 @@ describe("AuditQueuePage", () => {
 
     renderWithClient(<AuditQueuePage />);
 
-    // Batch button is present and displays count on page
-    const batchBtn = await screen.findByRole("button", { name: /accept filtered \(2 on page\)/i });
+    // Batch actions act on the selection: select the page, then confirm it.
+    await user.click(await screen.findByRole("checkbox", { name: "Select this page" }));
+    const batchBtn = screen.getByRole("button", { name: /confirm selected \(2\)/i });
     await user.click(batchBtn);
 
     // Modal dialog opens
     expect(await screen.findByRole("dialog", { name: /batch confirm edges/i })).toBeInTheDocument();
 
-    // Click "Confirm All" inside modal
-    const confirmBtn = screen.getByRole("button", { name: "Confirm All" });
+    // Click "Confirm Selected" inside modal
+    const confirmBtn = screen.getByRole("button", { name: "Confirm Selected" });
     await user.click(confirmBtn);
 
     // Verify sequential confirmEdge calls
@@ -612,13 +615,13 @@ describe("AuditQueuePage", () => {
 
     renderWithClient(<AuditQueuePage />);
 
-    const batchBtn = await screen.findByRole("button", { name: /accept filtered \(2 on page\)/i });
-    await user.click(batchBtn);
+    await user.click(await screen.findByRole("checkbox", { name: "Select this page" }));
+    await user.click(screen.getByRole("button", { name: /confirm selected \(2\)/i }));
 
     const dialog = await screen.findByRole("dialog", { name: /batch confirm edges/i });
     expect(dialog).toBeInTheDocument();
 
-    const confirmBtn = screen.getByRole("button", { name: "Confirm All" });
+    const confirmBtn = screen.getByRole("button", { name: "Confirm Selected" });
     await user.click(confirmBtn);
 
     // Verify error message is rendered and modal remains open

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { Background, Controls, ReactFlow, ReactFlowProvider, type Edge as FlowEdge, type Node as FlowNode } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { AssetGraph, LineageResponse } from "../api/types";
+import { edgeVisual } from "../lib/edgeStyle";
 
 interface AssetGraphCanvasProps {
   assetId: number;
@@ -35,14 +36,6 @@ function getNodeCategoryColor(ext: string): { border: string; bg: string } {
   }
   return { border: "var(--graph-node-border-neutral)", bg: "var(--graph-node-bg-neutral)" };
 }
-
-const relColor: Record<string, string> = {
-  DERIVED_FROM: "var(--graph-edge-derived)",
-  FINAL_EXPORT: "var(--graph-edge-final)",
-  PROXY_OF: "var(--graph-edge-proxy)",
-  PROJECT_SIDECAR: "var(--graph-edge-sidecar)",
-  DUPLICATE_OF: "var(--graph-edge-duplicate)",
-};
 
 export default function AssetGraphCanvas({ assetId, lineage, graph }: AssetGraphCanvasProps) {
   const navigate = useNavigate();
@@ -187,8 +180,7 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
     id: `e-${e.id}`,
     source: String(e.sourceNodeId),
     target: String(e.targetNodeId),
-    label: `${e.relationshipType} (${e.confidence.toFixed(2)})`,
-    style: { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)", strokeWidth: 2 },
+    ...edgeVisual(e, 2),
     labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
   }));
 
@@ -229,8 +221,7 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
       id: `e-${e.id}`,
       source: `parent-${e.sourceNodeId}`,
       target: String(assetId),
-      label: `${e.relationshipType} (${e.confidence.toFixed(2)})`,
-      style: { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)" },
+      ...edgeVisual(e),
       labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
     });
   });
@@ -250,8 +241,7 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
       id: `e-${e.id}`,
       source: String(assetId),
       target: `child-${e.targetNodeId}`,
-      label: `${e.relationshipType} (${e.confidence.toFixed(2)})`,
-      style: { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)" },
+      ...edgeVisual(e),
       labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
     });
   });

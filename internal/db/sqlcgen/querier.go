@@ -88,7 +88,8 @@ type Querier interface {
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
 	// makes it fall back to interface{} for every param.
 	CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error)
-	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes
+	// Backs GET /api/v1/assets' search-aware total (q, no structural filter;
+	// the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 	// by excluding ARCHIVED and superseded rows and applying the same optional
 	// name_query (NULL = no search).
 	CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error)
@@ -567,9 +568,8 @@ type Querier interface {
 	// `total` is returned as a column on every row via a separate subquery,
 	// avoiding a second COUNT(*) query per page turn and the race where a
 	// confirmation between the list and the count makes total disagree with
-	// what the list shows. The subquery applies only the review_state
-	// filter, so total always reflects the full NEEDS_REVIEW set regardless
-	// of cursor.
+	// what the list shows. It ignores the cursor, so total is the same on
+	// every page (see below for the filters it does apply).
 	//
 	// The cursor (confidence, id) is resolved in a CTE first, then the main
 	// query references it, rather than inlining `SELECT confidence, id FROM
@@ -579,7 +579,18 @@ type Querier interface {
 	// CTE to a sqlc v1.31.1 placeholder-counting bug; disproven by issue #413's
 	// fix -- sqlc.arg(before_id) used twice below, once inside the CTE and once
 	// in the outer WHERE, correctly collapses to a single BeforeID field.)
+	//
+	// Optional server-side filters (tier, resolver, relationship_type,
+	// min_confidence) are resolved once in the f CTE -- each CAST so sqlc types
+	// the param -- and applied identically to total_rows and the page, so
+	// total is the size of the FILTERED queue and keyset paging walks only
+	// the filtered rows. NULL means "no filter".
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
+	// Distinct resolvers across the whole NEEDS_REVIEW queue, for the audit
+	// page's resolver filter -- the options must come from the server now that
+	// filtering is server-side, not from whichever page happens to be loaded.
+	// Active edges only, like the queue's own view (v_media_edges_resolved).
+	ListAuditQueueResolvers(ctx context.Context) ([]string, error)
 	// COALESCE is not a null-guard here -- the WHERE clause already excludes
 	// NULL/empty camera_model -- it exists so sqlc infers []string instead of
 	// []sql.NullString: camera_model is a nullable column (00001_init.sql), and
@@ -668,7 +679,7 @@ type Querier interface {
 	// LIKE ... ESCAPE clause, so both go through p's columns instead.
 	// name_query is a plain case-insensitive substring of file_name (instr, so
 	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-	// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
 	// an unknown value falls through every CASE to the id DESC tiebreak.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
 	// p carries the search/sort params as a one-row derived table: sqlc's
@@ -676,7 +687,7 @@ type Querier interface {
 	// LIKE ... ESCAPE clause, so both go through p's columns instead.
 	// name_query is a plain case-insensitive substring of file_name (instr, so
 	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-	// only). sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
 	// an unknown value falls through every CASE to the id DESC tiebreak.
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
@@ -1103,6 +1114,15 @@ type Querier interface {
 	RegisterResolveTimelineScope(ctx context.Context, arg RegisterResolveTimelineScopeParams) error
 	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
+	// Backs POST /api/v1/edges/{id}/reset-review: hands a human decision
+	// (CONFIRMED/REJECTED) back to the review queue as NEEDS_REVIEW. The
+	// review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
+	// is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
+	// states, and only a human decision is a human's to undo. reviewed_at /
+	// reviewed_by are cleared: the schema only requires them for
+	// CONFIRMED/REJECTED, and keeping them would claim a review that no longer
+	// stands (the actor_audit row written by the handler keeps the history).
+	ResetMediaEdgeReview(ctx context.Context, id int64) (int64, error)
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound
 	// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --

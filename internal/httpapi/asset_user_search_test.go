@@ -162,6 +162,13 @@ func TestHandleListAssets_QSearchesFileNameServerSide(t *testing.T) {
 		t.Fatalf("q=100%%: total=%d names=%v, want only 100%%_crop.png", body.Total, got)
 	}
 
+	// An exact node UUID (any case) finds its node, as the node picker's
+	// old client-side filter did.
+	_, body = getAssets(t, srv, url.Values{"q": {"UUID-SEARCH-2"}})
+	if got := assetNames(body); body.Total != 1 || len(got) != 1 || got[0] != "IMG_1000.jpg" {
+		t.Fatalf("q=<node uuid>: total=%d names=%v, want only IMG_1000.jpg", body.Total, got)
+	}
+
 	// Blank q is no filter.
 	_, body = getAssets(t, srv, url.Values{"q": {"   "}})
 	if body.Total != 5 {
