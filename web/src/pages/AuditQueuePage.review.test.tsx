@@ -205,6 +205,13 @@ describe("AuditQueuePage server-side filters and paging", () => {
     expect(p.resolver).toBeUndefined();
   });
 
+  it("forwards in-range tier, minConfidence and resolver from the URL", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [entry(1)], total: 1, resolvers: [] });
+    renderPage(`/audit?tier=2&minConfidence=0.5&resolver=filename_stem`);
+    await screen.findByText("src-1.arw");
+    expect(lastQueueParams()).toMatchObject({ tier: 2, minConfidence: 0.5, resolver: "filename_stem" });
+  });
+
   it("disables paging while the next page loads, so a double click can't skip one", async () => {
     const user = userEvent.setup();
     Element.prototype.scrollIntoView = vi.fn();

@@ -111,14 +111,13 @@ func contractFixtures(t *testing.T) map[string]any {
 	fx["event_edge_attached"] = agent.EdgeAttachedPayload{
 		SourceNodeUUID:   fxNodeUUID,
 		TargetNodeUUID:   fxNodeUUID2,
-		SourceNodeID:     10,
-		TargetNodeID:     11,
 		RelationshipType: "PROXY_OF",
 		Confidence:       0.95,
 		Tier:             2,
-		Resolver:         "stem-match",
+		Resolver:         "filename_stem",
 		EvidenceJSON:     json.RawMessage(`{"stem":"A001_C002"}`),
-		ReviewState:      "(rejected when an agent sends it)",
+		// SourceNodeID, TargetNodeID and ReviewState stay unset: see
+		// contractZeroOK.
 	}
 	fx["event_node_moved"] = agent.NodeMovedPayload{
 		NodeUUID:             fxNodeUUID,
@@ -311,10 +310,15 @@ func queryFixture(t *testing.T, v any) map[string]any {
 	out := map[string]any{}
 	rv := reflect.ValueOf(v)
 	for i := 0; i < rv.NumField(); i++ {
-		name := rv.Type().Field(i).Tag.Get("query")
-		if name == "" {
-			continue
+		f := rv.Type().Field(i)
+		tag := f.Tag.Get("query")
+		if tag == "" {
+			// A GET input field with no query tag is never read from the
+			// request; fail rather than let the fixture miss it.
+			t.Fatalf("%T.%s has no query tag", v, f.Name)
 		}
+		// huma reads the name before the first comma (`query:"x,explode"`).
+		name, _, _ := strings.Cut(tag, ",")
 		out[name] = rv.Field(i).Interface()
 	}
 	if len(out) == 0 {
@@ -327,6 +331,14 @@ func queryFixture(t *testing.T, v any) map[string]any {
 // fixture shows them as the server actually sends them.
 var contractZeroOK = map[string]string{
 	"handshake_response.PendingRotation.APIKey": "always empty: the rotated key is only ever sent sealed",
+	// The drainer refuses an edge event that sets either id
+	// (ErrMalformedPayload, internal/agent/types.go): agents send node
+	// UUIDs only, and the omitempty ids are absent on the wire.
+	"event_edge_attached.SourceNodeID": "must be absent: a non-zero id fails the event",
+	"event_edge_attached.TargetNodeID": "must be absent: a non-zero id fails the event",
+	// Deprecated and ignored by the drainer (it refuses only CONFIRMED and
+	// REJECTED); agents leave it out.
+	"event_edge_attached.ReviewState": "deprecated: agents leave it out",
 }
 
 // requireAllFieldsSet fails for any exported field (recursively) still at
