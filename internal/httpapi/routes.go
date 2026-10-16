@@ -2161,7 +2161,9 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 		}
 		exists, err := s.guard.Exists(in.Body.TargetPath)
 		if err != nil {
-			return nil, apierr.New(http.StatusBadRequest, apierr.CodePathOutsideStorage, fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
+			// A failed stat is a server-side fault, not a bad path: code it
+			// as retryable so the agent doesn't give up on the rebase.
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, fmt.Sprintf("checking whether rebase target %q already exists: %v", in.Body.TargetPath, err), err)
 		}
 		if !exists {
 			return nil, apierr.New(http.StatusBadRequest, apierr.CodeArchiveFileNotPresent, fmt.Sprintf("rebase to read-only tier %s refused for path %q: no file exists there yet", loc.Tier, in.Body.TargetPath))

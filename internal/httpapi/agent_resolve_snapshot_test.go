@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/s3ntin3l8/branchdam/internal/apierr"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -228,6 +229,13 @@ func TestResolveSnapshotRollbackAndAgentIsolation(t *testing.T) {
 	rr := postResolveSnapshot(t, srv, body)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("missing source status = %d %s", rr.Code, rr.Body.String())
+	}
+	var conflict map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("missing source body is not JSON: %v (%s)", err, rr.Body.String())
+	}
+	if conflict["code"] != apierr.CodeSnapshotConflict {
+		t.Fatalf("missing source code = %v, want %s (body %s)", conflict["code"], apierr.CodeSnapshotConflict, rr.Body.String())
 	}
 	if _, err := database.Reader.GetMediaNodeByUUID(context.Background(), targetUUID); err == nil {
 		t.Fatal("failed snapshot committed its timeline node")

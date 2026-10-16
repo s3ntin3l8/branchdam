@@ -91,7 +91,7 @@ The constants live in `internal/apierr`.
 | `SNAPSHOT_CONFLICT` | 409 | A Resolve snapshot conflicts with existing graph state; nothing changed. | No (fix the snapshot) |
 | `PAYLOAD_TOO_LARGE` | 413 | Body over the signed-body limit, a Resolve snapshot over 10 000 entries, or an upload over 50 GB. | No |
 | `STORAGE_NOT_CONFIGURED` | 409, 500, 503 | The server lacks storage configuration the request needs (no storage guard, no virtual location, no writable location). | Yes, later (server-side fix) |
-| `INTERNAL_ERROR` | 500 | Unexpected server-side failure (database, key lookup, ...). | Yes |
+| `INTERNAL_ERROR` | 500 | Unexpected server-side failure (database, key lookup, a failed stat of a rebase target, ...). | Yes |
 | `SERVICE_UNAVAILABLE`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `ERROR` | 503, 403, 404, 409, other | Fallbacks for an error raised without a specific code (e.g. by the HTTP framework itself). | By status |
 
 Event processing errors (§2) are not HTTP errors: `POST /api/v1/agent/events` answers `202` and the
