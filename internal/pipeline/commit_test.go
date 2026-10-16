@@ -1754,3 +1754,12 @@ func TestCommitDoesNotResurrectLogicallyTrashedFile(t *testing.T) {
 		t.Fatalf("changed content: stats=%+v err=%v, want Inserted=1", stats, err)
 	}
 }
+
+func TestIndexingStatusFor(t *testing.T) {
+	if got := IndexingStatusFor("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); got != "INDEXED_FULL" {
+		t.Errorf("with full hash: %q, want INDEXED_FULL", got)
+	}
+	if got := IndexingStatusFor(""); got != "INDEXED_SHALLOW" {
+		t.Errorf("without full hash: %q, want INDEXED_SHALLOW", got)
+	}
+}

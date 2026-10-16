@@ -220,6 +220,12 @@ func TestKeyLookup_RevokedPairingReturnsEmpty(t *testing.T) {
 	assert.Nil(t, result.SigningKey)
 }
 
+func TestRevokePairing_UnknownIDReturnsNotFound(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.RevokePairing(context.Background(), 424242, "user:tester")
+	assert.ErrorIs(t, err, ErrPairingNotFound)
+}
+
 func TestKeyLookup_ExpiredKeyReturnsEmpty(t *testing.T) {
 	svc, db := newTestService(t)
 	ctx := context.Background()

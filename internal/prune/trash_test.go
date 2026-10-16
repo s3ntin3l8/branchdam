@@ -2,6 +2,7 @@ package prune
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func TestPurgeTrash_Basic(t *testing.T) {
 	require.NoError(t, os.Chtimes(oldFile, oldTime, oldTime))
 	require.NoError(t, os.Chtimes(newFile, newTime, newTime))
 
-	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 30, now)
+	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 30, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.FilesPurged)
 	assert.Equal(t, int64(len("old content")), res.BytesFreed)
@@ -67,14 +68,14 @@ func TestPurgeTrash_DisabledWhenZeroOrNegative(t *testing.T) {
 	require.NoError(t, os.Chtimes(oldFile, oldTime, oldTime))
 
 	// RetentionDays = 0 (disabled)
-	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 0, now)
+	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 0, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.FilesPurged)
 	_, err = os.Stat(oldFile)
 	assert.NoError(t, err, "file should not be purged when retentionDays is 0")
 
 	// RetentionDays = -1
-	res, err = PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, -1, now)
+	res, err = PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, -1, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.FilesPurged)
 	_, err = os.Stat(oldFile)
@@ -93,7 +94,7 @@ func TestPurgeTrash_CleansEmptySubdirectories(t *testing.T) {
 	oldTime := now.Add(-40 * 24 * time.Hour)
 	require.NoError(t, os.Chtimes(file, oldTime, oldTime))
 
-	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 30, now)
+	res, err := PurgeTrash(context.Background(), trashGuard(t, locRoot), locRoot, 30, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.FilesPurged)
 
@@ -124,7 +125,7 @@ func TestPurgeAllTrash_MultipleLocations(t *testing.T) {
 		{ID: 2, Name: "Loc2", RootPath: loc2, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false},
 	})
 
-	res, err := PurgeAllTrash(context.Background(), guard, 30, now)
+	res, err := PurgeAllTrash(context.Background(), guard, 30, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.FilesPurged)
 	assert.Equal(t, int64(10), res.BytesFreed)
@@ -157,7 +158,7 @@ func TestPurgeAllTrash_SkipsReadOnlyLocation(t *testing.T) {
 		{ID: 2, Name: "rw", RootPath: rw, Tier: "TIER3_MASTER_ARCHIVE", ReadOnly: false},
 	})
 
-	res, err := PurgeAllTrash(context.Background(), guard, 30, now)
+	res, err := PurgeAllTrash(context.Background(), guard, 30, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.FilesPurged)
 	assert.Empty(t, res.Errors)
@@ -168,10 +169,65 @@ func TestPurgeAllTrash_SkipsReadOnlyLocation(t *testing.T) {
 
 	// Calling PurgeTrash directly on the read-only root is refused by the
 	// Guard per file rather than unlinking.
-	res, err = PurgeTrash(context.Background(), guard, ro, 30, now)
+	res, err = PurgeTrash(context.Background(), guard, ro, 30, now, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.FilesPurged)
 	assert.NotEmpty(t, res.Errors)
 	_, err = os.Stat(roFile)
 	assert.NoError(t, err)
+}
+
+// TestPurgeTrash_RecordedTrashTimeOverridesMtime covers PurgeTrash's
+// TrashTimeFunc contract: a known recorded time decides (in both
+// directions), an unknown file falls back to mtime, and a lookup error
+// keeps the file for this pass and is reported.
+func TestPurgeTrash_RecordedTrashTimeOverridesMtime(t *testing.T) {
+	locRoot := t.TempDir()
+	guard := trashGuard(t, locRoot)
+	root := guard.Locations()[0].RootPath
+	trashDir := filepath.Join(root, ".trash")
+	require.NoError(t, os.MkdirAll(trashDir, 0o755))
+
+	now := time.Now().UTC()
+	old := now.Add(-60 * 24 * time.Hour)
+	fresh := now.Add(-time.Hour)
+	files := map[string]time.Time{ // name -> mtime
+		"chtimes-failed.jpg": old,   // recorded: fresh -> keep
+		"recorded-old.jpg":   fresh, // recorded: old   -> purge
+		"orphan-old.jpg":     old,   // unknown         -> purge by mtime
+		"orphan-fresh.jpg":   fresh, // unknown         -> keep by mtime
+		"lookup-error.jpg":   old,   // error           -> keep
+	}
+	for name, mtime := range files {
+		p := filepath.Join(trashDir, name)
+		require.NoError(t, os.WriteFile(p, []byte(name), 0o644))
+		require.NoError(t, os.Chtimes(p, mtime, mtime))
+	}
+	lookup := func(_ context.Context, gotRoot, path string) (time.Time, bool, error) {
+		assert.Equal(t, root, gotRoot)
+		switch filepath.Base(path) {
+		case "chtimes-failed.jpg":
+			return fresh, true, nil
+		case "recorded-old.jpg":
+			return old, true, nil
+		case "lookup-error.jpg":
+			return time.Time{}, false, errors.New("db unavailable")
+		}
+		return time.Time{}, false, nil
+	}
+
+	res, err := PurgeTrash(context.Background(), guard, root, 30, now, lookup)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.FilesPurged)
+	assert.Len(t, res.Errors, 1)
+	for name, wantKept := range map[string]bool{
+		"chtimes-failed.jpg": true,
+		"recorded-old.jpg":   false,
+		"orphan-old.jpg":     false,
+		"orphan-fresh.jpg":   true,
+		"lookup-error.jpg":   true,
+	} {
+		_, statErr := os.Stat(filepath.Join(trashDir, name))
+		assert.Equal(t, wantKept, statErr == nil, name)
+	}
 }

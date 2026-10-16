@@ -33,6 +33,9 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	ClearMFAPendingSecret(ctx context.Context, id int64) error
+	// pipeline.restoreTrashedAssetTx calls this next to UntrashNode. The row
+	// stays (rows are never deleted); a NULL trashed_at means "not trashed".
+	ClearNodeTrashed(ctx context.Context, nodeID int64) error
 	// Marks every open cascade row for export ?1 restored. Called whenever the
 	// export leaves TRASHED (restored with its master, or restored on its own),
 	// so a stale row can never resurrect a later, independent trash of it.
@@ -364,6 +367,8 @@ type Querier interface {
 	// spelling this needs to stay within SQLite's bound-parameter limit.
 	GetMediaNodesByUUIDs(ctx context.Context, nodeUuids string) ([]GetMediaNodesByUUIDsRow, error)
 	GetNodeCreator(ctx context.Context, nodeUuid string) (string, error)
+	// Read-back for tests and diagnostics.
+	GetNodeTrashTime(ctx context.Context, nodeID int64) (NodeTrashTime, error)
 	GetNodeUUIDAlias(ctx context.Context, aliasUuid string) (NodeUuidAlias, error)
 	// Confirm-time lookup: scan the active-token index for a specific
 	// token_hash. The active-partial unique index keeps the candidate
@@ -397,6 +402,11 @@ type Querier interface {
 	// reads self-documentingly and a future "system user has been renamed"
 	// rename has one obvious place to land.
 	GetSystemUserID(ctx context.Context) (int64, error)
+	// Purge-time lookup for one .trash/ copy, keyed on the node_uuid embedded
+	// in its file name. Only a node that is TRASHED right now and has a
+	// recorded trash time matches; anything else is sql.ErrNoRows and the
+	// purge falls back to the file's mtime.
+	GetTrashedNodeTrashTime(ctx context.Context, nodeUuid string) (GetTrashedNodeTrashTimeRow, error)
 	// Live authority check for PAT minting (issue #453 PR E): the PAT
 	// lookup query requires the OWNER to be is_admin=1 with disabled_at
 	// NULL, so minting for anyone else would hand back a well-formed
@@ -916,6 +926,15 @@ type Querier interface {
 	// claim to represent "the" watch state for it. ix_scan_jobs_active
 	// (state, started_at DESC) backs this WHERE clause.
 	ReconcileOrphanedScanJobs(ctx context.Context, lastError sql.NullString) (int64, error)
+	// node_trash_times: when each node was trashed (migration 00040). The
+	// trash purge worker ages .trash/ copies by this value instead of by file
+	// mtime, which a failed os.Chtimes in pipeline.moveToTrash left at the
+	// file's original (old) time.
+	// pipeline.trashAssetTx calls this right after MarkNodeTrashed, in the
+	// same transaction, for the master and for every export the trash
+	// cascades over. Upsert: a node restored and trashed again restarts its
+	// retention window.
+	RecordNodeTrashed(ctx context.Context, nodeID int64) error
 	// pipeline.TrashAsset records each export it cascade-trashes with its master
 	// (keepExports=false), in the same transaction as the export's
 	// MarkNodeTrashed.

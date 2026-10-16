@@ -249,6 +249,20 @@ func TestCompanionPairings_DeleteNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestCompanionPairings_RevokeNotFound pins the audit finding that
+// revoking an unknown pairing id returned 500: the PAIR_REVOKED audit
+// insert tripped device_pairings' RESTRICT FK. It must be a 404 and must
+// write no audit row.
+func TestCompanionPairings_RevokeNotFound(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+	rec := doAdmin(t, srv, http.MethodPost,
+		"/api/v1/companion/pairings/99999/revoke", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
+	n, err := srv.db.Reader.CountPairingAudit(context.Background(), 99999)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+}
+
 func TestCompanionPairings_DeleteAfterRotateAndRevoke(t *testing.T) {
 	srv, _, pairSvc := newPairingTestServer(t)
 	ctx := context.Background()

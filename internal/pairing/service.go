@@ -497,10 +497,21 @@ func (s *Service) RotateKey(ctx context.Context, pairingID int64, actor string, 
 
 // RevokePairing terminates pairingID: sets revoked_at on the pairing row
 // AND on every (still-active) key for the pairing. Returns the timestamp
-// used for revoked_at. Idempotent.
+// used for revoked_at. Idempotent for an existing pairing; an unknown
+// pairingID returns ErrPairingNotFound and writes nothing.
 func (s *Service) RevokePairing(ctx context.Context, pairingID int64, actor string) (int64, error) {
 	now := s.nowFn()
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		// Existence check first: the PAIR_REVOKED audit insert below
+		// carries a RESTRICT FK to device_pairings, so an unknown id
+		// used to surface as a FOREIGN KEY constraint failure (500)
+		// instead of a 404.
+		if _, err := q.GetDevicePairingByID(ctx, pairingID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrPairingNotFound
+			}
+			return fmt.Errorf("load pairing: %w", err)
+		}
 		if err := q.RevokeAllKeysForPairing(ctx, sqlcgen.RevokeAllKeysForPairingParams{
 			PairingID: pairingID,
 			RevokedAt: sql.NullInt64{Int64: now, Valid: true},

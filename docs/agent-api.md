@@ -401,7 +401,8 @@ Processing `EVENT_NODE_DELETED` triggers a safe, multi-step soft delete:
   node may do this.
 - Safely relocates the master file to `.trash/<rel_path-stem>.<node-uuid><ext>` in the storage
   location (the full node UUID keeps two nodes that trashed the same path distinct; copies
-  trashed before this naming still restore), retaining it for 30 days (`trash.retentionDays`)
+  trashed before this naming still restore), retaining it for 30 days (`trash.retentionDays`,
+  counted from the trash time recorded in `node_trash_times`, not from the file's mtime)
   before automated prune unlinks it.
 - Purges linked Tier 2 Immich exports immediately (moving export files into `.trash/` and deleting
   sync state) and triggers an Immich library rescan so the asset disappears from galleries right away.
@@ -794,7 +795,7 @@ All management endpoints require an authenticated administrator session (`auth.R
 | `/api/v1/companion/pairings` | `GET` | List all registered companion device pairings, their enabled state, last seen timestamps, and client names. |
 | `/api/v1/companion/pairings/{id}` | `GET` | Retrieve details for a specific companion pairing. |
 | `/api/v1/companion/pairings/{id}/rotate` | `POST` | Rotate device API key. Invalidates previous key and returns a new plaintext token. |
-| `/api/v1/companion/pairings/{id}/revoke` | `POST` | Revoke device access immediately. Enforces a 401 Unauthorized response on subsequent agent calls. |
+| `/api/v1/companion/pairings/{id}/revoke` | `POST` | Revoke device access immediately. Enforces a 401 Unauthorized response on subsequent agent calls. Errors: `404` unknown pairing. |
 | `/api/v1/companion/pairings/{id}/rename` | `POST` | Update a pairing's operator-facing `friendlyLabel`. Allowed on revoked pairings too (history rename is harmless). Empty labels are rejected (Huma `minLength` → 422). Audited as `LABEL_RENAMED`. |
 | `/api/v1/companion/pairings/{id}/credentials` | `GET` | Re-open the full credential set (QR SVG, pairing URL, parsed API key + preview) for an existing pairing's current key. Requires an authenticated admin session (`requireSettingsAdmin` — same gate as `GET /api/v1/settings`, stricter than the global `auth.RequireAdmin` GET bypass). Each successful read is audited fail-closed as `CREDENTIALS_REVEALED` before the response is served; response is `Cache-Control: private, no-store`. `keyPreview` is always the newest active key's last-4 from the DB (never key material). `apiKey`/`pairingUrl` are empty when the row has no sealed `pairing_url` (keyless server or pre-migration legacy row). `sealingEnabled` is whether a `BRANCHDAM_SECRET_KEY` box is configured on this server *right now* (not row provenance); with an empty `pairingUrl` the SPA uses it as `false` = keyless vs `true` = legacy row — rotate to seal. Errors: `404` unknown pairing; `410` revoked/expired (no active key); `409` sealed under a different `BRANCHDAM_SECRET_KEY`; `500` sealed credentials exist but no key is configured (same detail as `GET qr.svg` when the box is unset). |
 | `/api/v1/companion/pairings/{id}` | `DELETE` | Delete device pairing record and its key history. Requires the pairing to be revoked first (`POST /revoke`), returning `409 Conflict` otherwise. |
