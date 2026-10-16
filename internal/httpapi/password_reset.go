@@ -115,7 +115,7 @@ func (s *Server) dispatchPasswordResetRequest(email, ip, userAgent string) {
 	case la.resetSlots <- struct{}{}:
 	default:
 		la.log.Warn("password-reset: too many reset requests in flight; dropping this one",
-			slog.String("ip", ip),
+			slog.String("ip", sanitizeForLog(ip)),
 			slog.Int("in_flight", len(la.resetSlots)),
 			slog.Int("slots", cap(la.resetSlots)))
 		return
