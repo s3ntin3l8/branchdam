@@ -3,8 +3,8 @@
 This document is the wire-format reference for branchDAM's `/api/v1/agent/*` endpoints. It
 documents the **normative** REST DTOs (`AgentHandshakeInput`, `AgentEventInput`, etc.) and the
 behavioral caveats that aren't obvious from the code — advisory fields the server ignores,
-idempotency gaps, the Tier-3 rebase exemption. The handlers themselves live in
-`internal/httpapi/routes.go` and the type definitions in `internal/agent/types.go`.
+idempotency gaps, the Tier-3 rebase exemption. The handlers and their request/response DTOs live in
+`internal/httpapi/routes.go`; the event payload types (`EVENT_*`) in `internal/agent/types.go`.
 
 For the workstation agent ecosystem overview (offline queue, dual-copy ingest, scan-trigger),
 see [`integrations.md` §5](integrations.md#5-workstation-companion-agent). For the mobile
@@ -365,8 +365,9 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 
 ### 3.1. `EVENT_NODE_CREATED`
 
-`internal/agent/types.go`'s `NodeCreatedPayload` is normative -- 19 fields in total (excluding
-the deprecated, ignored `storageLocationId`). Every field past `fastHash` is optional (a normal
+`internal/agent/types.go`'s `NodeCreatedPayload` is normative -- 20 fields in total (excluding
+the deprecated, ignored `storageLocationId`); `contract/fixtures/event_node_created.json` shows
+every one. Every field past `fastHash` is optional (a normal
 scan-side probe failure or a client that can't compute one simply omits it), but omitting all of
 them just means an agent-ingested master carries none of the promoted metadata a scan would
 have given it.
@@ -490,7 +491,7 @@ Creates a virtual media node representing an integration project timeline (Resol
 | `filePath` | string | yes | Must resolve to a `virtual` storage location. Agent convention: `/virtual/resolve/<agentID>/<sanitized-name>-<8-hex hash>` (e.g. `/virtual/resolve/workstation-01/My%20Documentary-a2bb3478`) |
 | `displayName` | string | yes | Human-readable label shown in the asset graph (uses raw timeline name) |
 | `projectType` | string | no | One of `resolve_project`, `premiere_project`, `fcpxml_bundle`. Empty accepted for backward compat |
-| `evidenceJson` | string | no | Optional evidence JSON (timeline-level metadata) |
+| `evidenceJson` | object | no | Optional evidence, a raw JSON object (timeline-level metadata) -- not a JSON-encoded string |
 
 ```json
 {
@@ -498,7 +499,7 @@ Creates a virtual media node representing an integration project timeline (Resol
   "filePath": "/virtual/resolve/workstation-01/My%20Documentary-a2bb3478",
   "displayName": "Resolve: My Documentary",
   "projectType": "resolve_project",
-  "evidenceJson": "{\"schemaMapping\":\"resolve-projectdb-1\",\"databaseUrl\":\"postgresql://...\",\"timelineName\":\"My Documentary\"}"
+  "evidenceJson": {"schemaMapping": "resolve-projectdb-1", "databaseUrl": "postgresql://...", "timelineName": "My Documentary"}
 }
 ```
 
@@ -738,7 +739,7 @@ dismissed via `DELETE /api/v1/storage-health/agents/{agentId}`.
 
 A lightweight connectivity and version check endpoint for agent clients. Does not query the database, touch the event queue, or record state.
 
-**Authentication:** Requires an Agent Machine Principal (via Companion API key `Authorization: Bearer <key>`).
+**Authentication:** Requires an Agent Machine Principal: the device's paired API key in `X-API-Key`, like every other `/api/v1/agent/*` route (`Authorization: Bearer` is not read here).
 
 **Request:** Empty JSON object (`{}`).
 

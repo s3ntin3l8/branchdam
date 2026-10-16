@@ -188,43 +188,6 @@ type PathRebasedPayload struct {
 	SizeBytes               int64   `json:"sizeBytes,omitempty"`
 }
 
-// HandshakeRequest represents the input for POST /api/v1/agent/handshake.
-type HandshakeRequest struct {
-	AgentID                string `json:"agentId"`
-	ClientVersion          string `json:"clientVersion,omitempty"`
-	LastProcessedEventUUID string `json:"lastProcessedEventUuid,omitempty"`
-}
-
-// HandshakeResponse represents the output of POST /api/v1/agent/handshake.
-type HandshakeResponse struct {
-	OK                    bool   `json:"ok"`
-	ServerVersion         string `json:"serverVersion"`
-	ServerTimeUnix        int64  `json:"serverTimeUnix"`
-	AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
-	PendingEventsCount    int64  `json:"pendingEventsCount"`
-}
-
-// RebaseRequest represents the input for POST /api/v1/agent/rebase.
-type RebaseRequest struct {
-	NodeUUID          string  `json:"nodeUuid"`
-	TargetPath        string  `json:"targetPath"`
-	MtimeUnix         int64   `json:"mtimeUnix,omitempty"`
-	FileName          string  `json:"fileName,omitempty"`
-	FileExt           string  `json:"fileExt,omitempty"`
-	SizeBytes         int64   `json:"sizeBytes,omitempty"`
-	FastHash          *string `json:"fastHash,omitempty"`
-	StorageLocationID int64   `json:"storageLocationId,omitempty"`
-}
-
-// RebaseResponse represents the output of POST /api/v1/agent/rebase.
-type RebaseResponse struct {
-	ID                int64  `json:"id"`
-	NodeUUID          string `json:"nodeUuid"`
-	StorageLocationID int64  `json:"storageLocationId"`
-	FilePath          string `json:"filePath"`
-	Status            string `json:"status"` // "REBASED" or "CREATED"
-}
-
 // Retry policy for transiently failing events. A retryable failure defers
 // the row (event_queue.next_attempt_at) by RetryDelay(attempts) instead of
 // retrying it on the very next drain pass, so a condition that clears in
