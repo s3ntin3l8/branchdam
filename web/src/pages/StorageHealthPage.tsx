@@ -30,12 +30,17 @@ function formatDuration(durationMs: number): string {
 // PruneControl is a two-step flow: "Purge Cache" runs a dry-run plan and
 // lists the candidate files (path and size) with a total; a second,
 // explicit click ("Confirm Purge") re-posts with execute:true, narrowed via
-// nodeIds to exactly the files that were shown -- so a candidate that
-// became eligible between the preview and the click is never purged
-// without the operator having seen it. Mirrors the repo's existing feedback
+// nodeIds to exactly the plan that was shown -- so a candidate that became
+// eligible between the preview and the click is never purged without the
+// operator having seen it counted. Mirrors the repo's existing feedback
 // pattern (IngestPage/AuditQueuePage) -- isPending disables the button and
 // swaps its label, errors render as inline text -- no toast library exists
-// in this codebase, so this deliberately doesn't add one.
+// in this codebase, so this deliberately doesn't add one. The list renders
+// at most PRUNE_PREVIEW_LIMIT rows (a cache location can have thousands of
+// candidates) and says how many more there are; the count and total above
+// it always cover the whole plan.
+const PRUNE_PREVIEW_LIMIT = 200;
+
 function PruneControl({ locationId }: { locationId: number }) {
   const [plan, setPlan] = useState<PruneCandidate[] | null>(null);
   const [result, setResult] = useState<PruneCandidate[] | null>(null);
@@ -109,12 +114,17 @@ function PruneControl({ locationId }: { locationId: number }) {
             aria-label="Files to be purged"
             className="max-h-48 overflow-y-auto rounded border border-neutral-700 bg-neutral-900/60 divide-y divide-neutral-800"
           >
-            {plan.map((c) => (
+            {plan.slice(0, PRUNE_PREVIEW_LIMIT).map((c) => (
               <li key={c.nodeId} className="flex items-baseline justify-between gap-3 px-2 py-1">
                 <span className="font-mono break-all text-neutral-200">{c.filePath}</span>
                 <span className="shrink-0 text-neutral-400">{formatBytes(c.sizeBytes)}</span>
               </li>
             ))}
+            {plan.length > PRUNE_PREVIEW_LIMIT && (
+              <li className="px-2 py-1 text-neutral-400">
+                …and {plan.length - PRUNE_PREVIEW_LIMIT} more
+              </li>
+            )}
           </ul>
         )}
         {pruneCache.isError && (

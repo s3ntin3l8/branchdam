@@ -35,7 +35,7 @@ func (q *Queries) GetFullHashProvenance(ctx context.Context, nodeID int64) (Full
 
 const listRehashCandidates = `-- name: ListRehashCandidates :many
 SELECT n.id, n.node_uuid, n.file_path, n.full_hash, n.size_bytes,
-       p.rehash_attempts
+       p.rehash_attempts, p.rehash_state, p.rehash_checked_at
 FROM full_hash_provenance p
 JOIN media_nodes n ON n.id = p.node_id
 JOIN storage_locations s ON s.id = n.storage_location_id
@@ -59,12 +59,14 @@ type ListRehashCandidatesParams struct {
 }
 
 type ListRehashCandidatesRow struct {
-	ID             int64
-	NodeUuid       string
-	FilePath       string
-	FullHash       *string
-	SizeBytes      int64
-	RehashAttempts int64
+	ID              int64
+	NodeUuid        string
+	FilePath        string
+	FullHash        *string
+	SizeBytes       int64
+	RehashAttempts  int64
+	RehashState     sql.NullString
+	RehashCheckedAt sql.NullInt64
 }
 
 // internal/rehash's claim query: up to batch_limit live Tier-3 nodes, in
@@ -74,7 +76,10 @@ type ListRehashCandidatesRow struct {
 // did not match (MISMATCH) before mismatch_retry_before. A MISMATCH is
 // re-read on the longer window so that restoring a good copy of the file
 // onto the archive verifies it without anyone editing the database; the
-// stored value is never replaced by what was read. A row whose full_hash
+// stored value is never replaced by what was read. mismatch_retry_before
+// is the shortest MISMATCH window; internal/rehash skips a row whose
+// per-attempt backoff (from rehash_attempts and rehash_checked_at) has not
+// passed yet. A row whose full_hash
 // no longer equals the node's vouches for nothing and is skipped. Driven from the AGENT partial index
 // (ix_full_hash_provenance_agent) so a fully verified archive costs an
 // empty index range per pass, not a media_nodes scan.
@@ -99,6 +104,8 @@ func (q *Queries) ListRehashCandidates(ctx context.Context, arg ListRehashCandid
 			&i.FullHash,
 			&i.SizeBytes,
 			&i.RehashAttempts,
+			&i.RehashState,
+			&i.RehashCheckedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -234,6 +234,30 @@ describe("StorageHealthPage", () => {
     await waitFor(() => expect(screen.getByText("Purged 2 files.")).toBeInTheDocument());
   });
 
+  it("caps the purge preview list and says how many more there are", async () => {
+    vi.mocked(api.getStorageHealth).mockResolvedValue({
+      locations: [baseLocation({ tier: "TIER1_LOCAL_SCRATCH", prunable: true })],
+      queues: { workerPoolInFlight: 0, workerPoolQueued: 0, workerPoolCapacity: 0, workerCount: 0, runningScanJobs: 0 },
+    });
+    const candidates = Array.from({ length: 205 }, (_, i) => ({
+      nodeId: i + 1,
+      filePath: `/mnt/scratch/proxy-${i + 1}.jpg`,
+      sizeBytes: 10,
+      purged: false,
+    }));
+    vi.mocked(api.pruneCache).mockResolvedValueOnce({ executed: false, candidates });
+
+    renderWithClient(<StorageHealthPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /purge cache/i }));
+    await waitFor(() => expect(screen.getByText(/205 files eligible/)).toBeInTheDocument());
+
+    const fileList = screen.getByRole("list", { name: "Files to be purged" });
+    expect(within(fileList).getByText("/mnt/scratch/proxy-200.jpg")).toBeInTheDocument();
+    expect(within(fileList).queryByText("/mnt/scratch/proxy-201.jpg")).not.toBeInTheDocument();
+    expect(within(fileList).getByText(/and 5 more/)).toBeInTheDocument();
+    expect(within(fileList).getAllByRole("listitem")).toHaveLength(201);
+  });
+
   it("shows a DISABLED badge independently of INACTIVE", async () => {
     vi.mocked(api.getStorageHealth).mockResolvedValue({
       locations: [baseLocation({ disabled: true, isActive: true })],

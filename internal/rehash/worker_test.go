@@ -148,8 +148,8 @@ func TestMatchFlipsToServer(t *testing.T) {
 // TestMismatchStaysAgent: the bytes hash to something else. The asserted
 // value stays AGENT (authorising nothing), the computed value is kept for
 // an operator, and media_nodes.full_hash is untouched. The row is only
-// re-read after the mismatch window, and restoring good bytes then
-// verifies it.
+// re-read after the mismatch window, which doubles with every mismatch,
+// and restoring good bytes then verifies it.
 func TestMismatchStaysAgent(t *testing.T) {
 	e := newEnv(t)
 	content := "what is really on disk"
@@ -195,7 +195,15 @@ func TestMismatchStaysAgent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(e.archive, "b.mov"), []byte("what the agent claimed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(25 * time.Hour)
+	// The second mismatch doubled the wait to two days. rehash_checked_at
+	// is stamped by SQLite's real clock (the start of this test), so the
+	// windows here are measured from there: 40 hours in, the row is
+	// still held back; 49 hours in, the restored bytes verify.
+	now = now.Add(15 * time.Hour)
+	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats != (Stats{}) {
+		t.Fatalf("pass inside the doubled window = %+v, %v; want nothing (backoff is two days)", stats, err)
+	}
+	now = now.Add(9 * time.Hour)
 	if stats, err := w.ProcessBatch(context.Background()); err != nil || stats.Matched != 1 {
 		t.Fatalf("pass after restoring the file = %+v, %v; want one match", stats, err)
 	}
@@ -378,5 +386,27 @@ func TestCtxReaderStopsOnCancel(t *testing.T) {
 	cancel()
 	if _, err := r.Read(buf); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Read after cancel = %v, want context.Canceled", err)
+	}
+}
+
+// TestMismatchBackoffDoublesToTheCap: one day after the first mismatch,
+// doubling per attempt, never past MaxMismatchRetryAfter.
+func TestMismatchBackoffDoublesToTheCap(t *testing.T) {
+	day := 24 * time.Hour
+	for _, tc := range []struct {
+		attempts int64
+		want     time.Duration
+	}{
+		{0, day}, {1, day}, {2, 2 * day}, {3, 4 * day}, {5, 16 * day}, {6, MaxMismatchRetryAfter}, {1000, MaxMismatchRetryAfter},
+	} {
+		if got := mismatchBackoff(day, tc.attempts); got != tc.want {
+			t.Errorf("mismatchBackoff(1d, %d) = %s, want %s", tc.attempts, got, tc.want)
+		}
+	}
+	if got := mismatchBackoff(0, 3); got != 0 {
+		t.Errorf("mismatchBackoff(0, 3) = %s, want 0 (tests disable the window)", got)
+	}
+	if got := mismatchBackoff(60*day, 3); got != 60*day {
+		t.Errorf("mismatchBackoff(60d, 3) = %s, want the base when it exceeds the cap", got)
 	}
 }

@@ -353,7 +353,10 @@ func PlanInheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (
 // whose file was removed out of band, before a scan marked it MISSING,
 // gets this far). Opening the file follows symlinks the way exiftool
 // does, so a dangling link counts as missing, and it fails on a file the
-// process may not read.
+// process may not read. It does not probe the directory: exiftool writes
+// a temp file beside the original and renames it over, so a read-only
+// directory on a writable location still fails, later, as a write error.
+// Probing that would mean creating a file there, which a check must not do.
 func checkTagWritePossible(deps InheritDeps, child sqlcgen.MediaNode) error {
 	if deps.Prober == nil || !deps.Prober.HasExiftool() {
 		return probe.ErrToolUnavailable

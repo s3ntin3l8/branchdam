@@ -757,7 +757,10 @@ type Querier interface {
 	// did not match (MISMATCH) before mismatch_retry_before. A MISMATCH is
 	// re-read on the longer window so that restoring a good copy of the file
 	// onto the archive verifies it without anyone editing the database; the
-	// stored value is never replaced by what was read. A row whose full_hash
+	// stored value is never replaced by what was read. mismatch_retry_before
+	// is the shortest MISMATCH window; internal/rehash skips a row whose
+	// per-attempt backoff (from rehash_attempts and rehash_checked_at) has not
+	// passed yet. A row whose full_hash
 	// no longer equals the node's vouches for nothing and is skipped. Driven from the AGENT partial index
 	// (ix_full_hash_provenance_agent) so a fully verified archive costs an
 	// empty index range per pass, not a media_nodes scan.

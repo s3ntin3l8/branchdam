@@ -56,11 +56,17 @@ const DefaultBatchPause = 2 * time.Second
 const DefaultRetryAfter = time.Hour
 
 // DefaultMismatchRetryAfter is how long a file whose bytes did not match
-// the asserted hash waits before it is read again. Re-reading unchanged
-// bytes only repeats the MISMATCH, so this is long; it exists so that an
-// operator who restores a good copy onto the archive needs no database
-// edit for the master to verify.
+// the asserted hash waits before it is read again the first time. Each
+// further mismatch doubles the wait, up to MaxMismatchRetryAfter.
+// Re-reading unchanged bytes only repeats the MISMATCH, so the re-read
+// exists for one case: an operator who restores a good copy onto the
+// archive needs no database edit for the master to verify. A hash that
+// was simply wrong never matches, and the backoff keeps it from costing a
+// full read of the master every day for good.
 const DefaultMismatchRetryAfter = 24 * time.Hour
+
+// MaxMismatchRetryAfter caps the doubling MISMATCH backoff.
+const MaxMismatchRetryAfter = 30 * 24 * time.Hour
 
 const (
 	stateMismatch = "MISMATCH"
@@ -237,6 +243,10 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 		if ctx.Err() != nil {
 			return stats, ctx.Err()
 		}
+		if !w.mismatchDue(row) {
+			w.cursor = row.ID
+			continue
+		}
 		if err := w.processOne(ctx, row, &stats); err != nil {
 			return stats, err
 		}
@@ -247,6 +257,30 @@ func (w *Worker) ProcessBatch(ctx context.Context) (Stats, error) {
 		w.cursor = 0
 	}
 	return stats, nil
+}
+
+// mismatchDue reports whether row may be read now. Only a MISMATCH row can
+// be held back: the claim query already applied the first window, and
+// each later attempt doubles it (see DefaultMismatchRetryAfter).
+func (w *Worker) mismatchDue(row sqlcgen.ListRehashCandidatesRow) bool {
+	if !row.RehashState.Valid || row.RehashState.String != stateMismatch || !row.RehashCheckedAt.Valid {
+		return true
+	}
+	wait := mismatchBackoff(w.mismatchRetryAfter, row.RehashAttempts)
+	return !w.now().Before(time.Unix(row.RehashCheckedAt.Int64, 0).Add(wait))
+}
+
+// mismatchBackoff is base doubled for every attempt after the first,
+// capped at MaxMismatchRetryAfter (and never below base).
+func mismatchBackoff(base time.Duration, attempts int64) time.Duration {
+	wait := base
+	for i := int64(1); i < attempts && wait < MaxMismatchRetryAfter; i++ {
+		wait *= 2
+	}
+	if wait > MaxMismatchRetryAfter && base <= MaxMismatchRetryAfter {
+		wait = MaxMismatchRetryAfter
+	}
+	return wait
 }
 
 func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidatesRow, stats *Stats) error {
@@ -282,7 +316,7 @@ func (w *Worker) processOne(ctx context.Context, row sqlcgen.ListRehashCandidate
 		stats.Mismatched++
 		w.log.Warn("rehash: agent-asserted full_hash does not match the file; it will not authorise pruning",
 			"nodeUuid", row.NodeUuid, "path", row.FilePath, "asserted", asserted, "computed", computed,
-			"rereadAfter", w.mismatchRetryAfter)
+			"rereadAfter", mismatchBackoff(w.mismatchRetryAfter, row.RehashAttempts+1))
 		return w.record(ctx, func(q *sqlcgen.Queries) (int64, error) {
 			return q.RecordRehashFailure(ctx, sqlcgen.RecordRehashFailureParams{
 				NodeID:         row.ID,
