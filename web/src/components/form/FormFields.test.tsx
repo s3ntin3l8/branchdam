@@ -6,6 +6,7 @@ import { FieldRow } from "./FieldRow";
 import { NumberField } from "./NumberField";
 import { SecretField } from "./SecretField";
 import { SelectField } from "./SelectField";
+import { StringListField } from "./StringListField";
 import { TextField } from "./TextField";
 import { ToggleField } from "./ToggleField";
 
@@ -130,5 +131,57 @@ describe("form fields", () => {
     // 32 random bytes, base64url without padding, revealed so it can be copied.
     expect((input as HTMLInputElement).value).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(input).toHaveAttribute("type", "text");
+  });
+
+  it("StringListField shows an empty state and adds a trimmed entry", async () => {
+    const onChange = vi.fn();
+    function Harness() {
+      const [v, setV] = useState<string[]>([]);
+      return (
+        <FieldRow label="Trusted proxies" source="config">
+          <StringListField
+            value={v}
+            onChange={(next) => {
+              onChange(next);
+              setV(next);
+            }}
+          />
+        </FieldRow>
+      );
+    }
+    render(<Harness />);
+    expect(screen.getByText("No entries.")).toBeInTheDocument();
+
+    const input = screen.getByLabelText("Trusted proxies");
+    await userEvent.type(input, "  10.0.0.0/8  {Enter}");
+    expect(onChange).toHaveBeenLastCalledWith(["10.0.0.0/8"]);
+    expect(screen.queryByText("No entries.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove 10.0.0.0/8" })).toBeInTheDocument();
+    expect(input).toHaveValue("");
+
+    // Removing the last entry brings the empty state back.
+    await userEvent.click(screen.getByRole("button", { name: "Remove 10.0.0.0/8" }));
+    expect(onChange).toHaveBeenLastCalledWith([]);
+    expect(screen.getByText("No entries.")).toBeInTheDocument();
+  });
+
+  it("StringListField refuses blank and whitespace-only entries", async () => {
+    const onChange = vi.fn();
+    render(<StringListField value={["a"]} onChange={onChange} />);
+    const input = screen.getByPlaceholderText("Add an entry");
+    const add = screen.getByRole("button", { name: "Add" });
+
+    // Blank: Add is disabled and Enter does nothing.
+    expect(add).toBeDisabled();
+    await userEvent.type(input, "{Enter}");
+
+    // Whitespace only: still disabled, Enter still refused, input kept.
+    await userEvent.type(input, "   ");
+    expect(add).toBeDisabled();
+    await userEvent.type(input, "{Enter}");
+    expect(input).toHaveValue("   ");
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
   });
 });
