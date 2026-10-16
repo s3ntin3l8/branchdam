@@ -132,7 +132,7 @@ describe("formatEvidence", () => {
     expect(structured(ev).groups[0].label).toBe("Spatial-temporal heuristic");
     expect(rowsOf(ev, "heuristic_spatial_temporal")).toEqual({
       "Camera serial": "SN123",
-      "Capture delta": "1.2s",
+      "Capture delta (exact)": "1.2s",
       "Lens model": "FE 24-70mm F2.8 GM II",
       "pHash distance": "4 bits",
       "pHash missing": "no",
@@ -157,6 +157,13 @@ describe("formatEvidence", () => {
       Role: "sidecar",
       "Match type": "same_stem_sibling",
     });
+  });
+
+  it("shortens a signal named after its resolver only inside that group", () => {
+    const ev = structured(formatEvidence(JSON.stringify({ filename_stem: "x", heuristic_spatial_temporal: { filename_stem: "y" } })));
+    expect(ev.flat).toEqual([{ key: "filename_stem", label: "Filename stem", value: "x" }]);
+    expect(ev.groups[0].rows).toEqual([{ key: "filename_stem", label: "Filename stem", value: "y" }]);
+    expect(signalLabel("filename_stem")).toBe("Filename stem");
   });
 
   it("emits one group per merged resolver, in order", () => {

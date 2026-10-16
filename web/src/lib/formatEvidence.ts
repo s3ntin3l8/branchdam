@@ -41,9 +41,7 @@ export const SIGNAL_LABELS: Readonly<Record<string, string>> = {
   child_original_document_id: "Child original document ID",
   parent_document_id: "Parent document ID",
   // filename_stem
-  // "Stem", not "Filename stem": the row sits under the "Filename stem"
-  // resolver heading and would otherwise repeat it.
-  filename_stem: "Stem",
+  filename_stem: "Filename stem",
   dji_telemetry: "DJI telemetry",
   same_directory: "Same directory",
   same_capture_day: "Same capture day",
@@ -55,7 +53,9 @@ export const SIGNAL_LABELS: Readonly<Record<string, string>> = {
   proxy_ext_direction_forced: "Proxy direction forced",
   // heuristic_spatial_temporal
   camera_serial: "Camera serial",
-  capture_delta_seconds: "Capture delta",
+  // The resolver's exact float delta; the page's "Timestamp Delta" is a
+  // separate whole-second value derived from captured_at_unix.
+  capture_delta_seconds: "Capture delta (exact)",
   lens_model: "Lens model",
   hamming_distance: "pHash distance",
   phash_missing: "pHash missing",
@@ -138,8 +138,17 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function toRow(key: string, value: unknown): EvidenceRow {
-  return { key, label: signalLabel(key), value: formatSignalValue(key, value) };
+// Short labels for a signal that shares its resolver's name, used only
+// inside that resolver's group so the row doesn't repeat the heading
+// ("Filename stem" / "Stem: dsc01301"). A flat row keeps the full label.
+const SELF_SIGNAL_LABELS: Readonly<Record<string, string>> = {
+  filename_stem: "Stem",
+};
+
+function toRow(key: string, value: unknown, groupKey?: string): EvidenceRow {
+  const label =
+    key === groupKey ? (lookup(SELF_SIGNAL_LABELS, key) ?? signalLabel(key)) : signalLabel(key);
+  return { key, label, value: formatSignalValue(key, value) };
 }
 
 export function formatEvidence(evidenceJson?: string | null): FormattedEvidence {
@@ -160,7 +169,7 @@ export function formatEvidence(evidenceJson?: string | null): FormattedEvidence 
       groups.push({
         key,
         label: resolverLabel(key),
-        rows: Object.entries(value).map(([k, v]) => toRow(k, v)),
+        rows: Object.entries(value).map(([k, v]) => toRow(k, v, key)),
       });
     } else {
       flat.push(toRow(key, value));
