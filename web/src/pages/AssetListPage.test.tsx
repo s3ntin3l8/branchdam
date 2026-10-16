@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
@@ -266,6 +266,44 @@ describe("AssetListPage batch trash", () => {
     expect(screen.getByRole("checkbox", { name: "Select all on this page" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Select t.jpg" })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Select m.jpg" })).not.toBeChecked();
+  });
+
+  it("drops a selected row from the selection when a refetch shows it untrashable", async () => {
+    vi.mocked(api.getAssetFacets).mockResolvedValue({ cameraModels: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+    vi.mocked(api.listAssets).mockResolvedValue({
+      assets: [
+        baseAsset({ id: 1, filePath: "/scratch/a.jpg", fileName: "a.jpg" }),
+        baseAsset({ id: 2, filePath: "/scratch/b.jpg", fileName: "b.jpg" }),
+      ],
+      total: 2,
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <AssetListPage />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByText("/scratch/a.jpg")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    vi.mocked(api.listAssets).mockResolvedValue({
+      assets: [
+        baseAsset({ id: 1, filePath: "/scratch/a.jpg", fileName: "a.jpg" }),
+        baseAsset({ id: 2, filePath: "/scratch/b.jpg", fileName: "b.jpg", lifecycleState: "MISSING" }),
+      ],
+      total: 2,
+    });
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+
+    await waitFor(() => expect(screen.getByText("1 selected")).toBeInTheDocument());
+    expect(screen.getByRole("checkbox", { name: "Select b.jpg" })).not.toBeChecked();
   });
 
   it("issues one trash call per selected id on confirm", async () => {

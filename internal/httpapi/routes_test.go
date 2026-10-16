@@ -468,6 +468,7 @@ func TestInheritMetadataRefusesProjectFileChild(t *testing.T) {
 // read-only location, so the preview never promises a write the confirm
 // click would then be denied.
 func TestInheritMetadataDryRunWritesNothing(t *testing.T) {
+	fakeExiftoolOnPath(t)
 	root := t.TempDir()
 	srv, database, parent, child := inheritTestServer(t, root)
 	resolved, _ := filepath.EvalSymlinks(root)
@@ -6051,4 +6052,61 @@ func TestAgentRebase_RejectsMalformedNodeUUIDAndHash(t *testing.T) {
 			t.Errorf("%s: status = %d, want 400, body = %s", name, rr.Code, rr.Body.String())
 		}
 	}
+}
+
+// fakeExiftoolOnPath puts a do-nothing "exiftool" first on PATH so a
+// probe.New() built afterwards reports exiftool as available. Only for
+// paths that never run it (the dry run plans from stored metadata).
+func fakeExiftoolOnPath(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "exiftool"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake exiftool: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestInheritMetadataDryRunRefusesWhatTheWriteWould: the preview must not
+// promise a write the confirm click would be denied -- neither without
+// exiftool nor for a MISSING child whose file is not on disk.
+func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
+	seedParentMake := func(t *testing.T, database *db.DB, parentID int64) {
+		t.Helper()
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.InsertNodeMetadata(context.Background(), sqlcgen.InsertNodeMetadataParams{
+				NodeID: parentID, Source: "exiftool", Key: "EXIF:Make", Value: "SONY",
+			})
+		}); err != nil {
+			t.Fatalf("seed parent metadata: %v", err)
+		}
+	}
+
+	t.Run("no exiftool", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Errorf("%q: status = %d, want 503, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("MISSING child", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			return q.MarkNodeMissing(context.Background(), child.ID)
+		}); err != nil {
+			t.Fatalf("mark child MISSING: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "MISSING") {
+				t.Errorf("%q: status = %d, want 409 naming MISSING, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
 }

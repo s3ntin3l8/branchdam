@@ -205,6 +205,8 @@ describe("AssetDetailPage MISSING asset", () => {
     expect(screen.getByText("Missing on disk")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^trash$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /free up space/i })).not.toBeInTheDocument();
+    // Its file is gone, so there is nothing to write inherited tags into.
+    expect(screen.queryByRole("button", { name: /inherit metadata/i })).not.toBeInTheDocument();
   });
 });
 

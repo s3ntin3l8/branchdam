@@ -31,6 +31,9 @@ var (
 	ErrIsProjectFile    = errors.New("cannot inherit metadata into a project file")
 	ErrNoParent         = errors.New("asset has no resolved parent edge to inherit from")
 	ErrIneligibleParent = errors.New("cannot inherit from a Tier-3-resolved or non-ancestry (duplicate/sidecar) parent edge")
+	// ErrChildMissing: the child is MISSING, so there is no file at its
+	// recorded path to write the tags into.
+	ErrChildMissing = errors.New("asset is MISSING: its file is not on disk")
 )
 
 // ErrParentUnavailable indicates that the parent asset is in an archived or missing state.
@@ -319,12 +322,27 @@ func PlanInheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (
 	if err != nil {
 		return nil, err
 	}
-	return planInheritFor(ctx, deps, child)
+	plan, err := planInheritFor(ctx, deps, child)
+	if err != nil {
+		return nil, err
+	}
+	// The write needs exiftool for a non-empty plan; refuse the preview the
+	// same way, so it never promises a write the confirm would then refuse.
+	if len(plan.Tags) > 0 && !exiftoolAvailable(deps) {
+		return nil, probe.ErrToolUnavailable
+	}
+	return plan, nil
+}
+
+// exiftoolAvailable reports whether the tag write can run.
+func exiftoolAvailable(deps InheritDeps) bool {
+	return deps.Prober != nil && deps.Prober.HasExiftool()
 }
 
 // loadInheritChild loads the child node and runs the checks both the plan
 // and the write paths make before touching parent edges: the node exists
-// and isn't ARCHIVED, isn't a project file, and its location accepts writes.
+// and isn't ARCHIVED or MISSING, isn't a project file, and its location
+// accepts writes.
 func loadInheritChild(ctx context.Context, deps InheritDeps, childID int64) (sqlcgen.MediaNode, error) {
 	if deps.DB == nil {
 		return sqlcgen.MediaNode{}, errors.New("database is nil")
@@ -338,6 +356,9 @@ func loadInheritChild(ctx context.Context, deps InheritDeps, childID int64) (sql
 	}
 	if child.LifecycleState == "ARCHIVED" {
 		return child, ErrNodeNotFound
+	}
+	if child.LifecycleState == "MISSING" {
+		return child, ErrChildMissing
 	}
 
 	// Refuse project archive files
@@ -423,7 +444,7 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 		return tags, nil
 	}
 
-	if deps.Prober == nil {
+	if !exiftoolAvailable(deps) {
 		return nil, probe.ErrToolUnavailable
 	}
 

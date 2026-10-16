@@ -132,6 +132,19 @@ export default function AssetListPage() {
     setRestoreTargetId(null);
   }
 
+  // A selected row that became untrashable (a refetch shows it TRASHED or
+  // MISSING) can't be unchecked any more -- its checkbox is disabled -- so
+  // drop it from the selection here instead of letting it inflate the count
+  // and the batch.
+  const staleSelected = assets.filter((a) => !canTrash(a) && selectedIds.has(a.id));
+  if (staleSelected.length > 0) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const a of staleSelected) next.delete(a.id);
+      return next;
+    });
+  }
+
   const selectableIds = assets.filter(canTrash).map((a) => a.id);
   const allSelectableSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
   const someSelected = selectedIds.size > 0;

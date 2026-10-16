@@ -509,7 +509,9 @@ export default function AssetDetailPage() {
       <section>
         <div className="mb-2 flex items-center justify-between">
           <h2 className="text-sm font-medium text-neutral-400">Metadata</h2>
-          {asset.lifecycleState !== "ARCHIVED" && <AssetInheritMetadataControl asset={asset} />}
+          {asset.lifecycleState !== "ARCHIVED" && asset.lifecycleState !== "MISSING" && (
+            <AssetInheritMetadataControl asset={asset} />
+          )}
         </div>
         <dl className="rounded border border-neutral-800 p-3">
           <Field label="Node UUID" value={asset.nodeUuid} />

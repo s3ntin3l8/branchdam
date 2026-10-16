@@ -1153,6 +1153,9 @@ func (s *Server) handleInheritMetadata(ctx context.Context, in *InheritMetadataI
 		if errors.Is(err, pipeline.ErrIsProjectFile) {
 			return nil, huma.Error409Conflict("cannot inherit metadata into a project file")
 		}
+		if errors.Is(err, pipeline.ErrChildMissing) {
+			return nil, huma.Error409Conflict("asset is MISSING: its file is not on disk")
+		}
 		var roErr *storage.ErrReadOnlyTier
 		if errors.As(err, &roErr) {
 			return nil, huma.Error409Conflict("cannot inherit metadata into a read-only location (tier " + roErr.Tier + ")")
