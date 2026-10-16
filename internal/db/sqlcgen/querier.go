@@ -579,7 +579,17 @@ type Querier interface {
 	// CTE to a sqlc v1.31.1 placeholder-counting bug; disproven by issue #413's
 	// fix -- sqlc.arg(before_id) used twice below, once inside the CTE and once
 	// in the outer WHERE, correctly collapses to a single BeforeID field.)
+	//
+	// Optional server-side filters (tier, resolver, relationship_type,
+	// min_confidence) are resolved once in the f CTE -- each CAST so sqlc types
+	// the param -- and applied identically to total_rows and the page, so
+	// total is the size of the FILTERED queue and keyset paging walks only
+	// the filtered rows. NULL means "no filter".
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
+	// Distinct resolvers across the whole NEEDS_REVIEW queue, for the audit
+	// page's resolver filter -- the options must come from the server now that
+	// filtering is server-side, not from whichever page happens to be loaded.
+	ListAuditQueueResolvers(ctx context.Context) ([]string, error)
 	// COALESCE is not a null-guard here -- the WHERE clause already excludes
 	// NULL/empty camera_model -- it exists so sqlc infers []string instead of
 	// []sql.NullString: camera_model is a nullable column (00001_init.sql), and
@@ -1103,6 +1113,15 @@ type Querier interface {
 	RegisterResolveTimelineScope(ctx context.Context, arg RegisterResolveTimelineScopeParams) error
 	// See ConfirmMediaEdge's comment -- same shape, same reasoning.
 	RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error)
+	// Backs POST /api/v1/edges/{id}/reset-review: hands a human decision
+	// (CONFIRMED/REJECTED) back to the review queue as NEEDS_REVIEW. The
+	// review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
+	// is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
+	// states, and only a human decision is a human's to undo. reviewed_at /
+	// reviewed_by are cleared: the schema only requires them for
+	// CONFIRMED/REJECTED, and keeping them would claim a review that no longer
+	// stands (the actor_audit row written by the handler keeps the history).
+	ResetMediaEdgeReview(ctx context.Context, id int64) (int64, error)
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound
 	// are reset to PENDING_CLOUD_PUSH so the next worker pass re-attempts them --

@@ -218,6 +218,32 @@ export interface EdgeAuditEntry {
   phashDistance?: number;
 }
 
+// GET /api/v1/edges/audit query. Every filter is applied server-side to
+// both the page and total; beforeId is the keyset cursor (0 = first page).
+export interface AuditQueueParams {
+  limit?: number;
+  beforeId?: number;
+  tier?: number;
+  resolver?: string;
+  relationshipType?: Edge["relationshipType"];
+  minConfidence?: number;
+}
+
+export interface AuditQueueResponse {
+  entries: EdgeAuditEntry[];
+  total: number;
+  // Every resolver with a NEEDS_REVIEW edge (not just the loaded page's),
+  // for the resolver filter. Optional for older servers.
+  resolvers?: string[];
+}
+
+// POST /api/v1/edges/{id}/reset-review: a human CONFIRMED/REJECTED edge
+// back to NEEDS_REVIEW. Admin-only; 409 for a non-human-reviewed edge.
+export interface ResetEdgeReviewResponse {
+  ok: boolean;
+  previousState: "CONFIRMED" | "REJECTED";
+}
+
 export interface CreateEdgeInput {
   sourceNodeId: number;
   targetNodeId: number;

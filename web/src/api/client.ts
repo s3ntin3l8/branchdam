@@ -7,6 +7,8 @@ import type {
   AssetSyncStatus,
   AuditEntry,
   AuditQueryParams,
+  AuditQueueParams,
+  AuditQueueResponse,
   CheckContentResult,
   CompanionPairingDetail,
   Config,
@@ -19,7 +21,6 @@ import type {
   Edge,
   CreatePatInput,
   CreatePatResponse,
-  EdgeAuditEntry,
   InheritMetadataResponse,
   JobsQueryParams,
   LineageResponse,
@@ -51,6 +52,7 @@ import type {
   PutStorageLocationRequest,
   RenameCompanionPairingRequest,
   RenameCompanionPairingResponse,
+  ResetEdgeReviewResponse,
   RevokeCompanionPairingResponse,
   RevokeUserSessionsResponse,
   RotateCompanionPairingRequest,
@@ -298,14 +300,20 @@ export const api = {
   streamUrl: (id: number, version?: string) =>
     `/api/v1/assets/${id}/stream${version ? `?v=${encodeURIComponent(version)}` : ""}`,
 
-  listAuditQueue: (params: { limit?: number; beforeId?: number } = {}) => {
+  listAuditQueue: (params: AuditQueueParams = {}) => {
     const qs = new URLSearchParams();
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.beforeId) qs.set("beforeId", String(params.beforeId));
-    return request<{ entries: EdgeAuditEntry[]; total: number }>(`/api/v1/edges/audit?${qs}`);
+    if (params.tier) qs.set("tier", String(params.tier));
+    if (params.resolver) qs.set("resolver", params.resolver);
+    if (params.relationshipType) qs.set("relationshipType", params.relationshipType);
+    if (params.minConfidence) qs.set("minConfidence", String(params.minConfidence));
+    return request<AuditQueueResponse>(`/api/v1/edges/audit?${qs}`);
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),
   rejectEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/reject`, { method: "POST" }),
+  resetEdgeReview: (id: number) =>
+    request<ResetEdgeReviewResponse>(`/api/v1/edges/${id}/reset-review`, { method: "POST" }),
   createEdge: (input: CreateEdgeInput) =>
     request<Edge>("/api/v1/edges", {
       method: "POST",

@@ -84,13 +84,29 @@ LIMIT ?1 OFFSET ?2;
 -- CTE to a sqlc v1.31.1 placeholder-counting bug; disproven by issue #413's
 -- fix -- sqlc.arg(before_id) used twice below, once inside the CTE and once
 -- in the outer WHERE, correctly collapses to a single BeforeID field.)
-WITH cursor(cd, id) AS (
+--
+-- Optional server-side filters (tier, resolver, relationship_type,
+-- min_confidence) are resolved once in the f CTE -- each CAST so sqlc types
+-- the param -- and applied identically to total_rows and the page, so
+-- total is the size of the FILTERED queue and keyset paging walks only
+-- the filtered rows. NULL means "no filter".
+WITH f(tier, resolver, relationship_type, min_confidence) AS (
+  SELECT CAST(sqlc.narg(tier) AS INTEGER) AS tier,
+         CAST(sqlc.narg(resolver) AS TEXT) AS resolver,
+         CAST(sqlc.narg(relationship_type) AS TEXT) AS relationship_type,
+         CAST(sqlc.narg(min_confidence) AS REAL) AS min_confidence
+),
+cursor(cd, id) AS (
   SELECT confidence, id FROM media_edges WHERE id = CAST(sqlc.arg(before_id) AS INTEGER)
 ),
 total_rows AS (
   SELECT COUNT(*) AS n
-  FROM v_media_edges_resolved e
+  FROM v_media_edges_resolved e, f
   WHERE e.review_state = 'NEEDS_REVIEW'
+    AND (f.tier IS NULL OR e.tier = f.tier)
+    AND (f.resolver IS NULL OR e.resolver = f.resolver)
+    AND (f.relationship_type IS NULL OR e.relationship_type = f.relationship_type)
+    AND (f.min_confidence IS NULL OR e.confidence >= f.min_confidence)
 )
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
        e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
@@ -104,11 +120,25 @@ SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confiden
 FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
+CROSS JOIN f
 WHERE e.review_state = 'NEEDS_REVIEW'
+  AND (f.tier IS NULL OR e.tier = f.tier)
+  AND (f.resolver IS NULL OR e.resolver = f.resolver)
+  AND (f.relationship_type IS NULL OR e.relationship_type = f.relationship_type)
+  AND (f.min_confidence IS NULL OR e.confidence >= f.min_confidence)
   AND (CAST(sqlc.arg(before_id) AS INTEGER) = 0 OR e.confidence < (SELECT cd FROM cursor)
        OR (e.confidence = (SELECT cd FROM cursor) AND e.id > (SELECT id FROM cursor)))
 ORDER BY e.confidence DESC, e.id ASC
 LIMIT ?1;
+
+-- name: ListAuditQueueResolvers :many
+-- Distinct resolvers across the whole NEEDS_REVIEW queue, for the audit
+-- page's resolver filter -- the options must come from the server now that
+-- filtering is server-side, not from whichever page happens to be loaded.
+SELECT DISTINCT resolver
+FROM media_edges
+WHERE review_state = 'NEEDS_REVIEW'
+ORDER BY resolver ASC;
 
 
 -- name: ListAncestors :many

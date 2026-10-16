@@ -76,6 +76,9 @@ const (
 	EventUserDisabled        = "user.disabled"
 	EventUserUpdated         = "user.updated"
 	EventUserSessionsRevoked = "user.sessions_revoked"
+	// A human CONFIRMED/REJECTED edge decision handed back to the review
+	// queue (POST /api/v1/edges/{id}/reset-review).
+	EventEdgeReviewReset = "edge.review_reset"
 )
 
 // Event is a typed event name. Anything that wants to write a new kind

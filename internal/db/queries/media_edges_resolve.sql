@@ -123,6 +123,20 @@ SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, upda
 WHERE id = ?1
 RETURNING target_node_id;
 
+-- name: ResetMediaEdgeReview :one
+-- Backs POST /api/v1/edges/{id}/reset-review: hands a human decision
+-- (CONFIRMED/REJECTED) back to the review queue as NEEDS_REVIEW. The
+-- review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
+-- is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
+-- states, and only a human decision is a human's to undo. reviewed_at /
+-- reviewed_by are cleared: the schema only requires them for
+-- CONFIRMED/REJECTED, and keeping them would claim a review that no longer
+-- stands (the actor_audit row written by the handler keeps the history).
+UPDATE media_edges
+SET review_state = 'NEEDS_REVIEW', reviewed_at = NULL, reviewed_by = NULL, updated_at = unixepoch()
+WHERE id = ?1 AND review_state IN ('CONFIRMED', 'REJECTED')
+RETURNING target_node_id;
+
 -- name: ResolvedEdgeParentMissing :one
 -- Backs T7's regression guard: v_media_edges_resolved.parent_missing must
 -- be true for every relationship_type, not just DERIVED_FROM -- the thing

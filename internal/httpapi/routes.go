@@ -80,6 +80,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/edges/audit", s.handleAuditQueue)
 	huma.Post(api, "/api/v1/edges/{id}/confirm", s.handleConfirmEdge)
 	huma.Post(api, "/api/v1/edges/{id}/reject", s.handleRejectEdge)
+	huma.Post(api, "/api/v1/edges/{id}/reset-review", s.handleResetEdgeReview)
 
 	huma.Get(api, "/api/v1/audit", s.handleAudit)
 	huma.Get(api, "/api/v1/users", s.handleListUsers)
@@ -1395,6 +1396,20 @@ type AuditQueueInput struct {
 	// drifted when confirm/reject mutated the queue while the user was
 	// on page N.
 	BeforeID int64 `query:"beforeId" default:"0" minimum:"0"`
+	// Server-side filters, applied to both the page and Total (so Total
+	// is the size of the filtered queue, and the SPA's batch actions and
+	// keyset paging see the same set). Zero values mean "no filter".
+	Tier             int64   `query:"tier" default:"0" minimum:"0" maximum:"3"`
+	Resolver         string  `query:"resolver" maxLength:"128"`
+	RelationshipType string  `query:"relationshipType"`
+	MinConfidence    float64 `query:"minConfidence" default:"0" minimum:"0" maximum:"1"`
+}
+
+// auditRelationshipTypes is media_edges.relationship_type's CHECK set; a
+// relationshipType filter outside it is a 422 rather than an empty page.
+var auditRelationshipTypes = map[string]bool{
+	"DERIVED_FROM": true, "FINAL_EXPORT": true, "PROXY_OF": true,
+	"PROJECT_SIDECAR": true, "DUPLICATE_OF": true,
 }
 
 type auditNodeDTO struct {
@@ -1429,6 +1444,9 @@ type AuditQueueOutput struct {
 	Body struct {
 		Entries []auditEntryDTO `json:"entries"`
 		Total   int64           `json:"total"`
+		// Resolvers lists every resolver with a NEEDS_REVIEW edge, for
+		// the filter dropdown -- independent of the current filter/page.
+		Resolvers []string `json:"resolvers"`
 	}
 }
 
@@ -1438,14 +1456,35 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 	// offset+separate-COUNT(*) pair, which both drifted across mutations
 	// (offset shifted out from under the user) and could disagree
 	// (confirm between list and count made total stale).
-	rows, err := s.db.Reader.ListAuditQueueDetailed(ctx, sqlcgen.ListAuditQueueDetailedParams{
+	params := sqlcgen.ListAuditQueueDetailedParams{
 		Limit:    in.Limit,
 		BeforeID: in.BeforeID,
-	})
+	}
+	if in.Tier > 0 {
+		params.Tier = sql.NullInt64{Int64: in.Tier, Valid: true}
+	}
+	if r := strings.TrimSpace(in.Resolver); r != "" {
+		params.Resolver = sql.NullString{String: r, Valid: true}
+	}
+	if in.RelationshipType != "" {
+		if !auditRelationshipTypes[in.RelationshipType] {
+			return nil, huma.Error422UnprocessableEntity("unknown relationshipType " + strconv.Quote(in.RelationshipType))
+		}
+		params.RelationshipType = sql.NullString{String: in.RelationshipType, Valid: true}
+	}
+	if in.MinConfidence > 0 {
+		params.MinConfidence = sql.NullFloat64{Float64: in.MinConfidence, Valid: true}
+	}
+	rows, err := s.db.Reader.ListAuditQueueDetailed(ctx, params)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list audit queue", err)
 	}
+	resolvers, err := s.db.Reader.ListAuditQueueResolvers(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list audit queue resolvers", err)
+	}
 	out := &AuditQueueOutput{}
+	out.Body.Resolvers = resolvers
 	out.Body.Entries = make([]auditEntryDTO, len(rows))
 	for i, r := range rows {
 		if i == 0 {
@@ -1630,6 +1669,88 @@ func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*Ed
 	}
 	out := &EdgeReviewOutput{}
 	out.Body.OK = true
+	return out, nil
+}
+
+// --- /api/v1/edges/{id}/reset-review ---
+
+type EdgeResetReviewOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+		// PreviousState is the human decision that was undone
+		// (CONFIRMED or REJECTED); the edge is NEEDS_REVIEW again.
+		PreviousState string `json:"previousState"`
+	}
+}
+
+// handleResetEdgeReview undoes a human review decision: a CONFIRMED or
+// REJECTED edge goes back to NEEDS_REVIEW (and so back into the audit
+// queue). It is the only path out of a human-locked state, and it is
+// itself human-only (invariant 6): an admin browser principal, never a
+// machine/agent principal, and never for a resolver state (AUTO_ACCEPTED,
+// NEEDS_REVIEW), which is not a human decision to undo -- that is a 409.
+// The reset is written to actor_audit with the decision it undid.
+func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput) (*EdgeResetReviewOutput, error) {
+	if err := s.requireSettingsAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindUser || !p.Authenticated {
+		return nil, huma.Error403Forbidden("only a signed-in person can reset a review decision")
+	}
+
+	errNotHumanReviewed := errors.New("edge is not human-reviewed")
+	var before sqlcgen.MediaEdge
+	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		edge, err := q.GetMediaEdge(ctx, in.ID)
+		if err != nil {
+			return err
+		}
+		before = edge
+		targetNodeID, err := q.ResetMediaEdgeReview(ctx, in.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The edge exists (GetMediaEdge found it), so the state
+			// guard is what matched nothing.
+			return errNotHumanReviewed
+		}
+		if err != nil {
+			return err
+		}
+		return recomputeGraphStatus(ctx, q, targetNodeID)
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errNotHumanReviewed):
+			return nil, huma.Error409Conflict(fmt.Sprintf("edge %d is %s; only a CONFIRMED or REJECTED review can be reset", in.ID, before.ReviewState))
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, huma.Error404NotFound("edge not found")
+		default:
+			return nil, huma.Error500InternalServerError("reset edge review", err)
+		}
+	}
+
+	if s.audit != nil {
+		details := map[string]any{
+			"edgeId":           before.ID,
+			"sourceNodeId":     before.SourceNodeID,
+			"targetNodeId":     before.TargetNodeID,
+			"relationshipType": before.RelationshipType,
+			"resolver":         before.Resolver,
+			"previousState":    before.ReviewState,
+		}
+		if before.ReviewedBy.Valid {
+			details["previousReviewedBy"] = before.ReviewedBy.String
+		}
+		if before.ReviewedAt.Valid {
+			details["previousReviewedAt"] = before.ReviewedAt.Int64
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventEdgeReviewReset, "edge", strconv.FormatInt(before.ID, 10), details); err != nil {
+			s.log.Warn("failed to write actor audit for edge review reset", "error", err)
+		}
+	}
+
+	out := &EdgeResetReviewOutput{}
+	out.Body.OK = true
+	out.Body.PreviousState = before.ReviewState
 	return out, nil
 }
 

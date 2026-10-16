@@ -1,21 +1,55 @@
-import { useId, useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
-import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import {
   useAuditQueue,
   useConfirmEdge,
   useCreateEdge,
   useInvalidateEdgeReviewQueries,
   useRejectEdge,
+  useResetEdgeReview,
 } from "../hooks/queries";
 import { api } from "../api/client";
 import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
 import Dialog from "../components/Dialog";
-import type { EdgeAuditEntry } from "../api/types";
+import ConfirmDialog from "../components/ConfirmDialog";
+import type { AuditNode, AuditQueueParams, EdgeAuditEntry } from "../api/types";
 import { formatEvidence, type EvidenceRow } from "../lib/formatEvidence";
 
 const PAGE_SIZE = 50;
+// "Select all matching" pulls the filtered queue in pages of this size and
+// stops at SELECT_ALL_CAP edges, so one click can't queue an unbounded batch.
+const SELECT_ALL_PAGE_SIZE = 500;
+const SELECT_ALL_CAP = 1000;
+// How many recent decisions keep an Undo button -- at least a full
+// "select all matching" batch, so every edge of a batch stays undoable.
+const RECENT_LIMIT = SELECT_ALL_CAP;
+
+const RELATIONSHIP_TYPES: { value: EdgeAuditEntry["relationshipType"]; label: string }[] = [
+  { value: "DERIVED_FROM", label: "Derived From" },
+  { value: "FINAL_EXPORT", label: "Final Export" },
+  { value: "PROXY_OF", label: "Proxy Of" },
+  { value: "PROJECT_SIDECAR", label: "Project Sidecar" },
+  { value: "DUPLICATE_OF", label: "Duplicate Of" },
+];
+
+const MIN_CONFIDENCE_OPTIONS = ["0.5", "0.6", "0.7", "0.8", "0.9"];
+
+type ReviewAction = "confirm" | "reject";
+
+// A decision made on this page this session, kept so it can be undone
+// (POST /edges/{id}/reset-review) after the edge has left the queue.
+interface RecentDecision {
+  id: number;
+  action: ReviewAction;
+  summary: string;
+}
+
+function edgeSummary(entry: EdgeAuditEntry): string {
+  const src = entry.sourceNode?.fileName || `Node ${entry.sourceNodeId}`;
+  const tgt = entry.targetNode?.fileName || `Node ${entry.targetNodeId}`;
+  return `${src} -> ${tgt} (${entry.relationshipType})`;
+}
 
 function formatTimestamp(unix?: number): string {
   if (!unix) return "—";
@@ -84,16 +118,94 @@ function EvidencePanel({ evidenceJson }: { evidenceJson?: string }) {
   );
 }
 
-function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
+function NodePanel({
+  heading,
+  headingClass,
+  nodeId,
+  node,
+}: {
+  heading: string;
+  headingClass: string;
+  nodeId: number;
+  node?: AuditNode;
+}) {
+  const name = node?.fileName || `Node ${nodeId}`;
+  return (
+    <div className="rounded border border-neutral-800/60 bg-neutral-950/40 p-3">
+      <div className={`mb-2 text-xs font-bold uppercase tracking-wider ${headingClass}`}>
+        {heading} (Node #{nodeId})
+      </div>
+      <div className="mb-2 flex items-start gap-3">
+        <Link to={`/assets/${nodeId}`} aria-hidden="true" tabIndex={-1} className="shrink-0">
+          <Thumbnail
+            assetId={nodeId}
+            thumbState={node?.thumbState ?? "PENDING"}
+            alt={name}
+            className="h-20 w-20 shrink-0 rounded object-cover"
+          />
+        </Link>
+        <div className="min-w-0">
+          <Link
+            to={`/assets/${nodeId}`}
+            className="block truncate text-sm font-semibold text-sky-400 hover:underline"
+            title={node?.fileName}
+          >
+            {name}
+          </Link>
+          <div className="truncate text-xs text-neutral-500" title={node?.filePath}>
+            {node?.filePath || "—"}
+          </div>
+        </div>
+      </div>
+      <div className="mt-2 space-y-1 text-xs text-neutral-400">
+        <div>
+          <span className="text-neutral-500">Captured:</span> {formatTimestamp(node?.capturedAtUnix)}
+        </div>
+        <div>
+          <span className="text-neutral-500">Camera:</span> {node?.cameraModel || "—"}
+        </div>
+        <div>
+          <span className="text-neutral-500">pHash:</span>{" "}
+          {node?.phash ? <code className="font-mono text-neutral-300">{node.phash}</code> : "—"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AuditRow({
+  entry,
+  selected,
+  onToggleSelected,
+  onReviewed,
+}: {
+  entry: EdgeAuditEntry;
+  selected: boolean;
+  onToggleSelected: (entry: EdgeAuditEntry) => void;
+  onReviewed: (decision: RecentDecision) => void;
+}) {
   const confirm = useConfirmEdge();
   const reject = useRejectEdge();
+  const [rejectOpen, setRejectOpen] = useState(false);
   const busy = confirm.isPending || reject.isPending;
 
+  const record = (action: ReviewAction) => onReviewed({ id: entry.id, action, summary: edgeSummary(entry) });
+
   return (
-    <div className="rounded border border-neutral-800 bg-neutral-900/50 p-4">
+    <div
+      className={`rounded border bg-neutral-900/50 p-4 ${selected ? "border-indigo-600/70" : "border-neutral-800"}`}
+      data-testid={`audit-row-${entry.id}`}
+    >
       {/* Top Bar: Edge Meta & Action Buttons */}
       <div className="mb-3 flex items-center justify-between border-b border-neutral-800/80 pb-3">
         <div className="flex flex-wrap items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            aria-label={`Select edge #${entry.id}`}
+            checked={selected}
+            onChange={() => onToggleSelected(entry)}
+            className="rounded border-neutral-700 bg-neutral-800 text-indigo-500 focus:ring-0"
+          />
           <span className="font-semibold text-neutral-200">Edge #{entry.id}</span>
           <span className="rounded bg-indigo-900 px-2 py-0.5 text-xs text-indigo-200 font-medium">
             {entry.relationshipType}
@@ -115,7 +227,7 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
           <button
             type="button"
             disabled={busy}
-            onClick={() => confirm.mutate(entry.id)}
+            onClick={() => confirm.mutate(entry.id, { onSuccess: () => record("confirm") })}
             className="rounded bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
           >
             Confirm
@@ -123,7 +235,10 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
           <button
             type="button"
             disabled={busy}
-            onClick={() => reject.mutate(entry.id)}
+            onClick={() => {
+              reject.reset();
+              setRejectOpen(true);
+            }}
             className="rounded bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
           >
             Reject
@@ -131,48 +246,13 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
         </div>
       </div>
 
-      {(confirm.isError || reject.isError) && (
-        <div className="mb-3 text-xs text-red-400">
-          Failed to {confirm.isError ? "confirm" : "reject"} edge: {String(confirm.error || reject.error)}
-        </div>
+      {confirm.isError && (
+        <div className="mb-3 text-xs text-red-400">Failed to confirm edge: {String(confirm.error)}</div>
       )}
 
       {/* Side-by-side comparison */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {/* Source Node (Parent) */}
-        <div className="rounded border border-neutral-800/60 bg-neutral-950/40 p-3">
-          <div className="mb-2 text-xs font-bold uppercase tracking-wider text-blue-400">
-            Parent (Node #{entry.sourceNodeId})
-          </div>
-          <div className="mb-2 flex items-start gap-3">
-            <Thumbnail
-              assetId={entry.sourceNodeId}
-              thumbState={entry.sourceNode?.thumbState ?? "PENDING"}
-              alt={entry.sourceNode?.fileName ?? `Node ${entry.sourceNodeId}`}
-              className="h-20 w-20 shrink-0 rounded object-cover"
-            />
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-neutral-200" title={entry.sourceNode?.fileName}>
-                {entry.sourceNode?.fileName || `Node ${entry.sourceNodeId}`}
-              </div>
-              <div className="truncate text-xs text-neutral-500" title={entry.sourceNode?.filePath}>
-                {entry.sourceNode?.filePath || "—"}
-              </div>
-            </div>
-          </div>
-          <div className="mt-2 space-y-1 text-xs text-neutral-400">
-            <div>
-              <span className="text-neutral-500">Captured:</span> {formatTimestamp(entry.sourceNode?.capturedAtUnix)}
-            </div>
-            <div>
-              <span className="text-neutral-500">Camera:</span> {entry.sourceNode?.cameraModel || "—"}
-            </div>
-            <div>
-              <span className="text-neutral-500">pHash:</span>{" "}
-              {entry.sourceNode?.phash ? <code className="font-mono text-neutral-300">{entry.sourceNode.phash}</code> : "—"}
-            </div>
-          </div>
-        </div>
+        <NodePanel heading="Parent" headingClass="text-blue-400" nodeId={entry.sourceNodeId} node={entry.sourceNode} />
 
         {/* Signals / Deltas / Evidence */}
         <div className="flex flex-col justify-between rounded border border-neutral-800/60 bg-neutral-950/20 p-3">
@@ -198,42 +278,131 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
           <EvidencePanel evidenceJson={entry.evidenceJson} />
         </div>
 
-        {/* Target Node (Child) */}
-        <div className="rounded border border-neutral-800/60 bg-neutral-950/40 p-3">
-          <div className="mb-2 text-xs font-bold uppercase tracking-wider text-emerald-400">
-            Child (Node #{entry.targetNodeId})
-          </div>
-          <div className="mb-2 flex items-start gap-3">
-            <Thumbnail
-              assetId={entry.targetNodeId}
-              thumbState={entry.targetNode?.thumbState ?? "PENDING"}
-              alt={entry.targetNode?.fileName ?? `Node ${entry.targetNodeId}`}
-              className="h-20 w-20 shrink-0 rounded object-cover"
-            />
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-neutral-200" title={entry.targetNode?.fileName}>
-                {entry.targetNode?.fileName || `Node ${entry.targetNodeId}`}
-              </div>
-              <div className="truncate text-xs text-neutral-500" title={entry.targetNode?.filePath}>
-                {entry.targetNode?.filePath || "—"}
-              </div>
-            </div>
-          </div>
-          <div className="mt-2 space-y-1 text-xs text-neutral-400">
-            <div>
-              <span className="text-neutral-500">Captured:</span> {formatTimestamp(entry.targetNode?.capturedAtUnix)}
-            </div>
-            <div>
-              <span className="text-neutral-500">Camera:</span> {entry.targetNode?.cameraModel || "—"}
-            </div>
-            <div>
-              <span className="text-neutral-500">pHash:</span>{" "}
-              {entry.targetNode?.phash ? <code className="font-mono text-neutral-300">{entry.targetNode.phash}</code> : "—"}
-            </div>
-          </div>
+        <NodePanel heading="Child" headingClass="text-emerald-400" nodeId={entry.targetNodeId} node={entry.targetNode} />
+      </div>
+
+      {rejectOpen && (
+        <ConfirmDialog
+          titleId={`reject-edge-${entry.id}-title`}
+          title={`Reject Edge #${entry.id}`}
+          body={
+            <>
+              Reject <strong className="text-neutral-100">{edgeSummary(entry)}</strong>? The edge leaves the queue
+              and automated resolvers will not re-propose it. You can undo this from{" "}
+              <em>Recently reviewed</em> on this page.
+            </>
+          }
+          confirmLabel="Reject Edge"
+          pendingLabel="Rejecting…"
+          isPending={reject.isPending}
+          error={reject.isError ? reject.error : undefined}
+          errorLabel="Failed to reject edge"
+          onConfirm={() =>
+            reject.mutate(entry.id, {
+              onSuccess: () => {
+                setRejectOpen(false);
+                record("reject");
+              },
+            })
+          }
+          onCancel={() => setRejectOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// RecentlyReviewed lists this session's decisions with an Undo each: the
+// reset-review endpoint hands a CONFIRMED/REJECTED edge back to the queue.
+function RecentlyReviewed({
+  decisions,
+  onUndone,
+  onDismiss,
+}: {
+  decisions: RecentDecision[];
+  onUndone: (id: number) => void;
+  onDismiss: () => void;
+}) {
+  const reset = useResetEdgeReview();
+  const [targetId, setTargetId] = useState<number | null>(null);
+  // "Undo all" loops the single-edge endpoint (one actor_audit row each)
+  // and refreshes once at the end, like the batch confirm/reject.
+  const invalidateEdgeReview = useInvalidateEdgeReviewQueries();
+  const [undoingAll, setUndoingAll] = useState(false);
+  const [undoAllError, setUndoAllError] = useState("");
+  if (decisions.length === 0) return null;
+
+  const undoAll = async () => {
+    setUndoingAll(true);
+    setUndoAllError("");
+    let failed = 0;
+    for (const d of decisions) {
+      try {
+        await api.resetEdgeReview(d.id);
+        onUndone(d.id);
+      } catch {
+        failed++;
+      }
+    }
+    setUndoingAll(false);
+    invalidateEdgeReview();
+    if (failed > 0) setUndoAllError(`${failed} of ${decisions.length} could not be undone.`);
+  };
+  return (
+    <section
+      aria-label="Recently reviewed"
+      className="rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs space-y-2"
+    >
+      <div className="flex items-center justify-between">
+        <h2 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px]">Recently reviewed</h2>
+        <div className="flex items-center gap-3">
+          {undoAllError && <span className="text-red-400">{undoAllError}</span>}
+          {decisions.length > 1 && (
+            <button
+              type="button"
+              disabled={undoingAll || reset.isPending}
+              onClick={() => void undoAll()}
+              className="rounded border border-neutral-700 bg-neutral-800 px-2 py-0.5 text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
+            >
+              {undoingAll ? "Undoing…" : `Undo all (${decisions.length})`}
+            </button>
+          )}
+          <button type="button" onClick={onDismiss} className="text-neutral-500 hover:text-neutral-300">
+            Dismiss
+          </button>
         </div>
       </div>
-    </div>
+      <ul className="max-h-48 space-y-1 overflow-y-auto">
+        {decisions.map((d) => (
+          <li key={d.id} className="flex items-center justify-between gap-3">
+            <span className="truncate text-neutral-300">
+              <span className={d.action === "confirm" ? "text-emerald-400" : "text-red-400"}>
+                {d.action === "confirm" ? "Confirmed" : "Rejected"}
+              </span>{" "}
+              edge #{d.id}: {d.summary}
+            </span>
+            <span className="flex shrink-0 items-center gap-2">
+              {reset.isError && targetId === d.id && (
+                <span className="text-red-400">Undo failed: {String(reset.error)}</span>
+              )}
+              <button
+                type="button"
+                aria-label={`Undo review of edge #${d.id}`}
+                disabled={reset.isPending || undoingAll}
+                onClick={() => {
+                  reset.reset();
+                  setTargetId(d.id);
+                  reset.mutate(d.id, { onSuccess: () => onUndone(d.id) });
+                }}
+                className="rounded border border-neutral-700 bg-neutral-800 px-2 py-0.5 text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
+              >
+                {reset.isPending && targetId === d.id ? "Undoing…" : "Undo"}
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -395,17 +564,17 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
 }
 
 function BatchConfirmModal({
-  isOpen,
   action,
   edges,
   onClose,
   onComplete,
 }: {
-  isOpen: boolean;
-  action: "confirm" | "reject";
+  action: ReviewAction;
   edges: EdgeAuditEntry[];
   onClose: () => void;
-  onComplete: () => void;
+  // Called once the run settles, with the ids that succeeded (failed ones
+  // stay selected so they can be retried).
+  onComplete: (succeeded: EdgeAuditEntry[], failedCount: number) => void;
 }) {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -415,12 +584,10 @@ function BatchConfirmModal({
   // fan-out (queue, list, 3 detail keys, unlinked count) after EVERY edge.
   const invalidateEdgeReview = useInvalidateEdgeReviewQueries();
 
-  if (!isOpen) return null;
-
   const handleExecute = async () => {
     setRunning(true);
     setErrorMsg("");
-    let succeeded = 0;
+    const succeeded: EdgeAuditEntry[] = [];
     let failed = 0;
     try {
       for (const edge of edges) {
@@ -430,24 +597,24 @@ function BatchConfirmModal({
           } else {
             await api.rejectEdge(edge.id);
           }
-          succeeded++;
+          succeeded.push(edge);
         } catch {
           failed++;
         }
-        setProgress(succeeded + failed);
+        setProgress(succeeded.length + failed);
       }
     } finally {
       setRunning(false);
       invalidateEdgeReview();
       if (failed > 0) {
         setErrorMsg(`${failed} of ${edges.length} edges failed to ${action}.`);
-      } else {
-        onComplete();
       }
+      onComplete(succeeded, failed);
     }
   };
 
   const percent = edges.length > 0 ? Math.round((progress / edges.length) * 100) : 0;
+  const verb = action === "confirm" ? "confirm" : "reject";
 
   return (
     <Dialog
@@ -458,8 +625,10 @@ function BatchConfirmModal({
       panelClassName="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4"
     >
         <p className="text-xs text-neutral-300">
-          Are you sure you want to <strong>{action}</strong> all{" "}
-          <strong className="text-neutral-100">{edges.length}</strong> currently filtered edge candidates on this page?
+          {verb === "confirm" ? "Confirm" : "Reject"} the{" "}
+          <strong className="text-neutral-100">{edges.length}</strong> selected edge
+          {edges.length === 1 ? "" : "s"}? Only the selected edges are changed, not the rest of the queue. Each one
+          can be undone from <em>Recently reviewed</em> afterwards.
         </p>
 
         {running && (
@@ -501,7 +670,7 @@ function BatchConfirmModal({
                   : "bg-red-600 text-white hover:bg-red-500"
               }`}
             >
-              {running ? "Processing…" : action === "confirm" ? "Confirm All" : "Reject All"}
+              {running ? "Processing…" : action === "confirm" ? "Confirm Selected" : "Reject Selected"}
             </button>
           )}
         </div>
@@ -509,60 +678,173 @@ function BatchConfirmModal({
   );
 }
 
+function parseTrail(raw: string | null): number[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((v) => Number(v))
+    .filter((v) => Number.isInteger(v) && v > 0);
+}
+
 export default function AuditQueuePage() {
-  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
-  // beforeId=0 means "first page". We store it in the URL so a deep
-  // link shares the right cursor; offset is intentionally not in the URL
-  // because offset drifts across mutations (confirm/reject on page N
-  // shifts the offset window).
-  const beforeId = Number(searchParams.get("beforeId") || "0") || 0;
-  const { data, isLoading, isError } = useAuditQueue({ limit: PAGE_SIZE, beforeId });
+
+  // Filters live in the URL and are applied server-side, so they cover the
+  // whole queue (and its total), not just the loaded page.
+  const tierFilter = searchParams.get("tier") || "";
+  const resolverFilter = searchParams.get("resolver") || "";
+  const relFilter = (searchParams.get("relationshipType") || "") as EdgeAuditEntry["relationshipType"] | "";
+  const minConfFilter = searchParams.get("minConfidence") || "";
+  const hasActiveFilters = Boolean(tierFilter || resolverFilter || relFilter || minConfFilter);
+
+  // Keyset paging: `trail` is the stack of cursors (the last id of each
+  // previous page) that led here, so Previous pops one instead of only
+  // being able to jump back to the first page. A legacy ?beforeId= link is
+  // a one-step trail.
+  const trail = useMemo(() => {
+    const t = parseTrail(searchParams.get("trail"));
+    if (t.length > 0) return t;
+    return parseTrail(searchParams.get("beforeId"));
+  }, [searchParams]);
+  const beforeId = trail.length > 0 ? trail[trail.length - 1] : 0;
+
+  const filterParams = useMemo<Omit<AuditQueueParams, "limit" | "beforeId">>(
+    () => ({
+      tier: tierFilter ? Number(tierFilter) : undefined,
+      resolver: resolverFilter || undefined,
+      relationshipType: relFilter || undefined,
+      minConfidence: minConfFilter ? Number(minConfFilter) : undefined,
+    }),
+    [tierFilter, resolverFilter, relFilter, minConfFilter]
+  );
+  const { data, isLoading, isError, isFetching } = useAuditQueue({ limit: PAGE_SIZE, beforeId, ...filterParams });
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [tierFilter, setTierFilter] = useState("");
-  const [resolverFilter, setResolverFilter] = useState("");
-  const [relFilter, setRelFilter] = useState("");
-  const [batchAction, setBatchAction] = useState<"confirm" | "reject" | null>(null);
+  const [batchAction, setBatchAction] = useState<ReviewAction | null>(null);
 
   const entries = useMemo(() => data?.entries ?? [], [data?.entries]);
   const total = data?.total ?? 0;
-  // hasMore: server returns total consistently with the page (single
-  // query with COUNT(*) OVER()). If the page is full, there may be more.
   const hasMore = entries.length === PAGE_SIZE;
 
   const resolvers = useMemo(() => {
-    return Array.from(new Set(entries.map((e) => e.resolver))).sort();
-  }, [entries]);
+    const fromServer = data?.resolvers ?? Array.from(new Set(entries.map((e) => e.resolver)));
+    // Keep a URL-selected resolver selectable even if it has since drained.
+    const all = new Set(fromServer);
+    if (resolverFilter) all.add(resolverFilter);
+    return Array.from(all).sort();
+  }, [data?.resolvers, entries, resolverFilter]);
 
-  const filteredEntries = useMemo(() => {
-    return entries.filter((e) => {
-      if (tierFilter && String(e.tier) !== tierFilter) return false;
-      if (resolverFilter && e.resolver !== resolverFilter) return false;
-      if (relFilter && e.relationshipType !== relFilter) return false;
-      return true;
+  // Selection spans pages within one filter set (so a batch can cover
+  // more than the loaded page) and is cleared when the filters change --
+  // a selection made under other filters would no longer be what the
+  // batch buttons claim.
+  const [selected, setSelected] = useState<Map<number, EdgeAuditEntry>>(() => new Map());
+  const filterKey = JSON.stringify(filterParams);
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (filterKey !== prevFilterKey) {
+    setPrevFilterKey(filterKey);
+    setSelected(new Map());
+  }
+  const selectedEdges = useMemo(() => Array.from(selected.values()), [selected]);
+  const pageAllSelected = entries.length > 0 && entries.every((e) => selected.has(e.id));
+
+  const toggleSelected = useCallback((entry: EdgeAuditEntry) => {
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (next.has(entry.id)) next.delete(entry.id);
+      else next.set(entry.id, entry);
+      return next;
     });
-  }, [entries, tierFilter, resolverFilter, relFilter]);
+  }, []);
 
-  const handleFirst = () => {
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.delete("beforeId");
-    setSearchParams(nextParams);
+  const togglePage = () => {
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (pageAllSelected) entries.forEach((e) => next.delete(e.id));
+      else entries.forEach((e) => next.set(e.id, e));
+      return next;
+    });
   };
 
+  const [selectingAll, setSelectingAll] = useState(false);
+  const [selectAllError, setSelectAllError] = useState("");
+  const selectAllMatching = async () => {
+    setSelectingAll(true);
+    setSelectAllError("");
+    try {
+      const next = new Map<number, EdgeAuditEntry>();
+      let cursor = 0;
+      while (next.size < SELECT_ALL_CAP) {
+        const res = await api.listAuditQueue({
+          limit: Math.min(SELECT_ALL_PAGE_SIZE, SELECT_ALL_CAP - next.size),
+          beforeId: cursor,
+          ...filterParams,
+        });
+        res.entries.forEach((e) => next.set(e.id, e));
+        if (res.entries.length === 0 || next.size >= res.total) break;
+        cursor = res.entries[res.entries.length - 1].id;
+      }
+      setSelected(next);
+    } catch (err) {
+      setSelectAllError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSelectingAll(false);
+    }
+  };
+
+  const [recent, setRecent] = useState<RecentDecision[]>([]);
+  const recordDecisions = useCallback((decisions: RecentDecision[]) => {
+    setRecent((prev) => {
+      const ids = new Set(decisions.map((d) => d.id));
+      return [...decisions, ...prev.filter((d) => !ids.has(d.id))].slice(0, RECENT_LIMIT);
+    });
+    setSelected((prev) => {
+      if (!decisions.some((d) => prev.has(d.id))) return prev;
+      const next = new Map(prev);
+      decisions.forEach((d) => next.delete(d.id));
+      return next;
+    });
+  }, []);
+  const onReviewed = useCallback((d: RecentDecision) => recordDecisions([d]), [recordDecisions]);
+
+  const updateFilters = (updates: Record<string, string>) => {
+    const next = new URLSearchParams(searchParams);
+    // A filter change starts again from the first page of the new set.
+    next.delete("trail");
+    next.delete("beforeId");
+    Object.entries(updates).forEach(([k, v]) => {
+      if (v) next.set(k, v);
+      else next.delete(k);
+    });
+    setSearchParams(next);
+  };
+
+  // The page scrolls inside the layout's <main overflow-auto>, not the
+  // window, so window.scrollTo was a no-op; scroll the page's own top into
+  // view instead.
+  const topRef = useRef<HTMLDivElement>(null);
+  const goToTrail = (nextTrail: number[]) => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("beforeId");
+    if (nextTrail.length > 0) next.set("trail", nextTrail.join(","));
+    else next.delete("trail");
+    setSearchParams(next);
+    topRef.current?.scrollIntoView?.({ block: "start" });
+  };
+  const handleFirst = () => goToTrail([]);
+  const handlePrev = () => goToTrail(trail.slice(0, -1));
   const handleNext = () => {
     if (entries.length === 0) return;
-    const lastId = entries[entries.length - 1].id;
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.set("beforeId", String(lastId));
-    setSearchParams(nextParams);
-    window.scrollTo(0, 0);
+    goToTrail([...trail, entries[entries.length - 1].id]);
   };
 
   if (isLoading) return <div className="p-6 text-neutral-400">Loading…</div>;
   if (isError) return <div className="p-6 text-red-400">Failed to load the audit queue.</div>;
 
+  const pageNumber = trail.length + 1;
+  const firstOnPage = trail.length * PAGE_SIZE + 1;
+
   return (
-    <div className="p-6 space-y-6">
+    <div ref={topRef} className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-neutral-100">Audit Queue</h1>
@@ -577,15 +859,21 @@ export default function AuditQueuePage() {
         </button>
       </div>
 
-      {entries.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs">
-          <div className="flex flex-wrap items-center gap-3">
+      <RecentlyReviewed
+        decisions={recent}
+        onUndone={(id) => setRecent((prev) => prev.filter((d) => d.id !== id))}
+        onDismiss={() => setRecent([])}
+      />
+
+      {(entries.length > 0 || hasActiveFilters) && (
+        <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs">
+          <div className="flex flex-wrap items-end gap-3">
             <div>
               <label htmlFor="tier-filter" className="block text-neutral-400 mb-1">Tier</label>
               <select
                 id="tier-filter"
                 value={tierFilter}
-                onChange={(e) => setTierFilter(e.target.value)}
+                onChange={(e) => updateFilters({ tier: e.target.value })}
                 className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
               >
                 <option value="">All Tiers</option>
@@ -600,7 +888,7 @@ export default function AuditQueuePage() {
               <select
                 id="resolver-filter"
                 value={resolverFilter}
-                onChange={(e) => setResolverFilter(e.target.value)}
+                onChange={(e) => updateFilters({ resolver: e.target.value })}
                 className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
               >
                 <option value="">All Resolvers</option>
@@ -615,74 +903,151 @@ export default function AuditQueuePage() {
               <select
                 id="relationship-filter"
                 value={relFilter}
-                onChange={(e) => setRelFilter(e.target.value)}
+                onChange={(e) => updateFilters({ relationshipType: e.target.value })}
                 className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
               >
                 <option value="">All Relationships</option>
-                <option value="DERIVED_FROM">Derived From</option>
-                <option value="FINAL_EXPORT">Final Export</option>
-                <option value="PROXY_OF">Proxy Of</option>
-                <option value="PROJECT_SIDECAR">Project Sidecar</option>
-                <option value="DUPLICATE_OF">Duplicate Of</option>
+                {RELATIONSHIP_TYPES.map((r) => (
+                  <option key={r.value} value={r.value}>{r.label}</option>
+                ))}
               </select>
             </div>
 
-            {(tierFilter || resolverFilter || relFilter) && (
+            <div>
+              <label htmlFor="min-confidence-filter" className="block text-neutral-400 mb-1">Min confidence</label>
+              <select
+                id="min-confidence-filter"
+                value={minConfFilter}
+                onChange={(e) => updateFilters({ minConfidence: e.target.value })}
+                className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
+              >
+                <option value="">Any</option>
+                {MIN_CONFIDENCE_OPTIONS.map((v) => (
+                  <option key={v} value={v}>{`≥ ${Math.round(Number(v) * 100)}%`}</option>
+                ))}
+              </select>
+            </div>
+
+            {hasActiveFilters && (
               <button
                 type="button"
-                onClick={() => { setTierFilter(""); setResolverFilter(""); setRelFilter(""); }}
-                className="self-end text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
+                onClick={() => updateFilters({ tier: "", resolver: "", relationshipType: "", minConfidence: "" })}
+                className="text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
               >
                 Clear Filters
               </button>
             )}
           </div>
 
-          {filteredEntries.length > 0 && (
-            <div className="flex items-center gap-2 self-end">
-              <button
-                type="button"
-                onClick={() => setBatchAction("confirm")}
-                className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 shadow"
-              >
-                Accept Filtered ({filteredEntries.length} on page)
-              </button>
-              <button
-                type="button"
-                onClick={() => setBatchAction("reject")}
-                className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-neutral-700 border border-red-900/60"
-              >
-                Decline Filtered ({filteredEntries.length} on page)
-              </button>
+          {entries.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 border-t border-neutral-800 pt-3">
+              <label className="flex items-center gap-2 text-neutral-300">
+                <input
+                  type="checkbox"
+                  checked={pageAllSelected}
+                  onChange={togglePage}
+                  className="rounded border-neutral-700 bg-neutral-800 text-indigo-500 focus:ring-0"
+                />
+                Select this page
+              </label>
+              {total > entries.length && selected.size < Math.min(total, SELECT_ALL_CAP) && (
+                <button
+                  type="button"
+                  disabled={selectingAll}
+                  onClick={() => void selectAllMatching()}
+                  className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1 text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
+                >
+                  {selectingAll
+                    ? "Selecting…"
+                    : total > SELECT_ALL_CAP
+                      ? `Select first ${SELECT_ALL_CAP} of ${total} matching`
+                      : `Select all ${total} matching`}
+                </button>
+              )}
+              {selectAllError && <span className="text-red-400">Could not select all: {selectAllError}</span>}
+              {selected.size > 0 && (
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="text-indigo-200">
+                    {selected.size} selected{hasActiveFilters ? " (filtered)" : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(new Map())}
+                    className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1 text-neutral-300 hover:bg-neutral-700"
+                  >
+                    Clear selection
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBatchAction("confirm")}
+                    className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 shadow"
+                  >
+                    Confirm selected ({selected.size})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBatchAction("reject")}
+                    className="rounded bg-neutral-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-neutral-700 border border-red-900/60"
+                  >
+                    Reject selected ({selected.size})
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
       {entries.length === 0 ? (
-        <p className="text-neutral-500">Nothing needs review right now.</p>
-      ) : filteredEntries.length === 0 ? (
-        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
-          No edge candidates match the selected filters.
-        </div>
+        hasActiveFilters ? (
+          <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
+            No edge candidates match the selected filters.
+          </div>
+        ) : trail.length > 0 ? (
+          <p className="text-neutral-500">
+            No more edges past this point.{" "}
+            <button type="button" onClick={handleFirst} className="text-sky-400 hover:underline">
+              Back to the first page
+            </button>
+          </p>
+        ) : (
+          <p className="text-neutral-500">Nothing needs review right now.</p>
+        )
       ) : (
         <>
-          <div className="space-y-4">
-            {filteredEntries.map((e) => (
-              <AuditRow key={e.id} entry={e} />
+          <div className={`space-y-4 ${isFetching ? "opacity-70" : ""}`}>
+            {entries.map((e) => (
+              <AuditRow
+                key={e.id}
+                entry={e}
+                selected={selected.has(e.id)}
+                onToggleSelected={toggleSelected}
+                onReviewed={onReviewed}
+              />
             ))}
           </div>
 
           <div className="flex items-center justify-between pt-4 border-t border-neutral-800 text-xs text-neutral-400 mt-4">
-            <div>{total} item{total === 1 ? "" : "s"} awaiting review</div>
+            <div>
+              {total} item{total === 1 ? "" : "s"} awaiting review{hasActiveFilters ? " (filtered)" : ""}
+              {" · "}showing {firstOnPage}–{firstOnPage + entries.length - 1} (page {pageNumber})
+            </div>
             <div className="flex items-center space-x-2">
               <button
                 aria-label="First page"
-                disabled={beforeId === 0}
+                disabled={trail.length === 0}
                 onClick={handleFirst}
                 className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
               >
                 First
+              </button>
+              <button
+                aria-label="Previous page"
+                disabled={trail.length === 0}
+                onClick={handlePrev}
+                className="rounded border border-neutral-700 bg-neutral-800 px-3 py-1 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800"
+              >
+                Previous
               </button>
               <button
                 aria-label="Next page"
@@ -701,16 +1066,12 @@ export default function AuditQueuePage() {
 
       {batchAction && (
         <BatchConfirmModal
-          isOpen={true}
           action={batchAction}
-          edges={filteredEntries}
-          onClose={() => {
-            setBatchAction(null);
-            void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
-          }}
-          onComplete={() => {
-            setBatchAction(null);
-            void queryClient.invalidateQueries({ queryKey: ["audit-queue"] });
+          edges={selectedEdges}
+          onClose={() => setBatchAction(null)}
+          onComplete={(succeeded, failedCount) => {
+            recordDecisions(succeeded.map((e) => ({ id: e.id, action: batchAction, summary: edgeSummary(e) })));
+            if (failedCount === 0) setBatchAction(null);
           }}
         />
       )}

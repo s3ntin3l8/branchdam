@@ -370,10 +370,13 @@ export function useUnlinkedCount() {
   });
 }
 
-export function useAuditQueue(params: { limit?: number; beforeId?: number } = {}) {
+export function useAuditQueue(params: import("../api/types").AuditQueueParams = {}) {
   return useQuery({
     queryKey: ["audit-queue", params],
     queryFn: () => api.listAuditQueue(params),
+    // Keep the current page on screen while a filter/page change loads,
+    // instead of unmounting the whole queue into a "Loading..." state.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -417,6 +420,17 @@ export function useRejectEdge() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.rejectEdge(id),
+    onSuccess: () => invalidateEdgeReviewQueries(queryClient),
+  });
+}
+
+// useResetEdgeReview undoes a human confirm/reject (the edge returns to
+// NEEDS_REVIEW, so it rejoins the queue and its target's graph_status is
+// recomputed) -- the same blast radius as a confirm/reject.
+export function useResetEdgeReview() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.resetEdgeReview(id),
     onSuccess: () => invalidateEdgeReviewQueries(queryClient),
   });
 }

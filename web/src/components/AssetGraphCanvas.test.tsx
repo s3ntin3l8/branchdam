@@ -115,3 +115,30 @@ describe("buildOneHopFlow", () => {
     expect(edges.map((e) => e.id)).toEqual(["e-10", "e-11"]);
   });
 });
+
+describe("review-state edge styling", () => {
+  const edge = (id: number, reviewState: Edge["reviewState"]): Edge => ({
+    id,
+    sourceNodeId: 2,
+    targetNodeId: 1,
+    relationshipType: "DERIVED_FROM",
+    confidence: 0.6,
+    reviewState,
+    resolver: "test",
+  });
+
+  it("draws a NEEDS_REVIEW edge dashed and labelled, unlike a CONFIRMED one", () => {
+    const { edges } = buildOneHopFlow(1, {
+      parents: [edge(10, "NEEDS_REVIEW"), edge(11, "CONFIRMED")],
+      children: [edge(12, "AUTO_ACCEPTED")],
+    });
+    const byId = Object.fromEntries(edges.map((e) => [e.id, e]));
+    expect(byId["e-10"].style?.strokeDasharray).toBeTruthy();
+    expect(String(byId["e-10"].label)).toMatch(/needs review/i);
+    expect(byId["e-11"].style?.strokeDasharray).toBeUndefined();
+    expect(String(byId["e-11"].label)).not.toMatch(/review/i);
+    expect(byId["e-12"].style?.strokeDasharray).toBeUndefined();
+    // Same relationship colour either way: only the line pattern differs.
+    expect(byId["e-10"].style?.stroke).toBe(byId["e-11"].style?.stroke);
+  });
+});
