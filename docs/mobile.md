@@ -129,7 +129,7 @@ Operators rotate keys from the same **Companion Pairing** page, per-pairing:
 
 1. Click **Rotate** on the pairing row, choose a grace period (default 24h, max 7d).
 2. The server mints a new key, sets `expires_at = now + graceMinutes` on every currently-active key for the pairing, returns the new plaintext once.
-3. Both the old and new keys authenticate for the grace window. The mobile app's next `/agent/handshake` is told about the new key via `pendingRotation` in the response; the app stores it in the OS keychain and uses it for subsequent requests.
+3. Both the old and new keys authenticate for the grace window. The app's next `/agent/handshake` carries the new key sealed for the device in `pendingRotation.sealedApiKey` (only when the server has `BRANCHDAM_SECRET_KEY`; see [`agent-api.md`'s Key rotation delivery](agent-api.md#key-rotation-delivery)). The app opens it with its current key, stores it in the OS keychain, and uses it for subsequent requests; the server retires the old key on the first request made with the new one. (The app side of this is M13; until it ships, re-pair by QR within the grace window.)
 4. After the grace window, the old key stops authenticating. The pairing's detail panel shows the `expires_at` countdown for in-progress rotations.
 
 This means rotation is non-disruptive: a rotating phone never sees an outage as long as it picks up the new key within the grace window. If it doesn't (e.g. the device is powered off for two weeks), the operator can shorten or extend the grace window per rotation, or revoke the device and re-pair from scratch.

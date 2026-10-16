@@ -61,6 +61,7 @@ const (
 	EventPairCreated         = "PAIR_CREATED"
 	EventKeyMinted           = "KEY_MINTED"
 	EventKeyRotated          = "KEY_ROTATED"
+	EventKeyAdopted          = "KEY_ADOPTED" // first use of a rotated key; older keys retired (00043)
 	EventPairRevoked         = "PAIR_REVOKED"
 	EventLabelRenamed        = "LABEL_RENAMED"
 	EventCredentialsRevealed = "CREDENTIALS_REVEALED"

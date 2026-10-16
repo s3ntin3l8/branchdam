@@ -69,13 +69,16 @@ type DevicePairing struct {
 }
 
 type DevicePairingKey struct {
-	ID            int64
-	PairingID     int64
-	KeyLookupHash string
-	KeyPreview    string
-	CreatedAt     int64
-	ExpiresAt     sql.NullInt64
-	RevokedAt     sql.NullInt64
+	ID                int64
+	PairingID         int64
+	KeyLookupHash     string
+	KeyPreview        string
+	CreatedAt         int64
+	ExpiresAt         sql.NullInt64
+	RevokedAt         sql.NullInt64
+	RotationSealedKey sql.NullString
+	AwaitingAdoption  int64
+	AdoptedAt         sql.NullInt64
 }
 
 type EventQueue struct {

@@ -1996,15 +1996,19 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 // --- /api/v1/agent/handshake ---
 
 type AgentHandshakeInput struct {
-	Body struct {
+	// APIKey is the X-API-Key the request authenticated with (AgentChain
+	// already verified it). The handshake re-reads it to name the key the
+	// device is on (currentKeyId) and to seal a rotated key for it --
+	// only the holder of this key can open pendingRotation.sealedApiKey.
+	APIKey string `header:"X-API-Key" hidden:"true"`
+	Body   struct {
 		AgentID                string `json:"agentId" required:"true"`
 		ClientVersion          string `json:"clientVersion,omitempty"`
 		LastProcessedEventUUID string `json:"lastProcessedEventUuid,omitempty"`
-		// CurrentKeyID is the key_id the device is currently using -- used
-		// to determine whether the server should send back a pendingRotation
-		// hint. Optional for backward compatibility with older clients that
-		// pre-date the device-pairing flow; absent means "no rotation
-		// hint, even if a newer key exists".
+		// CurrentKeyID is accepted for backward compatibility and ignored:
+		// the server identifies the device's current key from the
+		// X-API-Key it authenticated with and reports it as the
+		// response's currentKeyId.
 		CurrentKeyID *int64 `json:"currentKeyId,omitempty"`
 	}
 }
@@ -2017,6 +2021,10 @@ type AgentHandshakeOutput struct {
 		AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 		PendingEventsCount    int64  `json:"pendingEventsCount"`
 		NamingTemplate        string `json:"namingTemplate,omitempty"`
+		// CurrentKeyID is the row id of the paired-device key this request
+		// authenticated with. Omitted for a caller that is not a paired
+		// device key.
+		CurrentKeyID int64 `json:"currentKeyId,omitempty"`
 		// PendingRotation, when non-null, tells the device about a newer
 		// key it should switch to. Only set when the caller's current
 		// key isn't the newest active key for this agent_id -- a device
@@ -2026,10 +2034,18 @@ type AgentHandshakeOutput struct {
 }
 
 type pendingRotationDTO struct {
-	// KeyID is the row id of the new key. Exposed for debugging / audit;
-	// the device stores the apiKey directly.
-	KeyID                int64  `json:"keyId"`
-	APIKey               string `json:"apiKey"`
+	// KeyID is the row id of the new key.
+	KeyID int64 `json:"keyId"`
+	// APIKey is always empty: the new key is never sent in the clear.
+	// Kept so clients that read it (and ignore a blank value) still parse.
+	APIKey string `json:"apiKey"`
+	// SealedAPIKey is the new key sealed for the requesting device:
+	// AES-256-GCM under HMAC-SHA256(current API key, "branchdam-key-rotation-v1"),
+	// in secrets.Box's "v1:" + base64(nonce||ciphertext||tag) format (see
+	// pairing.SealForDevice and docs/agent-api.md). Omitted when the key
+	// cannot be delivered (no BRANCHDAM_SECRET_KEY on the server, or a
+	// rotation from before delivery existed): re-pair by QR instead.
+	SealedAPIKey         string `json:"sealedApiKey,omitempty"`
 	PreviousKeyExpiresAt int64  `json:"previousKeyExpiresAtUnix"`
 }
 
@@ -2081,41 +2097,27 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	out.Body.PendingEventsCount = pendingCount
 	out.Body.NamingTemplate = namingTpl
 
-	// pendingRotation hint: only when the caller supplied currentKeyID.
-	// The service layer handles the SQL lookup; we just translate its
-	// result into the DTO. The plaintext of the new key is included
-	// -- this is the only mechanism for the device to learn it
-	// without re-scanning a QR.
-	if s.pairingService != nil && in.Body.CurrentKeyID != nil {
-		// LatestActiveKey looks up the active key for this agent_id
-		// that's strictly newer than the supplied currentKeyID. If the
-		// caller is already on the newest, it returns sql.ErrNoRows --
-		// not an error, just nothing to send.
-		newerKey, err := s.pairingService.LatestActiveKey(ctx, p.Name, *in.Body.CurrentKeyID)
-		if err == nil {
-			// The newer key row is available; we need its plaintext to
-			// ship the rotation hint. The pairing.Service API does not
-			// expose plaintext after mint -- by design, plaintext leaves
-			// the service only via CreatePairing/RotateKey. So a rotation
-			// hint here would require a different mechanism.
-			//
-			// For this iteration: when the device is on the older key,
-			// we tell it about the newer key but do NOT include the
-			// plaintext. The device's next step is a re-pair via the
-			// QR code (or, in a future iteration, a follow-up
-			// /api/v1/agent/rotation-token endpoint that returns the
-			// plaintext after a tighter auth check). The DTO field is
-			// present but blank -- mobile clients ignore blank keys.
-			_ = newerKey
-			out.Body.PendingRotation = &pendingRotationDTO{
-				KeyID: newerKey.ID,
+	// currentKeyId + pendingRotation (S13): the service resolves the key
+	// this request authenticated with and, when its pairing has a newer
+	// active key, returns that key sealed for this device. Adoption -- the
+	// device's first request with the new key, which retires the old one
+	// -- happens in pairing.Service.KeyLookup.
+	if s.pairingService != nil && in.APIKey != "" {
+		rot, err := s.pairingService.PendingRotationFor(ctx, p.Name, in.APIKey)
+		if err != nil {
+			// A real DB failure surfaces as 500 rather than a handshake
+			// that silently drops the rotation hint on every attempt.
+			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "lookup pending rotation", err)
+		}
+		if rot != nil {
+			out.Body.CurrentKeyID = rot.CurrentKeyID
+			if rot.KeyID != 0 {
+				out.Body.PendingRotation = &pendingRotationDTO{
+					KeyID:                rot.KeyID,
+					SealedAPIKey:         rot.SealedAPIKey,
+					PreviousKeyExpiresAt: rot.PreviousKeyExpiresAt,
+				}
 			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			// Real DB failure -- surface as 500. We deliberately don't
-			// fall through to a successful handshake with no rotation
-			// hint, because that would mask a DB outage on every
-			// subsequent handshake.
-			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "lookup newest key", err)
 		}
 	}
 
