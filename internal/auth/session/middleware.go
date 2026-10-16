@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
@@ -54,6 +55,42 @@ type Middleware struct {
 	users *users.Service
 	nowFn func() time.Time
 	log   *slog.Logger
+
+	// touchEvery is the minimum interval between two sliding-window
+	// touches of the same session (see touchInterval).
+	touchEvery time.Duration
+
+	// touchMu/lastTouch collapse concurrent requests on one session
+	// into a single touch per window: the persisted last_seen_at gate
+	// alone lets a burst that all read the same stale row (a page of
+	// thumbnails right after the window elapses) each take the writer.
+	touchMu   sync.Mutex
+	lastTouch map[int64]time.Time
+}
+
+// sessionTouchInterval is how often, at most, an authenticated request
+// refreshes its session's last_seen_at / idle_expires_at. TouchSession
+// is a write transaction on the single-connection writer pool (AGENTS.md
+// invariant #2); running it on every request made every thumbnail and
+// every SSE reconnect queue behind ingest and graph writes. Throttling
+// costs at most this much of the idle window: a session is revoked
+// IdleTimeout after its last *recorded* touch, i.e. at worst
+// sessionTouchInterval earlier than an every-request touch would allow.
+const sessionTouchInterval = time.Minute
+
+// maxLastTouchEntries bounds the in-process per-session touch map; on
+// overflow, entries older than the touch window (which no longer
+// suppress anything) are evicted.
+const maxLastTouchEntries = 4096
+
+// touchInterval returns the effective throttle window for idle: never
+// more than a quarter of the idle timeout, so a deliberately short
+// auth.local.idleTimeout still slides on activity.
+func touchInterval(idle time.Duration) time.Duration {
+	if q := idle / 4; q < sessionTouchInterval {
+		return q
+	}
+	return sessionTouchInterval
 }
 
 // New constructs a Middleware.
@@ -74,11 +111,42 @@ func New(u *users.Service, cfg Config) *Middleware {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
 	return &Middleware{
-		cfg:   cfg,
-		users: u,
-		nowFn: cfg.Now,
-		log:   cfg.Log,
+		cfg:        cfg,
+		users:      u,
+		nowFn:      cfg.Now,
+		log:        cfg.Log,
+		touchEvery: touchInterval(cfg.IdleTimeout),
 	}
+}
+
+// shouldTouch reports whether this request should refresh the session's
+// sliding idle window. lastSeen is the persisted sessions.last_seen_at
+// (unix seconds) read with the session row: a session touched within the
+// window -- by this process or, after a restart, a previous one -- is
+// skipped without any write. Otherwise the in-process map claims the
+// touch for this session so concurrent requests holding the same stale
+// row collapse to one write.
+func (m *Middleware) shouldTouch(sessionID, lastSeen int64, now time.Time) bool {
+	if now.Sub(time.Unix(lastSeen, 0)) < m.touchEvery {
+		return false
+	}
+	m.touchMu.Lock()
+	defer m.touchMu.Unlock()
+	if m.lastTouch == nil {
+		m.lastTouch = make(map[int64]time.Time)
+	}
+	if len(m.lastTouch) >= maxLastTouchEntries {
+		for id, at := range m.lastTouch {
+			if now.Sub(at) >= m.touchEvery {
+				delete(m.lastTouch, id)
+			}
+		}
+	}
+	if at, ok := m.lastTouch[sessionID]; ok && now.Sub(at) < m.touchEvery {
+		return false
+	}
+	m.lastTouch[sessionID] = now
+	return true
 }
 
 // CookieName returns the resolved cookie name.
@@ -159,9 +227,14 @@ func (m *Middleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		newIdle := now.Add(m.cfg.IdleTimeout)
-		if touchErr := m.users.TouchSession(r.Context(), session.ID, now, newIdle); touchErr != nil {
-			m.log.Warn("session: touch failed", "sessionID", session.ID, "err", touchErr.Error())
+		// Sliding idle window, throttled to one write per session per
+		// touchEvery (see sessionTouchInterval) instead of one writer
+		// transaction per request.
+		if m.shouldTouch(session.ID, session.LastSeenAt, now) {
+			newIdle := now.Add(m.cfg.IdleTimeout)
+			if touchErr := m.users.TouchSession(r.Context(), session.ID, now, newIdle); touchErr != nil {
+				m.log.Warn("session: touch failed", "sessionID", session.ID, "err", touchErr.Error())
+			}
 		}
 
 		view := LocalUserView{

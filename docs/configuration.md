@@ -125,9 +125,9 @@ the only one most operators ever touch; the rest have safe defaults.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `mode` | string | `forward` | One of `forward` (default, pre-#407 behavior), `local` (password login only), or `both` (either path authenticates; local wins on Name/Email collision). Empty / unset is treated as `forward`, so existing configs upgrade without modification. |
+| `mode` | string | `forward` | One of `forward` (default, pre-#407 behavior), `local` (password login only), or `both` (either path authenticates; local wins on Name/Email collision). Empty / unset is treated as `forward`, so existing configs upgrade without modification. Any other value (case-sensitive, so `Both` too) fails startup with `config validation: auth.mode "..." is not valid`. |
 | `local.cookieName` | string | `branchdam_session` | The session cookie name. Change if you run multiple branchDAM instances behind the same parent domain and need to disambiguate. |
-| `local.idleTimeout` | duration | `24h` | Idle-timeout: the session is revoked if no authenticated request lands within this window after the last `TouchSession`. |
+| `local.idleTimeout` | duration | `24h` | Idle-timeout: the session is revoked if no authenticated request lands within this window after the last `TouchSession`. Activity refreshes the window at most once a minute per session (or every quarter of `idleTimeout`, if shorter), so the effective idle limit can be up to that much shorter than configured. |
 | `local.absoluteTimeout` | duration | `720h` (30d) | Absolute timeout: the session is revoked once this elapses, regardless of activity. Reset on each successful login. |
 | `local.argon2.memoryKB` | int | `19456` (19 MiB) | Memory cost of the password hash. See local-auth.md §5 for tuning guidance. |
 | `local.argon2.iterations` | int | `2` | Iteration count. |

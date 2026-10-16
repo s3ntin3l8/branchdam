@@ -227,6 +227,10 @@ func (s *Service) SystemUserSafe() (Attribution, error) {
 //     admin groups (WithAdminGroups) -- an Authentik group promotion
 //     or demotion takes effect on the user's very next request.
 //
+// For PAT Principals (AuthProvider == "pat"), the token's owner is
+// already known by id (Principal.UserID): this reads that row and
+// returns it without writing anything (see resolvePAT).
+//
 // For local-session Principals (AuthProvider == "local"), the user row
 // already exists (source='local', password_hash set) so this skips the
 // INSERT and does a lookup+refresh instead -- the INSERT path uses
@@ -266,6 +270,9 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 	}
 	if provider == AuthProviderLocal {
 		return s.resolveLocal(ctx, p)
+	}
+	if provider == auth.AuthProviderPAT {
+		return s.resolvePAT(ctx, p)
 	}
 
 	// Sync is_admin to the same policy live request authorization
@@ -314,6 +321,36 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 		return Attribution{}, err
 	}
 	return out, nil
+}
+
+// resolvePAT handles the auth_provider="pat" case of ResolveOrCreate: a
+// personal-access-token Principal already carries its owner's users.id
+// (auth.Principal.UserID, set by auth.PATMiddleware after the token
+// lookup verified the owner is a live admin). Attribution is that row,
+// read-only -- no INSERT, no last_seen_at refresh -- so a PAT never
+// provisions a phantom ('authentik', 'pat:...') user and never takes
+// the single writer just to resolve who is acting. A zero UserID or a
+// missing row is ErrInvalidPrincipal: the caller leaves attribution
+// NULL rather than inventing an owner.
+func (s *Service) resolvePAT(ctx context.Context, p auth.Principal) (Attribution, error) {
+	if p.UserID == 0 {
+		return Attribution{}, ErrInvalidPrincipal
+	}
+	row, err := s.db.Reader.GetAttributionUserByID(ctx, p.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Attribution{}, fmt.Errorf("resolve PAT owner %d: %w", p.UserID, ErrInvalidPrincipal)
+		}
+		return Attribution{}, fmt.Errorf("resolve PAT owner %d: %w", p.UserID, err)
+	}
+	return Attribution{
+		ID:           row.ID,
+		AuthProvider: row.AuthProvider,
+		ExternalUID:  row.ExternalUid,
+		Username:     row.Username,
+		Email:        row.Email,
+		IsAdmin:      row.IsAdmin != 0,
+	}, nil
 }
 
 // boolToInt64 converts a bool to the 0/1 users.is_admin CHECK-constrained

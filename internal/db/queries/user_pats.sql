@@ -29,9 +29,15 @@ RETURNING id, user_id, name, hashed_key, scopes_json, created_at, last_used_at, 
 -- their tokens on the next request instead of freezing admin
 -- authority at mint time. A token whose owner fails the check
 -- surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
+--
+-- owner_username / owner_email let the PAT middleware build a Principal
+-- that names the token's owner (actor_audit.actor_name, edge
+-- reviewed_by) without a second query; attribution itself keys on
+-- user_id, never on these display fields.
 SELECT up.id AS id, up.user_id AS user_id, up.name AS name, up.hashed_key AS hashed_key,
        up.scopes_json AS scopes_json, up.created_at AS created_at, up.last_used_at AS last_used_at,
-       up.expires_at AS expires_at, up.revoked_at AS revoked_at
+       up.expires_at AS expires_at, up.revoked_at AS revoked_at,
+       u.username AS owner_username, u.email AS owner_email
 FROM user_pats AS up
 JOIN users AS u ON u.id = up.user_id
 WHERE up.hashed_key = ?1 AND up.revoked_at IS NULL

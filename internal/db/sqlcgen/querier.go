@@ -426,7 +426,12 @@ type Querier interface {
 	// their tokens on the next request instead of freezing admin
 	// authority at mint time. A token whose owner fails the check
 	// surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
-	GetUserPATByHash(ctx context.Context, hashedKey string) (UserPat, error)
+	//
+	// owner_username / owner_email let the PAT middleware build a Principal
+	// that names the token's owner (actor_audit.actor_name, edge
+	// reviewed_by) without a second query; attribution itself keys on
+	// user_id, never on these display fields.
+	GetUserPATByHash(ctx context.Context, hashedKey string) (GetUserPATByHashRow, error)
 	// Backs the fast-only pre-screen of GET /api/v1/agent/check-content:
 	// does any live (ACTIVE or HIDDEN) node carry this xxHash64 fast_hash
 	// (served by the partial index ix_media_nodes_fast_hash)? size_bytes = 0

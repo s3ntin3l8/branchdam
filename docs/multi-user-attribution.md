@@ -38,6 +38,13 @@ canonical attribution entry point. It:
 3. Refuses `KindMachine`, `Authenticated=false`, or empty
    `ExternalUID` with `ErrInvalidPrincipal`.
 
+Two principal kinds skip the INSERT: local-session principals
+(`auth_provider` `local`) look up their existing `source='local'` row,
+and personal-access-token principals (`auth_provider` `pat`) resolve
+to the token owner's row by `Principal.UserID` — read-only, no
+`last_seen_at` bump, and never a new row (see
+[`admin-pats.md`](admin-pats.md)).
+
 The system sentinel `("system", "system")` is provisioned once at boot
 via `EnsureSystemUser`. Every background worker (SweeperSupervisor's
 INCREMENTAL passes, prune, anything that has no request Principal)

@@ -38,6 +38,15 @@ const (
 // CHECK constraint on source/password_hash).
 const AuthProviderLocal = "local"
 
+// AuthProviderPAT marks a Principal authenticated by a personal access
+// token (RequirePAT). Such a Principal already knows its owner's
+// users.id (Principal.UserID), so the attribution layer resolves it by
+// id and never lazy-provisions a users row for it -- before this
+// existed every token minted its own phantom ('authentik', 'pat:...')
+// user on first use, and pairings, uploads and audit rows were
+// attributed to that phantom instead of the token's owner.
+const AuthProviderPAT = "pat"
+
 // Principal is what a request is authenticated as. A machine Principal
 // after #companion-pairing carries Name = agent_id (the device that owns
 // the API key) for device-paired sessions. Email and Groups are always
@@ -71,6 +80,12 @@ const AuthProviderLocal = "local"
 // it could not do before this field existed (see authz.go's RequireAdmin).
 // Always false (and never read) for a KindMachine Principal -- AgentChain
 // gates by API key instead, not by this field.
+//
+// UserID is the users.id the authenticating chain already resolved, for
+// chains that authenticate against a users row directly. Today only the
+// PAT chain sets it (AuthProvider == AuthProviderPAT); zero everywhere
+// else, where internal/users.ResolveOrCreate derives the id from
+// (AuthProvider, ExternalUID) instead.
 type Principal struct {
 	Kind          Kind
 	Name          string
@@ -78,6 +93,7 @@ type Principal struct {
 	Groups        []string
 	ExternalUID   string
 	AuthProvider  string
+	UserID        int64
 	Authenticated bool
 }
 

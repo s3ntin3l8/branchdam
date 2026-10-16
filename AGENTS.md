@@ -62,7 +62,7 @@ sqlc generate    # Run after editing migrations or queries; commit internal/db/s
 | `internal/settings` | `app_settings` UI overrides on top of `config.yaml`; field registry and live/restart apply modes |
 | `internal/sse` | Server-Sent Events hub ("something changed, re-fetch") |
 | `internal/thumbs` | JPEG thumbnail cache and background generation worker (outside `storage.Guard`, on the `/data` volume) |
-| `internal/users` | Multi-user attribution: lazy `users` provisioning keyed on `(auth_provider, external_uid)` and the system user |
+| `internal/users` | Multi-user attribution: lazy `users` provisioning keyed on `(auth_provider, external_uid)` and the system user; PAT principals resolve to the token owner by id and never provision a row |
 | `web/` | React 19 + Vite SPA (`@xyflow/react` graph, TanStack Query, Tailwind) |
 
 ## Key Invariants

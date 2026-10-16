@@ -809,3 +809,66 @@ func TestResolveOrCreate_LocalUser_DoesNotOverwriteIsAdmin(t *testing.T) {
 		t.Errorf("stored is_admin = %d, want 1 (unchanged)", row.IsAdmin)
 	}
 }
+
+// TestResolveOrCreate_PATPrincipalResolvesOwner pins the PAT branch: a
+// Principal with AuthProvider "pat" resolves to the owner's existing row
+// by Principal.UserID, writes nothing (no INSERT, no last_seen_at bump),
+// and never lazy-provisions a ('authentik', 'pat:...') phantom.
+func TestResolveOrCreate_PATPrincipalResolvesOwner(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+
+	owner, err := svc.ResolveOrCreate(ctx, auth.Principal{
+		Kind: auth.KindUser, Name: "owner", ExternalUID: "owner-uid", Authenticated: true,
+	})
+	if err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+	seeded, err := svc.db.Reader.GetAttributionUserByID(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("load owner: %v", err)
+	}
+
+	got, err := svc.ResolveOrCreate(ctx, auth.Principal{
+		Kind:          auth.KindUser,
+		Name:          "owner",
+		ExternalUID:   "pat:0123abcd",
+		AuthProvider:  auth.AuthProviderPAT,
+		UserID:        owner.ID,
+		Authenticated: true,
+	})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate(PAT): %v", err)
+	}
+	if got.ID != owner.ID {
+		t.Errorf("PAT principal resolved to users.id %d, want owner %d", got.ID, owner.ID)
+	}
+	if _, err := svc.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+		AuthProvider: AuthProviderAuthentik, ExternalUid: "pat:0123abcd",
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("phantom ('authentik', 'pat:0123abcd') lookup err = %v, want sql.ErrNoRows", err)
+	}
+	after, err := svc.db.Reader.GetAttributionUserByID(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("reload owner: %v", err)
+	}
+	if after != seeded {
+		t.Errorf("PAT resolution wrote to the owner row: before %+v, after %+v", seeded, after)
+	}
+}
+
+func TestResolveOrCreate_PATPrincipalWithoutOwnerIsInvalid(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	base := auth.Principal{
+		Kind: auth.KindUser, Name: "x", ExternalUID: "pat:0123abcd",
+		AuthProvider: auth.AuthProviderPAT, Authenticated: true,
+	}
+	if _, err := svc.ResolveOrCreate(ctx, base); !errors.Is(err, ErrInvalidPrincipal) {
+		t.Errorf("zero UserID: err = %v, want ErrInvalidPrincipal", err)
+	}
+	base.UserID = 999_999
+	if _, err := svc.ResolveOrCreate(ctx, base); !errors.Is(err, ErrInvalidPrincipal) {
+		t.Errorf("unknown owner: err = %v, want ErrInvalidPrincipal", err)
+	}
+}
