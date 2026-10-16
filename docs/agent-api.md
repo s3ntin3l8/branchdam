@@ -86,7 +86,7 @@ The constants live in `internal/apierr`.
 | `ARCHIVE_FILE_NOT_PRESENT` | 400 | A Tier-3 rebase target has no file yet. | Yes, once the archive copy has finished |
 | `CHECKSUM_MISMATCH` | 400 | Uploaded bytes don't match `X-Blake3-Hash`. | Yes, re-send the bytes |
 | `NODE_NOT_FOUND` | 404 | No live node with that UUID (an `ARCHIVED` superseded version or a `TRASHED` node included). | No |
-| `HASH_CONFLICT` | 409 | The node already has a different `fullHash`. | No |
+| `HASH_CONFLICT` | 409 | The node already has a different `fullHash`, or (rebase of an unknown `nodeUuid`) another live node already holds that content; the body then also carries `existingNodeUuid`. | No -- adopt `existingNodeUuid` |
 | `EVENT_UUID_CONFLICT` | 409 | `eventUuid` was already used with a different `eventType`. | No |
 | `SNAPSHOT_CONFLICT` | 409 | A Resolve snapshot conflicts with existing graph state; nothing changed. | No (fix the snapshot) |
 | `PAYLOAD_TOO_LARGE` | 413 | Body over the signed-body limit, a Resolve snapshot over 10 000 entries, or an upload over 50 GB. | No |
@@ -166,6 +166,17 @@ When `eventUuid` is provided, `POST /api/v1/agent/events` performs duplicate det
 `event_queue.event_uuid` unique constraint. If an event with the same `eventUuid` was already accepted,
 the endpoint returns `202 Accepted` with the existing `eventId` without enqueuing a duplicate row.
 If `eventUuid` is omitted (legacy callers), the server mints a new UUIDv7.
+
+**Processing and retries.** `internal/agent.Drainer` applies queued events asynchronously,
+oldest first. An event that fails with a *fatal* error (malformed payload, invalid identifier,
+ownership refusal, cycle, read-only target, ...) is marked `FAILED` on the first attempt. Any
+other failure is *retryable*: the row stays `PENDING` and is deferred via
+`event_queue.next_attempt_at` by an exponential backoff -- 5s after the first failed attempt,
+doubling per attempt, capped at 1 hour -- and is marked `FAILED` only after 20 attempts (roughly
+ten hours). A deferred row does not block the events behind it. This is what lets a Tier-3
+`EVENT_PATH_REBASED`/`EVENT_NODE_MOVED` sent while the agent is still copying the file into the
+archive (`ErrArchiveFileNotYetPresent`) succeed once the copy lands, instead of failing within
+seconds.
 
 ### 2.1. Resolve snapshot (`POST /api/v1/agent/resolve-snapshot`)
 
@@ -284,6 +295,16 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 > but stored `NEEDS_REVIEW` (see §3.2). A content-dedup hit on upload points at somebody else's
 > node and is not claimed by the uploader. Nodes created before this rule existed are attributed
 > from their processed creation event when it is still in the queue; otherwise no device owns them.
+>
+> **Content dedup records a UUID alias.** An `EVENT_NODE_CREATED` (or an insert-on-unknown
+> `EVENT_PATH_REBASED`) whose `fullHash` already belongs to a live (`ACTIVE`/`HIDDEN`) node does
+> not create a second node. The device's `nodeUuid` is recorded instead as an alias of the
+> existing node (`node_uuid_aliases`), so the device's follow-up calls naming its own UUID still
+> resolve: `EVENT_EDGE_ATTACHED` attaches to the existing node; `EVENT_PATH_REBASED`,
+> `EVENT_NODE_MOVED`, `EVENT_NODE_DELETED` and `POST /api/v1/agent/rebase` are acknowledged
+> without changing the existing node (it is not the device's -- deleting a duplicate never trashes
+> the original); `POST /api/v1/agent/node-status` reports the existing node's state. Only the
+> device that recorded an alias can resolve it; for any other device the UUID is unknown.
 >
 > **Identifiers are validated.** `nodeUuid` must be a canonical UUID and `fullHash` 64 lowercase
 > hex characters (`400 Bad Request` on the HTTP endpoint, a permanent event failure otherwise). A
@@ -478,16 +499,34 @@ header is also read.
 > (Tier 3 itself is writable by default for server-governed ingest -- `POST /api/v1/agent/upload`
 > and the `.trash/` buffer write there -- so this is about what *rebase* does, not a read-only
 > archive guarantee.) A Tier 3 target whose file is not yet present is
-> refused with `400 Bad Request` (HTTP) / the event marked `FAILED` (queue), so the agent must
-> finish copying before calling this. Any other read-only tier has no such exemption and is
+> refused with `400 Bad Request` (HTTP) / retried with backoff (queue, see §2 "Processing and
+> retries"; marked `FAILED` only if the file is still missing after the last attempt), so the
+> agent must finish copying before calling the HTTP endpoint. Any other read-only tier has no such exemption and is
 > always refused.
 
 Errors (codes per [Errors](#errors)): `400` for an invalid `nodeUuid`/`fullHash`
 (`VALIDATION_FAILED`), a target path outside storage (`PATH_OUTSIDE_STORAGE`), a read-only target
 (`READ_ONLY_TARGET`) or a Tier-3 target whose file is not there yet (`ARCHIVE_FILE_NOT_PRESENT`);
 `403` if the node was not created by the calling device (`NOT_NODE_OWNER`); `404` for an `ARCHIVED`
-or `TRASHED` node (`NODE_NOT_FOUND`); `409` if the node already has a different `fullHash` (`HASH_CONFLICT`). The response `status` is `REBASED`
-for an existing node or `CREATED` when an unknown `nodeUuid` was inserted.
+or `TRASHED` node (`NODE_NOT_FOUND`); `409` (`HASH_CONFLICT`) if the node already has a different
+`fullHash`, or if an unknown `nodeUuid` would be inserted with a `fullHash` another live node
+already holds. That second `409` carries the existing node's UUID in an extra `existingNodeUuid`
+field of the envelope:
+
+```json
+{
+  "title": "Conflict",
+  "status": 409,
+  "detail": "content already exists as node 018f2345-6789-7abc-def0-123456789abc",
+  "code": "HASH_CONFLICT",
+  "existingNodeUuid": "018f2345-6789-7abc-def0-123456789abc"
+}
+```
+
+The response `status` is `REBASED` for an existing node, `CREATED` when an unknown `nodeUuid` was
+inserted, or `ALIASED` when `nodeUuid` is this device's alias of an existing node (its
+`EVENT_NODE_CREATED` was content-deduplicated, §3): nothing is changed, `id`/`nodeUuid` name the
+existing node and `storageLocationId`/`filePath` are empty.
 
 **Request (`AgentRebaseInput`):**
 ```json
@@ -560,6 +599,10 @@ client about to delete its local copy can compare it with the hash it computed i
 trusting `verified` alone; it is omitted when the node is not found or has no full hash (added
 alongside the existing fields -- older clients simply ignore it). `found: false` is not an error
 -- it just means no `media_nodes` row currently has that `node_uuid`.
+
+When a requested UUID is the calling device's alias of an existing node (content dedup, §3), the
+entry keeps the requested `nodeUuid`, adds `canonicalNodeUuid` naming the existing node, and
+reports that node's `lifecycleState`/`tier`/`verified`.
 
 ---
 

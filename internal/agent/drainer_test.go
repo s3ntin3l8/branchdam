@@ -868,7 +868,8 @@ func TestDrainer_EdgeAttached_SelfLoopFails(t *testing.T) {
 
 func TestDrainer_RetryPersistenceAcrossInvocations(t *testing.T) {
 	env := setupTestDB(t)
-	drainer1 := agent.NewDrainer(env.db, env.guard, nil)
+	clock := newFakeClock()
+	drainer1 := agent.NewDrainer(env.db, env.guard, nil, agent.WithClock(clock.Now))
 	drainer1.SetMaxRetries(3)
 	ctx := context.Background()
 
@@ -891,13 +892,17 @@ func TestDrainer_RetryPersistenceAcrossInvocations(t *testing.T) {
 		require.Equal(t, "PENDING", ev.Status)
 		require.Equal(t, int64(1), ev.RetryCount)
 		require.True(t, ev.ErrorLog.Valid)
+		require.Equal(t, clock.Now().Add(agent.RetryDelay(1)).Unix(), ev.NextAttemptAt)
 		return nil
 	})
 	require.NoError(t, err)
 
-	// Simulate restart: create a new Drainer instance with empty in-memory state
-	drainer2 := agent.NewDrainer(env.db, env.guard, nil)
+	// Simulate restart: create a new Drainer instance with empty in-memory
+	// state. The deferral lives in the DB, so it survives the restart.
+	drainer2 := agent.NewDrainer(env.db, env.guard, nil, agent.WithClock(clock.Now))
 	drainer2.SetMaxRetries(3)
+
+	clock.Advance(agent.RetryDelay(1))
 
 	// Pass 2: drainer2 runs ProcessPending -> retry_count becomes 2
 	stats2, err := drainer2.ProcessPending(ctx, 10)
@@ -914,6 +919,8 @@ func TestDrainer_RetryPersistenceAcrossInvocations(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	clock.Advance(agent.RetryDelay(2))
+
 	// Pass 3: drainer2 runs ProcessPending -> attempts reaches 3 >= maxRetries -> marks FAILED
 	stats3, err := drainer2.ProcessPending(ctx, 10)
 	require.NoError(t, err)
@@ -927,30 +934,6 @@ func TestDrainer_RetryPersistenceAcrossInvocations(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-}
-
-func TestDrainer_Backoff(t *testing.T) {
-	env := setupTestDB(t)
-	drainer := agent.NewDrainer(env.db, env.guard, nil)
-	drainer.SetMaxRetries(10)
-	drainer.SetRetryBackoff(50 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
-	defer cancel()
-
-	// Enqueue a transient error event
-	enqueueEvent(t, env.db, agent.EventNodeMoved, agent.NodeMovedPayload{
-		NodeUUID:    uuid.New().String(),
-		NewFilePath: filepath.Join(env.staging, "ghost.mov"),
-	})
-
-	// DrainAll should back off until ctx expires
-	start := time.Now()
-	_, err := drainer.DrainAll(ctx)
-	duration := time.Since(start)
-
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.GreaterOrEqual(t, duration, 50*time.Millisecond)
 }
 
 func TestDrainer_RefuseArchivedNodeRebase(t *testing.T) {

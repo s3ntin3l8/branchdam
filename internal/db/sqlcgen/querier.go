@@ -63,6 +63,9 @@ type Querier interface {
 	CountActorAudit(ctx context.Context, arg CountActorAuditParams) (int64, error)
 	CountAttributionUsers(ctx context.Context) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
+	// PENDING rows ListPendingAgentEvents would claim right now. DrainAll stops
+	// once this reaches 0 even if deferred rows remain PENDING.
+	CountDueAgentEvents(ctx context.Context, nowUnix int64) (int64, error)
 	CountLoginAudit(ctx context.Context) (int64, error)
 	// Backs GET /api/v1/assets unfiltered total count. Matches ListMediaNodes by excluding ARCHIVED and superseded rows.
 	CountMediaNodes(ctx context.Context) (int64, error)
@@ -361,6 +364,7 @@ type Querier interface {
 	// spelling this needs to stay within SQLite's bound-parameter limit.
 	GetMediaNodesByUUIDs(ctx context.Context, nodeUuids string) ([]GetMediaNodesByUUIDsRow, error)
 	GetNodeCreator(ctx context.Context, nodeUuid string) (string, error)
+	GetNodeUUIDAlias(ctx context.Context, aliasUuid string) (NodeUuidAlias, error)
 	// Confirm-time lookup: scan the active-token index for a specific
 	// token_hash. The active-partial unique index keeps the candidate
 	// set small. The handler iterates and finds the row whose hash
@@ -433,7 +437,6 @@ type Querier interface {
 	// confirm with the full hash.
 	HasLiveNodeByFastHash(ctx context.Context, arg HasLiveNodeByFastHashParams) (bool, error)
 	InactivateResolveEdge(ctx context.Context, id int64) error
-	IncrementAgentEventRetry(ctx context.Context, arg IncrementAgentEventRetryParams) error
 	// actor_audit: append-only event log for admin actions that aren't
 	// otherwise audited (scan start, restart, settings PUT, storage location
 	// PUT, prune execute, pairing lifecycle). Mirrors companion_pairing_audit's
@@ -454,6 +457,10 @@ type Querier interface {
 	// Phase 1 (#33): EXIF/ffprobe overflow. Upsert on the table's natural key so
 	// a re-scan that re-derives metadata replaces rather than duplicates rows.
 	InsertNodeMetadata(ctx context.Context, arg InsertNodeMetadataParams) error
+	// Records that a device's node_uuid was content-deduplicated onto an
+	// existing node (see migration 00038). First writer wins: an alias never
+	// changes target once recorded.
+	InsertNodeUUIDAlias(ctx context.Context, arg InsertNodeUUIDAliasParams) error
 	InsertPairingAudit(ctx context.Context, arg InsertPairingAuditParams) error
 	InsertRecoveryCodes(ctx context.Context, arg InsertRecoveryCodesParams) error
 	// Resets a node's thumbnail generation state to PENDING with attempts
@@ -630,6 +637,9 @@ type Querier interface {
 	ListNodeCountsByLocation(ctx context.Context) ([]ListNodeCountsByLocationRow, error)
 	// Backs tests and any future metadata inspector UI.
 	ListNodeMetadata(ctx context.Context, nodeID int64) ([]NodeMetadatum, error)
+	// Backs POST /api/v1/agent/node-status: batch alias lookup for the UUIDs
+	// that matched no media_nodes row directly.
+	ListNodeUUIDAliases(ctx context.Context, aliasUuids string) ([]ListNodeUUIDAliasesRow, error)
 	// Column list matches the media_nodes table exactly (including
 	// source_path_hash, added by 00015_source_path_hash.sql) so sqlc maps this
 	// to the shared MediaNode struct instead of minting a one-off Row type.
@@ -649,7 +659,11 @@ type Querier interface {
 	// NULL or sealed, so it is read for completeness but never re-written
 	// here (the plaintext key for a legacy row is not recoverable).
 	ListPairingSecrets(ctx context.Context) ([]ListPairingSecretsRow, error)
-	ListPendingAgentEvents(ctx context.Context, limit int64) ([]ListPendingAgentEventsRow, error)
+	// Claims only rows whose retry backoff has elapsed (next_attempt_at <= now,
+	// unix seconds from the drainer's clock). A row deferred by
+	// ScheduleAgentEventRetry stays PENDING but is skipped until then, so it
+	// neither blocks the queue head nor burns its retry budget in seconds.
+	ListPendingAgentEvents(ctx context.Context, arg ListPendingAgentEventsParams) ([]ListPendingAgentEventsRow, error)
 	// internal/thumbs.Worker's claim query: up to ?2 PENDING nodes oldest-first
 	// (by id, this codebase's usual FIFO tiebreak), backed by 00007's partial
 	// index idx_media_nodes_thumb_pending (WHERE thumb_state = 'PENDING'), so
@@ -1021,6 +1035,9 @@ type Querier interface {
 	// matches reality. Keyed by hashed_key because the bootstrap path
 	// knows the hash, not the row id.
 	RevokeUserPATByHash(ctx context.Context, hashedKey string) (int64, error)
+	// Records one more failed attempt and defers the row until next_attempt_at
+	// (unix seconds), computed by the drainer's exponential backoff.
+	ScheduleAgentEventRetry(ctx context.Context, arg ScheduleAgentEventRetryParams) error
 	// Rotation: set expires_at on every currently-active key for this pairing
 	// that doesn't already have one. Idempotent -- re-running after the same
 	// clock has no effect.

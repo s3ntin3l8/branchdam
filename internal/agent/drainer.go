@@ -32,12 +32,16 @@ const DefaultDrainInterval = 2 * time.Second
 // Drainer processes PENDING rows in event_queue oldest-first and applies
 // the corresponding state changes to media_nodes and media_edges.
 type Drainer struct {
-	db          *db.DB
-	guard       *storage.Guard
-	log         *slog.Logger
-	maxRetries  int
-	backoffWait time.Duration
-	mu          sync.Mutex
+	db         *db.DB
+	guard      *storage.Guard
+	log        *slog.Logger
+	maxRetries int
+	mu         sync.Mutex
+
+	// now is the clock retry scheduling reads: both the "is this row due"
+	// cutoff and the next_attempt_at a retryable failure is deferred to.
+	// time.Now by default; tests inject a fake one via WithClock.
+	now func() time.Time
 
 	// nudge, if set, is called once after a drain pass (ProcessPending)
 	// commits at least one event, mirroring pipeline.ScanDeps.Nudge --
@@ -78,6 +82,17 @@ func WithEngine(engine *graph.Engine) DrainerOption {
 	return func(d *Drainer) { d.engine = engine }
 }
 
+// WithClock overrides the clock used for event retry scheduling
+// (next_attempt_at). Tests use it to step through a long backoff schedule
+// without sleeping.
+func WithClock(now func() time.Time) DrainerOption {
+	return func(d *Drainer) {
+		if now != nil {
+			d.now = now
+		}
+	}
+}
+
 // WithImmichScanner sets the ImmichScanner client used to trigger library rescans on asset deletion.
 func WithImmichScanner(scanner ImmichScanner) DrainerOption {
 	return func(d *Drainer) { d.immichScanner = scanner }
@@ -96,6 +111,7 @@ func NewDrainer(database *db.DB, guard *storage.Guard, log *slog.Logger, opts ..
 		guard:      guard,
 		log:        log,
 		maxRetries: DefaultMaxRetries,
+		now:        time.Now,
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -159,7 +175,8 @@ func (d *Drainer) run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// SetMaxRetries overrides the default poison-pill retry threshold.
+// SetMaxRetries overrides the default number of attempts (DefaultMaxRetries)
+// a retryable event gets before it is marked FAILED.
 func (d *Drainer) SetMaxRetries(n int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -169,16 +186,12 @@ func (d *Drainer) SetMaxRetries(n int) {
 	d.maxRetries = n
 }
 
-// SetRetryBackoff configures the backoff sleep duration in DrainAll when a batch makes no progress.
-func (d *Drainer) SetRetryBackoff(delay time.Duration) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.backoffWait = delay
-}
-
-// ProcessPending claims up to batchSize PENDING rows oldest-first and applies them.
-// Malformed payloads and poison-pill events are marked FAILED with error_log
-// and never crash the worker or block the queue head.
+// ProcessPending claims up to batchSize due PENDING rows oldest-first and
+// applies them. A row is due once its next_attempt_at has passed; a fresh
+// row is due immediately. Malformed payloads and poison-pill events are
+// marked FAILED with error_log and never crash the worker or block the queue
+// head. A retryable failure is deferred by RetryDelay(attempts) and marked
+// FAILED only once maxRetries attempts are spent.
 func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats, error) {
 	if batchSize <= 0 {
 		batchSize = 50
@@ -190,7 +203,10 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 	var events []sqlcgen.ListPendingAgentEventsRow
 	err := d.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
-		events, err = q.ListPendingAgentEvents(ctx, int64(batchSize))
+		events, err = q.ListPendingAgentEvents(ctx, sqlcgen.ListPendingAgentEventsParams{
+			NowUnix:    d.now().Unix(),
+			BatchLimit: int64(batchSize),
+		})
 		return err
 	})
 	if err != nil {
@@ -300,14 +316,18 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 			}
 			stats.Failed++
 		} else {
+			delay := RetryDelay(attempts)
 			d.log.Warn("agent: transient event error, will retry",
-				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "err", processErr)
+				"eventID", ev.ID, "eventUUID", ev.EventUuid, "eventType", ev.EventType, "attempts", attempts, "retryIn", delay, "err", processErr)
 
-			// Persist retry count in DB so retries survive crashes and multi-instance restarts.
+			// Persist the retry count and the deferral in the DB so the
+			// backoff survives crashes and restarts: the row is skipped by
+			// ListPendingAgentEvents until next_attempt_at has passed.
 			if err := d.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-				return q.IncrementAgentEventRetry(ctx, sqlcgen.IncrementAgentEventRetryParams{
-					ID:       ev.ID,
-					ErrorLog: sql.NullString{String: processErr.Error(), Valid: true},
+				return q.ScheduleAgentEventRetry(ctx, sqlcgen.ScheduleAgentEventRetryParams{
+					ID:            ev.ID,
+					ErrorLog:      sql.NullString{String: processErr.Error(), Valid: true},
+					NextAttemptAt: d.now().Add(delay).Unix(),
 				})
 			}); err != nil {
 				d.log.Error("agent: failed to increment event retry in db", "eventID", ev.ID, "err", err)
@@ -329,7 +349,9 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 	return stats, nil
 }
 
-// DrainAll continuously processes pending events until the queue is empty or ctx is cancelled.
+// DrainAll processes due events until none are left or ctx is cancelled.
+// Rows deferred by a retry backoff stay PENDING and are picked up by a
+// later pass once their next_attempt_at has passed (Start's ticker).
 func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 	var totalStats DrainStats
 	start := time.Now()
@@ -343,7 +365,7 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 		var pendingCount int64
 		err := d.db.ReadTx(ctx, func(q *sqlcgen.Queries) error {
 			var err error
-			pendingCount, err = q.CountPendingAgentEvents(ctx)
+			pendingCount, err = q.CountDueAgentEvents(ctx, d.now().Unix())
 			return err
 		})
 		if err != nil {
@@ -365,23 +387,11 @@ func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 		totalStats.Failed += stats.Failed
 
 		if stats.Processed == 0 && stats.Failed == 0 {
-			// If all pending events are in retry cooldown or unprogressed, back off or break
-			d.mu.Lock()
-			backoff := d.backoffWait
-			d.mu.Unlock()
-
-			if backoff <= 0 {
-				break
-			}
-			timer := time.NewTimer(backoff)
-			select {
-			case <-timer.C:
-				// retry next iteration
-			case <-ctx.Done():
-				timer.Stop()
-				totalStats.Duration = time.Since(start)
-				return totalStats, ctx.Err()
-			}
+			// Every due row failed transiently and was deferred (or the
+			// deferral itself could not be written): nothing more to do
+			// this pass. Stopping here, rather than looping, keeps a row
+			// whose ScheduleAgentEventRetry write failed from spinning.
+			break
 		}
 	}
 
@@ -443,8 +453,10 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 		return 0, fmt.Errorf("%w: fullHash must be 64 lowercase hex characters", ErrMalformedPayload)
 	}
 
-	// Idempotency: if node already exists with this node_uuid, it's a no-op success.
-	if _, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID); err == nil {
+	// Idempotency: if node already exists with this node_uuid (or this
+	// device's UUID was already aliased onto an existing node by an
+	// earlier content dedup), it's a no-op success.
+	if _, _, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.NodeUUID); err == nil {
 		return 0, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("lookup node by uuid: %w", err)
@@ -452,14 +464,18 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 
 	// Strict content dedup: if a live (non-ARCHIVED) node already has this full_hash,
 	// skip insertion and succeed without creating a duplicate media node.
+	// The device's UUID is recorded as an alias of the existing node so its
+	// follow-up rebase / node-status / edge events still resolve; without
+	// it the device holds a UUID the server never heard of and its rebase
+	// collided with ux_media_nodes_live_full_hash on every attempt.
 	if p.FullHash != nil && *p.FullHash != "" {
 		if existing, err := q.GetMediaNodeByFullHash(ctx, p.FullHash); err == nil {
-			d.log.Info("agent: content dedup — EVENT_NODE_CREATED skipped",
+			d.log.Info("agent: content dedup — EVENT_NODE_CREATED aliased onto existing node",
 				"incomingUuid", p.NodeUUID,
 				"existingUuid", existing.NodeUuid,
 				"existingPath", existing.FilePath,
 				"fullHash", *p.FullHash)
-			return 0, nil
+			return 0, recordContentAlias(ctx, q, p.NodeUUID, existing.NodeUuid, ev.AgentID)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return 0, fmt.Errorf("lookup node by full_hash: %w", err)
 		}
@@ -587,7 +603,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 					"incomingUuid", p.NodeUUID,
 					"existingUuid", existing.NodeUuid,
 					"existingPath", existing.FilePath)
-				return 0, nil
+				return 0, recordContentAlias(ctx, q, p.NodeUUID, existing.NodeUuid, ev.AgentID)
 			}
 		}
 		return 0, err
@@ -729,20 +745,25 @@ func (d *Drainer) applyEdgeAttached(ctx context.Context, q *sqlcgen.Queries, ev 
 		return fmt.Errorf("%w: confidence %v is below needsReviewFloor %v, refusing to create edge", ErrMalformedPayload, p.Confidence, graph.NeedsReviewFloor)
 	}
 
-	srcNode, err := q.GetMediaNodeByUUID(ctx, p.SourceNodeUUID)
+	// An aliased UUID (content-deduplicated by this device's own
+	// EVENT_NODE_CREATED) attaches to the node it was aliased onto.
+	srcNode, _, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.SourceNodeUUID)
 	if err != nil {
 		return fmt.Errorf("resolve source node %q: %w", p.SourceNodeUUID, err)
 	}
-	tgtNode, err := q.GetMediaNodeByUUID(ctx, p.TargetNodeUUID)
+	tgtNode, _, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.TargetNodeUUID)
 	if err != nil {
 		return fmt.Errorf("resolve target node %q: %w", p.TargetNodeUUID, err)
 	}
 	sourceID, targetID := srcNode.ID, tgtNode.ID
 
 	// Only the child's creator may assert its provenance with authority;
-	// anyone else's edge is a suggestion for a human to confirm.
+	// anyone else's edge is a suggestion for a human to confirm. Ownership
+	// is checked on the resolved node: an alias makes the device the owner
+	// of nothing, so an edge onto someone else's canonical node is only a
+	// suggestion.
 	targetOwned := true
-	if err := RequireNodeOwner(ctx, q, ev.AgentID, p.TargetNodeUUID); err != nil {
+	if err := RequireNodeOwner(ctx, q, ev.AgentID, tgtNode.NodeUuid); err != nil {
 		if !errors.Is(err, ErrNotNodeOwner) {
 			return err
 		}
@@ -818,12 +839,20 @@ func (d *Drainer) applyNodeMoved(ctx context.Context, q *sqlcgen.Queries, ev sql
 		return fmt.Errorf("%w: missing newFilePath in node moved payload", ErrMalformedPayload)
 	}
 
-	node, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	node, aliased, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.NodeUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: node uuid %s", ErrNodeNotFound, p.NodeUUID)
 		}
 		return fmt.Errorf("lookup node for move: %w", err)
+	}
+	if aliased {
+		// The device moved its own duplicate copy of content the server
+		// already holds under another node; that node is not the device's
+		// to re-point. Acknowledge without touching it.
+		d.log.Info("agent: EVENT_NODE_MOVED for a content-deduplicated uuid, nothing to move",
+			"nodeUuid", p.NodeUUID, "canonicalUuid", node.NodeUuid)
+		return nil
 	}
 	// An ARCHIVED node is a superseded version. RebaseNodePathByUUID sets
 	// lifecycle_state='ACTIVE' unconditionally with no lifecycle filter of
@@ -884,12 +913,19 @@ func (d *Drainer) applyNodeDeleted(ctx context.Context, q *sqlcgen.Queries, ev s
 		return fmt.Errorf("%w: missing or malformed nodeUuid in node deleted payload", ErrInvalidNodeUUID)
 	}
 
-	node, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	node, aliased, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.NodeUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: node uuid %s", ErrNodeNotFound, p.NodeUUID)
 		}
 		return fmt.Errorf("lookup node for deletion: %w", err)
+	}
+	if aliased {
+		// Deleting the device's duplicate copy must never trash the
+		// canonical node the duplicate was aliased onto.
+		d.log.Info("agent: EVENT_NODE_DELETED for a content-deduplicated uuid, canonical node left untouched",
+			"nodeUuid", p.NodeUUID, "canonicalUuid", node.NodeUuid)
+		return nil
 	}
 	// A device may only trash nodes it created itself: this physically
 	// moves the file into .trash and it is purged after the retention period.
@@ -991,7 +1027,15 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 		mtime = time.Now().Unix()
 	}
 
-	existing, err := q.GetMediaNodeByUUID(ctx, p.NodeUUID)
+	existing, aliased, err := LookupNodeByUUID(ctx, q, ev.AgentID, p.NodeUUID)
+	if err == nil && aliased {
+		// The device's EVENT_NODE_CREATED was content-deduplicated onto an
+		// existing node: the server already holds these bytes under that
+		// node, which is not the device's to re-point. Acknowledge.
+		d.log.Info("agent: EVENT_PATH_REBASED for a content-deduplicated uuid, canonical node left untouched",
+			"nodeUuid", p.NodeUUID, "canonicalUuid", existing.NodeUuid)
+		return 0, nil
+	}
 	if err == nil {
 		// Existing node: rebase path in place. Refuse an ARCHIVED node for
 		// the same reason as applyNodeMoved -- RebaseNodePathByUUID would
@@ -1050,6 +1094,16 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	indexingStatus := "INDEXED_SHALLOW"
 	var nullFullHash *string
 	if p.FullHash != nil && *p.FullHash != "" {
+		// Same content dedup as applyNodeCreated: a live node already
+		// holding these bytes gets the device's UUID as an alias instead
+		// of a second row (which ux_media_nodes_live_full_hash refuses).
+		if dup, dupErr := q.GetMediaNodeByFullHash(ctx, p.FullHash); dupErr == nil {
+			d.log.Info("agent: content dedup — EVENT_PATH_REBASED aliased onto existing node",
+				"incomingUuid", p.NodeUUID, "existingUuid", dup.NodeUuid)
+			return 0, recordContentAlias(ctx, q, p.NodeUUID, dup.NodeUuid, ev.AgentID)
+		} else if !errors.Is(dupErr, sql.ErrNoRows) {
+			return 0, fmt.Errorf("lookup node by full_hash: %w", dupErr)
+		}
 		nullFullHash = p.FullHash
 		indexingStatus = "INDEXED_FULL"
 	}
