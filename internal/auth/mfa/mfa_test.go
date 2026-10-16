@@ -296,6 +296,39 @@ func TestDisable_RejectsReplayedCode(t *testing.T) {
 	assert.Equal(t, step+1, creds.LastUsedStep)
 }
 
+// TestDisable_ReplayedAndWrongCodeAreIndistinguishable: the disable handler
+// returns err.Error() to the client, so a replayed (already consumed) code
+// and a plain wrong code must produce the identical error, or the response
+// would tell an attacker that a guessed code was valid but already used.
+func TestDisable_ReplayedAndWrongCodeAreIndistinguishable(t *testing.T) {
+	svc, database := newTestService(t)
+	userID := createTestUser(t, database, "mira")
+
+	setupResult, err := svc.Setup(context.Background(), userID, "mira")
+	require.NoError(t, err)
+	secret := extractSecret(setupResult.OtpauthURI)
+	step := time.Now().Unix() / int64(DefaultTOTPPeriod)
+	_, err = svc.Enable(context.Background(), userID, computeTOTP(secret, step))
+	require.NoError(t, err)
+
+	step = time.Now().Unix() / int64(DefaultTOTPPeriod)
+	usedCode := computeTOTP(secret, step+1)
+	valid, err := svc.ValidateTOTPCode(context.Background(), userID, usedCode)
+	require.NoError(t, err)
+	require.True(t, valid)
+
+	passwordOK := func(string) error { return nil }
+	replayErr := svc.Disable(context.Background(), userID, passwordOK, usedCode)
+	wrongErr := svc.Disable(context.Background(), userID, passwordOK, "000000")
+	if usedCode == "000000" {
+		t.Skip("generated code collided with the wrong-code fixture")
+	}
+	require.ErrorIs(t, replayErr, ErrInvalidTOTP)
+	require.ErrorIs(t, wrongErr, ErrInvalidTOTP)
+	assert.Equal(t, wrongErr.Error(), replayErr.Error(), "replayed and wrong codes must surface identically")
+	assert.True(t, svc.HasMFA(context.Background(), userID))
+}
+
 // TestEnable_RejectsExpiredPendingSecret pins Issue 7's TTL enforcement:
 // a pending secret older than PendingSecretTTL is refused at Enable
 // time. The test sets up a user, manually rewinds the

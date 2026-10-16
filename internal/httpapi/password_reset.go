@@ -71,11 +71,6 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited; retry after "+d.RetryAfter.String())
 		return
 	}
-	// Every request counts as an attempt: each one mints a token row and
-	// can send an email, so an unauthenticated caller must not be able to
-	// loop on it (mail bombing / token-table growth).
-	s.localAuth.resetLimiter.RecordFailure(ip)
-
 	var body struct {
 		Email string `json:"email"`
 	}
@@ -88,6 +83,13 @@ func (s *Server) handlePasswordResetRequest(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusUnprocessableEntity, "email is required")
 		return
 	}
+
+	// Every well-formed request counts as an attempt, whether or not an
+	// account matches: a found address mints a token row and sends an
+	// email, and counting only those would let the limiter itself reveal
+	// which addresses exist. Malformed bodies are rejected above without
+	// a strike because they never reach the background job.
+	s.localAuth.resetLimiter.RecordFailure(ip)
 
 	s.dispatchPasswordResetRequest(email, ip, r.UserAgent())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -113,7 +115,9 @@ func (s *Server) dispatchPasswordResetRequest(email, ip, userAgent string) {
 	case la.resetSlots <- struct{}{}:
 	default:
 		la.log.Warn("password-reset: too many reset requests in flight; dropping this one",
-			slog.Int("in_flight", cap(la.resetSlots)))
+			slog.String("ip", ip),
+			slog.Int("in_flight", len(la.resetSlots)),
+			slog.Int("slots", cap(la.resetSlots)))
 		return
 	}
 	la.resetJobs.Add(1)

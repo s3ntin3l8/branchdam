@@ -292,6 +292,19 @@ unexpectedly logged out) rather than the silent alternative (some
 sessions working, some not, depending on which key was active when
 they were minted).
 
+**Password-reset requests are fire-and-forget**: `POST
+/api/v1/password-reset/request` always answers 200 after validating the
+body, then does the account lookup, token mint and email send on a
+background job. That keeps the response identical for known and unknown
+addresses, but it also means a 200 does not prove an email went out.
+When the job fails (a database error, the email provider failing, or the
+32-job cap dropping a request during a flood) the server logs a WARN:
+`password-reset: request failed`, `password-reset: email delivery failed` or
+`password-reset: too many reset requests in flight`. Each of those means
+a user is waiting for an email that will not arrive. Alert on them, and
+use the admin reset (`POST /api/v1/admin/users/{id}/reset-password`) for
+a user who reports a missing email.
+
 **Backups**: a `branchdam.db` backup pairs with the `BRANCHDAM_SECRET_KEY`
 that was active when the backup was taken. Restoring the database
 without restoring the key makes the app_settings table's encrypted
