@@ -40,6 +40,18 @@ describe("FieldRow", () => {
     expect(screen.queryByText("Applies on restart")).not.toBeInTheDocument();
   });
 
+  it("renders a plain label, not a dangling <label for>, when the row has no control", () => {
+    const { container } = render(
+      <FieldRow label="Listen address" doc="Where the server listens." source="config" hasControl={false}>
+        <p>:8080</p>
+      </FieldRow>,
+    );
+    expect(screen.getByText("Listen address").tagName).toBe("SPAN");
+    expect(container.querySelector("label")).toBeNull();
+    expect(container.querySelector("[for]")).toBeNull();
+    expect(screen.getByText(":8080")).toBeInTheDocument();
+  });
+
   it("labels each kind of control", () => {
     render(
       <>

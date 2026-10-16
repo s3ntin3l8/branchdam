@@ -31,22 +31,41 @@ interface FieldRowProps {
   source: SettingsFieldSource;
   pendingRestart?: boolean;
   readOnlyReason?: string;
+  // false when the row holds no labelable control, only a display value
+  // (SettingsPage's ReadOnlyValue for a non-editable field). The label is
+  // then a plain element: a <label htmlFor> would point at an id nothing
+  // carries. Default true.
+  hasControl?: boolean;
   children: React.ReactNode;
 }
 
-export function FieldRow({ fieldKey, label, doc, source, pendingRestart, readOnlyReason, children }: FieldRowProps) {
+export function FieldRow({
+  fieldKey,
+  label,
+  doc,
+  source,
+  pendingRestart,
+  readOnlyReason,
+  hasControl = true,
+  children,
+}: FieldRowProps) {
   const baseId = useId();
   const controlId = `${baseId}-control`;
   const docId = doc ? `${baseId}-doc` : undefined;
+  const labelClass = "text-sm font-medium text-neutral-200";
   return (
     <div
       data-testid={fieldKey ? `field-row-${fieldKey}` : undefined}
       className="border-b border-neutral-800/60 py-3 last:border-b-0"
     >
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <label htmlFor={controlId} className="text-sm font-medium text-neutral-200">
-          {label}
-        </label>
+        {hasControl ? (
+          <label htmlFor={controlId} className={labelClass}>
+            {label}
+          </label>
+        ) : (
+          <span className={labelClass}>{label}</span>
+        )}
         <ProvenanceChip source={source} />
         {pendingRestart && (
           <span className="rounded-full border border-amber-700/60 bg-amber-950/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-400">
@@ -59,7 +78,7 @@ export function FieldRow({ fieldKey, label, doc, source, pendingRestart, readOnl
           {doc}
         </p>
       )}
-      <FieldIdsContext.Provider value={{ controlId, docId }}>{children}</FieldIdsContext.Provider>
+      <FieldIdsContext.Provider value={hasControl ? { controlId, docId } : null}>{children}</FieldIdsContext.Provider>
       {readOnlyReason && <p className="mt-1 text-xs text-neutral-600">{readOnlyReason}</p>}
     </div>
   );

@@ -26,8 +26,6 @@ export interface DialogProps {
   dismissible?: boolean;
   // Explicit id for the title element; generated when omitted.
   titleId?: string;
-  // Render the title for screen readers only (e.g. the lightbox).
-  hideTitle?: boolean;
   initialFocusRef?: RefObject<HTMLElement | null>;
   // Classes for the panel; replaces the default card styling.
   panelClassName?: string;
@@ -59,7 +57,6 @@ export default function Dialog({
   onClose,
   dismissible = true,
   titleId,
-  hideTitle = false,
   initialFocusRef,
   panelClassName = dialogPanelClass,
   overlayClassName = "z-50 bg-black/70",
@@ -70,6 +67,12 @@ export default function Dialog({
   const generatedId = useId();
   const labelId = titleId ?? `dialog-title-${generatedId}`;
   const panelRef = useRef<HTMLDivElement>(null);
+  // Whether the current press started on the backdrop itself. A click is
+  // dispatched on the common ancestor of the mousedown and mouseup
+  // targets, so a text selection dragged from inside the panel and
+  // released on the backdrop arrives as a click on the overlay; only a
+  // press that both starts and ends on the backdrop closes the dialog.
+  const pressStartedOnOverlay = useRef(false);
 
   // Latest props for the document listener, without re-subscribing (and so
   // without re-running the focus-on-open effect) on every render.
@@ -138,8 +141,13 @@ export default function Dialog({
   return (
     <div
       className={`fixed inset-0 flex items-center justify-center p-4 ${overlayClassName}`}
+      onMouseDown={(e) => {
+        pressStartedOnOverlay.current = e.target === e.currentTarget;
+      }}
       onClick={(e) => {
-        if (e.target === e.currentTarget && dismissible && onClose) onClose();
+        const startedOnOverlay = pressStartedOnOverlay.current;
+        pressStartedOnOverlay.current = false;
+        if (startedOnOverlay && e.target === e.currentTarget && dismissible && onClose) onClose();
       }}
     >
       <div
@@ -152,13 +160,13 @@ export default function Dialog({
       >
         {headerAction ? (
           <div className={headerClassName}>
-            <h2 id={labelId} className={hideTitle ? "sr-only" : titleClassName}>
+            <h2 id={labelId} className={titleClassName}>
               {title}
             </h2>
             {headerAction}
           </div>
         ) : (
-          <h2 id={labelId} className={hideTitle ? "sr-only" : titleClassName}>
+          <h2 id={labelId} className={titleClassName}>
             {title}
           </h2>
         )}

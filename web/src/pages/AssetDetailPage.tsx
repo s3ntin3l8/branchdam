@@ -494,8 +494,10 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
   const assetId = Number.isInteger(parsedId) && parsedId > 0 ? parsedId : undefined;
   const [searchParams, setSearchParams] = useSearchParams();
 
+  // The lineage route takes `Depth int`: a fractional ?depth=2.5 would
+  // be a 400, so like the id it must be a whole number in range.
   const rawDepth = Number(searchParams.get("depth"));
-  const depth = !Number.isNaN(rawDepth) && rawDepth >= 1 && rawDepth <= 5 ? rawDepth : 2;
+  const depth = Number.isInteger(rawDepth) && rawDepth >= 1 && rawDepth <= 5 ? rawDepth : 2;
 
   const { data: asset, isLoading, isError, error, refetch, isFetching } = useAsset(assetId);
   const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(assetId, depth);

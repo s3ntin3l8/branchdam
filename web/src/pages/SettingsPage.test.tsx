@@ -282,6 +282,48 @@ describe("SettingsPage", () => {
     expect(screen.getByText(":8080")).toBeInTheDocument();
   });
 
+  it("gives a read-only row a plain label and every <label for> a real control", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    vi.mocked(api.getSettings).mockResolvedValue(settingsResponse());
+
+    const { container } = renderWithClient(<SettingsPage />);
+
+    // Non-editable string and stringList fields render a ReadOnlyValue,
+    // not a control, so their label must not point at an id.
+    for (const key of ["listenAddr", "authz.groups"]) {
+      const row = await screen.findByTestId(`field-row-${key}`);
+      expect(row.querySelector("label")).toBeNull();
+    }
+    expect(within(screen.getByTestId("field-row-listenAddr")).getByText("Listen Address").tagName).toBe("SPAN");
+    // An editable row keeps its association.
+    expect(screen.getByLabelText("Hash Workers")).toHaveValue(4);
+    // No <label for> anywhere on the page points at a missing element.
+    const labels = Array.from(container.querySelectorAll("label[for]"));
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) {
+      expect(document.getElementById(label.getAttribute("for")!)).not.toBeNull();
+    }
+  });
+
+  it("does not claim there are no path rewrites while settings load or after a failed load", async () => {
+    vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
+    vi.mocked(api.listPathRewrites).mockResolvedValue([]);
+    // Still loading: the fetch never settles.
+    vi.mocked(api.getSettings).mockReturnValue(new Promise(() => {}));
+    const { unmount } = renderWithClient(<SettingsPage />);
+    expect(await screen.findByText("Loading path rewrites…")).toBeInTheDocument();
+    expect(screen.queryByText("No operator path rewrites configured.")).not.toBeInTheDocument();
+    unmount();
+
+    // Failed load.
+    vi.mocked(api.getSettings).mockRejectedValue(new ApiError(500, "boom"));
+    renderWithClient(<SettingsPage />);
+    expect(await screen.findByText("Failed to load settings.")).toBeInTheDocument();
+    expect(screen.getByText("Path rewrites are unavailable because settings failed to load.")).toBeInTheDocument();
+    expect(screen.queryByText("No operator path rewrites configured.")).not.toBeInTheDocument();
+  });
+
   it("renders the Appearance category with a theme switcher (no server round-trip)", async () => {
     vi.mocked(api.config).mockResolvedValue({ version: "v1.2.3" });
     vi.mocked(api.listPathRewrites).mockResolvedValue([]);

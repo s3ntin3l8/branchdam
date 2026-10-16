@@ -698,6 +698,38 @@ describe("AssetDetailPage load errors", () => {
     expect(api.getAsset).not.toHaveBeenCalled();
   });
 
+  it("falls back to depth 2 for a fractional or out-of-range ?depth", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+
+    const renderAt = (path: string) =>
+      render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <MemoryRouter initialEntries={[path]}>
+            <Routes>
+              <Route path="/assets/:id" element={<AssetDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+
+    for (const raw of ["2.5", "9", "abc"]) {
+      vi.mocked(api.getAssetLineage).mockClear();
+      const { unmount } = renderAt(`/assets/42?depth=${raw}`);
+      await waitFor(() => expect(api.getAssetLineage).toHaveBeenCalled());
+      expect(api.getAssetLineage).toHaveBeenCalledWith(42, 2);
+      expect(await screen.findByLabelText("Traversal depth")).toHaveValue("2");
+      unmount();
+    }
+
+    // A whole number in range is honoured.
+    vi.mocked(api.getAssetLineage).mockClear();
+    renderAt("/assets/42?depth=4");
+    await waitFor(() => expect(api.getAssetLineage).toHaveBeenCalledWith(42, 4));
+    expect(await screen.findByLabelText("Traversal depth")).toHaveValue("4");
+  });
+
   it("shows the size human-readable, with exact bytes on hover", async () => {
     vi.mocked(api.getAsset).mockResolvedValue(asset);
     vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });

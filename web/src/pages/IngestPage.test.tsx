@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
@@ -36,9 +36,47 @@ describe("IngestPage", () => {
     vi.mocked(api.listProgress).mockResolvedValue({ jobs: [] });
     renderWithClient(<IngestPage />);
 
-    expect(screen.getByRole("button", { name: /manual web upload/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /storage scan/i })).toBeInTheDocument();
-    expect(screen.getByText(/drag and drop media files or folders here/i)).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Ingest method" })).toBeInTheDocument();
+    const upload = screen.getByRole("tab", { name: /manual web upload/i });
+    const scan = screen.getByRole("tab", { name: /storage scan/i });
+    expect(upload).toHaveAttribute("aria-selected", "true");
+    expect(scan).toHaveAttribute("aria-selected", "false");
+    expect(screen.queryByRole("button", { pressed: true })).not.toBeInTheDocument();
+    // The selected tab controls the panel, and the panel is named by it.
+    const panel = screen.getByRole("tabpanel", { name: /manual web upload/i });
+    expect(upload).toHaveAttribute("aria-controls", panel.id);
+    expect(scan).not.toHaveAttribute("aria-controls");
+    expect(within(panel).getByText(/drag and drop media files or folders here/i)).toBeInTheDocument();
+  });
+
+  it("moves between tabs with the arrow keys, Home and End", async () => {
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations });
+    vi.mocked(api.listProgress).mockResolvedValue({ jobs: [] });
+    renderWithClient(<IngestPage />);
+
+    const upload = screen.getByRole("tab", { name: /manual web upload/i });
+    const scan = screen.getByRole("tab", { name: /storage scan/i });
+    // Roving tabindex: only the selected tab is in the Tab order.
+    expect(upload).toHaveAttribute("tabindex", "0");
+    expect(scan).toHaveAttribute("tabindex", "-1");
+
+    upload.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(scan).toHaveFocus();
+    expect(scan).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel", { name: /storage scan/i })).toBeInTheDocument();
+
+    await userEvent.keyboard("{ArrowRight}");
+    expect(upload).toHaveFocus();
+    expect(upload).toHaveAttribute("aria-selected", "true");
+
+    await userEvent.keyboard("{End}");
+    expect(scan).toHaveFocus();
+    await userEvent.keyboard("{Home}");
+    expect(upload).toHaveFocus();
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(scan).toHaveFocus();
+    expect(scan).toHaveAttribute("aria-selected", "true");
   });
 
   it("switches to Storage Scan tab and lists locations in the picker", async () => {
@@ -46,7 +84,7 @@ describe("IngestPage", () => {
     vi.mocked(api.listProgress).mockResolvedValue({ jobs: [] });
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     expect(await screen.findByRole("combobox")).toBeInTheDocument();
     expect(await screen.findByRole("option", { name: /exports · TIER2_EXPORTS/ })).toBeInTheDocument();
@@ -64,7 +102,7 @@ describe("IngestPage", () => {
     vi.mocked(api.startScan).mockResolvedValue({ jobId: 7 });
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     await screen.findByRole("option", { name: /exports · TIER2_EXPORTS/ });
     const select = await screen.findByRole("combobox");
@@ -79,7 +117,7 @@ describe("IngestPage", () => {
     vi.mocked(api.listProgress).mockResolvedValue({ jobs: [] });
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     await screen.findByRole("option", { name: /exports · TIER2_EXPORTS/ });
     const select = await screen.findByRole("combobox");
@@ -94,7 +132,7 @@ describe("IngestPage", () => {
     vi.mocked(api.startScan).mockResolvedValue({ jobId: 8 });
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     await screen.findByRole("option", { name: /archive · TIER3_MASTER_ARCHIVE · read-only/ });
     const select = await screen.findByRole("combobox");
@@ -125,7 +163,7 @@ describe("IngestPage", () => {
     });
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     expect(await screen.findByText("FULL_SCAN")).toBeInTheDocument();
     expect(screen.getByText("FAILED")).toBeInTheDocument();
@@ -138,7 +176,7 @@ describe("IngestPage", () => {
     vi.mocked(api.startScan).mockRejectedValue(new Error("Storage location not found"));
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     await screen.findByRole("option", { name: /exports · TIER2_EXPORTS/ });
     const select = await screen.findByRole("combobox");
@@ -174,7 +212,7 @@ describe("IngestPage", () => {
     });
     renderWithClient(<IngestPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: /storage scan/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /storage scan/i }));
 
     expect(await screen.findByText("ACTIVE")).toBeInTheDocument();
     expect(screen.getByText("STOPPED")).toBeInTheDocument();

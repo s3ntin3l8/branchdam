@@ -184,6 +184,9 @@ function SettingsFieldEditor({
       source={field.source}
       pendingRestart={field.pendingRestart}
       readOnlyReason={field.readOnlyReason}
+      // renderInput gives a non-editable field a ReadOnlyValue <p>, not a
+      // control, so its row must not render a <label htmlFor>.
+      hasControl={field.editable}
     >
       <div className="flex items-start gap-2">
         <div className="flex-1">{renderInput(field, draft, handleChange, secretsAvailable)}</div>
@@ -245,11 +248,17 @@ function SettingsFieldEditor({
 function PathRewritesEditor({
   field,
   saving,
+  loading,
+  loadFailed,
   onSave,
   onRevert,
 }: {
   field?: SettingsField;
   saving: boolean;
+  // The settings fetch is still in flight, or it failed. Either way
+  // `field` is absent, which must not read as "no rules configured".
+  loading: boolean;
+  loadFailed: boolean;
   onSave: (key: string, value: unknown, cb: SaveCallbacks) => void;
   onRevert: (key: string, cb: SaveCallbacks) => void;
 }) {
@@ -375,7 +384,13 @@ function PathRewritesEditor({
       <SaveStatusText status={status} />
 
       {rules.length === 0 ? (
-        <p className="mb-4 text-sm text-neutral-500">No operator path rewrites configured.</p>
+        loading ? (
+          <p className="mb-4 text-sm text-neutral-500">Loading path rewrites…</p>
+        ) : loadFailed ? (
+          <p className="mb-4 text-sm text-red-400">Path rewrites are unavailable because settings failed to load.</p>
+        ) : (
+          <p className="mb-4 text-sm text-neutral-500">No operator path rewrites configured.</p>
+        )
       ) : (
         <div className="overflow-x-auto mb-4">
           <table className="w-full text-left text-sm text-neutral-300">
@@ -656,6 +671,8 @@ export default function SettingsPage() {
           <PathRewritesEditor
             field={pathRewritesField}
             saving={putSettings.isPending}
+            loading={settingsLoading}
+            loadFailed={Boolean(settingsError)}
             onSave={handleSave}
             onRevert={handleRevert}
           />
