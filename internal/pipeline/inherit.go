@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strconv"
@@ -37,6 +38,9 @@ var (
 	// ErrChildTrashed: the child is TRASHED, so its file was moved into
 	// .trash/ and is no longer at its recorded path either.
 	ErrChildTrashed = errors.New("asset is TRASHED: restore it before inheriting metadata")
+	// ErrChildFileNotFound: the row is live but its file is not at the
+	// recorded path (deleted out of band before a scan marked it MISSING).
+	ErrChildFileNotFound = errors.New("asset's file is not on disk at its recorded path")
 )
 
 // ErrParentUnavailable indicates that the parent asset is in an archived or missing state.
@@ -329,17 +333,29 @@ func PlanInheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (
 	if err != nil {
 		return nil, err
 	}
-	// The write needs exiftool for a non-empty plan; refuse the preview the
-	// same way, so it never promises a write the confirm would then refuse.
-	if len(plan.Tags) > 0 && !exiftoolAvailable(deps) {
-		return nil, probe.ErrToolUnavailable
+	// A non-empty plan needs the write to be possible; refuse the preview
+	// the same way the write does, so it never promises a write the
+	// confirm would then refuse.
+	if len(plan.Tags) > 0 {
+		if err := checkTagWritePossible(deps, child); err != nil {
+			return nil, err
+		}
 	}
 	return plan, nil
 }
 
-// exiftoolAvailable reports whether the tag write can run.
-func exiftoolAvailable(deps InheritDeps) bool {
-	return deps.Prober != nil && deps.Prober.HasExiftool()
+// checkTagWritePossible reports why the tag write could not run: no
+// exiftool, or no file at the child's recorded path (Guard.CheckWrite
+// resolves by path prefix only, so a row still ACTIVE whose file was
+// removed out of band, before a scan marked it MISSING, gets this far).
+func checkTagWritePossible(deps InheritDeps, child sqlcgen.MediaNode) error {
+	if deps.Prober == nil || !deps.Prober.HasExiftool() {
+		return probe.ErrToolUnavailable
+	}
+	if _, err := os.Lstat(child.FilePath); errors.Is(err, fs.ErrNotExist) {
+		return ErrChildFileNotFound
+	}
+	return nil
 }
 
 // loadInheritChild loads the child node and runs the checks both the plan
@@ -450,8 +466,8 @@ func InheritMetadata(ctx context.Context, deps InheritDeps, childID int64) (map[
 		return tags, nil
 	}
 
-	if !exiftoolAvailable(deps) {
-		return nil, probe.ErrToolUnavailable
+	if err := checkTagWritePossible(deps, child); err != nil {
+		return nil, err
 	}
 
 	// Detach write and refresh context from caller/request context so client

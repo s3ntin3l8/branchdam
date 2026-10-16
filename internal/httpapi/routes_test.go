@@ -133,6 +133,11 @@ func inheritTestServer(t *testing.T, rootPath string) (*Server, *db.DB, sqlcgen.
 		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey)})
 
 	parent := seedInheritNode(t, database, locID, filepath.Join(resolved, "parent.jpg"), "uuid-parent")
+	// The child's file exists, as for a live node; tests that need a
+	// specific payload overwrite it.
+	if err := os.WriteFile(filepath.Join(resolved, "child.jpg"), []byte("child"), 0o600); err != nil {
+		t.Fatalf("write child file: %v", err)
+	}
 	child := seedInheritNode(t, database, locID, filepath.Join(resolved, "child.jpg"), "uuid-child")
 	err = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
 		_, err := q.CreateMediaEdge(context.Background(), sqlcgen.CreateMediaEdgeParams{
@@ -6107,6 +6112,21 @@ func TestInheritMetadataDryRunRefusesWhatTheWriteWould(t *testing.T) {
 			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
 			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "MISSING") {
 				t.Errorf("%q: status = %d, want 409 naming MISSING, body = %s", q, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("ACTIVE child whose file is gone", func(t *testing.T) {
+		fakeExiftoolOnPath(t)
+		srv, database, parent, child := inheritTestServer(t, t.TempDir())
+		seedParentMake(t, database, parent.ID)
+		if err := os.Remove(child.FilePath); err != nil {
+			t.Fatalf("remove child file: %v", err)
+		}
+		for _, q := range []string{"?dryRun=1", ""} {
+			rr := doJSON(t, srv.Handler(), http.MethodPost, "/api/v1/assets/"+fmt.Sprint(child.ID)+"/inherit-metadata"+q, nil)
+			if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not on disk") {
+				t.Errorf("%q: status = %d, want 409 naming the missing file, body = %s", q, rr.Code, rr.Body.String())
 			}
 		}
 	})
