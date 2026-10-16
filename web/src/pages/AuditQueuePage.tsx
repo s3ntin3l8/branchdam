@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,6 +13,7 @@ import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
 import Dialog from "../components/Dialog";
 import type { EdgeAuditEntry } from "../api/types";
+import { formatEvidence, type EvidenceRow } from "../lib/formatEvidence";
 
 const PAGE_SIZE = 50;
 
@@ -21,24 +22,66 @@ function formatTimestamp(unix?: number): string {
   return new Date(unix * 1000).toLocaleString();
 }
 
-function formatEvidence(evidenceJson?: string): React.ReactNode {
-  if (!evidenceJson || evidenceJson === "{}" || evidenceJson === "") return null;
-  try {
-    const parsed = JSON.parse(evidenceJson);
-    return (
-      <div className="mt-2 rounded bg-neutral-950 p-2 font-mono text-xs text-neutral-400">
-        <div className="mb-1 font-semibold text-neutral-500">Evidence:</div>
-        {Object.entries(parsed).map(([k, v]) => (
-          <div key={k} className="flex justify-between gap-2">
-            <span className="text-neutral-500">{k}:</span>
-            <span className="text-neutral-300">{String(v)}</span>
-          </div>
-        ))}
-      </div>
-    );
-  } catch {
-    return <div className="mt-2 font-mono text-xs text-neutral-400">Evidence: {evidenceJson}</div>;
+function EvidenceRows({ rows }: { rows: EvidenceRow[] }) {
+  return (
+    <dl>
+      {rows.map((row) => (
+        <div key={row.key} className="flex justify-between gap-2">
+          <dt className="text-neutral-500">{row.label}:</dt>
+          <dd className="min-w-0 break-all text-right text-neutral-300">{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function EvidencePanel({ evidenceJson }: { evidenceJson?: string }) {
+  const headingId = useId();
+  const evidence = useMemo(() => formatEvidence(evidenceJson), [evidenceJson]);
+  if (evidence.kind === "empty") return null;
+  if (evidence.kind === "raw") {
+    return <div className="mt-2 break-all font-mono text-xs text-neutral-400">Evidence: {evidence.raw}</div>;
   }
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="mt-2 rounded bg-neutral-950 p-2 font-mono text-xs text-neutral-400"
+    >
+      <div id={headingId} className="mb-1 font-semibold text-neutral-500">Evidence:</div>
+      {evidence.flat.length > 0 && evidence.groups.length === 0 && <EvidenceRows rows={evidence.flat} />}
+      {evidence.flat.length > 0 && evidence.groups.length > 0 && (
+        // Mixed payload: give the flat rows their own heading so they line up
+        // with the resolver groups instead of sitting at heading level.
+        <div role="group" aria-labelledby={`${headingId}-flat`} className="mt-1">
+          <div id={`${headingId}-flat`} className="font-semibold text-neutral-400">
+            Other signals
+          </div>
+          <div className="pl-2">
+            <EvidenceRows rows={evidence.flat} />
+          </div>
+        </div>
+      )}
+      {evidence.groups.map((group, i) => (
+        <div
+          key={group.key}
+          role="group"
+          aria-labelledby={`${headingId}-g${i}`}
+          className="mt-1"
+        >
+          <div id={`${headingId}-g${i}`} className="font-semibold text-neutral-400">
+            {group.label}
+          </div>
+          {group.rows.length > 0 ? (
+            <div className="pl-2">
+              <EvidenceRows rows={group.rows} />
+            </div>
+          ) : (
+            <div className="pl-2 text-neutral-500">No signals recorded</div>
+          )}
+        </div>
+      ))}
+    </section>
+  );
 }
 
 function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
@@ -152,7 +195,7 @@ function AuditRow({ entry }: { entry: EdgeAuditEntry }) {
               </div>
             </div>
           </div>
-          {formatEvidence(entry.evidenceJson)}
+          <EvidencePanel evidenceJson={entry.evidenceJson} />
         </div>
 
         {/* Target Node (Child) */}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
@@ -81,6 +81,96 @@ describe("AuditQueuePage", () => {
     expect(screen.getByText("EXPORT_001.JPG")).toBeInTheDocument();
     expect(screen.getByText("5s")).toBeInTheDocument();
     expect(screen.getByText("2 bits")).toBeInTheDocument();
+  });
+
+  it("renders nested per-resolver evidence as labelled groups, never [object Object]", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 7,
+          sourceNodeId: 10,
+          targetNodeId: 20,
+          relationshipType: "DERIVED_FROM",
+          confidence: 0.85,
+          tier: 2,
+          resolver: "filename_stem",
+          evidenceJson: JSON.stringify({
+            filename_stem: {
+              filename_stem: "dsc01301",
+              same_capture_day: true,
+              same_camera_model: "ILCE-7M4",
+              same_directory: true,
+            },
+            heuristic_spatial_temporal: {
+              camera_serial: "SN123",
+              capture_delta_seconds: 3.456,
+              hamming_distance: 4,
+              extra: { nested: { deep: true } },
+            },
+          }),
+          parentAlive: true,
+          parentMissing: false,
+          sourceNode: { id: 10, nodeUuid: "uuid-10", fileName: "DSC01301.ARW", filePath: "/s/DSC01301.ARW", thumbState: "READY" },
+          targetNode: { id: 20, nodeUuid: "uuid-20", fileName: "DSC01301.JPG", filePath: "/s/DSC01301.JPG", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+    const { container } = renderWithClient(<AuditQueuePage />);
+
+    const evidence = await screen.findByRole("region", { name: /evidence/i });
+    expect(container.textContent).not.toContain("[object Object]");
+
+    const stemGroup = within(evidence).getByRole("group", { name: "Filename stem" });
+    expect(within(stemGroup).getByText("Same capture day:")).toBeInTheDocument();
+    expect(within(stemGroup).getByText("yes (ILCE-7M4)")).toBeInTheDocument();
+    expect(within(stemGroup).getByText("dsc01301")).toBeInTheDocument();
+
+    const heuristicGroup = within(evidence).getByRole("group", { name: "Spatial-temporal heuristic" });
+    expect(within(heuristicGroup).getByText("3.5s")).toBeInTheDocument();
+    expect(within(heuristicGroup).getByText("4 bits")).toBeInTheDocument();
+    expect(within(heuristicGroup).getByText('{"nested":{"deep":true}}')).toBeInTheDocument();
+  });
+
+  it("groups flat rows under 'Other signals' when mixed with resolver groups", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 9, sourceNodeId: 1, targetNodeId: 2, relationshipType: "DERIVED_FROM",
+          confidence: 0.5, tier: 2, resolver: "filename_stem",
+          evidenceJson: JSON.stringify({ reason: "manual", filename_stem: { same_directory: true } }),
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 1, nodeUuid: "uuid-1", fileName: "a", filePath: "/a", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "b", filePath: "/b", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+    renderWithClient(<AuditQueuePage />);
+
+    const evidence = await screen.findByRole("region", { name: /evidence/i });
+    const other = within(evidence).getByRole("group", { name: "Other signals" });
+    expect(within(other).getByText("manual")).toBeInTheDocument();
+    const stem = within(evidence).getByRole("group", { name: "Filename stem" });
+    expect(within(stem).getByText("Same directory:")).toBeInTheDocument();
+  });
+
+  it("falls back to the raw evidence string when it is not valid JSON", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 8, sourceNodeId: 1, targetNodeId: 2, relationshipType: "DERIVED_FROM",
+          confidence: 0.5, tier: 3, resolver: "agent", evidenceJson: "not-json{",
+          parentAlive: true, parentMissing: false,
+          sourceNode: { id: 1, nodeUuid: "uuid-1", fileName: "a", filePath: "/a", thumbState: "READY" },
+          targetNode: { id: 2, nodeUuid: "uuid-2", fileName: "b", filePath: "/b", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+    renderWithClient(<AuditQueuePage />);
+
+    expect(await screen.findByText("Evidence: not-json{")).toBeInTheDocument();
   });
 
   it("calls confirmEdge when Confirm is clicked", async () => {
