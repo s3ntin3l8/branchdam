@@ -194,6 +194,12 @@ type MeOutput struct {
 		// AND the current session has been MFA-verified. The SPA
 		// uses this to know that the challenge step is complete.
 		MFAVerified bool `json:"mfaVerified,omitempty"`
+		// MFAEnabled is true when the local user has a TOTP second
+		// factor enrolled, whatever the session's state. The account
+		// page uses it to offer "set up" or "disable"; MFAVerified
+		// alone can't say, because a session verified before the user
+		// disabled MFA keeps its verified stamp.
+		MFAEnabled bool `json:"mfaEnabled,omitempty"`
 	}
 }
 
@@ -218,7 +224,8 @@ func (s *Server) handleMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
 			// form on page load / reload (review suggestion, PR #459).
 			if s.localAuth != nil && s.localAuth.mfa != nil {
 				out.Body.MFAVerified = localView.MFAVerified
-				if !localView.MFAVerified && s.localAuth.mfa.HasMFA(ctx, localView.UserID) {
+				out.Body.MFAEnabled = s.localAuth.mfa.HasMFA(ctx, localView.UserID)
+				if !localView.MFAVerified && out.Body.MFAEnabled {
 					out.Body.MFARequired = true
 				}
 			}
@@ -3075,44 +3082,6 @@ type storageLocationHealthDTO struct {
 	WatcherDroppedEvents int64    `json:"watcherDroppedEvents"`
 }
 
-// locationValues is one storage location's effective safe-field values.
-// Comparable, so two resolutions can be diffed with !=.
-type locationValues struct {
-	name                         string
-	watch, sweep, disabled       bool
-	sweepIntervalSecs, cacheTTLH int
-}
-
-// effectiveLocationValues applies ov to config.yaml's entry for a
-// location, with the same cacheTtlHours validity rule as the display
-// merge in handleStorageHealth (and settings.ResolveStorageLocations).
-// Used to compare the boot-time override set with the current one, so
-// an override that was set and then unset again, or set to the value
-// config.yaml already has, doesn't count as pending.
-func effectiveLocationValues(base config.StorageLocation, ov settings.StorageLocationOverride, prunable bool) locationValues {
-	v := locationValues{
-		name: base.Name, watch: base.Watch, sweep: base.Sweep,
-		sweepIntervalSecs: base.SweepIntervalSecs, cacheTTLH: base.CacheTTLHours,
-	}
-	if ov.Name != nil {
-		v.name = *ov.Name
-	}
-	if ov.Watch != nil {
-		v.watch = *ov.Watch
-	}
-	if ov.Sweep != nil {
-		v.sweep = *ov.Sweep
-	}
-	if ov.SweepIntervalSecs != nil {
-		v.sweepIntervalSecs = *ov.SweepIntervalSecs
-	}
-	if ov.CacheTTLHours != nil && *ov.CacheTTLHours >= 0 && (*ov.CacheTTLHours == 0 || prunable) {
-		v.cacheTTLH = *ov.CacheTTLHours
-	}
-	v.disabled = ov.Enabled != nil && !*ov.Enabled
-	return v
-}
-
 type storageQueueHealthDTO struct {
 	WorkerPoolInFlight  int   `json:"workerPoolInFlight"`
 	WorkerPoolQueued    int   `json:"workerPoolQueued"`
@@ -3288,62 +3257,49 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 	dtos := make([]storageLocationHealthDTO, len(locations))
 	for i, loc := range locations {
 		base := baseByRootPath[loc.RootPath] // zero value if config.yaml no longer lists it
-		watch, sweep, sweepIntervalSecs, cacheTTLHours := base.Watch, base.Sweep, base.SweepIntervalSecs, base.CacheTTLHours
-		var disabled bool
-		if ov, ok := overrides[loc.RootPath]; ok {
-			if ov.Watch != nil {
-				watch = *ov.Watch
-			}
-			if ov.Sweep != nil {
-				sweep = *ov.Sweep
-			}
-			if ov.SweepIntervalSecs != nil {
-				sweepIntervalSecs = *ov.SweepIntervalSecs
-			}
-			// Same validity rule as ResolveStorageLocations: a positive
-			// cacheTtlHours on a non-prunable location, or a negative one,
-			// is invalid and must display the base value rather than the
-			// raw override -- e.g. an override set while prunable, later
-			// invalidated by a config.yaml edit flipping prunable to false.
-			if ov.CacheTTLHours != nil && *ov.CacheTTLHours >= 0 && (*ov.CacheTTLHours == 0 || loc.Prunable == 1) {
-				cacheTTLHours = *ov.CacheTTLHours
-			}
-			disabled = ov.Enabled != nil && !*ov.Enabled
-		}
-		// name falls back to the DB row (last-seeded value), not base.Name --
-		// unlike ResolveStorageLocations (which feeds the seeder and rightly
-		// drops a rootPath config.yaml no longer lists), display should still
-		// show something sensible for a location whose row survives after
-		// its config.yaml entry was removed.
-		name := loc.Name
+		prunable := loc.Prunable == 1
+		ov := overrides[loc.RootPath] // zero value (no override) when absent
+		// The display merge uses the same rule as ResolveStorageLocations
+		// (settings.EffectiveStorageLocation), with two deliberate
+		// differences. prunable comes from the DB row. The name falls back
+		// to the DB row's (last-seeded) name, not base.Name: unlike
+		// ResolveStorageLocations, which feeds the seeder and rightly drops
+		// a rootPath config.yaml no longer lists, display should still show
+		// something sensible for a location whose row survives after its
+		// config.yaml entry was removed.
+		displayBase := base
+		displayBase.Name = loc.Name
+		eff, _ := settings.EffectiveStorageLocation(displayBase, ov, prunable)
 		overriddenFields := make([]string, 0)
-		if ov, ok := overrides[loc.RootPath]; ok {
-			if ov.Name != nil {
-				name = *ov.Name
-				overriddenFields = append(overriddenFields, "name")
-			}
-			if ov.Watch != nil {
-				overriddenFields = append(overriddenFields, "watch")
-			}
-			if ov.Sweep != nil {
-				overriddenFields = append(overriddenFields, "sweep")
-			}
-			if ov.SweepIntervalSecs != nil {
-				overriddenFields = append(overriddenFields, "sweepIntervalSecs")
-			}
-			if ov.CacheTTLHours != nil {
-				overriddenFields = append(overriddenFields, "cacheTtlHours")
-			}
-			if ov.Enabled != nil {
-				overriddenFields = append(overriddenFields, "enabled")
-			}
+		if ov.Name != nil {
+			overriddenFields = append(overriddenFields, "name")
 		}
+		if ov.Watch != nil {
+			overriddenFields = append(overriddenFields, "watch")
+		}
+		if ov.Sweep != nil {
+			overriddenFields = append(overriddenFields, "sweep")
+		}
+		if ov.SweepIntervalSecs != nil {
+			overriddenFields = append(overriddenFields, "sweepIntervalSecs")
+		}
+		if ov.CacheTTLHours != nil {
+			overriddenFields = append(overriddenFields, "cacheTtlHours")
+		}
+		if ov.Enabled != nil {
+			overriddenFields = append(overriddenFields, "enabled")
+		}
+		// pendingRestart compares the boot-time override set with the
+		// current one through the same merge, so an override that was set
+		// and then unset again, or set to the value config.yaml already
+		// has, doesn't count as pending. Both sides use base as is (name
+		// from config.yaml); only the difference between them matters.
 		pendingRestart := len(overriddenFields) > 0
 		if s.settingsStore != nil {
 			if boot, ok := s.settingsStore.BootStorageLocationOverrides(); ok {
-				prunable := loc.Prunable == 1
-				pendingRestart = effectiveLocationValues(base, boot[loc.RootPath], prunable) !=
-					effectiveLocationValues(base, overrides[loc.RootPath], prunable)
+				atBoot, _ := settings.EffectiveStorageLocation(base, boot[loc.RootPath], prunable)
+				now, _ := settings.EffectiveStorageLocation(base, ov, prunable)
+				pendingRestart = atBoot != now
 			}
 		}
 		var watcherBacklog int
@@ -3354,18 +3310,18 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 		}
 		dtos[i] = storageLocationHealthDTO{
 			ID:                   loc.ID,
-			Name:                 name,
+			Name:                 eff.Name,
 			RootPath:             loc.RootPath,
 			Tier:                 loc.Tier,
 			ReadOnly:             loc.ReadOnly == 1,
 			Prunable:             loc.Prunable == 1,
 			IsActive:             loc.IsActive == 1,
 			IsVirtual:            loc.IsVirtual == 1,
-			Watch:                watch,
-			Sweep:                sweep,
-			SweepIntervalSecs:    sweepIntervalSecs,
-			CacheTtlHours:        cacheTTLHours,
-			Disabled:             disabled,
+			Watch:                eff.Watch,
+			Sweep:                eff.Sweep,
+			SweepIntervalSecs:    eff.SweepIntervalSecs,
+			CacheTtlHours:        eff.CacheTTLHours,
+			Disabled:             eff.Disabled,
 			OverriddenFields:     overriddenFields,
 			PendingRestart:       pendingRestart,
 			NodeCount:            countMap[loc.ID],

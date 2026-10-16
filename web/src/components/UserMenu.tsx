@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router";
 import type { Me } from "../api/types";
 import { api } from "../api/client";
 
@@ -149,6 +150,13 @@ export function UserMenu({ me }: UserMenuProps) {
               </span>
             </div>
           )}
+          <Link
+            to="/account"
+            onClick={() => setOpen(false)}
+            className="block border-b border-neutral-800 px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-800 focus:bg-neutral-800 focus:outline-none"
+          >
+            Account security
+          </Link>
           {me.isLocal ? (
             <button
               type="button"

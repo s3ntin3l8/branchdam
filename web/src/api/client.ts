@@ -17,11 +17,14 @@ import type {
   CreateUserResponse,
   DeleteCompanionPairingResponse,
   Edge,
+  CreatePatInput,
+  CreatePatResponse,
   EdgeAuditEntry,
   InheritMetadataResponse,
   JobsQueryParams,
   LineageResponse,
   ListPairingsResponse,
+  ListPatsResponse,
   ListUsersResponse,
   LoginInput,
   LoginResponse,
@@ -236,6 +239,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
+
+  // Personal access tokens (admin-only; internal/httpapi/pats.go).
+  listPats: (params: { limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return request<ListPatsResponse>(`/api/v1/users/me/pats${q ? `?${q}` : ""}`);
+  },
+  createPat: (input: CreatePatInput) =>
+    request<CreatePatResponse>("/api/v1/users/me/pats", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  revokePat: (id: number) =>
+    request<{ ok: boolean }>(`/api/v1/users/me/pats/${id}/revoke`, { method: "POST" }),
 
   listAssets: (params: AssetQueryParams = {}) => {
     const qs = new URLSearchParams();

@@ -44,6 +44,10 @@ export interface Me {
   // the current session has been MFA-verified. Mirrors
   // MeOutput.Body.MFAVerified in internal/httpapi/routes.go.
   mfaVerified?: boolean;
+  // mfaEnabled is true when the local user has a TOTP second factor
+  // enrolled, whatever this session's state. The account page uses it to
+  // offer set-up or disable. Mirrors MeOutput.Body.MFAEnabled.
+  mfaEnabled?: boolean;
 }
 
 export interface SetupStatus {
@@ -761,6 +765,9 @@ export interface AuditQueryParams {
 export interface MfaSetupResponse {
   otpauthURI: string;
   asciiQR: string;
+  // qrSvg is an SVG QR code of otpauthURI (internal/qr). Omitted when
+  // the server couldn't render one; the URI alone still works.
+  qrSvg?: string;
 }
 
 export interface MfaEnableInput {
@@ -784,6 +791,47 @@ export interface MfaChallengeResponse {
 export interface MfaDisableInput {
   password: string;
   code: string;
+}
+
+// Personal access tokens (internal/httpapi/pats.go). Admin-only: the
+// server mints a token only for a live local admin, and a PAT
+// authenticates only while its owner still is one.
+
+// PatScope mirrors auth.PATGrantableScopes. "*" is the full-access
+// wildcard; "admin" covers every admin route without its own scope.
+export type PatScope = "admin" | "pats:write" | "pairings:write" | "*";
+
+export interface Pat {
+  id: number;
+  name: string;
+  scopes: string[];
+  createdAt: number;
+  lastUsedAt?: number;
+  expiresAt?: number;
+  revokedAt?: number;
+  hashedKeyPrefix: string;
+}
+
+export interface ListPatsResponse {
+  pats: Pat[];
+  total: number;
+}
+
+export interface CreatePatInput {
+  name: string;
+  scopes: string[];
+  // Unix seconds; omit for a token that never expires.
+  expiresAt?: number;
+}
+
+export interface CreatePatResponse {
+  // Shown exactly once; the server never returns it again.
+  plaintext: string;
+  id: number;
+  name: string;
+  scopes: string[];
+  createdAt: number;
+  hashedKeyPrefix: string;
 }
 
 export interface LoginResponse {

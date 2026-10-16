@@ -158,6 +158,47 @@ describe("AuditLogPage: filters and loading", () => {
     expect(api.listAudit).not.toHaveBeenCalledWith(expect.objectContaining({ untilUnix: expect.any(Number) }));
   });
 
+  it("shows only the range alert while the range is invalid, not results for an unsent query", async () => {
+    vi.mocked(api.listAudit).mockResolvedValue({
+      entries: [
+        {
+          id: 1,
+          source: "actor_audit",
+          actorKind: "user",
+          actorName: "alice",
+          event: "settings.updated",
+          resourceType: "app_setting",
+          resourceId: "metadata.autoInherit",
+          detailsJson: "{}",
+          createdAt: 1700000000,
+        },
+      ],
+      total: 1,
+    });
+    renderWithClient(<AuditLogPage />);
+    await screen.findByText("settings.updated");
+
+    // An empty result for a valid range is still reported as such.
+    vi.mocked(api.listAudit).mockResolvedValue({ entries: [], total: 0 });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-03-05" } });
+    expect(await screen.findByText("No audit entries match the specified filters.")).toBeInTheDocument();
+    vi.mocked(api.listAudit).mockClear();
+
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-03-01" } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/must not be before/);
+    expect(screen.queryByText(/No audit entries/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Loading audit log/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByText(/records$/)).not.toBeInTheDocument();
+    expect(api.listAudit).not.toHaveBeenCalled();
+
+    // Fixing the range brings the results back.
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-03-09" } });
+    expect(await screen.findByText("No audit entries match the specified filters.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("applies filters to the login stream, without the resource type", async () => {
     vi.mocked(api.listAudit).mockResolvedValue({ entries: [], total: 0 });
     renderWithClient(<AuditLogPage />);

@@ -273,10 +273,14 @@ export default function AuditLogPage() {
             )}
           </div>
 
-          <div className="text-neutral-400" aria-live="polite">
-            {isFetching && isPlaceholderData ? "Updating… " : null}
-            Total: <strong className="text-neutral-200">{total}</strong> records
-          </div>
+          {/* No total while the range is invalid: it would be the last
+              range's count, for a query that was never sent. */}
+          {!rangeInvalid && (
+            <div className="text-neutral-400" aria-live="polite">
+              {isFetching && isPlaceholderData ? "Updating… " : null}
+              Total: <strong className="text-neutral-200">{total}</strong> records
+            </div>
+          )}
         </div>
         {rangeInvalid && (
           <p role="alert" className="text-red-400">
@@ -286,10 +290,14 @@ export default function AuditLogPage() {
       </div>
 
       {/* TABLE */}
-      {/* isPending, not isLoading: the query is disabled until /me says
+      {/* While the range is invalid the query is disabled, so there is no
+          result for it: show only the range alert above, not an empty state
+          (or the last range's rows, kept as placeholder data) that would
+          claim something about a request never sent.
+          isPending, not isLoading: the query is disabled until /me says
           admin, and a disabled query isn't "loading" -- the page used to
           flash "No audit entries" in that window. */}
-      {isMeLoading || (isPending && !rangeInvalid) ? (
+      {rangeInvalid ? null : isMeLoading || isPending ? (
         <div className="p-6 text-neutral-400">Loading audit log…</div>
       ) : isError ? (
         <div className="p-6 text-red-400">Failed to load audit entries: {String(error)}</div>

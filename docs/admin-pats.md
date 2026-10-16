@@ -80,6 +80,12 @@ NULL) — the same predicate the token lookup enforces — and returns
 Mint and revoke are written to `actor_audit` (`pat.minted` /
 `pat.revoked`) with the hash prefix, never the plaintext or full hash.
 
+In the web UI, admins manage their own tokens on the **Account
+security** page (`/account`, in the account menu): the list with
+status, last use and expiry, a create form that reveals the plaintext
+once in a dialog only its Done button closes, and revoke with a
+confirmation.
+
 ## Scope model
 
 A token's `scopes` is a JSON array of strings. The wildcard `"*"`

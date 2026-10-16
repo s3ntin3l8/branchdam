@@ -108,7 +108,7 @@ describe("LoginPage", () => {
     });
     await user.click(screen.getByRole("button", { name: "Forgot password?" }));
     await user.type(screen.getByPlaceholderText("you@example.com"), "alice@example.com");
-    await user.click(screen.getByRole("button", { name: "Notify operator" }));
+    await user.click(screen.getByRole("button", { name: "Send reset link" }));
     await waitFor(() => {
       // React Query 5.x passes extra args to mutationFn (the QueryClient
       // and meta). Match on the first positional arg only.
@@ -131,11 +131,16 @@ describe("LoginPage", () => {
     });
     await user.click(screen.getByRole("button", { name: "Forgot password?" }));
     await user.type(screen.getByPlaceholderText("you@example.com"), "alice@example.com");
-    await user.click(screen.getByRole("button", { name: "Notify operator" }));
+    await user.click(screen.getByRole("button", { name: "Send reset link" }));
     await waitFor(() => {
       expect(screen.getByTestId("reset-sent")).toBeInTheDocument();
     });
-    expect(screen.getByText(/If an account exists/)).toBeInTheDocument();
+    expect(screen.getByText(/a reset link is on its way/)).toBeInTheDocument();
+    // The confirmation must point somewhere that exists: an admin's
+    // password reset on the Users page, not the never-mounted
+    // "Pending password resets" panel.
+    expect(screen.getByText(/ask an administrator to reset your password/)).toBeInTheDocument();
+    expect(screen.queryByText(/Pending password resets/)).not.toBeInTheDocument();
   });
 
   it("renders the setup form when no users exist", async () => {

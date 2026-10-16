@@ -130,6 +130,69 @@ func LoadStorageLocationOverrides(ctx context.Context, lister appSettingsLister)
 	return out, nil
 }
 
+// StorageLocationValues is one storage location's effective safe-field
+// values: config.yaml's entry with its UI override applied. Comparable, so
+// two resolutions (e.g. the boot-time override set and the current one)
+// can be diffed with !=.
+type StorageLocationValues struct {
+	Name              string
+	Watch             bool
+	Sweep             bool
+	SweepIntervalSecs int
+	CacheTTLHours     int
+	// Disabled is true when the override sets enabled=false.
+	Disabled bool
+}
+
+// EffectiveStorageLocation is the one base+override merge rule for a
+// storage location's safe fields. ResolveStorageLocations (what the seeder
+// and a restart apply), the storage-health display and its pendingRestart
+// comparison all go through it, so what the UI shows and flags as pending
+// can't drift from what a restart actually applies.
+//
+// Each non-nil override field replaces base's value, except cacheTtlHours
+// when it would violate validatePruneConfig's rule: a negative value, or a
+// positive one on a location that isn't prunable. That override is ignored
+// (base's value stands) and ttlRejected reports it so the caller can log.
+// prunable is passed separately because callers source it differently:
+// ResolveStorageLocations uses config.yaml's flag, the storage-health
+// handler the storage_locations row's.
+//
+// Name comes from base.Name unless overridden. A caller that wants a
+// different fallback (the storage-health display falls back to the DB
+// row's last-seeded name, so a location dropped from config.yaml still
+// shows one) sets base.Name before calling.
+func EffectiveStorageLocation(base config.StorageLocation, ov StorageLocationOverride, prunable bool) (v StorageLocationValues, ttlRejected bool) {
+	v = StorageLocationValues{
+		Name:              base.Name,
+		Watch:             base.Watch,
+		Sweep:             base.Sweep,
+		SweepIntervalSecs: base.SweepIntervalSecs,
+		CacheTTLHours:     base.CacheTTLHours,
+		Disabled:          ov.Enabled != nil && !*ov.Enabled,
+	}
+	if ov.Name != nil {
+		v.Name = *ov.Name
+	}
+	if ov.Watch != nil {
+		v.Watch = *ov.Watch
+	}
+	if ov.Sweep != nil {
+		v.Sweep = *ov.Sweep
+	}
+	if ov.SweepIntervalSecs != nil {
+		v.SweepIntervalSecs = *ov.SweepIntervalSecs
+	}
+	if ov.CacheTTLHours != nil {
+		if *ov.CacheTTLHours < 0 || (*ov.CacheTTLHours > 0 && !prunable) {
+			ttlRejected = true
+		} else {
+			v.CacheTTLHours = *ov.CacheTTLHours
+		}
+	}
+	return v, ttlRejected
+}
+
 // ResolveStorageLocations applies overrides onto base, keyed by rootPath,
 // and returns the effective list main.go feeds to seedStorageLocations,
 // watchedFromConfig, and sweptFromConfig. A location whose override sets
@@ -170,29 +233,19 @@ func ResolveStorageLocations(base []config.StorageLocation, overrides map[string
 			out = append(out, loc)
 			continue
 		}
-		if ov.Enabled != nil && !*ov.Enabled {
+		v, ttlRejected := EffectiveStorageLocation(loc, ov, loc.Prunable)
+		if v.Disabled {
 			continue
 		}
-		if ov.Name != nil {
-			loc.Name = *ov.Name
+		if ttlRejected {
+			log.Warn("settings: dropping invalid storage location cacheTtlHours override, falling back to config value",
+				"rootPath", loc.RootPath, "override", *ov.CacheTTLHours, "prunable", loc.Prunable)
 		}
-		if ov.Watch != nil {
-			loc.Watch = *ov.Watch
-		}
-		if ov.Sweep != nil {
-			loc.Sweep = *ov.Sweep
-		}
-		if ov.SweepIntervalSecs != nil {
-			loc.SweepIntervalSecs = *ov.SweepIntervalSecs
-		}
-		if ov.CacheTTLHours != nil {
-			if *ov.CacheTTLHours < 0 || (*ov.CacheTTLHours > 0 && !loc.Prunable) {
-				log.Warn("settings: dropping invalid storage location cacheTtlHours override, falling back to config value",
-					"rootPath", loc.RootPath, "override", *ov.CacheTTLHours, "prunable", loc.Prunable)
-			} else {
-				loc.CacheTTLHours = *ov.CacheTTLHours
-			}
-		}
+		loc.Name = v.Name
+		loc.Watch = v.Watch
+		loc.Sweep = v.Sweep
+		loc.SweepIntervalSecs = v.SweepIntervalSecs
+		loc.CacheTTLHours = v.CacheTTLHours
 		out = append(out, loc)
 	}
 	return out

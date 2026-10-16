@@ -187,6 +187,75 @@ func TestResolveStorageLocationsFallsBackOnNegativeCacheTTLOverride(t *testing.T
 	}
 }
 
+func TestEffectiveStorageLocation(t *testing.T) {
+	str := func(v string) *string { return &v }
+	boolp := func(v bool) *bool { return &v }
+	intp := func(v int) *int { return &v }
+	base := config.StorageLocation{
+		Name: "Tier 1", RootPath: "/data/tier1", Watch: true, Sweep: false,
+		SweepIntervalSecs: 600, CacheTTLHours: 12,
+		// Deliberately the opposite of the prunable argument in the cases
+		// below: the helper must use the argument, not base.Prunable.
+		Prunable: false,
+	}
+	baseVals := StorageLocationValues{Name: "Tier 1", Watch: true, SweepIntervalSecs: 600, CacheTTLHours: 12}
+
+	tests := []struct {
+		name         string
+		ov           StorageLocationOverride
+		prunable     bool
+		want         StorageLocationValues
+		wantRejected bool
+	}{
+		{name: "no override keeps base", ov: StorageLocationOverride{}, prunable: true, want: baseVals},
+		{
+			name: "every field overridden",
+			ov: StorageLocationOverride{
+				Name: str("Renamed"), Watch: boolp(false), Sweep: boolp(true),
+				SweepIntervalSecs: intp(30), CacheTTLHours: intp(48), Enabled: boolp(false),
+			},
+			prunable: true,
+			want:     StorageLocationValues{Name: "Renamed", Sweep: true, SweepIntervalSecs: 30, CacheTTLHours: 48, Disabled: true},
+		},
+		{
+			name: "enabled=true is not disabled", ov: StorageLocationOverride{Enabled: boolp(true)},
+			prunable: true, want: baseVals,
+		},
+		{
+			name: "zero cacheTtlHours is valid on a non-prunable location", ov: StorageLocationOverride{CacheTTLHours: intp(0)},
+			prunable: false,
+			want:     StorageLocationValues{Name: "Tier 1", Watch: true, SweepIntervalSecs: 600},
+		},
+		{
+			name: "positive cacheTtlHours on a non-prunable location is rejected", ov: StorageLocationOverride{CacheTTLHours: intp(24)},
+			prunable: false, want: baseVals, wantRejected: true,
+		},
+		{
+			name: "negative cacheTtlHours is rejected even when prunable", ov: StorageLocationOverride{CacheTTLHours: intp(-1)},
+			prunable: true, want: baseVals, wantRejected: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, rejected := EffectiveStorageLocation(base, tc.ov, tc.prunable)
+			if got != tc.want {
+				t.Errorf("values = %+v, want %+v", got, tc.want)
+			}
+			if rejected != tc.wantRejected {
+				t.Errorf("ttlRejected = %v, want %v", rejected, tc.wantRejected)
+			}
+		})
+	}
+
+	// The name falls back to whatever base.Name the caller passes, which is
+	// how the storage-health display substitutes the DB row's name.
+	shown := base
+	shown.Name = "Last seeded"
+	if got, _ := EffectiveStorageLocation(shown, StorageLocationOverride{}, true); got.Name != "Last seeded" {
+		t.Errorf("Name = %q, want the caller's base name %q", got.Name, "Last seeded")
+	}
+}
+
 func TestApplyStorageLocationOverrideSetAndUnset(t *testing.T) {
 	ctx := context.Background()
 	database := testDB(t)

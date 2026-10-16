@@ -1,3 +1,4 @@
+import { StrictMode, useState } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
@@ -13,20 +14,28 @@ vi.mock("../api/client", () => ({
   },
 }));
 
-function renderPage() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  const router = createMemoryRouter(
-    [
-      { path: "/mfa/setup", element: <MfaSetupPage /> },
-      { path: "/users", element: <div>users page</div> },
-    ],
-    { initialEntries: ["/mfa/setup"] },
-  );
-  render(
+function Harness() {
+  const queryClient = useState(
+    () => new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }),
+  )[0];
+  const router = useState(() =>
+    createMemoryRouter(
+      [
+        { path: "/mfa/setup", element: <MfaSetupPage /> },
+        { path: "/account", element: <div>account page</div> },
+      ],
+      { initialEntries: ["/mfa/setup"] },
+    ),
+  )[0];
+  return (
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+}
+
+function renderPage() {
+  render(<Harness />);
 }
 
 beforeEach(() => {
@@ -47,7 +56,7 @@ describe("MfaSetupPage", () => {
     expect(await screen.findByText("otpauth://totp/branchDAM:alice?secret=ABC")).toBeInTheDocument();
     expect(api.mfaSetup).toHaveBeenCalled();
 
-    await userEvent.type(screen.getByPlaceholderText("123456"), "654321");
+    await userEvent.type(screen.getByLabelText("Then enter the 6-digit code it shows"), "654321");
     await userEvent.click(screen.getByRole("button", { name: "Enable MFA" }));
 
     await waitFor(() => expect(api.mfaEnable).toHaveBeenCalled());
@@ -57,7 +66,7 @@ describe("MfaSetupPage", () => {
     expect(screen.getByText("bbbb-2222")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
-    expect(await screen.findByText("users page")).toBeInTheDocument();
+    expect(await screen.findByText("account page")).toBeInTheDocument();
   });
 
   it("keeps the code form up and shows the error when the code is rejected", async () => {
@@ -73,12 +82,48 @@ describe("MfaSetupPage", () => {
     expect(screen.getByRole("button", { name: "Enable MFA" })).toBeInTheDocument();
   });
 
+  it("never submits a whitespace-only code", async () => {
+    vi.mocked(api.mfaSetup).mockResolvedValue({ otpauthURI: "otpauth://totp/x", asciiQR: "" });
+    renderPage();
+
+    await screen.findByText("otpauth://totp/x");
+    const input = screen.getByPlaceholderText("123456");
+    await userEvent.type(input, "   ");
+    expect(screen.getByRole("button", { name: "Enable MFA" })).toBeDisabled();
+    await userEvent.type(input, "{Enter}");
+    expect(api.mfaEnable).not.toHaveBeenCalled();
+  });
+
   it("shows a setup failure with a way back", async () => {
     vi.mocked(api.mfaSetup).mockRejectedValue(new Error("MFA is not available"));
     renderPage();
 
     expect(await screen.findByText("MFA is not available")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Back to users" }));
-    expect(await screen.findByText("users page")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("link", { name: "Back to account" }));
+    expect(await screen.findByText("account page")).toBeInTheDocument();
+  });
+
+  it("shows the QR code, hides the key until asked, and starts setup only once", async () => {
+    vi.mocked(api.mfaSetup).mockResolvedValue({
+      otpauthURI: "otpauth://totp/branchDAM:bob?secret=JBSWY3DPEHPK3PXP&issuer=branchDAM",
+      asciiQR: "",
+      qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    });
+    render(
+      <StrictMode>
+        <Harness />
+      </StrictMode>,
+    );
+
+    const img = await screen.findByRole("img", { name: "MFA QR code" });
+    expect(img.getAttribute("src")).toMatch(/^data:image\/svg\+xml/);
+    expect(screen.queryByTestId("mfa-secret")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /enter a key instead/i }));
+    expect(screen.getByTestId("mfa-secret")).toHaveTextContent("JBSW Y3DP EHPK 3PXP");
+
+    // Each /mfa/setup call mints a new secret, so StrictMode's double
+    // render and double effect must still produce exactly one call.
+    expect(api.mfaSetup).toHaveBeenCalledTimes(1);
   });
 });
