@@ -424,9 +424,10 @@ export function useRejectEdge() {
   });
 }
 
-// useResetEdgeReview undoes a human confirm/reject (the edge returns to
-// NEEDS_REVIEW, so it rejoins the queue and its target's graph_status is
-// recomputed) -- the same blast radius as a confirm/reject.
+// useResetEdgeReview undoes a human confirm/reject's review state (the
+// edge returns to NEEDS_REVIEW, so it rejoins the queue and its target's
+// graph_status is recomputed). Admin-only. It does not rewrite files:
+// metadata a confirm copied into the child (auto-inherit) stays.
 export function useResetEdgeReview() {
   const queryClient = useQueryClient();
   return useMutation({

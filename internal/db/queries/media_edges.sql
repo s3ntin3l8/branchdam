@@ -72,9 +72,8 @@ LIMIT ?1 OFFSET ?2;
 -- `total` is returned as a column on every row via a separate subquery,
 -- avoiding a second COUNT(*) query per page turn and the race where a
 -- confirmation between the list and the count makes total disagree with
--- what the list shows. The subquery applies only the review_state
--- filter, so total always reflects the full NEEDS_REVIEW set regardless
--- of cursor.
+-- what the list shows. It ignores the cursor, so total is the same on
+-- every page (see below for the filters it does apply).
 --
 -- The cursor (confidence, id) is resolved in a CTE first, then the main
 -- query references it, rather than inlining `SELECT confidence, id FROM

@@ -1405,13 +1405,6 @@ type AuditQueueInput struct {
 	MinConfidence    float64 `query:"minConfidence" default:"0" minimum:"0" maximum:"1"`
 }
 
-// auditRelationshipTypes is media_edges.relationship_type's CHECK set; a
-// relationshipType filter outside it is a 422 rather than an empty page.
-var auditRelationshipTypes = map[string]bool{
-	"DERIVED_FROM": true, "FINAL_EXPORT": true, "PROXY_OF": true,
-	"PROJECT_SIDECAR": true, "DUPLICATE_OF": true,
-}
-
 type auditNodeDTO struct {
 	ID             int64   `json:"id"`
 	NodeUUID       string  `json:"nodeUuid"`
@@ -1467,7 +1460,9 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 		params.Resolver = sql.NullString{String: r, Valid: true}
 	}
 	if in.RelationshipType != "" {
-		if !auditRelationshipTypes[in.RelationshipType] {
+		// A relationshipType outside media_edges' CHECK set is a 422
+		// rather than an empty page.
+		if !graph.IsValidRelationshipType(in.RelationshipType) {
 			return nil, huma.Error422UnprocessableEntity("unknown relationshipType " + strconv.Quote(in.RelationshipType))
 		}
 		params.RelationshipType = sql.NullString{String: in.RelationshipType, Valid: true}
@@ -1686,16 +1681,22 @@ type EdgeResetReviewOutput struct {
 // handleResetEdgeReview undoes a human review decision: a CONFIRMED or
 // REJECTED edge goes back to NEEDS_REVIEW (and so back into the audit
 // queue). It is the only path out of a human-locked state, and it is
-// itself human-only (invariant 6): an admin browser principal, never a
-// machine/agent principal, and never for a resolver state (AUTO_ACCEPTED,
-// NEEDS_REVIEW), which is not a human decision to undo -- that is a 409.
-// The reset is written to actor_audit with the decision it undid.
+// itself human-only (invariant 6): an admin signed in through a browser
+// session, never a machine/agent principal and never a personal access
+// token (a PAT carries KindUser but no person need be present), and never
+// for a resolver state (AUTO_ACCEPTED, NEEDS_REVIEW), which is not a human
+// decision to undo -- that is a 409. The reset is written to actor_audit
+// with the decision it undid.
+//
+// It changes review_state only. Metadata a confirm already wrote into the
+// child's file (autoInherit, handleConfirmEdge) stays there; the reset
+// does not rewrite files.
 func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput) (*EdgeResetReviewOutput, error) {
 	if err := s.requireSettingsAdmin(ctx); err != nil {
 		return nil, err
 	}
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindUser || !p.Authenticated {
-		return nil, huma.Error403Forbidden("only a signed-in person can reset a review decision")
+	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindUser || !p.Authenticated || p.AuthProvider == auth.AuthProviderPAT {
+		return nil, huma.Error403Forbidden("only a person signed in to the web UI can reset a review decision")
 	}
 
 	errNotHumanReviewed := errors.New("edge is not human-reviewed")

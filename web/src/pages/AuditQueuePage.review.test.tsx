@@ -9,7 +9,7 @@ import type { AuditQueueParams, EdgeAuditEntry } from "../api/types";
 
 vi.mock("../api/client", () => ({
   api: {
-    me: vi.fn().mockResolvedValue({ kind: "user", name: "admin" }),
+    me: vi.fn().mockResolvedValue({ kind: "user", name: "admin", isAdmin: true }),
     listAuditQueue: vi.fn(),
     confirmEdge: vi.fn(),
     rejectEdge: vi.fn(),
@@ -103,6 +103,21 @@ describe("AuditQueuePage reversible review", () => {
 
     await waitFor(() => expect(api.resetEdgeReview).toHaveBeenCalledWith(43));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Recently reviewed" })).not.toBeInTheDocument());
+  });
+
+  it("offers no Undo to a reviewer who is not an admin", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.me).mockResolvedValueOnce({ kind: "user", name: "bob", isAdmin: false } as Awaited<ReturnType<typeof api.me>>);
+    vi.mocked(api.listAuditQueue).mockResolvedValue({ entries: [entry(43)], total: 1 });
+    vi.mocked(api.rejectEdge).mockResolvedValue({ ok: true });
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: /^reject$/i }));
+    await user.click(await screen.findByRole("button", { name: "Reject Edge" }));
+    await waitFor(() => expect(api.rejectEdge).toHaveBeenCalledWith(43));
+
+    expect(screen.queryByRole("region", { name: "Recently reviewed" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /undo/i })).not.toBeInTheDocument();
   });
 
   it("offers Undo after a confirm too", async () => {

@@ -5,6 +5,7 @@ import {
   useConfirmEdge,
   useCreateEdge,
   useInvalidateEdgeReviewQueries,
+  useMe,
   useRejectEdge,
   useResetEdgeReview,
 } from "../hooks/queries";
@@ -314,6 +315,9 @@ function AuditRow({
 
 // RecentlyReviewed lists this session's decisions with an Undo each: the
 // reset-review endpoint hands a CONFIRMED/REJECTED edge back to the queue.
+// That endpoint is admin-only, so the page renders this only for admins.
+// Undo changes the review state only: metadata a confirm already copied
+// into the child's file (auto-inherit) stays, and the panel says so.
 function RecentlyReviewed({
   decisions,
   onUndone,
@@ -372,6 +376,9 @@ function RecentlyReviewed({
           </button>
         </div>
       </div>
+      <p className="text-neutral-500">
+        Undo returns an edge to the queue. It does not remove metadata a confirm already copied into the file.
+      </p>
       <ul className="max-h-48 space-y-1 overflow-y-auto">
         {decisions.map((d) => (
           <li key={d.id} className="flex items-center justify-between gap-3">
@@ -791,6 +798,8 @@ export default function AuditQueuePage() {
     }
   };
 
+  // Undo (reset-review) is admin-only; the queue itself is not.
+  const { data: me } = useMe();
   const [recent, setRecent] = useState<RecentDecision[]>([]);
   const recordDecisions = useCallback((decisions: RecentDecision[]) => {
     setRecent((prev) => {
@@ -859,11 +868,13 @@ export default function AuditQueuePage() {
         </button>
       </div>
 
-      <RecentlyReviewed
-        decisions={recent}
-        onUndone={(id) => setRecent((prev) => prev.filter((d) => d.id !== id))}
-        onDismiss={() => setRecent([])}
-      />
+      {me?.isAdmin && (
+        <RecentlyReviewed
+          decisions={recent}
+          onUndone={(id) => setRecent((prev) => prev.filter((d) => d.id !== id))}
+          onDismiss={() => setRecent([])}
+        />
+      )}
 
       {(entries.length > 0 || hasActiveFilters) && (
         <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/80 p-4 text-xs">

@@ -255,8 +255,9 @@ func TestResetEdgeReview_OnlyHumanDecisions(t *testing.T) {
 	}
 }
 
-// TestResetEdgeReview_AdminHumansOnly: a non-admin person and a machine
-// (agent) principal are both refused, and the human decision stands.
+// TestResetEdgeReview_AdminHumansOnly: a non-admin person, a machine
+// (agent) principal and an admin's personal access token (a script, no
+// person present) are all refused, and the human decision stands.
 func TestResetEdgeReview_AdminHumansOnly(t *testing.T) {
 	srv, database, _ := newReviewTestServer(t)
 	ctx := context.Background()
@@ -273,6 +274,19 @@ func TestResetEdgeReview_AdminHumansOnly(t *testing.T) {
 	var se huma.StatusError
 	if !errors.As(err, &se) || se.GetStatus() != http.StatusForbidden {
 		t.Errorf("machine principal: err = %v, want 403", err)
+	}
+
+	// Admin by group, so only the PAT check can refuse it.
+	pat := auth.WithPrincipal(ctx, auth.Principal{
+		Kind: auth.KindUser, Name: "carol", Groups: []string{"dam-admins"},
+		AuthProvider: auth.AuthProviderPAT, UserID: 1, ExternalUID: "pat:abcd", Authenticated: true,
+	})
+	if err := srv.requireSettingsAdmin(pat); err != nil {
+		t.Fatalf("PAT principal fixture is not an admin: %v", err)
+	}
+	_, err = srv.handleResetEdgeReview(pat, &EdgeReviewInput{ID: edgeID})
+	if !errors.As(err, &se) || se.GetStatus() != http.StatusForbidden {
+		t.Errorf("admin PAT principal: err = %v, want 403", err)
 	}
 
 	if e, _ := database.Reader.GetMediaEdge(ctx, edgeID); e.ReviewState != "REJECTED" {
