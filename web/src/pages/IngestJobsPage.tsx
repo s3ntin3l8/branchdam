@@ -236,8 +236,8 @@ export default function IngestJobsPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-lg border border-neutral-800 overflow-hidden">
-            <table className="w-full text-left text-sm">
+          <div className="rounded-lg border border-neutral-800 overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left text-sm">
               <thead className="border-b border-neutral-800 bg-neutral-900/60 text-neutral-400 text-xs">
                 <tr>
                   <th className="py-2.5 px-4 font-semibold">Job ID</th>

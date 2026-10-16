@@ -24,6 +24,7 @@ export default function IngestPage() {
         <button
           type="button"
           onClick={() => setActiveTab("upload")}
+          aria-pressed={activeTab === "upload"}
           className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
             activeTab === "upload"
               ? "border-brand text-neutral-100"
@@ -35,6 +36,7 @@ export default function IngestPage() {
         <button
           type="button"
           onClick={() => setActiveTab("scan")}
+          aria-pressed={activeTab === "scan"}
           className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
             activeTab === "scan"
               ? "border-brand text-neutral-100"
@@ -49,8 +51,9 @@ export default function IngestPage() {
         <ManualUploadZone />
       ) : (
         <div>
-          <div className="mb-2 flex max-w-xl items-center gap-3 rounded border border-neutral-800 p-4">
+          <div className="mb-2 flex max-w-xl flex-wrap items-center gap-3 rounded border border-neutral-800 p-4">
             <select
+              aria-label="Storage location to scan"
               value={selected}
               disabled={isLoading || startScan.isPending}
               onChange={(e) => {
@@ -95,7 +98,9 @@ export default function IngestPage() {
           )}
           {hasReadOnly && (
             <p className="mb-4 text-xs text-neutral-500">
-              Read-only locations (e.g. TIER3_MASTER_ARCHIVE) can be scanned, but no writes are ever made to them.
+              Read-only locations can be scanned, but branchDAM never writes to them. Tier 3 (master archive) is
+              writable by default; a location is read-only only when configured with{" "}
+              <code className="text-neutral-400">readOnly: true</code>.
             </p>
           )}
 
@@ -107,7 +112,8 @@ export default function IngestPage() {
           ) : (progress.data?.jobs.length ?? 0) === 0 ? (
             <p className="text-neutral-500">No scans yet.</p>
           ) : (
-            <table className="w-full text-left text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-sm">
               <thead className="border-b border-neutral-800 text-neutral-400">
                 <tr>
                   <th className="py-2 pr-4">Kind</th>
@@ -148,16 +154,17 @@ export default function IngestPage() {
                       >
                         {label}
                       </td>
-                      <td className="py-2 pr-4 text-right">{j.filesSeen}</td>
-                      <td className="py-2 pr-4 text-right">{j.filesHashed}</td>
-                      <td className="py-2 pr-4 text-right">{j.filesFailed}</td>
-                      <td className="py-2 pr-4 text-right">{j.edgesCreated}</td>
+                      <td className="py-2 pr-4 text-right">{j.filesSeen.toLocaleString()}</td>
+                      <td className="py-2 pr-4 text-right">{j.filesHashed.toLocaleString()}</td>
+                      <td className="py-2 pr-4 text-right">{j.filesFailed.toLocaleString()}</td>
+                      <td className="py-2 pr-4 text-right">{j.edgesCreated.toLocaleString()}</td>
                       <td className="py-2 pr-4 font-mono text-xs text-neutral-500">{j.lastError ?? "—"}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       )}

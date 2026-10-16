@@ -52,6 +52,10 @@ describe("IngestPage", () => {
     expect(await screen.findByRole("option", { name: /exports · TIER2_EXPORTS/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /archive · TIER3_MASTER_ARCHIVE · read-only/ })).toBeInTheDocument();
     expect(screen.getByText(/read-only locations/i)).toBeInTheDocument();
+    // Tier 3 is writable by default (invariant 3); the hint must not claim
+    // the master archive tier is read-only as such.
+    expect(screen.getByText(/read-only locations/i)).toHaveTextContent(/Tier 3 \(master archive\) is\s+writable by default/);
+    expect(screen.queryByText(/e\.g\. TIER3_MASTER_ARCHIVE/)).not.toBeInTheDocument();
   });
 
   it("fires startScan with the selected location id and differential:false", async () => {

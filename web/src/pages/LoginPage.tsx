@@ -349,6 +349,7 @@ function LoginForm({
           <input
             type="email"
             required
+            aria-label="Email"
             value={resetEmail}
             onChange={(e) => setResetEmail(e.target.value)}
             placeholder="you@example.com"

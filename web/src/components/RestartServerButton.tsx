@@ -3,11 +3,10 @@ import { useRestartServer } from "../hooks/queries";
 
 // Shared by SettingsPage's "Restart server" card and StorageHealthPage's
 // conditional "Restart to apply" button -- same POST /api/v1/restart
-// mutation (useRestartServer), same two-step confirm flow. The repo has no
-// dialog/modal primitive and browser modals (window.confirm) are avoided
-// throughout (see claude-in-chrome's own guidance and the rest of this
-// codebase), so "confirm" here is an inline second button state rather than
-// a native dialog.
+// mutation (useRestartServer), same two-step confirm flow. "Confirm" here
+// is an inline second button state rather than a Dialog: it stays next to
+// the card or banner it applies to, and browser modals (window.confirm)
+// are avoided throughout the SPA.
 function useRestartConfirm() {
   const restart = useRestartServer();
   const [confirming, setConfirming] = useState(false);

@@ -47,7 +47,9 @@ describe("DedupNotice", () => {
     expect(link).toHaveAttribute("href", "/assets/42");
   });
 
-  it("renders link with nodeUuid when assetId is not provided", () => {
+  // /assets/:id takes a numeric id; a UUID there would land on "Invalid
+  // asset id", so without an id the UUID is shown as text, not linked.
+  it("shows the node UUID as text, not a broken link, when assetId is not provided", () => {
     const onDismiss = vi.fn();
     render(
       <MemoryRouter>
@@ -60,8 +62,8 @@ describe("DedupNotice", () => {
     );
 
     expect(screen.getByText(/sample\.raw/)).toBeInTheDocument();
-    const link = screen.getByRole("link", { name: /view existing node/i });
-    expect(link).toHaveAttribute("href", "/assets/018f-uuid-99");
+    expect(screen.getByText("018f-uuid-99")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
   it("dismisses on click of close button", async () => {

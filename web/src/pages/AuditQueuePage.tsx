@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -11,6 +11,7 @@ import {
 import { api } from "../api/client";
 import Thumbnail from "../components/Thumbnail";
 import NodePickerModal from "../components/NodePickerModal";
+import Dialog from "../components/Dialog";
 import type { EdgeAuditEntry } from "../api/types";
 
 const PAGE_SIZE = 50;
@@ -200,58 +201,7 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
   const [errorMsg, setErrorMsg] = useState("");
   const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false);
   const [isTargetPickerOpen, setIsTargetPickerOpen] = useState(false);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
-  const wasOpenRef = useRef(false);
-
   const createEdge = useCreateEdge();
-
-  useEffect(() => {
-    if (isOpen) {
-      if (!wasOpenRef.current) {
-        previousFocusRef.current = document.activeElement as HTMLElement;
-        wasOpenRef.current = true;
-        const timer = setTimeout(() => {
-          if (!dialogRef.current?.contains(document.activeElement)) {
-            dialogRef.current?.querySelector<HTMLInputElement>("input")?.focus();
-          }
-        }, 50);
-        return () => clearTimeout(timer);
-      }
-    } else {
-      if (wasOpenRef.current) {
-        wasOpenRef.current = false;
-        if (previousFocusRef.current) {
-          previousFocusRef.current.focus();
-          previousFocusRef.current = null;
-        }
-      }
-    }
-  }, [isOpen]);
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      onClose();
-    }
-  }, [onClose]);
-
-  const handleTrapFocus = useCallback((e: React.KeyboardEvent) => {
-    if (e.key !== "Tab" || !dialogRef.current) return;
-    const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
-      'input, select, button, [tabindex]:not([tabindex="-1"])'
-    );
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }, []);
 
   if (!isOpen) return null;
 
@@ -284,19 +234,13 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
 
   return (
     <>
-      <div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
-        onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      <Dialog
+        title="Manual Link Edge"
+        onClose={onClose}
+        dismissible={!createEdge.isPending}
+        overlayClassName="z-50 bg-black/60 backdrop-blur-xs"
+        titleClassName="mb-4 text-lg font-semibold text-neutral-100"
       >
-        <div
-          ref={dialogRef}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="manual-link-modal-title"
-          onKeyDown={(e) => { handleKeyDown(e); handleTrapFocus(e); }}
-          className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl"
-        >
-          <h2 id="manual-link-modal-title" className="mb-4 text-lg font-semibold text-neutral-100">Manual Link Edge</h2>
           {errorMsg && (
             <div className="mb-4 rounded bg-red-900 p-3 text-xs text-red-200 border border-red-800">
               {errorMsg}
@@ -304,9 +248,10 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
           )}
           <form onSubmit={handleSubmit} className="space-y-4 text-sm">
             <div>
-              <label className="mb-1 block font-medium text-neutral-300">Parent (Source) Node ID</label>
+              <label htmlFor="manual-link-source" className="mb-1 block font-medium text-neutral-300">Parent (Source) Node ID</label>
               <div className="flex gap-2">
                 <input
+                  id="manual-link-source"
                   type="number"
                   value={sourceId}
                   onChange={(e) => setSourceId(e.target.value)}
@@ -326,9 +271,10 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
             </div>
 
             <div>
-              <label className="mb-1 block font-medium text-neutral-300">Child (Target) Node ID</label>
+              <label htmlFor="manual-link-target" className="mb-1 block font-medium text-neutral-300">Child (Target) Node ID</label>
               <div className="flex gap-2">
                 <input
+                  id="manual-link-target"
                   type="number"
                   value={targetId}
                   onChange={(e) => setTargetId(e.target.value)}
@@ -348,8 +294,9 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
             </div>
 
             <div>
-              <label className="mb-1 block font-medium text-neutral-300">Relationship Type</label>
+              <label htmlFor="manual-link-relationship" className="mb-1 block font-medium text-neutral-300">Relationship Type</label>
               <select
+                id="manual-link-relationship"
                 value={relType}
                 onChange={(e) => setRelType(e.target.value as EdgeAuditEntry["relationshipType"])}
                 className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
@@ -379,8 +326,7 @@ function ManualLinkModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => 
               </button>
             </div>
           </form>
-        </div>
-      </div>
+      </Dialog>
 
       <NodePickerModal
         isOpen={isSourcePickerOpen}
@@ -426,17 +372,6 @@ function BatchConfirmModal({
   // fan-out (queue, list, 3 detail keys, unlinked count) after EVERY edge.
   const invalidateEdgeReview = useInvalidateEdgeReviewQueries();
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !running) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isOpen, running, onClose]);
-
   if (!isOpen) return null;
 
   const handleExecute = async () => {
@@ -472,16 +407,13 @@ function BatchConfirmModal({
   const percent = edges.length > 0 ? Math.round((progress / edges.length) * 100) : 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="batch-confirm-modal-title"
+    <Dialog
+      title={`Batch ${action === "confirm" ? "Confirm" : "Reject"} Edges`}
+      onClose={onClose}
+      dismissible={!running}
+      titleClassName="text-base font-semibold text-neutral-100"
+      panelClassName="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4"
     >
-      <div className="max-w-md w-full rounded-lg border border-neutral-800 bg-neutral-900 p-6 space-y-4">
-        <h3 id="batch-confirm-modal-title" className="text-base font-semibold text-neutral-100">
-          Batch {action === "confirm" ? "Confirm" : "Reject"} Edges
-        </h3>
         <p className="text-xs text-neutral-300">
           Are you sure you want to <strong>{action}</strong> all{" "}
           <strong className="text-neutral-100">{edges.length}</strong> currently filtered edge candidates on this page?
@@ -530,8 +462,7 @@ function BatchConfirmModal({
             </button>
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

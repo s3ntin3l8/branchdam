@@ -29,7 +29,9 @@ export default function DedupNotice({
     return () => clearTimeout(timer);
   }, [autoDismissMs]);
 
-  const targetLink = assetId ? `/assets/${assetId}` : nodeUuid ? `/assets/${nodeUuid}` : "/assets";
+  // /assets/:id routes take the numeric asset id only; a node UUID there
+  // lands on "Invalid asset id". Without an id, show the UUID as text so
+  // it can still be searched for, rather than linking somewhere broken.
 
   return (
     <div
@@ -61,13 +63,21 @@ export default function DedupNotice({
             "This file is already in your library."
           )}
         </span>
-        <span className="text-amber-400/80 font-medium">—</span>
-        <Link
-          to={targetLink}
-          className="shrink-0 font-medium text-sky-400 underline hover:text-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-400 rounded"
-        >
-          View existing node →
-        </Link>
+        {assetId ? (
+          <>
+            <span className="text-amber-400/80 font-medium">—</span>
+            <Link
+              to={`/assets/${assetId}`}
+              className="shrink-0 font-medium text-sky-400 underline hover:text-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-400 rounded"
+            >
+              View existing node →
+            </Link>
+          </>
+        ) : nodeUuid ? (
+          <span className="shrink-0 font-mono text-amber-400/80" title="Existing node UUID">
+            {nodeUuid}
+          </span>
+        ) : null}
       </div>
       <button
         type="button"

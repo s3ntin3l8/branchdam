@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
@@ -496,5 +496,40 @@ describe("UsersPage row actions", () => {
       expect(screen.queryByRole("status")).not.toBeInTheDocument();
     });
     expect(enableUserMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("UsersPage dialogs", () => {
+  // The temporary password is shown once and can't be fetched again, so
+  // its dialog only closes through Done -- never Escape or the backdrop.
+  it("keeps the one-time password dialog open on Escape and the backdrop", async () => {
+    stubUsers([makeUser({ id: 2, username: "bob" })]);
+    renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: /reset password/i }));
+    const confirm = await screen.findByRole("dialog", { name: "Reset User Password" });
+    await userEvent.click(within(confirm).getByRole("button", { name: "Confirm Reset" }));
+
+    const reveal = await screen.findByRole("dialog", { name: "Temporary Password Generated" });
+    expect(within(reveal).getByText("temp-password")).toBeInTheDocument();
+
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(reveal.parentElement as HTMLElement);
+    expect(screen.getByRole("dialog", { name: "Temporary Password Generated" })).toBeInTheDocument();
+
+    await userEvent.click(within(reveal).getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("labels the create-user form fields", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Add User" }));
+    const dialog = screen.getByRole("dialog", { name: "Create User" });
+    expect(within(dialog).getByLabelText("Username *")).toHaveFocus();
+    expect(within(dialog).getByLabelText("Email (optional)")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Initial Password")).toBeInTheDocument();
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

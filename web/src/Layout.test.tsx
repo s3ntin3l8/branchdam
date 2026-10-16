@@ -151,3 +151,58 @@ describe("Layout live-update stream gate", () => {
     expect(useEventStream).toHaveBeenLastCalledWith({ enabled: false });
   });
 });
+
+describe("Layout collapsible navigation", () => {
+  function renderAt(path: string) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (useMe as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: { kind: "user", authenticated: true, isAdmin: true },
+    });
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/",
+          element: <Layout />,
+          children: [
+            { index: true, element: <div>home content</div> },
+            { path: "audit", element: <div>audit content</div> },
+          ],
+        },
+      ],
+      { initialEntries: [path] },
+    );
+    return render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("toggles the sidebar drawer from the menu button", async () => {
+    const user = (await import("@testing-library/user-event")).default.setup();
+    renderAt("/");
+
+    const toggle = screen.getByRole("button", { name: "Open navigation" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", "app-nav");
+    expect(screen.getByRole("navigation", { name: "Main" })).toHaveClass("hidden", "md:block");
+
+    await user.click(toggle);
+    expect(screen.getByRole("button", { name: "Close navigation" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("navigation", { name: "Main" })).toHaveClass("fixed");
+
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: "Open navigation" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("closes the drawer after navigating", async () => {
+    const user = (await import("@testing-library/user-event")).default.setup();
+    renderAt("/");
+
+    await user.click(screen.getByRole("button", { name: "Open navigation" }));
+    await user.click(screen.getByRole("link", { name: "Audit Queue" }));
+
+    expect(await screen.findByText("audit content")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open navigation" })).toHaveAttribute("aria-expanded", "false");
+  });
+});
