@@ -154,6 +154,12 @@ func triggerPath(deb *debouncer, log *slog.Logger, path string, onEvent func(Rec
 				return
 			}
 			info, err = again, aerr
+			// A write event that landed during the settle sleep armed a fresh
+			// timer for this path; that callback re-samples and reports the
+			// final state, so reporting here too would be a duplicate.
+			if deb.pending(path) {
+				return
+			}
 		}
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) && onRemove != nil {
@@ -253,6 +259,14 @@ func (d *debouncer) trigger(key string, fn func()) {
 		d.mu.Unlock()
 		fn()
 	})
+}
+
+// pending reports whether a trigger for key is armed and not yet fired.
+func (d *debouncer) pending(key string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.timers[key]
+	return ok
 }
 
 func (d *debouncer) stopAll() {

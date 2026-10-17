@@ -396,7 +396,9 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		n, _ := f.WriteString(strings.Repeat("x", 1000))
 		total += int64(n)
-		_ = f.Sync()
+		// No f.Sync(): the size is visible to Lstat from the page cache, and
+		// an fsync that stalls on a busy disk stretches the gap between
+		// chunks past the settle window (#557).
 		time.Sleep(pause)
 	}
 	_ = f.Close()
@@ -436,5 +438,28 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	}
 	if len(sizes) != 1 {
 		t.Fatalf("reported %d times, want once after it settles; all reports: %v", len(sizes), sizes)
+	}
+}
+
+// A callback that finishes its settle sleep while a newer trigger for the same
+// path is armed must stand down: the newer callback reports the final state.
+func TestDebouncerPendingTracksArmedTimer(t *testing.T) {
+	d := newDebouncer(50 * time.Millisecond)
+	defer d.stopAll()
+	if d.pending("a") {
+		t.Fatal("pending before any trigger")
+	}
+	fired := make(chan struct{})
+	d.trigger("a", func() { close(fired) })
+	if !d.pending("a") {
+		t.Fatal("not pending after trigger")
+	}
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timer never fired")
+	}
+	if d.pending("a") {
+		t.Fatal("still pending after the timer fired")
 	}
 }
