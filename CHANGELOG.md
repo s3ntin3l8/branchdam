@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.27.0](https://github.com/s3ntin3l8/branchdam/compare/v0.26.2...v0.27.0) (2026-10-17)
+
+
+### Features
+
+* **admin:** complete the admin pages ([#561](https://github.com/s3ntin3l8/branchdam/issues/561)) ([35630b1](https://github.com/s3ntin3l8/branchdam/commit/35630b1d7c3f07201dfaca211e235a3049f6f711))
+* **agent-api:** deliver rotated keys to clients ([#566](https://github.com/s3ntin3l8/branchdam/issues/566)) ([7370097](https://github.com/s3ntin3l8/branchdam/commit/73700975a613053b4d1488d7554b13c50d66b5e2))
+* **agent-api:** fast-hash pre-screen in check-content; return fullHash in node-status ([#538](https://github.com/s3ntin3l8/branchdam/issues/538)) ([fcc7e2d](https://github.com/s3ntin3l8/branchdam/commit/fcc7e2d954791a7366709d0fb03f106e28ae430f))
+* **agent-api:** one error envelope with machine-readable codes ([#544](https://github.com/s3ntin3l8/branchdam/issues/544)) ([b9c9d60](https://github.com/s3ntin3l8/branchdam/commit/b9c9d602332c7baa02593e51d8fe3f90dbadcb9e))
+* asset and user search with server-side paging ([#568](https://github.com/s3ntin3l8/branchdam/issues/568)) ([3a2f5ca](https://github.com/s3ntin3l8/branchdam/commit/3a2f5ca157ec837c4d18f6389498d75546fb6cb1))
+* **audit:** record edge confirm and reject in actor_audit ([#584](https://github.com/s3ntin3l8/branchdam/issues/584)) ([b924ddd](https://github.com/s3ntin3l8/branchdam/commit/b924ddd7ff2d3a40fe7722f133d287a82fe6bf25))
+* **audit:** record manual edge creation in actor_audit ([#586](https://github.com/s3ntin3l8/branchdam/issues/586)) ([bc635c3](https://github.com/s3ntin3l8/branchdam/commit/bc635c398f393d878ca7edaf7f5e127a9e151d5c))
+* demo dataset and reproducible screenshot pipeline ([#530](https://github.com/s3ntin3l8/branchdam/issues/530)) ([77fe43e](https://github.com/s3ntin3l8/branchdam/commit/77fe43e4fc4615f544ef9fcc1c7fcfd9fcee5a59))
+* **prune:** record full_hash provenance and re-hash agent-asserted masters ([#554](https://github.com/s3ntin3l8/branchdam/issues/554)) ([5e21489](https://github.com/s3ntin3l8/branchdam/commit/5e21489898c20a860353b4ac7c28b0ba48b6f5fa))
+* **review:** reversible edge review, server-side queue filters ([#570](https://github.com/s3ntin3l8/branchdam/issues/570)) ([cac6f0c](https://github.com/s3ntin3l8/branchdam/commit/cac6f0cf2f7e3a7642891e1fe552bb640f0a3f3c))
+* **security:** self-service MFA and personal access tokens ([#563](https://github.com/s3ntin3l8/branchdam/issues/563)) ([2a29ce2](https://github.com/s3ntin3l8/branchdam/commit/2a29ce296299104d24fa4ee97975f0ede930d05f))
+
+
+### Bug Fixes
+
+* **agent-api:** enforce device ownership on edge, telemetry and rebase endpoints ([#540](https://github.com/s3ntin3l8/branchdam/issues/540)) ([354a56a](https://github.com/s3ntin3l8/branchdam/commit/354a56a742c72434d4b186d11948b443757e6827)), closes [#504](https://github.com/s3ntin3l8/branchdam/issues/504)
+* **agent-api:** verify request signatures with the key clients actually use ([#536](https://github.com/s3ntin3l8/branchdam/issues/536)) ([e8216e5](https://github.com/s3ntin3l8/branchdam/commit/e8216e5c829c96fddb125df329cc6b63594f908f))
+* **agent:** event retry backoff and content-dedup aliasing ([#546](https://github.com/s3ntin3l8/branchdam/issues/546)) ([0d7bb8b](https://github.com/s3ntin3l8/branchdam/commit/0d7bb8be963c6f635cd89353cfe98139c0d03223))
+* **agent:** scope device actions to nodes the device created ([#503](https://github.com/s3ntin3l8/branchdam/issues/503)) ([a2817bc](https://github.com/s3ntin3l8/branchdam/commit/a2817bcd6c7f45a4d4289747038997bdfb36cf47))
+* **agent:** undo trash/restore file moves when the enclosing tx rolls back ([#517](https://github.com/s3ntin3l8/branchdam/issues/517)) ([927de20](https://github.com/s3ntin3l8/branchdam/commit/927de209eb6cd72203b64616077efb5c20ea4a39)), closes [#509](https://github.com/s3ntin3l8/branchdam/issues/509)
+* **audit:** keep prior reviewer attribution on manual edge re-link ([#588](https://github.com/s3ntin3l8/branchdam/issues/588)) ([6cc9510](https://github.com/s3ntin3l8/branchdam/commit/6cc9510526b04819342659f7226ee27cb6edb885)), closes [#587](https://github.com/s3ntin3l8/branchdam/issues/587)
+* **auth:** attribute PAT actions to the token owner; throttle session touch ([#548](https://github.com/s3ntin3l8/branchdam/issues/548)) ([868ab90](https://github.com/s3ntin3l8/branchdam/commit/868ab909d140c3ddc77bbc5fc08afb0864c3170e))
+* **auth:** close anonymous-read and forged-identity paths in both mode ([#499](https://github.com/s3ntin3l8/branchdam/issues/499)) ([b528d42](https://github.com/s3ntin3l8/branchdam/commit/b528d42e8c946e595d7e61ccc4e373d6a7438b4b))
+* **auth:** enforce local is_admin regardless of authz.groups ([#532](https://github.com/s3ntin3l8/branchdam/issues/532)) ([2f6cd15](https://github.com/s3ntin3l8/branchdam/commit/2f6cd1542af8aa48b91ca8e7c9ddbdc2d42d2d6c))
+* **auth:** harden rate limiting, CSRF, TOTP replay and pairing reads ([#501](https://github.com/s3ntin3l8/branchdam/issues/501)) ([d5deec8](https://github.com/s3ntin3l8/branchdam/commit/d5deec875d47d9b64885c703c7a42790882c3e2d))
+* **auth:** keep MFA on self-service reset and harden login/reset paths ([#533](https://github.com/s3ntin3l8/branchdam/issues/533)) ([5805a0c](https://github.com/s3ntin3l8/branchdam/commit/5805a0cbdbcdf74bb1c445974c55fa2bbb717f43))
+* cap SSE streams per principal and require apiKey when Immich apiUrl changes ([#512](https://github.com/s3ntin3l8/branchdam/issues/512)) ([6fa8506](https://github.com/s3ntin3l8/branchdam/commit/6fa85063c94721f0149d01817956f2f7eba9b0bb))
+* **indexer:** watcher/walk robustness, thumb retry, sync and tx safety ([#508](https://github.com/s3ntin3l8/branchdam/issues/508)) ([15f1751](https://github.com/s3ntin3l8/branchdam/commit/15f1751466014d3a55a09da205b208d0d2b7bda3))
+* pairing revoke 404, upload indexing status, trash purge by recorded time ([#550](https://github.com/s3ntin3l8/branchdam/issues/550)) ([bf4afc8](https://github.com/s3ntin3l8/branchdam/commit/bf4afc84f49bb9fd6632953f4a5786b4c1499d12))
+* **pipeline:** scan correctness, prune safety and lifecycle races ([#507](https://github.com/s3ntin3l8/branchdam/issues/507)) ([6cd68e4](https://github.com/s3ntin3l8/branchdam/commit/6cd68e4d464694785d1f53dc890b38d52b47e6b4))
+* **prune,trash:** only follow reviewed cache and export edges ([#534](https://github.com/s3ntin3l8/branchdam/issues/534)) ([de0c85c](https://github.com/s3ntin3l8/branchdam/commit/de0c85c55ac257f8583019cb00405be353c21f38))
+* **rehash:** back off repeated mismatches and finish the S12/W5 review notes ([#555](https://github.com/s3ntin3l8/branchdam/issues/555)) ([ae76bd0](https://github.com/s3ntin3l8/branchdam/commit/ae76bd045e5f01da2f5b86bd5d3973dd04e996ed))
+* **storage:** keep DB location IDs when hot-reloading the Guard ([#531](https://github.com/s3ntin3l8/branchdam/issues/531)) ([86eb66e](https://github.com/s3ntin3l8/branchdam/commit/86eb66e55fee95b19793d24c25c81fe317b9f8b2))
+* **storage:** route all storage writes through Guard; contain reads ([#506](https://github.com/s3ntin3l8/branchdam/issues/506)) ([bbf42f0](https://github.com/s3ntin3l8/branchdam/commit/bbf42f0f7129231ce34b805c009eb1ea1382a073))
+* **web:** dialogs, a11y, responsive layout and copy ([#559](https://github.com/s3ntin3l8/branchdam/issues/559)) ([7875845](https://github.com/s3ntin3l8/branchdam/commit/7875845afa1d6cff88a72f9f81f767031f7aa648))
+* **web:** guard destructive actions ([#553](https://github.com/s3ntin3l8/branchdam/issues/553)) ([384259a](https://github.com/s3ntin3l8/branchdam/commit/384259a3900a92a67bfec93e2954b6ace13327f2))
+* **web:** redirect signed-out users to login and reconnect live updates after sign-in ([#542](https://github.com/s3ntin3l8/branchdam/issues/542)) ([f343e91](https://github.com/s3ntin3l8/branchdam/commit/f343e91c7865b93548aac10500b0498446437820))
+* **web:** render nested edge evidence in the audit queue ([#556](https://github.com/s3ntin3l8/branchdam/issues/556)) ([7262369](https://github.com/s3ntin3l8/branchdam/commit/7262369faba255cc36654ac611ccb7e3e5e13e29))
+* **web:** stop non-admin 403 banner, stale caches and upload-queue bugs ([#502](https://github.com/s3ntin3l8/branchdam/issues/502)) ([15d845f](https://github.com/s3ntin3l8/branchdam/commit/15d845ffa96c0cd9ad5811bb445de8bc6a1067aa))
+* **web:** theme lineage graph labels and controls for dark mode ([#577](https://github.com/s3ntin3l8/branchdam/issues/577)) ([9064659](https://github.com/s3ntin3l8/branchdam/commit/9064659f55f55a02d6931457f4c5cc26cfef72ea))
+
+
+### Performance Improvements
+
+* **db:** restore dropped indexes, range-scan sync prefix, bound parser/decoder input ([#511](https://github.com/s3ntin3l8/branchdam/issues/511)) ([dc7c3be](https://github.com/s3ntin3l8/branchdam/commit/dc7c3be8e6efa9c9e44868e1fb9f2706fc8ab2da))
+* keep IO and reads off the writer lock, batch reverse lineage, guard unstable files ([#519](https://github.com/s3ntin3l8/branchdam/issues/519)) ([03da59c](https://github.com/s3ntin3l8/branchdam/commit/03da59c9712bbf0483adbf9feaea1da76b41ffbb))
+
 ## [0.26.2](https://github.com/s3ntin3l8/branchdam/compare/v0.26.1...v0.26.2) (2026-09-26)
 
 
