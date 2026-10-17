@@ -179,6 +179,11 @@ func TestCreateEdge_WritesAuditRow(t *testing.T) {
 	if details["source"] != "manual" {
 		t.Errorf("details.source = %v, want manual", details["source"])
 	}
+	for _, k := range []string{"previousReviewedBy", "previousReviewedAt"} {
+		if v, ok := details[k]; ok {
+			t.Errorf("details.%s = %v, want absent on a fresh insert", k, v)
+		}
+	}
 	if details["sourceNodeId"] != float64(sourceID) || details["targetNodeId"] != float64(targetID) {
 		t.Errorf("details endpoints = %v -> %v, want %d -> %d", details["sourceNodeId"], details["targetNodeId"], sourceID, targetID)
 	}
@@ -188,20 +193,58 @@ func TestCreateEdge_WritesAuditRow(t *testing.T) {
 }
 
 // TestCreateEdge_OverExistingEdgeRecordsPreviousState: linking by hand a
-// triple a resolver already proposed upserts that row; the audit row
-// records the state the upsert replaced.
+// triple that already exists upserts that row; the audit row records the
+// state the upsert replaced and, like a reset, who last reviewed it and
+// when (#587), so re-linking over a human decision keeps its attribution.
+// An unreviewed resolver guess has no reviewer, so carries neither key.
 func TestCreateEdge_OverExistingEdgeRecordsPreviousState(t *testing.T) {
-	srv, database, auditSvc := newReviewTestServer(t)
-	locID := seedAuditLocation(t, database)
-	edgeID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{tier: 2, resolver: "stem", confidence: 0.7})
-	sourceID, targetID := seededEdgeEndpoints(t, database, edgeID)
-
-	if rr := serve(srv, createEdgeReq(t, sourceID, targetID, "DERIVED_FROM")); rr.Code != http.StatusOK {
-		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	cases := []struct {
+		name  string
+		state string // seeded prior state; CONFIRMED is reviewed by carol
+	}{
+		{"resolver guess", ""},
+		{"human decision", "CONFIRMED"},
 	}
-	details := assertEdgeReviewAuditRow(t, database, auditSvc, audit.EventEdgeReviewConfirmed, edgeID, "manual", "NEEDS_REVIEW", "CONFIRMED")
-	if details["source"] != "manual" {
-		t.Errorf("details.source = %v, want manual", details["source"])
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, database, auditSvc := newReviewTestServer(t)
+			locID := seedAuditLocation(t, database)
+			edgeID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{tier: 2, resolver: "stem", confidence: 0.7, state: tc.state})
+			sourceID, targetID := seededEdgeEndpoints(t, database, edgeID)
+			prior, err := database.Reader.GetMediaEdge(context.Background(), edgeID)
+			if err != nil {
+				t.Fatalf("GetMediaEdge(%d): %v", edgeID, err)
+			}
+
+			if rr := serve(srv, createEdgeReq(t, sourceID, targetID, "DERIVED_FROM")); rr.Code != http.StatusOK {
+				t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+			}
+			details := assertEdgeReviewAuditRow(t, database, auditSvc, audit.EventEdgeReviewConfirmed, edgeID, "manual", prior.ReviewState, "CONFIRMED")
+			if details["source"] != "manual" {
+				t.Errorf("details.source = %v, want manual", details["source"])
+			}
+
+			if tc.state == "" {
+				if prior.ReviewState != "NEEDS_REVIEW" {
+					t.Fatalf("seeded prior state = %q, want NEEDS_REVIEW", prior.ReviewState)
+				}
+				for _, k := range []string{"previousReviewedBy", "previousReviewedAt"} {
+					if v, ok := details[k]; ok {
+						t.Errorf("details.%s = %v, want absent (prior row never reviewed)", k, v)
+					}
+				}
+				return
+			}
+			if !prior.ReviewedBy.Valid || !prior.ReviewedAt.Valid {
+				t.Fatalf("seeded prior row not reviewed: %+v", prior)
+			}
+			if details["previousReviewedBy"] != "carol" {
+				t.Errorf("details.previousReviewedBy = %v, want carol", details["previousReviewedBy"])
+			}
+			if details["previousReviewedAt"] != float64(prior.ReviewedAt.Int64) {
+				t.Errorf("details.previousReviewedAt = %v, want %d", details["previousReviewedAt"], prior.ReviewedAt.Int64)
+			}
+		})
 	}
 }
 

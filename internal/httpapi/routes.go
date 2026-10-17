@@ -1334,8 +1334,9 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	// prior is the row CreateManualMediaEdge's ON CONFLICT upsert is about to
 	// overwrite, if the (source, target, relationship) triple already exists
 	// (e.g. a resolver's NEEDS_REVIEW guess the user is now linking by hand).
-	// It feeds the audit row's previousState; hadPrior=false means a fresh
-	// insert, and the audit row then carries no previousState key at all.
+	// It feeds the audit row's previousState / previousReviewedBy /
+	// previousReviewedAt; hadPrior=false means a fresh insert, and the audit
+	// row then carries none of those keys.
 	var prior sqlcgen.MediaEdge
 	var hadPrior bool
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -1390,15 +1391,17 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	// edge.review_confirmed decision a confirm writes, marked
 	// source=manual. The common keys describe the edge as created (its
 	// resolver is "manual"); reviewState comes from the RETURNING row, i.e.
-	// the database. previousState is the state the upsert replaced when the
-	// triple already existed, and is omitted for a fresh insert: there was
-	// no prior row, so there is no previous state to report (an empty
-	// string would read as a state).
+	// the database. previousState, previousReviewedBy and
+	// previousReviewedAt describe the row the upsert replaced when the
+	// triple already existed (the reviewer keys formatted exactly as reset
+	// formats them, via addPreviousReview), so overwriting a prior human
+	// decision keeps who made it and when. All three are omitted for a
+	// fresh insert: there was no prior row, so there is no previous state
+	// to report (an empty string would read as a state).
 	details := edgeAuditDetails(createdEdge)
 	if hadPrior {
 		details["previousState"] = prior.ReviewState
-	} else {
-		delete(details, "previousState")
+		addPreviousReview(details, prior)
 	}
 	details["reviewState"] = createdEdge.ReviewState
 	details["source"] = "manual"
@@ -1656,10 +1659,13 @@ func recomputeGraphStatus(ctx context.Context, q *sqlcgen.Queries, nodeID int64)
 
 // edgeAuditDetails is the details payload every edge review audit row
 // shares (edge.review_confirmed, edge.review_rejected, edge.review_reset,
-// and manual creation's edge.review_confirmed): the edge's identity plus
-// previousState, read from edge. Callers pass the edge as it was before
-// their write, so previousState is the state the write replaced, and add
-// their event-specific keys on top.
+// and manual creation's edge.review_confirmed): the edge's identity, read
+// from edge. It carries no previousState: that is the state a write
+// replaced, so each caller adds it from the row as it was before its
+// write -- confirm, reject and reset from the pre-write row they read,
+// manual creation only when its upsert replaced an existing row (a fresh
+// insert has no previous state). Callers add their event-specific keys on
+// top.
 func edgeAuditDetails(edge sqlcgen.MediaEdge) map[string]any {
 	return map[string]any{
 		"edgeId":           edge.ID,
@@ -1667,7 +1673,19 @@ func edgeAuditDetails(edge sqlcgen.MediaEdge) map[string]any {
 		"targetNodeId":     edge.TargetNodeID,
 		"relationshipType": edge.RelationshipType,
 		"resolver":         edge.Resolver,
-		"previousState":    edge.ReviewState,
+	}
+}
+
+// addPreviousReview adds who last reviewed before (previousReviewedBy) and
+// when (previousReviewedAt, unix seconds as stored) to an edge audit
+// details payload, each only when the row has it. before is the row as it
+// was before the caller's write.
+func addPreviousReview(details map[string]any, before sqlcgen.MediaEdge) {
+	if before.ReviewedBy.Valid {
+		details["previousReviewedBy"] = before.ReviewedBy.String
+	}
+	if before.ReviewedAt.Valid {
+		details["previousReviewedAt"] = before.ReviewedAt.Int64
 	}
 }
 
@@ -1712,6 +1730,7 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 		return nil, huma.Error500InternalServerError("confirm edge", err)
 	}
 	details := edgeAuditDetails(confirmedEdge)
+	details["previousState"] = confirmedEdge.ReviewState
 	details["reviewState"] = afterEdge.ReviewState
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewConfirmed, confirmedEdge.ID, details)
 
@@ -1749,6 +1768,7 @@ func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*Ed
 		return nil, huma.Error500InternalServerError("reject edge", err)
 	}
 	details := edgeAuditDetails(rejectedEdge)
+	details["previousState"] = rejectedEdge.ReviewState
 	details["reviewState"] = afterEdge.ReviewState
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewRejected, rejectedEdge.ID, details)
 	out := &EdgeReviewOutput{}
@@ -1819,12 +1839,8 @@ func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput)
 	}
 
 	details := edgeAuditDetails(before)
-	if before.ReviewedBy.Valid {
-		details["previousReviewedBy"] = before.ReviewedBy.String
-	}
-	if before.ReviewedAt.Valid {
-		details["previousReviewedAt"] = before.ReviewedAt.Int64
-	}
+	details["previousState"] = before.ReviewState
+	addPreviousReview(details, before)
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewReset, before.ID, details)
 
 	out := &EdgeResetReviewOutput{}
