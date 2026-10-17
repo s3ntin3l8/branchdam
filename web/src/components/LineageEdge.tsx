@@ -1,5 +1,5 @@
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyflow/react";
-import type { LineageFlowEdge } from "../lib/edgeStyle";
+import { pointAlong, routePath, type LineageFlowEdge } from "../lib/edgeStyle";
 
 export default function LineageEdge({
   id,
@@ -14,10 +14,17 @@ export default function LineageEdge({
   label,
   data,
 }: EdgeProps<LineageFlowEdge>) {
-  const [path] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition });
-  const t = data?.labelT ?? 0.5;
-  const labelX = sourceX + (targetX - sourceX) * t;
-  const labelY = sourceY + (targetY - sourceY) * t + (data?.labelDy ?? 0);
+  const waypoints = data?.waypoints ?? [];
+  // A plain edge is one bezier; one spanning several columns bends through
+  // free slots so it does not run behind the nodes in between.
+  const points = [{ x: sourceX, y: sourceY }, ...waypoints, { x: targetX, y: targetY }];
+  const path =
+    waypoints.length > 0
+      ? routePath(points)
+      : getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[0];
+  const at = pointAlong(points, data?.labelT ?? 0.5);
+  const labelX = at.x;
+  const labelY = at.y + (data?.labelDy ?? 0);
 
   return (
     <>
