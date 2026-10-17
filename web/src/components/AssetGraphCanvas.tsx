@@ -1,9 +1,33 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router";
-import { Background, Controls, ReactFlow, ReactFlowProvider, type Edge as FlowEdge, type Node as FlowNode } from "@xyflow/react";
+import { Background, Controls, Position, ReactFlow, ReactFlowProvider, type Node as FlowNode } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { AssetGraph, LineageResponse } from "../api/types";
-import { edgeVisual } from "../lib/edgeStyle";
+import { edgeVisual, labelSpread, type LineageFlowEdge } from "../lib/edgeStyle";
+import LineageEdge from "./LineageEdge";
+
+// Levels run left to right, so edges leave a node's right side and enter the
+// next one's left; the default top/bottom handles made every edge loop around
+// its nodes and park its label on top of them.
+const HORIZONTAL_HANDLES = { sourcePosition: Position.Right, targetPosition: Position.Left } as const;
+// Wide enough that a label sits between two columns instead of on a node.
+const LEVEL_GAP_X = 460;
+
+// Module-level so React Flow sees a stable reference across renders.
+const edgeTypes = { lineage: LineageEdge };
+
+/** Spread labels of edges that share `key(edge)`, in the given (deterministic) order. */
+function spreadLabels<T>(edges: T[], key: (e: T) => string): Map<T, ReturnType<typeof labelSpread>> {
+  const groups = new Map<string, T[]>();
+  edges.forEach((e) => {
+    const k = key(e);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(e);
+  });
+  const out = new Map<T, ReturnType<typeof labelSpread>>();
+  groups.forEach((group) => group.forEach((e, i) => out.set(e, labelSpread(i, group.length))));
+  return out;
+}
 
 interface AssetGraphCanvasProps {
   assetId: number;
@@ -67,6 +91,7 @@ export default function AssetGraphCanvas({ assetId, lineage, graph }: AssetGraph
         <ReactFlow
           nodes={nodes}
           edges={edges}
+          edgeTypes={edgeTypes}
           onNodeClick={handleNodeClick}
           fitView
           proOptions={{ hideAttribution: true }}
@@ -79,7 +104,7 @@ export default function AssetGraphCanvas({ assetId, lineage, graph }: AssetGraph
   );
 }
 
-function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: FlowNode[]; edges: FlowEdge[]; isEmpty: boolean } {
+export function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: FlowNode[]; edges: LineageFlowEdge[]; isEmpty: boolean } {
   if (!lineage.nodes || lineage.nodes.length <= 1 && lineage.edges.length === 0) {
     return { nodes: [], edges: [], isEmpty: true };
   }
@@ -149,7 +174,7 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
     const group = levelGroups.get(l) || [n.id];
     const index = group.indexOf(n.id);
 
-    const x = l * 280;
+    const x = l * LEVEL_GAP_X;
     const y = (index - (group.length - 1) / 2) * 110;
 
     const colors = getNodeCategoryColor(n.fileExt || "");
@@ -157,6 +182,7 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
     nodes.push({
       id: String(n.id),
       position: { x, y },
+      ...HORIZONTAL_HANDLES,
       data: {
         label: (
           <div className="text-center">
@@ -176,18 +202,21 @@ function buildLineageFlow(rootId: number, lineage: LineageResponse): { nodes: Fl
     });
   });
 
-  const edges: FlowEdge[] = lineage.edges.map((e) => ({
+  // Edges into one node converge on the same handle; fan their labels out.
+  const spread = spreadLabels(lineage.edges, (e) => String(e.targetNodeId));
+  const edges: LineageFlowEdge[] = lineage.edges.map((e) => ({
     id: `e-${e.id}`,
+    type: "lineage",
     source: String(e.sourceNodeId),
     target: String(e.targetNodeId),
     ...edgeVisual(e, 2),
-    labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
+    data: spread.get(e)!,
   }));
 
   return { nodes, edges, isEmpty: false };
 }
 
-export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[]; edges: FlowEdge[]; isEmpty: boolean } {
+export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: FlowNode[]; edges: LineageFlowEdge[]; isEmpty: boolean } {
   if (graph.parents.length === 0 && graph.children.length === 0) {
     return { nodes: [], edges: [], isEmpty: true };
   }
@@ -196,11 +225,16 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
     {
       id: String(assetId),
       position: { x: 0, y: 0 },
+      ...HORIZONTAL_HANDLES,
       data: { label: "This asset" },
       style: { background: "var(--graph-node-bg-root)", color: "var(--graph-text)", border: "3px solid var(--color-brand)", borderRadius: "6px", cursor: "pointer" },
     },
   ];
-  const edges: FlowEdge[] = [];
+  const edges: LineageFlowEdge[] = [];
+  // Parents all converge on this asset and children all leave it, so each
+  // side spreads as one group.
+  const parentSpread = spreadLabels(graph.parents, () => "parents");
+  const childSpread = spreadLabels(graph.children, () => "children");
 
   // Several edges (different relationship types) can join the same pair of
   // nodes; React Flow needs unique node ids, so emit each neighbour once
@@ -212,7 +246,8 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
       seenNeighbours.add(nodeId);
       nodes.push({
         id: `parent-${e.sourceNodeId}`,
-        position: { x: -260, y: (i - (graph.parents.length - 1) / 2) * 90 },
+        position: { x: -LEVEL_GAP_X, y: (i - (graph.parents.length - 1) / 2) * 90 },
+        ...HORIZONTAL_HANDLES,
         data: { label: `Node ${e.sourceNodeId}` },
         style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
       });
@@ -221,8 +256,9 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
       id: `e-${e.id}`,
       source: `parent-${e.sourceNodeId}`,
       target: String(assetId),
+      type: "lineage",
       ...edgeVisual(e),
-      labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
+      data: parentSpread.get(e)!,
     });
   });
 
@@ -232,7 +268,8 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
       seenNeighbours.add(nodeId);
       nodes.push({
         id: `child-${e.targetNodeId}`,
-        position: { x: 260, y: (i - (graph.children.length - 1) / 2) * 90 },
+        position: { x: LEVEL_GAP_X, y: (i - (graph.children.length - 1) / 2) * 90 },
+        ...HORIZONTAL_HANDLES,
         data: { label: `Node ${e.targetNodeId}` },
         style: { background: "var(--graph-node-bg-neutral)", color: "var(--graph-text)", border: "1px solid var(--graph-node-border-neutral)", borderRadius: "6px", cursor: "pointer" },
       });
@@ -241,8 +278,9 @@ export function buildOneHopFlow(assetId: number, graph: AssetGraph): { nodes: Fl
       id: `e-${e.id}`,
       source: String(assetId),
       target: `child-${e.targetNodeId}`,
+      type: "lineage",
       ...edgeVisual(e),
-      labelStyle: { fill: "var(--graph-text)", fontSize: 11 },
+      data: childSpread.get(e)!,
     });
   });
 

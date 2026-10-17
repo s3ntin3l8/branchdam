@@ -1,3 +1,4 @@
+import type { Edge as FlowEdge } from "@xyflow/react";
 import type { CSSProperties } from "react";
 import type { Edge } from "../api/types";
 
@@ -30,4 +31,37 @@ export function edgeVisual(
     label += " - rejected";
   }
   return { style, label };
+}
+
+/**
+ * Where an edge's label sits. React Flow's built-in labels all sit at the
+ * path midpoint, so edges converging on one handle stack their labels on top
+ * of each other. `labelT` slides the label along the source->target line and
+ * `labelDy` nudges it vertically, both chosen per edge by `labelSpread`.
+ */
+export interface LineageEdgeData extends Record<string, unknown> {
+  labelT: number;
+  labelDy: number;
+}
+
+export type LineageFlowEdge = FlowEdge<LineageEdgeData, "lineage">;
+
+const SPREAD_T_FROM = 0.3;
+const SPREAD_T_TO = 0.6;
+const SPREAD_DY = 24;
+
+/**
+ * Label position for edge `index` of `count` that share an endpoint. A lone
+ * edge keeps the midpoint. Siblings are fanned out in both axes: the t range
+ * leans towards the source end, where converging paths are still apart, and
+ * the vertical step (a little over one label height) keeps labels from
+ * overlapping even when the siblings' sources share a y.
+ */
+export function labelSpread(index: number, count: number): LineageEdgeData {
+  if (count <= 1) return { labelT: 0.5, labelDy: 0 };
+  const f = index / (count - 1);
+  return {
+    labelT: SPREAD_T_FROM + (SPREAD_T_TO - SPREAD_T_FROM) * f,
+    labelDy: (index - (count - 1) / 2) * SPREAD_DY,
+  };
 }

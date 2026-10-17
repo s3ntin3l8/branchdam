@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import AssetGraphCanvas, { buildOneHopFlow } from "./AssetGraphCanvas";
+import AssetGraphCanvas, { buildLineageFlow, buildOneHopFlow } from "./AssetGraphCanvas";
+import { labelSpread } from "../lib/edgeStyle";
 import type { Edge } from "../api/types";
 
 describe("AssetGraphCanvas", () => {
@@ -140,5 +141,64 @@ describe("review-state edge styling", () => {
     expect(byId["e-12"].style?.strokeDasharray).toBeUndefined();
     // Same relationship colour either way: only the line pattern differs.
     expect(byId["e-10"].style?.stroke).toBe(byId["e-11"].style?.stroke);
+  });
+
+  describe("label placement (#576)", () => {
+    const lineageEdge = (id: number, source: number, target: number): Edge => ({
+      id,
+      sourceNodeId: source,
+      targetNodeId: target,
+      relationshipType: "PROXY_OF",
+      confidence: 0.6,
+      reviewState: "NEEDS_REVIEW",
+      resolver: "test",
+    });
+    const node = (id: number) => ({
+      id,
+      nodeUuid: `uuid-${id}`,
+      filePath: `/s/${id}.arw`,
+      fileName: `${id}.arw`,
+      fileExt: ".arw",
+      sizeBytes: 1,
+      indexingStatus: "INDEXED_FULL",
+      graphStatus: "LINKED",
+      lifecycleState: "ACTIVE",
+      storageLocationId: 1,
+    });
+
+    it("keeps a lone edge's label at the midpoint", () => {
+      expect(labelSpread(0, 1)).toEqual({ labelT: 0.5, labelDy: 0 });
+    });
+
+    it("gives every edge into one node a distinct label position", () => {
+      const { edges } = buildLineageFlow(1, {
+        rootId: 1,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        nodes: [1, 2, 3, 4, 5].map(node) as any,
+        edges: [lineageEdge(10, 1, 5), lineageEdge(11, 2, 5), lineageEdge(12, 3, 5), lineageEdge(13, 4, 2)],
+      });
+      const into5 = edges.filter((e) => e.target === "5").map((e) => e.data!);
+      expect(into5).toHaveLength(3);
+      // Pairwise different on both axes: no two labels can share a spot.
+      for (let i = 0; i < into5.length; i++) {
+        for (let j = i + 1; j < into5.length; j++) {
+          expect(into5[i].labelT).not.toBe(into5[j].labelT);
+          expect(into5[i].labelDy).not.toBe(into5[j].labelDy);
+        }
+      }
+      // The edge into a different node is alone in its group.
+      expect(edges.find((e) => e.target === "2")!.data).toEqual({ labelT: 0.5, labelDy: 0 });
+    });
+
+    it("is deterministic for the same input and uses the custom edge type", () => {
+      const graph = { parents: [lineageEdge(20, 2, 1), lineageEdge(21, 3, 1)], children: [lineageEdge(22, 1, 4)] };
+      const a = buildOneHopFlow(1, graph);
+      const b = buildOneHopFlow(1, graph);
+      expect(a.edges).toEqual(b.edges);
+      expect(a.edges.every((e) => e.type === "lineage")).toBe(true);
+      const byId = Object.fromEntries(a.edges.map((e) => [e.id, e.data]));
+      expect(byId["e-20"]).not.toEqual(byId["e-21"]);
+      expect(byId["e-22"]).toEqual({ labelT: 0.5, labelDy: 0 });
+    });
   });
 });
