@@ -106,10 +106,11 @@ vet: web-stub ## Run go vet
 tidy: ## Tidy Go modules
 	go mod tidy
 
-# GOTOOLCHAIN: @latest otherwise builds govulncheck with its own (older) go.mod
-# toolchain, which cannot type-check a newer module.
+# GOTOOLCHAIN: minimum Go is the module's ("+auto" can still switch up).
+# @latest otherwise builds govulncheck with its own go.mod toolchain, which
+# cannot type-check a newer module.
 vulncheck: ## Check for known vulnerabilities
-	GOTOOLCHAIN=$$(go env GOVERSION) go install golang.org/x/vuln/cmd/govulncheck@latest
+	GOTOOLCHAIN=$$(go env GOVERSION)+auto go install golang.org/x/vuln/cmd/govulncheck@latest
 	$$(go env GOPATH)/bin/govulncheck ./...
 
 build: web-stub ## Build all packages (embeds whatever web/dist contains -- see `build-embed`)
