@@ -568,10 +568,13 @@ func decodeQueryFixture(b []byte, dst any) error {
 	rv := reflect.ValueOf(dst).Elem()
 	fields := map[string]reflect.Value{}
 	for i := 0; i < rv.NumField(); i++ {
-		name, _, _ := strings.Cut(rv.Type().Field(i).Tag.Get("query"), ",")
-		if name != "" {
-			fields[name] = rv.Field(i)
+		f := rv.Type().Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("query"), ",")
+		if name == "" {
+			// Never read from the request; queryFixture refuses it too.
+			return fmt.Errorf("%s has no query tag", f.Name)
 		}
+		fields[name] = rv.Field(i)
 	}
 	for key, val := range raw {
 		f, ok := fields[key]
