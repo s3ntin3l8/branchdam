@@ -1617,6 +1617,31 @@ func recomputeGraphStatus(ctx context.Context, q *sqlcgen.Queries, nodeID int64)
 	return graph.RecomputeStatusFromPersistedEdges(ctx, q, nodeID)
 }
 
+// writeEdgeReviewAudit records a human confirm/reject decision in
+// actor_audit, the counterpart of the edge.review_reset row written by
+// handleResetEdgeReview: same resource ("edge", id), same principal, and
+// the same best-effort, after-commit semantics (a failed audit write is
+// logged, never surfaced). before is the edge as it was read inside the
+// decision's transaction, so previousState is the state the decision
+// replaced; reviewState is the state it set.
+func (s *Server) writeEdgeReviewAudit(ctx context.Context, event string, before sqlcgen.MediaEdge, reviewState string) {
+	if s.audit == nil {
+		return
+	}
+	details := map[string]any{
+		"edgeId":           before.ID,
+		"sourceNodeId":     before.SourceNodeID,
+		"targetNodeId":     before.TargetNodeID,
+		"relationshipType": before.RelationshipType,
+		"resolver":         before.Resolver,
+		"previousState":    before.ReviewState,
+		"reviewState":      reviewState,
+	}
+	if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), event, "edge", strconv.FormatInt(before.ID, 10), details); err != nil {
+		s.log.Warn("failed to write actor audit for edge review", "event", event, "error", err)
+	}
+}
+
 func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
 	var targetNodeID int64
 	var confirmedEdge sqlcgen.MediaEdge
@@ -1638,6 +1663,7 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 		}
 		return nil, huma.Error500InternalServerError("confirm edge", err)
 	}
+	s.writeEdgeReviewAudit(ctx, auditPkg.EventEdgeReviewConfirmed, confirmedEdge, "CONFIRMED")
 
 	if confirmedEdge.Tier != 3 && pipeline.ValidParentRelationships[confirmedEdge.RelationshipType] {
 		s.autoInherit(ctx, targetNodeID)
@@ -1649,11 +1675,17 @@ func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*E
 }
 
 func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
+	var rejectedEdge sqlcgen.MediaEdge
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		edge, err := q.GetMediaEdge(ctx, in.ID)
+		if err != nil {
+			return err
+		}
 		targetNodeID, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
 		if err != nil {
 			return err
 		}
+		rejectedEdge = edge
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
@@ -1662,6 +1694,7 @@ func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*Ed
 		}
 		return nil, huma.Error500InternalServerError("reject edge", err)
 	}
+	s.writeEdgeReviewAudit(ctx, auditPkg.EventEdgeReviewRejected, rejectedEdge, "REJECTED")
 	out := &EdgeReviewOutput{}
 	out.Body.OK = true
 	return out, nil

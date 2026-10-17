@@ -79,6 +79,11 @@ const (
 	// A human CONFIRMED/REJECTED edge decision handed back to the review
 	// queue (POST /api/v1/edges/{id}/reset-review).
 	EventEdgeReviewReset = "edge.review_reset"
+	// A human review decision on an edge (POST /api/v1/edges/{id}/confirm
+	// and /reject). Written with the same details shape as
+	// edge.review_reset, plus the reviewState the decision set.
+	EventEdgeReviewConfirmed = "edge.review_confirmed"
+	EventEdgeReviewRejected  = "edge.review_rejected"
 )
 
 // Event is a typed event name. Anything that wants to write a new kind
