@@ -50,9 +50,14 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      # GOTOOLCHAIN sets the install's minimum to the module's Go ("+auto"
+      # still lets it switch up if govulncheck needs a newer one): `@latest`
+      # otherwise builds with govulncheck's own go.mod toolchain, and a binary
+      # built by an older Go cannot type-check a newer module ("package
+      # requires newer Go version").
       - id: govulncheck
         name: govulncheck
-        entry: bash -c 'GOBIN="$(git rev-parse --show-toplevel)/.bin" go install golang.org/x/vuln/cmd/govulncheck@latest && "$(git rev-parse --show-toplevel)/.bin/govulncheck" ./...'
+        entry: bash -c 'GOTOOLCHAIN="$(go env GOVERSION)+auto" GOBIN="$(git rev-parse --show-toplevel)/.bin" go install golang.org/x/vuln/cmd/govulncheck@latest && "$(git rev-parse --show-toplevel)/.bin/govulncheck" ./...'
         language: system
         types: [go]
         pass_filenames: false
