@@ -91,7 +91,13 @@ export function routePath(points: Point[]): string {
   return d;
 }
 
-/** Point a fraction `t` of the way across `points` (by x), interpolating between neighbours. */
+/**
+ * Point on the drawn path a fraction `t` of the way across `points` (by x).
+ * Each hop is the cubic `routePath` draws, whose x and y are not linear in
+ * each other, so solve it for the parameter at the wanted x (x is monotone, so
+ * bisection converges) rather than interpolating the chord: the label then
+ * sits on the line, not beside it.
+ */
 export function pointAlong(points: Point[], t: number): Point {
   const first = points[0];
   const last = points[points.length - 1];
@@ -99,10 +105,20 @@ export function pointAlong(points: Point[], t: number): Point {
   for (let i = 1; i < points.length; i++) {
     const a = points[i - 1];
     const b = points[i];
-    if (x <= b.x || i === points.length - 1) {
-      const f = b.x === a.x ? 0 : (x - a.x) / (b.x - a.x);
-      return { x, y: a.y + (b.y - a.y) * f };
+    if (x > b.x && i < points.length - 1) continue;
+    // Horizontal tangents with controls at the hop's x midpoint:
+    //   x(u) = a.x + (b.x - a.x) * (1.5u - 1.5u^2 + u^3)
+    //   y(u) = a.y + (b.y - a.y) * (3u^2 - 2u^3)
+    const fx = b.x === a.x ? 0 : Math.min(1, Math.max(0, (x - a.x) / (b.x - a.x)));
+    let lo = 0;
+    let hi = 1;
+    for (let k = 0; k < 40; k++) {
+      const u = (lo + hi) / 2;
+      if (1.5 * u - 1.5 * u * u + u * u * u < fx) lo = u;
+      else hi = u;
     }
+    const u = (lo + hi) / 2;
+    return { x, y: a.y + (b.y - a.y) * (3 * u * u - 2 * u * u * u) };
   }
   return first;
 }

@@ -33,14 +33,25 @@ describe("routePath / pointAlong (#598)", () => {
     expect(routePath(pts)).toBe("M 0 0 C 50 0, 50 50, 100 50 C 200 50, 200 50, 300 50");
   });
 
-  it("interpolates along x across the segments", () => {
-    expect(pointAlong(pts, 0)).toEqual({ x: 0, y: 0 });
-    expect(pointAlong(pts, 1)).toEqual({ x: 300, y: 50 });
-    expect(pointAlong(pts, 1 / 3)).toEqual({ x: 100, y: 50 }); // a waypoint exactly
-    expect(pointAlong(pts, 1 / 6).y).toBeCloseTo(25);
+  it("hits the endpoints and waypoints exactly", () => {
+    expect(pointAlong(pts, 0).y).toBeCloseTo(0);
+    expect(pointAlong(pts, 1).y).toBeCloseTo(50);
+    const wp = pointAlong(pts, 1 / 3);
+    expect(wp.x).toBeCloseTo(100);
+    expect(wp.y).toBeCloseTo(50);
   });
 
-  it("matches the straight source->target line when there are no waypoints", () => {
-    expect(pointAlong([{ x: 0, y: 0 }, { x: 200, y: 100 }], 0.5)).toEqual({ x: 100, y: 50 });
+  it("stays on the drawn curve, not the chord", () => {
+    // Quarter of the way across the first hop: on routePath's cubic the label
+    // is still near the start height, well short of the chord's 12.5.
+    const p = pointAlong(pts, 1 / 12);
+    expect(p.x).toBeCloseTo(25);
+    expect(p.y).toBeLessThan(12.5 - 3);
+  });
+
+  it("puts a two-point edge's label at the midpoint of its S-curve", () => {
+    const mid = pointAlong([{ x: 0, y: 0 }, { x: 200, y: 100 }], 0.5);
+    expect(mid.x).toBe(100);
+    expect(mid.y).toBeCloseTo(50);
   });
 });

@@ -13,8 +13,9 @@ import LineageEdge from "./LineageEdge";
 const HORIZONTAL_HANDLES = { sourcePosition: Position.Right, targetPosition: Position.Left } as const;
 // Wide enough that a label sits between two columns instead of on a node.
 const LEVEL_GAP_X = 460;
-// Rough centre of a node from its top-left position, for waypoints that must
-// line up with where edges meet the node handles.
+// Approximate centre of a node from its top-left position (node size is
+// content-driven). A waypoint only has to land inside the column it crosses and
+// level with its row, so an estimate is enough.
 const NODE_CENTRE = { x: 80, y: 22 };
 
 // Module-level so React Flow sees a stable reference across renders.
