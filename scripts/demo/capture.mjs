@@ -8,7 +8,7 @@
 // the normal Playwright cache (`npx playwright install chromium` once).
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,9 @@ import { parseArgs } from "node:util";
 import { DEMO_HEADERS, assetsOf, startDemo } from "./instance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const { chromium } = createRequire(path.join(ROOT, "web/package.json"))("@playwright/test");
+const webRequire = createRequire(path.join(ROOT, "web/package.json"));
+const { chromium } = webRequire("@playwright/test");
+const sharp = webRequire("sharp");
 
 const { values } = parseArgs({
   options: {
@@ -58,17 +60,24 @@ async function open(page, url, scrollTo) {
   await page.waitForTimeout(1200); // thumbnails fade in, the graph lays out
 }
 
-/** The graph sits at the bottom of the detail page, so it's captured as its own element. */
-function shot(page, dir, name, element) {
+/**
+ * The graph sits at the bottom of the detail page, so it's captured as its own element.
+ * The PNG is re-encoded losslessly (same pixels, smaller file) so a refresh
+ * doesn't bloat the repo; sharp is already a web devDependency.
+ */
+async function shot(page, dir, name, element) {
   mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${name}`);
   const target = element
     ? page.locator("section").filter({ has: page.getByText(element, { exact: true }) }).last()
     : page;
-  return target.screenshot({ path: tmp }).then(() => {
-    renameSync(tmp, path.join(dir, name));
-    console.log(`wrote ${name}`);
-  });
+  await target.screenshot({ path: tmp });
+  try {
+    await sharp(tmp).png({ compressionLevel: 9, adaptiveFiltering: true, effort: 10 }).toFile(path.join(dir, name));
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+  console.log(`wrote ${name}`);
 }
 
 async function heroAssetId(demo) {
