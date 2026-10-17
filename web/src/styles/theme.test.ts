@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { createRequire } from "node:module";
 
 /*
  * Static analysis of the theme CSS file. Verifies the dual-theme token
@@ -296,5 +297,62 @@ describe("theme.css dual-theme contract", () => {
     expect(idx).toBeGreaterThanOrEqual(0);
     const line = themeCss.slice(idx, themeCss.indexOf("\n", idx));
     expect(line).toContain('[data-theme="dark"]');
+  });
+  /*
+   * xyflow overrides (#571). xyflow reads `var(--xy-NAME, var(--xy-NAME-default))`
+   * and declares the `-default` names on `.react-flow` itself, so a
+   * `-default` override on :root is silently shadowed (edge labels and the
+   * zoom controls rendered light-on-light in dark mode). Every --xy-* name
+   * theme.css sets must be an un-suffixed name the installed xyflow
+   * stylesheet actually consumes -- this also catches typos such as
+   * `--xy-controls-button-border` vs `--xy-controls-button-border-color`.
+   */
+  describe("xyflow overrides", () => {
+    const xyflowCss = readFileSync(
+      createRequire(import.meta.url).resolve("@xyflow/react/dist/style.css"),
+      "utf8"
+    );
+    const xyTokens = new Map<string, string>();
+    for (const b of blocks) {
+      for (const [k, v] of tokensIn(b.body)) if (k.startsWith("--xy-")) xyTokens.set(k, v);
+    }
+
+    it("declares xyflow overrides", () => {
+      expect(xyTokens.size).toBeGreaterThan(0);
+    });
+
+    for (const token of [
+      "--xy-edge-label-background-color",
+      "--xy-edge-label-color",
+      "--xy-controls-button-background-color",
+      "--xy-controls-button-background-color-hover",
+      "--xy-controls-button-color",
+      "--xy-controls-button-border-color",
+    ]) {
+      it(`themes ${token}`, () => {
+        expect(xyTokens.has(token)).toBe(true);
+      });
+    }
+
+    // The #571 regression values themselves: a swap to a hard-coded colour
+    // would pass the name checks below but break one of the two themes.
+    it("edge labels use the canvas surface and graph text tokens", () => {
+      expect(xyTokens.get("--xy-edge-label-background-color")).toBe("var(--surface-canvas)");
+      expect(xyTokens.get("--xy-edge-label-color")).toBe("var(--graph-text)");
+    });
+
+    for (const [token, value] of xyTokens) {
+      it(`${token} resolves through a theme token`, () => {
+        // Hard-coded colours would be identical in both themes.
+        expect(value === "transparent" || value.includes("var(--")).toBe(true);
+      });
+    }
+
+    for (const token of xyTokens.keys()) {
+      it(`${token} is a name xyflow reads ahead of its own default`, () => {
+        expect(token.endsWith("-default")).toBe(false);
+        expect(xyflowCss).toContain(`var(${token},`);
+      });
+    }
   });
 });
