@@ -96,6 +96,7 @@ is preferred over a failed response with no audit trail.
 | `PUT /api/v1/storage-locations/{id}` | Writes `actor_audit('storage_location.upserted')`. |
 | `POST /api/v1/prune` (execute) | Writes `actor_audit('prune.executed')`. |
 | `POST /api/v1/edges/{id}/confirm` / `reject` | Writes `actor_audit('edge.review_confirmed')` / `actor_audit('edge.review_rejected')` (resource `edge`; details: `edgeId`, `sourceNodeId`, `targetNodeId`, `relationshipType`, `resolver`, `previousState`, `reviewState`). Not written for a 404. |
+| `POST /api/v1/edges` (manual link) | A manual edge is created `CONFIRMED`, so it writes `actor_audit('edge.review_confirmed')` with the same details plus `source: "manual"`. `previousState` is the state the upsert replaced when the (source, target, relationship) edge already existed, and is omitted for a fresh insert. Not written for a refused (404/409/422) create. |
 | `POST /api/v1/edges/{id}/reset-review` | Writes `actor_audit('edge.review_reset')` with the decision it undid (`previousState`, `previousReviewedBy`, `previousReviewedAt`). |
 | `POST /api/v1/companion/pairings` | Sets `device_pairings.user_id` from the creating request's resolved user id. |
 | `GET /api/v1/audit?type=activity\|login` | Merged actor_audit + login_audit read. |
