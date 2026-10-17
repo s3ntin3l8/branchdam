@@ -81,7 +81,9 @@ const (
 	EventEdgeReviewReset = "edge.review_reset"
 	// A human review decision on an edge (POST /api/v1/edges/{id}/confirm
 	// and /reject). Written with the same details shape as
-	// edge.review_reset, plus the reviewState the decision set.
+	// edge.review_reset, plus the reviewState the decision set. A manual
+	// edge (POST /api/v1/edges) is born CONFIRMED and is also recorded as
+	// edge.review_confirmed, with details.source = "manual".
 	EventEdgeReviewConfirmed = "edge.review_confirmed"
 	EventEdgeReviewRejected  = "edge.review_rejected"
 )

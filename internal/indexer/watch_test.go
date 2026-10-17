@@ -401,14 +401,30 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	}
 	_ = f.Close()
 
-	waitFor(t, 10*time.Second, func() bool {
+	const timeout = 10 * time.Second
+	deadline := time.Now().Add(timeout)
+	waitFor(t, timeout, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(sizes) > 0 && sizes[len(sizes)-1] == total
 	})
-	// Give a late duplicate report time to arrive before checking that the
-	// file was reported exactly once.
-	time.Sleep(3 * debounce)
+	// A late duplicate report could still be on its way. Rather than a fixed
+	// grace sleep, wait until the report count has held still for
+	// 3 x debounce (longer than the ~2 x debounce settle window, so a second
+	// settle of the same file would land inside it), bounded by what is left
+	// of the overall timeout. Only then is "exactly once" a stable answer.
+	quiet := 3 * debounce
+	lastLen, lastChange := -1, time.Now()
+	waitFor(t, time.Until(deadline), func() bool {
+		mu.Lock()
+		n := len(sizes)
+		mu.Unlock()
+		if n != lastLen {
+			lastLen, lastChange = n, time.Now()
+			return false
+		}
+		return time.Since(lastChange) >= quiet
+	})
 	mu.Lock()
 	defer mu.Unlock()
 	for _, sz := range sizes {

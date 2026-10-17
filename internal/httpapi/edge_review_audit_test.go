@@ -8,14 +8,20 @@ import (
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
+	"github.com/s3ntin3l8/branchdam/internal/db"
 )
 
 // assertEdgeReviewAuditRow reads back the single actor_audit row for event
-// and checks the resource, actor and details shape shared with
-// edge.review_reset.
-func assertEdgeReviewAuditRow(t *testing.T, auditSvc *audit.Service, event string, edgeID int64, seed reviewEdgeSeed, previousState, reviewState string) {
+// and checks the resource, actor (name, kind and the admin's users.id) and
+// the details shape shared with edge.review_reset. previousState is the
+// expected details.previousState, or nil when the key must be absent.
+// reviewState is checked against the edge row itself too, so the audit
+// value is the one the database holds. It returns the decoded details for
+// event-specific checks.
+func assertEdgeReviewAuditRow(t *testing.T, database *db.DB, auditSvc *audit.Service, event string, edgeID int64, resolver string, previousState any, reviewState string) map[string]any {
 	t.Helper()
-	entries, _, err := auditSvc.ListActivity(context.Background(), audit.Filter{Event: event}, 10, 0)
+	ctx := context.Background()
+	entries, _, err := auditSvc.ListActivity(ctx, audit.Filter{Event: event}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListActivity: %v", err)
 	}
@@ -26,12 +32,29 @@ func assertEdgeReviewAuditRow(t *testing.T, auditSvc *audit.Service, event strin
 	if e.ResourceType != "edge" || e.ResourceID.String != fmt.Sprint(edgeID) || e.ActorName != "admin" || e.ActorKind != audit.ActorKindUser {
 		t.Errorf("audit row = %+v, want resource edge/%d by user admin", e, edgeID)
 	}
+	// adminReq's principal is provisioned lazily into users on its first
+	// request; the audit row must point at that row.
+	admin, err := database.Reader.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername(admin): %v", err)
+	}
+	if !e.ActorUserID.Valid || e.ActorUserID.Int64 != admin.ID {
+		t.Errorf("audit ActorUserID = %+v, want %d (admin)", e.ActorUserID, admin.ID)
+	}
 	var details map[string]any
 	if err := json.Unmarshal([]byte(e.DetailsJSON), &details); err != nil {
 		t.Fatalf("details: %v", err)
 	}
+	gotPrev, hasPrev := details["previousState"]
+	if previousState == nil {
+		if hasPrev {
+			t.Errorf("details.previousState = %v, want absent", gotPrev)
+		}
+	} else if gotPrev != previousState {
+		t.Errorf("details.previousState = %v, want %v", gotPrev, previousState)
+	}
 	if details["edgeId"] != float64(edgeID) || details["relationshipType"] != "DERIVED_FROM" ||
-		details["resolver"] != seed.resolver || details["previousState"] != previousState || details["reviewState"] != reviewState {
+		details["resolver"] != resolver || details["reviewState"] != reviewState {
 		t.Errorf("details = %v", details)
 	}
 	if _, ok := details["sourceNodeId"].(float64); !ok {
@@ -40,6 +63,14 @@ func assertEdgeReviewAuditRow(t *testing.T, auditSvc *audit.Service, event strin
 	if _, ok := details["targetNodeId"].(float64); !ok {
 		t.Errorf("details.targetNodeId missing: %v", details)
 	}
+	edge, err := database.Reader.GetMediaEdge(ctx, edgeID)
+	if err != nil {
+		t.Fatalf("GetMediaEdge(%d): %v", edgeID, err)
+	}
+	if details["reviewState"] != edge.ReviewState {
+		t.Errorf("details.reviewState = %v, edge row review_state = %q", details["reviewState"], edge.ReviewState)
+	}
+	return details
 }
 
 func countAuditRows(t *testing.T, auditSvc *audit.Service, event string) int {
@@ -62,7 +93,10 @@ func TestConfirmEdge_WritesAuditRow(t *testing.T) {
 	if rr := serve(srv, adminReq(http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/confirm", edgeID), nil)); rr.Code != http.StatusOK {
 		t.Fatalf("confirm: %d %s", rr.Code, rr.Body.String())
 	}
-	assertEdgeReviewAuditRow(t, auditSvc, audit.EventEdgeReviewConfirmed, edgeID, seed, "NEEDS_REVIEW", "CONFIRMED")
+	details := assertEdgeReviewAuditRow(t, database, auditSvc, audit.EventEdgeReviewConfirmed, edgeID, seed.resolver, "NEEDS_REVIEW", "CONFIRMED")
+	if _, ok := details["source"]; ok {
+		t.Errorf("confirm details carry source = %v, want absent (manual creation only)", details["source"])
+	}
 	if n := countAuditRows(t, auditSvc, audit.EventEdgeReviewRejected); n != 0 {
 		t.Errorf("confirm wrote %d edge.review_rejected rows, want 0", n)
 	}
@@ -80,7 +114,7 @@ func TestRejectEdge_WritesAuditRow(t *testing.T) {
 	if rr := serve(srv, adminReq(http.MethodPost, fmt.Sprintf("/api/v1/edges/%d/reject", edgeID), nil)); rr.Code != http.StatusOK {
 		t.Fatalf("reject: %d %s", rr.Code, rr.Body.String())
 	}
-	assertEdgeReviewAuditRow(t, auditSvc, audit.EventEdgeReviewRejected, edgeID, seed, "CONFIRMED", "REJECTED")
+	assertEdgeReviewAuditRow(t, database, auditSvc, audit.EventEdgeReviewRejected, edgeID, seed.resolver, "CONFIRMED", "REJECTED")
 	if n := countAuditRows(t, auditSvc, audit.EventEdgeReviewConfirmed); n != 0 {
 		t.Errorf("reject wrote %d edge.review_confirmed rows, want 0", n)
 	}
@@ -99,5 +133,105 @@ func TestEdgeReview_UnknownEdgeWritesNoAuditRow(t *testing.T) {
 		if n := countAuditRows(t, auditSvc, ev); n != 0 {
 			t.Errorf("%s rows after 404s = %d, want 0", ev, n)
 		}
+	}
+}
+
+// createEdgeReq is an admin POST /api/v1/edges for a manual link.
+func createEdgeReq(t *testing.T, sourceID, targetID int64, relationship string) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"sourceNodeId": sourceID, "targetNodeId": targetID, "relationshipType": relationship})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return adminReq(http.MethodPost, "/api/v1/edges", body)
+}
+
+// seededEdgeEndpoints returns the (source, target) node ids of a seeded edge.
+func seededEdgeEndpoints(t *testing.T, database *db.DB, edgeID int64) (int64, int64) {
+	t.Helper()
+	edge, err := database.Reader.GetMediaEdge(context.Background(), edgeID)
+	if err != nil {
+		t.Fatalf("GetMediaEdge(%d): %v", edgeID, err)
+	}
+	return edge.SourceNodeID, edge.TargetNodeID
+}
+
+// TestCreateEdge_WritesAuditRow (#585): a manual link is born CONFIRMED,
+// so it is recorded as edge.review_confirmed with source=manual. A fresh
+// insert has no prior row and so no previousState key.
+func TestCreateEdge_WritesAuditRow(t *testing.T) {
+	srv, database, auditSvc := newReviewTestServer(t)
+	locID := seedAuditLocation(t, database)
+	// Seed a PROXY_OF edge only to get a node pair; the manual link below
+	// is a different (DERIVED_FROM) triple, so it is a fresh insert.
+	seedID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{relationship: "PROXY_OF", tier: 2, resolver: "stem", confidence: 0.7})
+	sourceID, targetID := seededEdgeEndpoints(t, database, seedID)
+
+	rr := serve(srv, createEdgeReq(t, sourceID, targetID, "DERIVED_FROM"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	var created edgeDTO
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	details := assertEdgeReviewAuditRow(t, database, auditSvc, audit.EventEdgeReviewConfirmed, created.ID, "manual", nil, "CONFIRMED")
+	if details["source"] != "manual" {
+		t.Errorf("details.source = %v, want manual", details["source"])
+	}
+	if details["sourceNodeId"] != float64(sourceID) || details["targetNodeId"] != float64(targetID) {
+		t.Errorf("details endpoints = %v -> %v, want %d -> %d", details["sourceNodeId"], details["targetNodeId"], sourceID, targetID)
+	}
+	if n := countAuditRows(t, auditSvc, audit.EventEdgeReviewRejected); n != 0 {
+		t.Errorf("create wrote %d edge.review_rejected rows, want 0", n)
+	}
+}
+
+// TestCreateEdge_OverExistingEdgeRecordsPreviousState: linking by hand a
+// triple a resolver already proposed upserts that row; the audit row
+// records the state the upsert replaced.
+func TestCreateEdge_OverExistingEdgeRecordsPreviousState(t *testing.T) {
+	srv, database, auditSvc := newReviewTestServer(t)
+	locID := seedAuditLocation(t, database)
+	edgeID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{tier: 2, resolver: "stem", confidence: 0.7})
+	sourceID, targetID := seededEdgeEndpoints(t, database, edgeID)
+
+	if rr := serve(srv, createEdgeReq(t, sourceID, targetID, "DERIVED_FROM")); rr.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	details := assertEdgeReviewAuditRow(t, database, auditSvc, audit.EventEdgeReviewConfirmed, edgeID, "manual", "NEEDS_REVIEW", "CONFIRMED")
+	if details["source"] != "manual" {
+		t.Errorf("details.source = %v, want manual", details["source"])
+	}
+}
+
+// TestCreateEdge_RefusedCreateWritesNoAuditRow: validation, missing-node
+// and cycle refusals create nothing and so record nothing.
+func TestCreateEdge_RefusedCreateWritesNoAuditRow(t *testing.T) {
+	srv, database, auditSvc := newReviewTestServer(t)
+	locID := seedAuditLocation(t, database)
+	edgeID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{tier: 2, resolver: "stem", confidence: 0.7, state: "CONFIRMED"})
+	sourceID, targetID := seededEdgeEndpoints(t, database, edgeID)
+
+	cases := []struct {
+		name           string
+		source, target int64
+		relationship   string
+		want           int
+	}{
+		{"self-loop", sourceID, sourceID, "DERIVED_FROM", http.StatusUnprocessableEntity},
+		{"invalid relationship", sourceID, targetID, "NOT_A_TYPE", http.StatusUnprocessableEntity},
+		{"unknown target", sourceID, 999999, "DERIVED_FROM", http.StatusNotFound},
+		{"unknown source", 999999, targetID, "DERIVED_FROM", http.StatusNotFound},
+		// The seeded CONFIRMED edge is source -> target; the reverse closes a cycle.
+		{"cycle", targetID, sourceID, "DERIVED_FROM", http.StatusConflict},
+	}
+	for _, tc := range cases {
+		if rr := serve(srv, createEdgeReq(t, tc.source, tc.target, tc.relationship)); rr.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d (%s)", tc.name, rr.Code, tc.want, rr.Body.String())
+		}
+	}
+	if n := countAuditRows(t, auditSvc, audit.EventEdgeReviewConfirmed); n != 0 {
+		t.Errorf("edge.review_confirmed rows after refused creates = %d, want 0", n)
 	}
 }
