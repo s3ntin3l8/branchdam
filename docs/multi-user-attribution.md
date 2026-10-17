@@ -95,6 +95,8 @@ is preferred over a failed response with no audit trail.
 | `POST /api/v1/restart` | Writes `actor_audit('restart.executed')` before the restart goroutine. |
 | `PUT /api/v1/storage-locations/{id}` | Writes `actor_audit('storage_location.upserted')`. |
 | `POST /api/v1/prune` (execute) | Writes `actor_audit('prune.executed')`. |
+| `POST /api/v1/edges/{id}/confirm` / `reject` | Writes `actor_audit('edge.review_confirmed')` / `actor_audit('edge.review_rejected')` (resource `edge`; details: `edgeId`, `sourceNodeId`, `targetNodeId`, `relationshipType`, `resolver`, `previousState`, `reviewState`). Not written for a 404. |
+| `POST /api/v1/edges/{id}/reset-review` | Writes `actor_audit('edge.review_reset')` with the decision it undid (`previousState`, `previousReviewedBy`, `previousReviewedAt`). |
 | `POST /api/v1/companion/pairings` | Sets `device_pairings.user_id` from the creating request's resolved user id. |
 | `GET /api/v1/audit?type=activity\|login` | Merged actor_audit + login_audit read. |
 | `GET /api/v1/users` | Admin-only read of the users table. `?q=` is a case-insensitive username/email substring and `?ids=1,2,3` restricts it to specific users; `total` honours both. |

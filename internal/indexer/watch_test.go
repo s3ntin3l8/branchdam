@@ -406,11 +406,17 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 		defer mu.Unlock()
 		return len(sizes) > 0 && sizes[len(sizes)-1] == total
 	})
+	// Give a late duplicate report time to arrive before checking that the
+	// file was reported exactly once.
+	time.Sleep(3 * debounce)
 	mu.Lock()
 	defer mu.Unlock()
 	for _, sz := range sizes {
 		if sz != total {
 			t.Fatalf("reported a partially written file (size %d of %d); all reports: %v", sz, total, sizes)
 		}
+	}
+	if len(sizes) != 1 {
+		t.Fatalf("reported %d times, want once after it settles; all reports: %v", len(sizes), sizes)
 	}
 }
