@@ -611,20 +611,6 @@ export interface AgentHelloResponse {
   version: string;
 }
 
-export interface AgentHandshakeRequest {
-  agentId: string;
-  clientVersion?: string;
-  lastProcessedEventUuid?: string;
-}
-
-export interface AgentHandshakeResponse {
-  ok: boolean;
-  serverVersion: string;
-  serverTimeUnix: number;
-  acknowledgedEventUuid?: string;
-  pendingEventsCount: number;
-}
-
 export interface AgentEventRequest {
   agentId: string;
   eventType:
@@ -638,25 +624,6 @@ export interface AgentEventRequest {
 
 export interface AgentEventResponse {
   eventId: string;
-}
-
-export interface AgentRebaseRequest {
-  nodeUuid: string;
-  targetPath: string;
-  mtimeUnix?: number;
-  fileName?: string;
-  fileExt?: string;
-  sizeBytes?: number;
-  fastHash?: string;
-  storageLocationId?: number;
-}
-
-export interface AgentRebaseResponse {
-  id: number;
-  nodeUuid: string;
-  storageLocationId: number;
-  filePath: string;
-  status: "REBASED" | "CREATED";
 }
 
 // Settings: a UI-set value takes precedence over config.yaml/.env, which

@@ -365,10 +365,18 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// The watcher treats a file as settled once its size holds for about
+	// 2 x debounce, so each pause between chunks must exceed the debounce
+	// (or a naive debounce would fire mid-copy) and stay well under twice
+	// it. 1.3 x debounce leaves 0.7 x debounce of slack, which at 300ms
+	// absorbs a scheduler stall on a loaded -race runner (#581).
+	const debounce = 300 * time.Millisecond
+	const pause = debounce * 13 / 10
+
 	var mu sync.Mutex
 	var sizes []int64
 	go func() {
-		_ = Watch(ctx, root, 100*time.Millisecond, testLogger(), func(r Record) error {
+		_ = Watch(ctx, root, debounce, testLogger(), func(r Record) error {
 			mu.Lock()
 			sizes = append(sizes, r.Size)
 			mu.Unlock()
@@ -382,18 +390,18 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Append in chunks with pauses LONGER than the debounce but shorter than
-	// the settle window, so a naive debounce would fire mid-copy.
+	// Append in chunks with pauses longer than the debounce but shorter than
+	// the settle window.
 	var total int64
 	for i := 0; i < 4; i++ {
 		n, _ := f.WriteString(strings.Repeat("x", 1000))
 		total += int64(n)
 		_ = f.Sync()
-		time.Sleep(130 * time.Millisecond)
+		time.Sleep(pause)
 	}
 	_ = f.Close()
 
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(sizes) > 0 && sizes[len(sizes)-1] == total

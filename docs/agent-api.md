@@ -366,7 +366,7 @@ that state; restoring a pre-migration backup is the safe rollback in that case.
 ### 3.1. `EVENT_NODE_CREATED`
 
 `internal/agent/types.go`'s `NodeCreatedPayload` is normative -- 20 fields in total (excluding
-the deprecated, ignored `storageLocationId`); `contract/fixtures/event_node_created.json` shows
+the deprecated, ignored `storageLocationId`); [contract/fixtures/event_node_created.json](contract/fixtures/event_node_created.json) shows
 every one. Every field past `fastHash` is optional (a normal
 scan-side probe failure or a client that can't compute one simply omits it), but omitting all of
 them just means an agent-ingested master carries none of the promoted metadata a scan would
