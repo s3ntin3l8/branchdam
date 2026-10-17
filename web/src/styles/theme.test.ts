@@ -148,6 +148,7 @@ describe("theme.css dual-theme contract", () => {
     "--surface-canvas",
     "--surface-raised",
     "--border-subtle",
+    "--surface-hover",
     "--text-primary",
     "--text-secondary",
     "--text-muted",
@@ -298,6 +299,39 @@ describe("theme.css dual-theme contract", () => {
     const line = themeCss.slice(idx, themeCss.indexOf("\n", idx));
     expect(line).toContain('[data-theme="dark"]');
   });
+/*
+ * Follow a `var(--token)` chain through one theme's tokens down to a hex
+ * colour. Throws on anything that is not a plain var() alias or a hex, so a
+ * token rewritten to color-mix()/rgb() fails loudly instead of being skipped.
+ */
+function resolveHex(value: string, tokens: Map<string, string>): string {
+  let v = value.trim();
+  for (let hops = 0; hops < 10; hops++) {
+    const alias = /^var\((--[a-z0-9-]+)\)$/i.exec(v);
+    if (!alias) break;
+    const next = tokens.get(alias[1].toLowerCase());
+    if (next === undefined) throw new Error(`${alias[1]} is not declared in this theme`);
+    v = next.trim();
+  }
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v);
+  if (!hex) throw new Error(`"${value}" does not resolve to a hex colour (got "${v}")`);
+  const h = hex[1].length === 3 ? [...hex[1]].map((c) => c + c).join("") : hex[1];
+  return `#${h.toLowerCase()}`;
+}
+
+/** WCAG 2.x contrast ratio between two #rrggbb colours. */
+function contrastRatio(a: string, b: string): number {
+  const lum = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
   /*
    * xyflow overrides (#571). xyflow reads `var(--xy-NAME, var(--xy-NAME-default))`
    * and declares the `-default` names on `.react-flow` itself, so a
@@ -306,6 +340,10 @@ describe("theme.css dual-theme contract", () => {
    * theme.css sets must be an un-suffixed name the installed xyflow
    * stylesheet actually consumes -- this also catches typos such as
    * `--xy-controls-button-border` vs `--xy-controls-button-border-color`.
+   *
+   * A dependency bump that renames an xyflow variable will deliberately fail
+   * the "is a name xyflow reads" test below: update theme.css to the new name
+   * rather than loosening the test.
    */
   describe("xyflow overrides", () => {
     const xyflowCss = readFileSync(
@@ -339,6 +377,41 @@ describe("theme.css dual-theme contract", () => {
     it("edge labels use the canvas surface and graph text tokens", () => {
       expect(xyTokens.get("--xy-edge-label-background-color")).toBe("var(--surface-canvas)");
       expect(xyTokens.get("--xy-edge-label-color")).toBe("var(--graph-text)");
+    });
+
+    // Resolving through a theme token (below) says nothing about what it
+    // resolves to; check legibility per theme for each foreground/background
+    // pair xyflow draws together (WCAG AA for normal text).
+    describe("legibility per theme", () => {
+      const pairs: Array<[label: string, fg: string, bg: string]> = [
+        ["edge label", "--xy-edge-label-color", "--xy-edge-label-background-color"],
+        ["controls", "--xy-controls-button-color", "--xy-controls-button-background-color"],
+        ["controls (hover)", "--xy-controls-button-color-hover", "--xy-controls-button-background-color-hover"],
+      ];
+      for (const [theme, tokens] of [["dark", darkTokens], ["light", lightTokens]] as const) {
+        for (const [label, fg, bg] of pairs) {
+          it(`${label} text is at least 4.5:1 on its background in ${theme}`, () => {
+            const fgValue = xyTokens.get(fg);
+            const bgValue = xyTokens.get(bg);
+            expect(fgValue, `${fg} is not set`).toBeDefined();
+            expect(bgValue, `${bg} is not set`).toBeDefined();
+            const ratio = contrastRatio(resolveHex(fgValue!, tokens), resolveHex(bgValue!, tokens));
+            expect(ratio, `${fg} on ${bg} in ${theme}: ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+          });
+        }
+      }
+
+      it("resolveHex follows alias chains and rejects non-hex values", () => {
+        const t = new Map([["--a", "var(--b)"], ["--b", "#FFF"], ["--c", "color-mix(in srgb, red, blue)"]]);
+        expect(resolveHex("var(--a)", t)).toBe("#ffffff");
+        expect(() => resolveHex("var(--c)", t)).toThrow(/hex colour/);
+        expect(() => resolveHex("var(--missing)", t)).toThrow(/not declared/);
+      });
+
+      it("contrastRatio matches the WCAG reference values", () => {
+        expect(contrastRatio("#000000", "#ffffff")).toBeCloseTo(21, 5);
+        expect(contrastRatio("#777777", "#777777")).toBeCloseTo(1, 5);
+      });
     });
 
     for (const [token, value] of xyTokens) {

@@ -139,6 +139,7 @@
   --surface-raised: var(--color-neutral-900);
   --surface-sunken: var(--color-neutral-950);
   --border-subtle: var(--color-neutral-800);
+  --surface-hover: var(--color-neutral-800);
   --text-primary: var(--color-neutral-100);
   --text-secondary: var(--color-neutral-300);
   --text-muted: var(--color-neutral-400);
@@ -274,6 +275,7 @@
   --surface-raised: #ffffff;
   --surface-sunken: var(--color-neutral-900);
   --border-subtle: var(--color-neutral-800);
+  --surface-hover: var(--color-neutral-800);
   --text-primary: var(--color-neutral-100);
   --text-secondary: var(--color-neutral-300);
   --text-muted: var(--color-neutral-500);
@@ -340,7 +342,7 @@
   --xy-edge-label-color: var(--graph-text);
   --xy-attribution-background-color: transparent;
   --xy-controls-button-background-color: var(--surface-raised);
-  --xy-controls-button-background-color-hover: var(--color-neutral-800);
+  --xy-controls-button-background-color-hover: var(--surface-hover);
   --xy-controls-button-color: var(--text-primary);
   --xy-controls-button-color-hover: var(--text-primary);
   --xy-controls-button-border-color: var(--border-subtle);
