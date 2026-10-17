@@ -10,6 +10,9 @@ For the workstation agent ecosystem overview (offline queue, dual-copy ingest, s
 see [`integrations.md` §5](integrations.md#5-workstation-companion-agent). For the mobile
 companion app that shares this wire format, see [`mobile.md`](mobile.md).
 
+Machine-checked example of every request and response body (all fields set, generated from the
+DTOs and pinned by both clients' conformance tests): [`contract/fixtures/`](contract/README.md).
+
 ---
 
 ## Request signing (`agent.signedRequests`)

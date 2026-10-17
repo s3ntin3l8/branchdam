@@ -698,14 +698,20 @@ export default function AuditQueuePage() {
 
   // Filters live in the URL and are applied server-side, so they cover the
   // whole queue (and its total), not just the loaded page.
-  const tierFilter = searchParams.get("tier") || "";
-  const resolverFilter = searchParams.get("resolver") || "";
-  // Validated like the api client's tier/minConfidence: an unknown type in
-  // the URL would 422 and leave the page without a filter bar to clear it.
+  // Every URL filter is checked against the server's bounds (AuditQueueInput:
+  // tier 1-3, resolver <= 128 chars, a known relationshipType, minConfidence
+  // in (0, 1]) and dropped if outside them: an out-of-range value would 422
+  // and leave the page without a filter bar to clear it.
+  const tierParam = searchParams.get("tier") || "";
+  const tierFilter = ["1", "2", "3"].includes(tierParam) ? tierParam : "";
+  const resolverParam = searchParams.get("resolver") || "";
+  const resolverFilter = resolverParam.length <= 128 ? resolverParam : "";
   const relParam = searchParams.get("relationshipType") || "";
   const relFilter: EdgeAuditEntry["relationshipType"] | "" =
     RELATIONSHIP_TYPES.find((r) => r.value === relParam)?.value ?? "";
-  const minConfFilter = searchParams.get("minConfidence") || "";
+  const minConfParam = searchParams.get("minConfidence") || "";
+  const minConfNum = Number(minConfParam);
+  const minConfFilter = minConfParam && minConfNum > 0 && minConfNum <= 1 ? minConfParam : "";
   const hasActiveFilters = Boolean(tierFilter || resolverFilter || relFilter || minConfFilter);
 
   // Keyset paging: `trail` is the stack of cursors (the last id of each
