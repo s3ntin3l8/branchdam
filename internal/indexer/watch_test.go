@@ -402,7 +402,6 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	_ = f.Close()
 
 	const timeout = 10 * time.Second
-	deadline := time.Now().Add(timeout)
 	waitFor(t, timeout, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -411,11 +410,14 @@ func TestWatchWaitsForGrowingFileToSettle(t *testing.T) {
 	// A late duplicate report could still be on its way. Rather than a fixed
 	// grace sleep, wait until the report count has held still for
 	// 3 x debounce (longer than the ~2 x debounce settle window, so a second
-	// settle of the same file would land inside it), bounded by what is left
-	// of the overall timeout. Only then is "exactly once" a stable answer.
+	// settle of the same file would land inside it). Only then is "exactly
+	// once" a stable answer. The quiet wait gets its own deadline, set now
+	// that the first wait has returned, rather than sharing one set before
+	// it: a slow first wait must not starve this one of its budget.
 	quiet := 3 * debounce
+	quietDeadline := time.Now().Add(timeout)
 	lastLen, lastChange := -1, time.Now()
-	waitFor(t, time.Until(deadline), func() bool {
+	waitFor(t, time.Until(quietDeadline), func() bool {
 		mu.Lock()
 		n := len(sizes)
 		mu.Unlock()
