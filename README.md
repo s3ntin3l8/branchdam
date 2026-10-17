@@ -29,6 +29,14 @@ ForwardAuth, on SQLite in WAL mode.
 <td align="center"><sub><b>Assets</b> <a href="docs/screenshots/assets-light.png">(light)</a></sub></td>
 <td align="center"><sub><b>Storage health</b> per tier <a href="docs/screenshots/storage-health-light.png">(light)</a></sub></td>
 </tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/asset-detail.png"><img src="docs/screenshots/asset-detail.png" alt="Asset detail with media preview, indexing status and hashes" /></a></td>
+<td width="50%"><a href="docs/screenshots/jobs.png"><img src="docs/screenshots/jobs.png" alt="Ingest jobs history with scan state and counts" /></a></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Asset detail</b>: preview, metadata and hashes for one version <a href="docs/screenshots/asset-detail-light.png">(light)</a></sub></td>
+<td align="center"><sub><b>Ingest jobs</b>: every scan with its state and counts <a href="docs/screenshots/jobs-light.png">(light)</a></sub></td>
+</tr>
 </table>
 
 All media in these captures is synthetic: `make screenshots` renders it with
