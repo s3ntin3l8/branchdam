@@ -13,6 +13,10 @@ import LineageEdge from "./LineageEdge";
 const HORIZONTAL_HANDLES = { sourcePosition: Position.Right, targetPosition: Position.Left } as const;
 // Wide enough that a label sits between two columns instead of on a node.
 const LEVEL_GAP_X = 460;
+// Approximate centre of a node from its top-left position (node size is
+// content-driven). A waypoint only has to land inside the column it crosses and
+// level with its row, so an estimate is enough.
+const NODE_CENTRE = { x: 80, y: 22 };
 
 // Module-level so React Flow sees a stable reference across renders.
 const edgeTypes = { lineage: LineageEdge };
@@ -111,7 +115,7 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
   }
 
   const ranks = lineageRanks(lineage.nodes.map((n) => n.id), lineage.edges);
-  const rows = lineageRows(ranks, lineage.edges);
+  const { rows, routes } = lineageRows(ranks, lineage.edges);
 
   const nodes: FlowNode[] = [];
   lineage.nodes.forEach((n) => {
@@ -146,13 +150,18 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
 
   // Edges into one node converge on the same handle; fan their labels out.
   const spread = spreadLabels(lineage.edges, (e) => String(e.targetNodeId));
-  const edges: LineageFlowEdge[] = lineage.edges.map((e) => ({
+  const edges: LineageFlowEdge[] = lineage.edges.map((e, i) => ({
     id: `e-${e.id}`,
     type: "lineage",
     source: String(e.sourceNodeId),
     target: String(e.targetNodeId),
     ...edgeVisual(e, 2),
-    data: spread.get(e)!,
+    data: {
+      ...spread.get(e)!,
+      // An edge spanning several columns bends through free slots in the ones
+      // between, rather than running behind the nodes there.
+      waypoints: routes.get(i)?.map((s) => ({ x: s.rank * LEVEL_GAP_X + NODE_CENTRE.x, y: s.y + NODE_CENTRE.y })),
+    },
   }));
 
   return { nodes, edges, isEmpty: false };

@@ -37,7 +37,7 @@ describe("lineageRanks (#595)", () => {
 describe("lineageRows", () => {
   it("centres each column and spaces its nodes by ROW_GAP_Y", () => {
     const ranks = lineageRanks([1, 2, 3], [e(1, 2), e(1, 3)]);
-    const rows = lineageRows(ranks, [e(1, 2), e(1, 3)]);
+    const { rows } = lineageRows(ranks, [e(1, 2), e(1, 3)]);
     expect(rows.get(1)).toBe(0);
     expect(rows.get(3)! - rows.get(2)!).toBe(ROW_GAP_Y);
     expect(rows.get(2)! + rows.get(3)!).toBe(0);
@@ -48,7 +48,30 @@ describe("lineageRows", () => {
     // placed above 11 even though 11 has the smaller id.
     const edges = [e(10, 21), e(20, 11)];
     const ranks = lineageRanks([10, 20, 11, 21], edges);
-    const rows = lineageRows(ranks, edges);
+    const { rows } = lineageRows(ranks, edges);
     expect(rows.get(21)!).toBeLessThan(rows.get(11)!);
+  });
+});
+
+describe("lineageRows routes (#598)", () => {
+  // 1 -> 2 -> 3 -> 4 is a spine; 1 -> 4 skips columns 1 and 2.
+  const edges = [e(1, 2), e(2, 3), e(3, 4), e(1, 4)];
+  const ranks = lineageRanks([1, 2, 3, 4], edges);
+
+  it("gives an edge spanning several columns a slot in each column it crosses", () => {
+    const { routes } = lineageRows(ranks, edges);
+    expect(routes.get(3)!.map((s) => s.rank)).toEqual([1, 2]);
+    expect(routes.has(0)).toBe(false); // adjacent columns: no route
+  });
+
+  it("keeps the slots clear of the real nodes in those columns", () => {
+    const { rows, routes } = lineageRows(ranks, edges);
+    const [first, second] = routes.get(3)!;
+    expect(Math.abs(first.y - rows.get(2)!)).toBeGreaterThanOrEqual(ROW_GAP_Y);
+    expect(Math.abs(second.y - rows.get(3)!)).toBeGreaterThanOrEqual(ROW_GAP_Y);
+  });
+
+  it("is deterministic", () => {
+    expect(lineageRows(ranks, edges)).toEqual(lineageRows(ranks, edges));
   });
 });

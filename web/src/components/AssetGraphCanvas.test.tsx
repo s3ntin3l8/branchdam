@@ -190,6 +190,26 @@ describe("review-state edge styling", () => {
       expect(edges.find((e) => e.target === "2")!.data).toEqual({ labelT: 0.5, labelDy: 0 });
     });
 
+    it("routes an edge that skips columns through flow-coordinate waypoints in the columns it crosses", () => {
+      // 1 -> 2 -> 3 -> 4 and 1 -> 4: the last edge crosses columns 1 and 2.
+      const { edges, nodes } = buildLineageFlow(1, {
+        rootId: 1,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        nodes: [1, 2, 3, 4].map(node) as any,
+        edges: [lineageEdge(10, 1, 2), lineageEdge(11, 2, 3), lineageEdge(12, 3, 4), lineageEdge(13, 1, 4)],
+      });
+      const waypoints = edges.find((e) => e.id === "e-13")!.data!.waypoints!;
+      const nodeX = (id: string) => nodes.find((n) => n.id === id)!.position.x;
+      expect(waypoints).toHaveLength(2);
+      // Each waypoint sits inside the x-span of the column it crosses.
+      expect(waypoints[0].x).toBeGreaterThan(nodeX("2"));
+      expect(waypoints[0].x).toBeLessThan(nodeX("3"));
+      expect(waypoints[1].x).toBeGreaterThan(nodeX("3"));
+      expect(waypoints[1].x).toBeLessThan(nodeX("4"));
+      // Edges between adjacent columns are not routed.
+      expect(edges.find((e) => e.id === "e-10")!.data!.waypoints).toBeUndefined();
+    });
+
     it("is deterministic for the same input and uses the custom edge type", () => {
       const graph = { parents: [lineageEdge(20, 2, 1), lineageEdge(21, 3, 1)], children: [lineageEdge(22, 1, 4)] };
       const a = buildOneHopFlow(1, graph);

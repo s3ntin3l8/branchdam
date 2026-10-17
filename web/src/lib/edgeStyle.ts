@@ -38,10 +38,14 @@ export function edgeVisual(
  * path midpoint, so edges converging on one handle stack their labels on top
  * of each other. `labelT` slides the label along the source->target line and
  * `labelDy` nudges it vertically, both chosen per edge by `labelSpread`.
+ * `waypoints` route an edge that spans several columns around the nodes in
+ * between (see `lineageRows`).
  */
 export interface LineageEdgeData extends Record<string, unknown> {
   labelT: number;
   labelDy: number;
+  /** Points the edge bends through, between its endpoints (flow coordinates). */
+  waypoints?: { x: number; y: number }[];
 }
 
 export type LineageFlowEdge = FlowEdge<LineageEdgeData, "lineage">;
@@ -64,4 +68,57 @@ export function labelSpread(index: number, count: number): LineageEdgeData {
     labelT: SPREAD_T_FROM + (SPREAD_T_TO - SPREAD_T_FROM) * f,
     labelDy: (index - (count - 1) / 2) * SPREAD_DY,
   };
+}
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+/**
+ * Smooth left-to-right path through `points`: each hop is a cubic with
+ * horizontal tangents at both ends, so it leaves and enters every point flat
+ * and the pieces join without a kink.
+ */
+export function routePath(points: Point[]): string {
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const dx = (b.x - a.x) / 2;
+    d += ` C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
+  }
+  return d;
+}
+
+/**
+ * Point on the drawn path a fraction `t` of the way across `points` (by x).
+ * Each hop is the cubic `routePath` draws, whose x and y are not linear in
+ * each other, so solve it for the parameter at the wanted x (x is monotone, so
+ * bisection converges) rather than interpolating the chord: the label then
+ * sits on the line, not beside it.
+ */
+export function pointAlong(points: Point[], t: number): Point {
+  const first = points[0];
+  const last = points[points.length - 1];
+  const x = first.x + (last.x - first.x) * t;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (x > b.x && i < points.length - 1) continue;
+    // Horizontal tangents with controls at the hop's x midpoint:
+    //   x(u) = a.x + (b.x - a.x) * (1.5u - 1.5u^2 + u^3)
+    //   y(u) = a.y + (b.y - a.y) * (3u^2 - 2u^3)
+    const fx = b.x === a.x ? 0 : Math.min(1, Math.max(0, (x - a.x) / (b.x - a.x)));
+    let lo = 0;
+    let hi = 1;
+    for (let k = 0; k < 40; k++) {
+      const u = (lo + hi) / 2;
+      if (1.5 * u - 1.5 * u * u + u * u * u < fx) lo = u;
+      else hi = u;
+    }
+    const u = (lo + hi) / 2;
+    return { x, y: a.y + (b.y - a.y) * (3 * u * u - 2 * u * u * u) };
+  }
+  return first;
 }
