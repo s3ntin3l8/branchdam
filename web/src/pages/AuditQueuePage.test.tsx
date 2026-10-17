@@ -120,8 +120,9 @@ describe("AuditQueuePage", () => {
 
     const evidence = await screen.findByRole("group", { name: /^evidence/i });
     expect(container.textContent).not.toContain("[object Object]");
-    // The panel must not add a landmark per audit row.
-    expect(screen.queryAllByRole("region")).toHaveLength(0);
+    // The panel must not be a landmark (one per audit row); scoped to the
+    // evidence panel because other parts of the page legitimately render regions.
+    expect(screen.queryByRole("region", { name: /evidence/i })).not.toBeInTheDocument();
 
     const stemGroup = within(evidence).getByRole("group", { name: "Filename stem" });
     expect(within(stemGroup).getByText("Same capture day:")).toBeInTheDocument();
