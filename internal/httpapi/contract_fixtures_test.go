@@ -332,14 +332,12 @@ func queryFixture(t *testing.T, v any) map[string]any {
 	rv := reflect.ValueOf(v)
 	for i := 0; i < rv.NumField(); i++ {
 		f := rv.Type().Field(i)
-		tag := f.Tag.Get("query")
-		if tag == "" {
-			// A GET input field with no query tag is never read from the
+		name, ok := queryParamName(f)
+		if !ok {
+			// A GET input field with no query name is never read from the
 			// request; fail rather than let the fixture miss it.
 			t.Fatalf("%T.%s has no query tag", v, f.Name)
 		}
-		// huma reads the name before the first comma (`query:"x,explode"`).
-		name, _, _ := strings.Cut(tag, ",")
 		out[name] = rv.Field(i).Interface()
 	}
 	if len(out) == 0 {
@@ -569,8 +567,8 @@ func decodeQueryFixture(b []byte, dst any) error {
 	fields := map[string]reflect.Value{}
 	for i := 0; i < rv.NumField(); i++ {
 		f := rv.Type().Field(i)
-		name, _, _ := strings.Cut(f.Tag.Get("query"), ",")
-		if name == "" {
+		name, ok := queryParamName(f)
+		if !ok {
 			// Never read from the request; queryFixture refuses it too.
 			return fmt.Errorf("%s has no query tag", f.Name)
 		}
@@ -586,4 +584,14 @@ func decodeQueryFixture(b []byte, dst any) error {
 		}
 	}
 	return nil
+}
+
+// queryParamName is the query parameter huma reads a GET input field from:
+// the tag's name before the first comma (`query:"x,explode"`). ok is false
+// for a field huma never reads (no tag, or a tag like `query:",explode"`).
+// queryFixture and decodeQueryFixture both use it, so the fixture's keys
+// and the decoder's fields can't disagree.
+func queryParamName(f reflect.StructField) (string, bool) {
+	name, _, _ := strings.Cut(f.Tag.Get("query"), ",")
+	return name, name != ""
 }
