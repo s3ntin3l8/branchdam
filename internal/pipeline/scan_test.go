@@ -1321,9 +1321,13 @@ func TestQueueFullBackpressureStillCompletes(t *testing.T) {
 
 	tracker := &ScanTracker{}
 	deps := ScanDeps{
-		DB:             database,
-		Guard:          storage.NewGuard([]storage.Location{{ID: locationID, Name: "test-backpressure", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}}),
-		Prober:         probe.New(),
+		DB:    database,
+		Guard: storage.NewGuard([]storage.Location{{ID: locationID, Name: "test-backpressure", RootPath: resolvedRoot, Tier: "TIER2_EXPORTS", ReadOnly: false}}),
+		// Zero-value Prober: no exiftool/ffprobe subprocess. This test is about
+		// queue backpressure, and one real exiftool spawn per file on a single
+		// worker (~80ms each) made a 40-file scan take ~3s unloaded and blow
+		// the 10s wait under CPU contention.
+		Prober:         &probe.Prober{},
 		Pool:           pool,
 		FullHashPolicy: "never",
 		Tracker:        tracker,
