@@ -118,8 +118,11 @@ describe("AuditQueuePage", () => {
     });
     const { container } = renderWithClient(<AuditQueuePage />);
 
-    const evidence = await screen.findByRole("region", { name: /evidence/i });
+    const evidence = await screen.findByRole("group", { name: /^evidence/i });
     expect(container.textContent).not.toContain("[object Object]");
+    // The panel must not be a landmark (one per audit row); scoped to the
+    // evidence panel because other parts of the page legitimately render regions.
+    expect(screen.queryByRole("region", { name: /evidence/i })).not.toBeInTheDocument();
 
     const stemGroup = within(evidence).getByRole("group", { name: "Filename stem" });
     expect(within(stemGroup).getByText("Same capture day:")).toBeInTheDocument();
@@ -148,7 +151,7 @@ describe("AuditQueuePage", () => {
     });
     renderWithClient(<AuditQueuePage />);
 
-    const evidence = await screen.findByRole("region", { name: /evidence/i });
+    const evidence = await screen.findByRole("group", { name: /^evidence/i });
     const other = within(evidence).getByRole("group", { name: "Other signals" });
     expect(within(other).getByText("manual")).toBeInTheDocument();
     const stem = within(evidence).getByRole("group", { name: "Filename stem" });

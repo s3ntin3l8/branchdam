@@ -78,7 +78,10 @@ function EvidencePanel({ evidenceJson }: { evidenceJson?: string }) {
     return <div className="mt-2 break-all font-mono text-xs text-neutral-400">Evidence: {evidence.raw}</div>;
   }
   return (
-    <section
+    // role="group", not <section>: a labelled <section> is a region landmark,
+    // and every audit row would add one (up to PAGE_SIZE identical landmarks).
+    <div
+      role="group"
       aria-labelledby={headingId}
       className="mt-2 rounded bg-neutral-950 p-2 font-mono text-xs text-neutral-400"
     >
@@ -115,7 +118,7 @@ function EvidencePanel({ evidenceJson }: { evidenceJson?: string }) {
           )}
         </div>
       ))}
-    </section>
+    </div>
   );
 }
 
