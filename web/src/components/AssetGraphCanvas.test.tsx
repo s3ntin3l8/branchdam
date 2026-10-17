@@ -206,6 +206,14 @@ describe("review-state edge styling", () => {
       expect(waypoints[0].x).toBeLessThan(nodeX("3"));
       expect(waypoints[1].x).toBeGreaterThan(nodeX("3"));
       expect(waypoints[1].x).toBeLessThan(nodeX("4"));
+      // Edges from one source share their route (#601): 1 -> 4 and a second long edge 1 -> 3 start alike.
+      const shared = buildLineageFlow(1, {
+        rootId: 1,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        nodes: [1, 2, 3, 4].map(node) as any,
+        edges: [lineageEdge(10, 1, 2), lineageEdge(11, 2, 3), lineageEdge(12, 3, 4), lineageEdge(13, 1, 4), lineageEdge(14, 1, 3)],
+      }).edges;
+      expect(shared.find((x) => x.id === "e-13")!.data!.waypoints![0]).toEqual(shared.find((x) => x.id === "e-14")!.data!.waypoints![0]);
       // Edges between adjacent columns are not routed.
       expect(edges.find((e) => e.id === "e-10")!.data!.waypoints).toBeUndefined();
     });

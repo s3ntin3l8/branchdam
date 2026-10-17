@@ -1,5 +1,5 @@
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyflow/react";
-import { pointAlong, routePath, type LineageFlowEdge } from "../lib/edgeStyle";
+import { labelAnchor, routePath, type LineageFlowEdge } from "../lib/edgeStyle";
 
 export default function LineageEdge({
   id,
@@ -22,7 +22,7 @@ export default function LineageEdge({
     waypoints.length > 0
       ? routePath(points)
       : getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[0];
-  const at = pointAlong(points, data?.labelT ?? 0.5);
+  const at = labelAnchor(points[0], waypoints, points[points.length - 1], data?.labelT ?? 0.5);
   const labelX = at.x;
   const labelY = at.y + (data?.labelDy ?? 0);
 

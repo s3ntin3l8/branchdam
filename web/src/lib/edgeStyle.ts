@@ -39,7 +39,8 @@ export function edgeVisual(
  * of each other. `labelT` slides the label along the source->target line and
  * `labelDy` nudges it vertically, both chosen per edge by `labelSpread`.
  * `waypoints` route an edge that spans several columns around the nodes in
- * between (see `lineageRows`).
+ * between (see `lineageRows`); edges from one source share them, so the label
+ * goes on the edge's own last hop (see `labelAnchor`).
  */
 export interface LineageEdgeData extends Record<string, unknown> {
   labelT: number;
@@ -121,4 +122,15 @@ export function pointAlong(points: Point[], t: number): Point {
     return { x, y: a.y + (b.y - a.y) * (3 * u * u - 2 * u * u * u) };
   }
   return first;
+}
+
+/**
+ * Where an edge's label goes. A plain edge labels its whole source->target
+ * span. A routed edge's earlier hops are shared with every other edge from the
+ * same source, so its label goes on the last hop (last waypoint -> target),
+ * the only stretch that is its own.
+ */
+export function labelAnchor(source: Point, waypoints: Point[], target: Point, t: number): Point {
+  const from = waypoints.length > 0 ? waypoints[waypoints.length - 1] : source;
+  return pointAlong([from, target], t);
 }
