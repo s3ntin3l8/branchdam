@@ -53,8 +53,8 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		cameraModel         = r.URL.Query().Get("overrideCameraModel")
 		capturedAtUnix      int64
 		applyNamingTemplate = true
-		expectedBlake3      = r.Header.Get("X-Blake3-Hash")
-		sourcePathHash      = r.Header.Get("X-Source-Path-Hash")
+		expectedBlake3      = r.Header.Get(agentUploadHeaders.Blake3Hash)
+		sourcePathHash      = r.Header.Get(agentUploadHeaders.SourcePathHash)
 		result              *UploadResult
 		fileProcessed       bool
 	)
