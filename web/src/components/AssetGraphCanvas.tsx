@@ -13,10 +13,16 @@ import LineageEdge from "./LineageEdge";
 const HORIZONTAL_HANDLES = { sourcePosition: Position.Right, targetPosition: Position.Left } as const;
 // Wide enough that a label sits between two columns instead of on a node.
 const LEVEL_GAP_X = 460;
-// Approximate centre of a node from its top-left position (node size is
-// content-driven). A waypoint only has to land inside the column it crosses and
-// level with its row, so an estimate is enough.
-const NODE_CENTRE = { x: 80, y: 22 };
+// Lineage nodes have a fixed width, so a routed edge's waypoints and the
+// clearance between a column's nodes and its route slots are computed for the
+// real boxes (a content-sized node would make that a guess). Long names wrap.
+const NODE_WIDTH = 160;
+// Centre of a node from its top-left position. The height is content-driven
+// (names wrap), so y is an estimate; a waypoint only has to land level with its
+// row, and slots sit a full row from any node.
+const NODE_CENTRE = { x: NODE_WIDTH / 2, y: 22 };
+// Vertical offset between routed edges that join the same pair of nodes.
+const PARALLEL_NUDGE_Y = 8;
 
 // Module-level so React Flow sees a stable reference across renders.
 const edgeTypes = { lineage: LineageEdge };
@@ -138,6 +144,8 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
         ),
       },
       style: {
+        width: NODE_WIDTH,
+        overflowWrap: "anywhere",
         background: isRoot ? "var(--graph-node-bg-root)" : colors.bg,
         color: "var(--graph-text)",
         border: isRoot ? "3px solid var(--color-brand)" : `2px solid ${colors.border}`,
@@ -150,19 +158,30 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
 
   // Edges into one node converge on the same handle; fan their labels out.
   const spread = spreadLabels(lineage.edges, (e) => String(e.targetNodeId));
-  const edges: LineageFlowEdge[] = lineage.edges.map((e, i) => ({
-    id: `e-${e.id}`,
-    type: "lineage",
-    source: String(e.sourceNodeId),
-    target: String(e.targetNodeId),
-    ...edgeVisual(e, 2),
-    data: {
-      ...spread.get(e)!,
-      // An edge spanning several columns bends through free slots in the ones
-      // between, rather than running behind the nodes there.
-      waypoints: routes.get(i)?.map((s) => ({ x: s.rank * LEVEL_GAP_X + NODE_CENTRE.x, y: s.y + NODE_CENTRE.y })),
-    },
-  }));
+  // Edges on one source/target pair (different relationship types) share a
+  // route; nudge each routed copy apart so none is drawn exactly over another.
+  const pairSize = new Map<string, number>();
+  const pairSeen = new Map<string, number>();
+  const pairKey = (e: { sourceNodeId: number; targetNodeId: number }) => `${e.sourceNodeId}>${e.targetNodeId}`;
+  lineage.edges.forEach((e) => pairSize.set(pairKey(e), (pairSize.get(pairKey(e)) ?? 0) + 1));
+  const edges: LineageFlowEdge[] = lineage.edges.map((e, i) => {
+    const seen = pairSeen.get(pairKey(e)) ?? 0;
+    pairSeen.set(pairKey(e), seen + 1);
+    const nudge = (seen - (pairSize.get(pairKey(e))! - 1) / 2) * PARALLEL_NUDGE_Y;
+    return {
+      id: `e-${e.id}`,
+      type: "lineage",
+      source: String(e.sourceNodeId),
+      target: String(e.targetNodeId),
+      ...edgeVisual(e, 2),
+      data: {
+        ...spread.get(e)!,
+        // An edge spanning several columns bends through free slots in the ones
+        // between, rather than running behind the nodes there.
+        waypoints: routes.get(i)?.map((s) => ({ x: s.rank * LEVEL_GAP_X + NODE_CENTRE.x, y: s.y + NODE_CENTRE.y + nudge })),
+      },
+    };
+  });
 
   return { nodes, edges, isEmpty: false };
 }

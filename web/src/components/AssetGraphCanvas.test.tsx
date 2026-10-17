@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import AssetGraphCanvas, { buildLineageFlow, buildOneHopFlow } from "./AssetGraphCanvas";
+import { pointAlong } from "../lib/edgeStyle";
 import { labelSpread } from "../lib/edgeStyle";
 import type { Edge } from "../api/types";
 
@@ -216,6 +217,60 @@ describe("review-state edge styling", () => {
       expect(shared.find((x) => x.id === "e-13")!.data!.waypoints![0]).toEqual(shared.find((x) => x.id === "e-14")!.data!.waypoints![0]);
       // Edges between adjacent columns are not routed.
       expect(edges.find((e) => e.id === "e-10")!.data!.waypoints).toBeUndefined();
+    });
+
+    it("nudges routed edges on one source/target pair apart so none hides another", () => {
+      const { edges } = buildLineageFlow(1, {
+        rootId: 1,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        nodes: [1, 2, 3, 4].map(node) as any,
+        edges: [lineageEdge(10, 1, 2), lineageEdge(11, 2, 3), lineageEdge(12, 3, 4), lineageEdge(13, 1, 4), { ...lineageEdge(14, 1, 4), relationshipType: "DERIVED_FROM" }],
+      });
+      const a = edges.find((e) => e.id === "e-13")!.data!.waypoints!;
+      const b = edges.find((e) => e.id === "e-14")!.data!.waypoints!;
+      expect(a.map((p) => p.x)).toEqual(b.map((p) => p.x));
+      a.forEach((p, i) => expect(Math.abs(p.y - b[i].y)).toBeGreaterThan(4));
+    });
+
+    it("never draws a routed edge through a node that is not one of its endpoints, over random DAGs", () => {
+      // The #598 guarantee, checked on the drawn curve (not just slot heights):
+      // sample the path through source handle, waypoints and target handle and
+      // keep it out of every other node's box. Boxes use the nodes' own width
+      // and a height allowing three wrapped lines.
+      let seed = 4242;
+      const rand = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+      const boxHeight = 70;
+      const violations: string[] = [];
+      for (let g = 0; g < 150; g++) {
+        const n = 4 + Math.floor(rand() * 9);
+        const raw: Edge[] = [];
+        let id = 1;
+        for (let a = 1; a <= n; a++) for (let b = a + 1; b <= n; b++) if (rand() < 0.3) raw.push(lineageEdge(id++, a, b));
+        if (raw.length === 0) continue;
+        const { nodes, edges } = buildLineageFlow(1, {
+          rootId: 1,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          nodes: Array.from({ length: n }, (_, i) => node(i + 1)) as any,
+          edges: raw,
+        });
+        const width = Number(nodes[0].style!.width);
+        const pos = new Map(nodes.map((nd) => [nd.id, nd.position]));
+        for (const e of edges) {
+          const s = pos.get(e.source)!;
+          const t = pos.get(e.target)!;
+          const pts = [{ x: s.x + width, y: s.y + 22 }, ...(e.data?.waypoints ?? []), { x: t.x, y: t.y + 22 }];
+          for (let k = 0; k <= 100; k++) {
+            const p = pointAlong(pts, k / 100);
+            for (const nd of nodes) {
+              if (nd.id === e.source || nd.id === e.target) continue;
+              if (p.x > nd.position.x && p.x < nd.position.x + width && p.y > nd.position.y && p.y < nd.position.y + boxHeight) {
+                violations.push(`graph ${g}: edge ${e.id} enters node ${nd.id}`);
+              }
+            }
+          }
+        }
+      }
+      expect(violations).toEqual([]);
     });
 
     it("is deterministic for the same input and uses the custom edge type", () => {

@@ -64,10 +64,19 @@ describe("labelAnchor (#601)", () => {
     expect(labelAnchor(source, [], target, 0.5)).toEqual(pointAlong([source, target], 0.5));
   });
 
+  it("anchors a routed edge's label early on its last hop, from the spread t", () => {
+    const wp = [{ x: 460, y: 22 }];
+    const target = { x: 920, y: 22 };
+    const first = labelAnchor(source, wp, target, 0.3);
+    const last = labelAnchor(source, wp, target, 0.6);
+    expect(first.x).toBeCloseTo(460 + 0.15 * 460);
+    expect(last.x).toBeCloseTo(460 + 0.35 * 460);
+  });
+
   it("keeps edges that share a route apart by labelling each one's own last hop", () => {
     const shared = [{ x: 460, y: 22 }];
     const a = labelAnchor(source, shared, { x: 920, y: -88 }, 0.5);
     const b = labelAnchor(source, shared, { x: 920, y: 132 }, 0.5);
-    expect(Math.abs(a.y - b.y)).toBeGreaterThan(50);
+    expect(Math.abs(a.y - b.y)).toBeGreaterThan(25); // more than a label is tall
   });
 });

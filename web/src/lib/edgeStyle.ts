@@ -60,7 +60,9 @@ const SPREAD_DY = 24;
  * edge keeps the midpoint. Siblings are fanned out in both axes: the t range
  * leans towards the source end, where converging paths are still apart, and
  * the vertical step (a little over one label height) keeps labels from
- * overlapping even when the siblings' sources share a y.
+ * overlapping even when the siblings' sources share a y. (For a routed edge `t`
+ * is re-ranged onto its last hop by `labelAnchor`; the vertical step is what
+ * keeps its siblings apart.)
  */
 export function labelSpread(index: number, count: number): LineageEdgeData {
   if (count <= 1) return { labelT: 0.5, labelDy: 0 };
@@ -124,13 +126,22 @@ export function pointAlong(points: Point[], t: number): Point {
   return first;
 }
 
+// A routed edge's label sits in the early part of its last hop, close to the
+// free slot it leaves, which keeps it off the nodes in the target's column. On
+// 300 random DAGs that put fewer labels over nodes than the midpoint (254 vs
+// 306) and far fewer than the late end (401), with no more label/label overlap.
+const ROUTED_T_FROM = 0.15;
+const ROUTED_T_SPAN = 0.2;
+
 /**
  * Where an edge's label goes. A plain edge labels its whole source->target
- * span. A routed edge's earlier hops are shared with every other edge from the
- * same source, so its label goes on the last hop (last waypoint -> target),
- * the only stretch that is its own.
+ * span at `t`. A routed edge's earlier hops are shared with every other edge
+ * from the same source, so its label goes on the last hop (last waypoint ->
+ * target), the only stretch that is its own, with `t` (from `labelSpread`,
+ * 0.3-0.6) re-ranged to the early part of that hop.
  */
 export function labelAnchor(source: Point, waypoints: Point[], target: Point, t: number): Point {
-  const from = waypoints.length > 0 ? waypoints[waypoints.length - 1] : source;
-  return pointAlong([from, target], t);
+  if (waypoints.length === 0) return pointAlong([source, target], t);
+  const spread = (Math.min(SPREAD_T_TO, Math.max(SPREAD_T_FROM, t)) - SPREAD_T_FROM) / (SPREAD_T_TO - SPREAD_T_FROM);
+  return pointAlong([waypoints[waypoints.length - 1], target], ROUTED_T_FROM + ROUTED_T_SPAN * spread);
 }

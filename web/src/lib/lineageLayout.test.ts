@@ -110,22 +110,4 @@ describe("shared route slots (#601)", () => {
     // Node-only, every column has one row; unshared slots made it 10 in the worst column.
     expect(Math.max(...[...perRank.values()].map((ys) => ys.size))).toBeLessThanOrEqual(2);
   });
-
-  it("never puts a route slot on a real node, over random DAGs", () => {
-    let seed = 12345;
-    const rand = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
-    for (let g = 0; g < 200; g++) {
-      const n = 4 + Math.floor(rand() * 10);
-      const ids = Array.from({ length: n }, (_, i) => i + 1);
-      const edges = [];
-      for (let a = 1; a <= n; a++) for (let b = a + 1; b <= n; b++) if (rand() < 0.3) edges.push(e(a, b));
-      const ranks = lineageRanks(ids, edges);
-      const { rows, routes } = lineageRows(ranks, edges);
-      routes.forEach((slots) =>
-        slots.forEach((s) => {
-          ids.filter((id) => ranks.get(id) === s.rank).forEach((id) => expect(rows.get(id)).not.toBe(s.y));
-        }),
-      );
-    }
-  });
 });
