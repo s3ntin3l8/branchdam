@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/naming"
@@ -119,7 +120,9 @@ func contractFixtures(t *testing.T) map[string]any {
 		Confidence:       0.95,
 		Tier:             2,
 		Resolver:         "filename_stem",
-		EvidenceJSON:     json.RawMessage(`{"stem":"A001_C002"}`),
+		// The shape internal/graph's filename_stem resolver writes: the
+		// lowercased stem plus its corroboration keys.
+		EvidenceJSON: json.RawMessage(`{"filename_stem":"a001_c002","same_capture_day":true,"same_camera_model":"FX3"}`),
 		// SourceNodeID, TargetNodeID and ReviewState stay unset: see
 		// contractZeroOK.
 	}
@@ -301,7 +304,14 @@ func contractFixtures(t *testing.T) map[string]any {
 		Status:       "UPLOADED",
 		BytesWritten: 1048576,
 		Blake3Hash:   fxFullHash,
-		RelativePath: "2025/2025-10-16/A001_C002.MOV",
+		// What the upload route renders from this fixture's own headers
+		// with the default template (upload_engine.go), so it can't drift
+		// from the renderer.
+		RelativePath: naming.RenderPath(naming.DefaultPathTemplate, naming.TemplateVars{
+			CapturedAt:   time.Unix(1759990000, 0).UTC(),
+			CameraModel:  uploadExamples["CameraModel"],
+			OriginalName: uploadExamples["Filename"],
+		}),
 	}
 	return fx
 }
@@ -345,12 +355,18 @@ var contractZeroOK = map[string]string{
 	"event_edge_attached.ReviewState": "deprecated: agents leave it out",
 }
 
+// contractZeroOKUsed records which contractZeroOK keys requireAllFieldsSet
+// actually consulted, so a key that stops matching a field path fails the
+// test instead of silently exempting nothing.
+var contractZeroOKUsed = map[string]bool{}
+
 // requireAllFieldsSet fails for any exported field (recursively) still at
 // its zero value, so a fixture can't silently miss a new DTO field.
 // Booleans must be true for the same reason.
 func requireAllFieldsSet(t *testing.T, path string, v reflect.Value) {
 	t.Helper()
 	if _, ok := contractZeroOK[path]; ok {
+		contractZeroOKUsed[path] = true
 		return
 	}
 	switch v.Kind() {
@@ -412,6 +428,11 @@ func TestContractFixtures(t *testing.T) {
 
 	for _, name := range names {
 		requireAllFieldsSet(t, name, reflect.ValueOf(fx[name]))
+	}
+	for key := range contractZeroOK {
+		if !contractZeroOKUsed[key] {
+			t.Errorf("contractZeroOK[%q] matches no fixture field: fix or remove it", key)
+		}
 	}
 
 	if *updateContract {
@@ -483,6 +504,21 @@ func TestContractFixturesDecodeIntoServerDTOs(t *testing.T) {
 		"event_node_deleted":         &agent.NodeDeletedPayload{},
 		"event_path_rebased":         &agent.PathRebasedPayload{},
 		"event_virtual_node_created": &agent.VirtualNodeCreated{},
+	}
+	// Every request fixture and every event payload must be decoded here;
+	// a new one that isn't listed fails instead of silently skipping the
+	// strict check.
+	entries, err := os.ReadDir(contractFixtureDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if strings.HasSuffix(name, "_request") || strings.HasPrefix(name, "event_") {
+			if _, ok := targets[name]; !ok {
+				t.Errorf("%s is a request fixture with no DTO in this test's targets", name)
+			}
+		}
 	}
 	for name, dst := range targets {
 		b, err := os.ReadFile(filepath.Join(contractFixtureDir, name+".json"))

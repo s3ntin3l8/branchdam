@@ -6,6 +6,8 @@
   "tier": 2,
   "resolver": "filename_stem",
   "evidenceJson": {
-    "stem": "A001_C002"
+    "filename_stem": "a001_c002",
+    "same_capture_day": true,
+    "same_camera_model": "FX3"
   }
 }
