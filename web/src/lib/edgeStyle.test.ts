@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { edgeVisual, pointAlong, routePath } from "./edgeStyle";
+import { edgeVisual, labelAnchor, pointAlong, routePath } from "./edgeStyle";
 
 describe("edgeVisual", () => {
   const base = { relationshipType: "PROXY_OF" as const, confidence: 0.5 };
@@ -53,5 +53,30 @@ describe("routePath / pointAlong (#598)", () => {
     const mid = pointAlong([{ x: 0, y: 0 }, { x: 200, y: 100 }], 0.5);
     expect(mid.x).toBe(100);
     expect(mid.y).toBeCloseTo(50);
+  });
+});
+
+describe("labelAnchor (#601)", () => {
+  const source = { x: 0, y: 0 };
+
+  it("labels a plain edge across its whole span", () => {
+    const target = { x: 200, y: 100 };
+    expect(labelAnchor(source, [], target, 0.5)).toEqual(pointAlong([source, target], 0.5));
+  });
+
+  it("anchors a routed edge's label early on its last hop, from the spread t", () => {
+    const wp = [{ x: 460, y: 22 }];
+    const target = { x: 920, y: 22 };
+    const first = labelAnchor(source, wp, target, 0.3);
+    const last = labelAnchor(source, wp, target, 0.6);
+    expect(first.x).toBeCloseTo(460 + 0.15 * 460);
+    expect(last.x).toBeCloseTo(460 + 0.35 * 460);
+  });
+
+  it("keeps edges that share a route apart by labelling each one's own last hop", () => {
+    const shared = [{ x: 460, y: 22 }];
+    const a = labelAnchor(source, shared, { x: 920, y: -88 }, 0.5);
+    const b = labelAnchor(source, shared, { x: 920, y: 132 }, 0.5);
+    expect(Math.abs(a.y - b.y)).toBeGreaterThan(25); // more than a label is tall
   });
 });

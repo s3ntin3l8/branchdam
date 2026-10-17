@@ -56,7 +56,9 @@ export interface RouteSlot {
  * Vertical position of every node, plus a route for each edge that spans more
  * than one column. Such an edge gets a dummy slot in every column it crosses;
  * the slot is laid out like a node, so real nodes make room for it and the
- * edge bends through the gap instead of running behind a node (#598).
+ * edge bends through the gap instead of running behind a node (#598). Edges
+ * from the same source share their slots (#601), so a master linked to many
+ * versions costs one row per crossed column, not one per link.
  *
  * Within a column, items are ordered by the mean height of their parents (then
  * id, for a stable order across refetches) so edges between neighbouring
@@ -85,8 +87,11 @@ export function lineageRows(
     let prev = nodeKey(e.sourceNodeId);
     const keys: string[] = [];
     for (let rank = from + 1; rank < to; rank++) {
-      const key = `d${i}:${rank}`;
-      items.set(key, { key, rank, sortId: e.sourceNodeId, parents: [prev] });
+      // One slot per source per column: edges leaving one node already share a
+      // handle, so they share the route through the middle columns too and fan
+      // out at the end, instead of each reserving a row of its own (#601).
+      const key = `d${e.sourceNodeId}:${rank}`;
+      if (!items.has(key)) items.set(key, { key, rank, sortId: e.sourceNodeId, parents: [prev] });
       keys.push(key);
       prev = key;
     }
