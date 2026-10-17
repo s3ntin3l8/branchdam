@@ -134,7 +134,7 @@ describe("formatEvidence", () => {
       "Camera serial": "SN123",
       "Capture delta (exact)": "1.2s",
       "Lens model": "FE 24-70mm F2.8 GM II",
-      "pHash distance": "4 bits",
+      "pHash distance (at match)": "4 bits",
       "pHash missing": "no",
     });
   });

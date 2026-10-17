@@ -57,7 +57,7 @@ export const SIGNAL_LABELS: Readonly<Record<string, string>> = {
   // separate whole-second value derived from captured_at_unix.
   capture_delta_seconds: "Capture delta (exact)",
   lens_model: "Lens model",
-  hamming_distance: "pHash distance",
+  hamming_distance: "pHash distance (at match)",
   phash_missing: "pHash missing",
   // project_sidecar
   project_file_path: "Project file",
