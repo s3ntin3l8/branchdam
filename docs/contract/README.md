@@ -26,8 +26,18 @@ not here, so `upload_request_headers` is not the complete header contract.
 
 Every fixture sets every field, so it shows the full wire shape; the test
 fails when a DTO gains a field the fixture leaves at its zero value, and
-every request fixture must decode strictly (no unknown field) into the DTO
-the route reads. Example values are placeholders, not real data.
+every request, event and query fixture must decode strictly (no unknown
+field) into the DTO or input struct the route reads. Example values are
+placeholders, not real data.
+
+Fields the server accepts but ignores stay pinned with example values,
+because the clients still send them: `handshake_request.currentKeyId`,
+`rebase_request.storageLocationId`, `event_node_created.storageLocationId`,
+`event_node_moved.newStorageLocationId` and
+`event_path_rebased.targetStorageLocationId` (the server re-derives the
+location from the path; see `internal/agent/types.go`). Only a field whose
+non-zero value is refused, or never sent, is left at its zero value
+(`contractZeroOK` in the test), such as `event_edge_attached.reviewState`.
 
 ## Changing the contract
 
@@ -35,8 +45,7 @@ the route reads. Example values are placeholders, not real data.
    regenerated `fixtures/`.
 2. branchdam-agent and branchdam-mobile each pin a copy of `fixtures/` and
    run a conformance test that decodes every pinned fixture into their own
-   DTO and re-encodes it. That pinning (and each client's
-   `make contract-sync` target, which refreshes the copy) lands in the
-   clients' own follow-up PRs after this one; from then on, refresh the
-   copy in a follow-up PR and their test shows exactly which fields
-   drifted.
+   DTO and re-encodes it. Refresh a client's copy with its
+   `make contract-sync BRANCHDAM=<this checkout>` target in a follow-up
+   PR; its test then shows exactly which fields drifted, and its
+   `SOURCE` file names the server commit the copy came from.

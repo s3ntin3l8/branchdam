@@ -8,7 +8,7 @@ The [branchDAM Mobile Companion App](https://github.com/s3ntin3l8/branchdam-mobi
 
 ```mermaid
 graph TD
-    subgraph MobileDevice["Mobile Companion App (Flutter / Dart)"]
+    subgraph MobileDevice["Mobile Companion App (Kotlin + Swift shells, shared Go core)"]
         CameraRoll["Camera Roll / DCIM"]
         QueueDB["Local Queue DB (SQLite)"]
         Daemon["Background Ingest Daemon"]
@@ -55,7 +55,8 @@ graph TD
      - `X-Camera-Model`: device model (e.g. `Pixel 9 Pro`).
      - `X-Capture-Timestamp`: EXIF capture Unix timestamp.
      - `X-Blake3-Hash`: optional pre-computed BLAKE3 hash for end-to-end integrity.
-   - The server streams bytes directly to disk in `TIER3_MASTER_ARCHIVE`, calculates its BLAKE3 hash during the stream write, resolves the folder structure according to the active naming template, records the `media_nodes` row, and returns `201 UPLOADED` with the verified `blake3Hash`.
+     - `X-Source-Path-Hash`: optional SHA-256 of the device-side path, for `GET /api/v1/agent/source-status`.
+   - The server streams bytes directly to disk in `TIER3_MASTER_ARCHIVE`, calculates its BLAKE3 hash during the stream write, resolves the folder structure according to the active naming template, records the `media_nodes` row, and returns `201` with status `UPLOADED` and the verified `blake3Hash` (or `200` with status `DEDUPLICATED` when a live node already holds the same content).
 
 4. **Instant Zero-Storage Immich Display**:
    - Non-RAW displayable images and videos (`.jpg`, `.heic`, `.png`, `.webp`, `.mp4`, `.mov`) are automatically hardlinked into `TIER2_EXPORTS/immich/` under the matching folder structure.
@@ -63,8 +64,8 @@ graph TD
    - For the Immich integration's prerequisites and operational caveats (external-library-only, matching `exportPath`, etc.), see [`integrations.md` §4](integrations.md#4-immich-external-library-push).
 
 5. **Safe Space Reclaim**:
-   - Once the server responds with `201 UPLOADED` and matching BLAKE3 hash confirmation, the local file is marked `BACKED_UP`.
-   - The Safe Space engine can automatically delete local media from device storage after verified archival backup.
+   - Once the server responds with `UPLOADED` (or `DEDUPLICATED`) and a matching BLAKE3 hash, the local file is marked `BACKED_UP`.
+   - A successful upload alone never frees space. The Safe Space reclaim asks `POST /api/v1/agent/node-status` first and deletes a local file only when the server reports its node found, live (`ACTIVE`/`HIDDEN`), on `TIER3_MASTER_ARCHIVE` and `verified: true` -- a server-computed `full_hash`, never one the device merely asserted (#505).
 
 ---
 

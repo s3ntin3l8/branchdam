@@ -175,7 +175,7 @@ session-cookie signing — that path is closed off entirely.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `autoInherit` | bool | `true` | Automated EXIF/XMP identity-metadata inheritance from the winning parent edge to the child on edge confirmation or auto-acceptance. Live-editable via the settings API. |
+| `autoInherit` | bool | `true` | Automated EXIF/XMP identity-metadata inheritance from the winning parent edge to the child on edge confirmation or auto-acceptance. **On by default, and it rewrites the child file in place** (`exiftool -overwrite_original`, allow-listed identity tags only, through `storage.Guard`, so never on a read-only tier). Turn it off to keep every file byte-for-byte as ingested. Live-editable via the settings API. |
 
 ## `admin`
 

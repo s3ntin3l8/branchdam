@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -117,9 +118,11 @@ func contractFixtures(t *testing.T) map[string]any {
 		SourceNodeUUID:   fxNodeUUID,
 		TargetNodeUUID:   fxNodeUUID2,
 		RelationshipType: "PROXY_OF",
-		Confidence:       0.95,
-		Tier:             2,
-		Resolver:         "filename_stem",
+		// 0.60 base + same_capture_day + same_camera_model: what
+		// internal/graph's filename_stem resolver scores this evidence.
+		Confidence: 0.85,
+		Tier:       2,
+		Resolver:   "filename_stem",
 		// The shape internal/graph's filename_stem resolver writes: the
 		// lowercased stem plus its corroboration keys.
 		EvidenceJSON: json.RawMessage(`{"filename_stem":"a001_c002","same_capture_day":true,"same_camera_model":"FX3"}`),
@@ -299,6 +302,10 @@ func contractFixtures(t *testing.T) map[string]any {
 		headers[hv.Field(i).String()] = ex
 	}
 	fx["upload_request_headers"] = headers
+	captured, err := strconv.ParseInt(uploadExamples["CaptureTimestamp"], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fx["upload_response"] = AgentUploadResponse{
 		NodeUUID:     fxNodeUUID,
 		Status:       "UPLOADED",
@@ -308,7 +315,7 @@ func contractFixtures(t *testing.T) map[string]any {
 		// with the default template (upload_engine.go), so it can't drift
 		// from the renderer.
 		RelativePath: naming.RenderPath(naming.DefaultPathTemplate, naming.TemplateVars{
-			CapturedAt:   time.Unix(1759990000, 0).UTC(),
+			CapturedAt:   time.Unix(captured, 0).UTC(),
 			CameraModel:  uploadExamples["CameraModel"],
 			OriginalName: uploadExamples["Filename"],
 		}),
@@ -505,7 +512,11 @@ func TestContractFixturesDecodeIntoServerDTOs(t *testing.T) {
 		"event_path_rebased":         &agent.PathRebasedPayload{},
 		"event_virtual_node_created": &agent.VirtualNodeCreated{},
 	}
-	// Every request fixture and every event payload must be decoded here;
+	queryTargets := map[string]any{
+		"check_content_query": &AgentCheckContentInput{},
+		"source_status_query": &AgentSourceStatusInput{},
+	}
+	// Every request, query and event fixture must be decoded here;
 	// a new one that isn't listed fails instead of silently skipping the
 	// strict check.
 	entries, err := os.ReadDir(contractFixtureDir)
@@ -519,6 +530,20 @@ func TestContractFixturesDecodeIntoServerDTOs(t *testing.T) {
 				t.Errorf("%s is a request fixture with no DTO in this test's targets", name)
 			}
 		}
+		if strings.HasSuffix(name, "_query") {
+			if _, ok := queryTargets[name]; !ok {
+				t.Errorf("%s is a query fixture with no input struct in this test's queryTargets", name)
+			}
+		}
+	}
+	for name, dst := range queryTargets {
+		b, err := os.ReadFile(filepath.Join(contractFixtureDir, name+".json"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := decodeQueryFixture(b, dst); err != nil {
+			t.Errorf("%s does not decode into %T: %v", name, dst, err)
+		}
 	}
 	for name, dst := range targets {
 		b, err := os.ReadFile(filepath.Join(contractFixtureDir, name+".json"))
@@ -531,4 +556,31 @@ func TestContractFixturesDecodeIntoServerDTOs(t *testing.T) {
 			t.Errorf("%s does not decode into %T: %v", name, dst, err)
 		}
 	}
+}
+
+// decodeQueryFixture decodes a query fixture into a GET input struct by its
+// `query` tags, the names huma reads, failing on any key no field takes.
+func decodeQueryFixture(b []byte, dst any) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	rv := reflect.ValueOf(dst).Elem()
+	fields := map[string]reflect.Value{}
+	for i := 0; i < rv.NumField(); i++ {
+		name, _, _ := strings.Cut(rv.Type().Field(i).Tag.Get("query"), ",")
+		if name != "" {
+			fields[name] = rv.Field(i)
+		}
+	}
+	for key, val := range raw {
+		f, ok := fields[key]
+		if !ok {
+			return fmt.Errorf("unknown query parameter %q", key)
+		}
+		if err := json.Unmarshal(val, f.Addr().Interface()); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+	}
+	return nil
 }
