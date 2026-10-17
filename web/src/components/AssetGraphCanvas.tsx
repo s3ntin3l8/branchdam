@@ -4,9 +4,10 @@ import { Background, Controls, Position, ReactFlow, ReactFlowProvider, type Node
 import "@xyflow/react/dist/style.css";
 import type { AssetGraph, LineageResponse } from "../api/types";
 import { edgeVisual, labelSpread, type LineageFlowEdge } from "../lib/edgeStyle";
+import { lineageRanks, lineageRows } from "../lib/lineageLayout";
 import LineageEdge from "./LineageEdge";
 
-// Levels run left to right, so edges leave a node's right side and enter the
+// Columns run left to right, so edges leave a node's right side and enter the
 // next one's left; the default top/bottom handles made every edge loop around
 // its nodes and park its label on top of them.
 const HORIZONTAL_HANDLES = { sourcePosition: Position.Right, targetPosition: Position.Left } as const;
@@ -109,73 +110,14 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
     return { nodes: [], edges: [], isEmpty: true };
   }
 
-  // Calculate BFS levels relative to root
-  const levels = new Map<number, number>();
-  levels.set(rootId, 0);
-
-  const adjParents = new Map<number, number[]>();
-  const adjChildren = new Map<number, number[]>();
-
-  lineage.edges.forEach((e) => {
-    if (!adjChildren.has(e.sourceNodeId)) adjChildren.set(e.sourceNodeId, []);
-    adjChildren.get(e.sourceNodeId)!.push(e.targetNodeId);
-
-    if (!adjParents.has(e.targetNodeId)) adjParents.set(e.targetNodeId, []);
-    adjParents.get(e.targetNodeId)!.push(e.sourceNodeId);
-  });
-
-  // BFS Upstream (Parents)
-  const qUp: { id: number; level: number }[] = [{ id: rootId, level: 0 }];
-  const visitedUp = new Set<number>([rootId]);
-  while (qUp.length > 0) {
-    const curr = qUp.shift()!;
-    const parents = adjParents.get(curr.id) || [];
-    parents.forEach((p) => {
-      if (!visitedUp.has(p)) {
-        visitedUp.add(p);
-        const l = curr.level - 1;
-        levels.set(p, l);
-        qUp.push({ id: p, level: l });
-      }
-    });
-  }
-
-  // BFS Downstream (Children)
-  const qDown: { id: number; level: number }[] = [{ id: rootId, level: 0 }];
-  const visitedDown = new Set<number>([rootId]);
-  while (qDown.length > 0) {
-    const curr = qDown.shift()!;
-    const children = adjChildren.get(curr.id) || [];
-    children.forEach((c) => {
-      if (!visitedDown.has(c)) {
-        visitedDown.add(c);
-        const l = curr.level + 1;
-        levels.set(c, l);
-        qDown.push({ id: c, level: l });
-      }
-    });
-  }
-
-  // Group nodes by level to compute deterministic positions
-  const levelGroups = new Map<number, number[]>();
-  lineage.nodes.forEach((n) => {
-    const l = levels.get(n.id) ?? 0;
-    if (!levelGroups.has(l)) levelGroups.set(l, []);
-    levelGroups.get(l)!.push(n.id);
-  });
-
-  // Sort node IDs inside level groups for deterministic ordering across refetches
-  levelGroups.forEach((ids) => ids.sort((a, b) => a - b));
+  const ranks = lineageRanks(lineage.nodes.map((n) => n.id), lineage.edges);
+  const rows = lineageRows(ranks, lineage.edges);
 
   const nodes: FlowNode[] = [];
   lineage.nodes.forEach((n) => {
     const isRoot = n.id === rootId;
-    const l = levels.get(n.id) ?? 0;
-    const group = levelGroups.get(l) || [n.id];
-    const index = group.indexOf(n.id);
-
-    const x = l * LEVEL_GAP_X;
-    const y = (index - (group.length - 1) / 2) * 110;
+    const x = (ranks.get(n.id) ?? 0) * LEVEL_GAP_X;
+    const y = rows.get(n.id) ?? 0;
 
     const colors = getNodeCategoryColor(n.fileExt || "");
 
