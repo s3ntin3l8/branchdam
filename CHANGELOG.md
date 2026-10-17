@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.27.1](https://github.com/s3ntin3l8/branchdam/compare/v0.27.0...v0.27.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **ci:** build govulncheck with the module's Go toolchain ([#590](https://github.com/s3ntin3l8/branchdam/issues/590)) ([adb88d4](https://github.com/s3ntin3l8/branchdam/commit/adb88d46b7639b9cb78af1b13aeadeb63660316b))
+* **indexer:** report a settled file once, and stop the settle test fsyncing ([#589](https://github.com/s3ntin3l8/branchdam/issues/589)) ([9cc2c84](https://github.com/s3ntin3l8/branchdam/commit/9cc2c84b177ed925f0eac07a1c3c6e5f441c5c26)), closes [#557](https://github.com/s3ntin3l8/branchdam/issues/557)
+* **web:** audit evidence panel landmark and pHash label ([#592](https://github.com/s3ntin3l8/branchdam/issues/592)) ([410cddd](https://github.com/s3ntin3l8/branchdam/commit/410cddd422371803a7523c3b2a662b5141a02248))
+* **web:** lay out the lineage graph by edge direction so no edge loops back ([#599](https://github.com/s3ntin3l8/branchdam/issues/599)) ([f92f739](https://github.com/s3ntin3l8/branchdam/commit/f92f739d91a095536e7232b9b159201da3e9d1d2)), closes [#595](https://github.com/s3ntin3l8/branchdam/issues/595)
+* **web:** spread lineage graph edge labels so they stop overlapping ([#594](https://github.com/s3ntin3l8/branchdam/issues/594)) ([daac11c](https://github.com/s3ntin3l8/branchdam/commit/daac11c3ee463279e13f3f5e5bf02b006fac0c48)), closes [#576](https://github.com/s3ntin3l8/branchdam/issues/576)
+
 ## [0.27.0](https://github.com/s3ntin3l8/branchdam/compare/v0.26.2...v0.27.0) (2026-10-17)
 
 
