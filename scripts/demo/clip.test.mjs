@@ -32,9 +32,13 @@ describe("paddedRect", () => {
 });
 
 describe("paddedClip", () => {
-  const page = (scroll) => ({ evaluate: async () => ({ ...doc, ...scroll }) });
-  const locator = (box) => {
-    const calls = [];
+  const page = (scroll, calls = []) => ({
+    evaluate: async () => {
+      calls.push("evaluate");
+      return { ...doc, ...scroll };
+    },
+  });
+  const locator = (box, calls = []) => {
     return {
       calls,
       scrollIntoViewIfNeeded: async () => calls.push("scroll"),
@@ -46,9 +50,11 @@ describe("paddedClip", () => {
   };
 
   it("scrolls the element in, then adds the scroll offset to its viewport box", async () => {
-    const loc = locator({ x: 300, y: 40, width: 1000, height: 400 });
-    const clip = await paddedClip(page({ scrollX: 0, scrollY: 1800 }), loc, 10);
-    assert.deepEqual(loc.calls, ["scroll", "box"]);
+    // One log for both stubs: the scroll offset must be read after the scroll.
+    const calls = [];
+    const loc = locator({ x: 300, y: 40, width: 1000, height: 400 }, calls);
+    const clip = await paddedClip(page({ scrollX: 0, scrollY: 1800 }, calls), loc, 10);
+    assert.deepEqual(calls, ["scroll", "box", "evaluate"]);
     assert.deepEqual(clip, { x: 290, y: 1830, width: 1020, height: 420 });
   });
 

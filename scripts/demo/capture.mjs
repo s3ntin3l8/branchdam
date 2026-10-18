@@ -150,9 +150,10 @@ async function recordLoop(browser, demo, heroId, outDir) {
   const input = ["-ss", offset.toFixed(2), "-i", src, "-an"];
   // CRF alone lets the smooth scroll spike the bitrate (the mp4 hit 440 KB for 8 s
   // once the graph went dark-themed). Both encodes get a rate cap that only bites
-  // during the scroll, so the static frames keep their CRF quality and each file
-  // stays within the landing page's ~350 KB per-loop budget: constrained quality
-  // (CRF plus a nonzero -b:v) for VP9, a VBV cap for h264.
+  // during the scroll, so the static frames keep their CRF quality: constrained
+  // quality (CRF plus a nonzero -b:v) for VP9, a VBV cap for h264. Neither is a
+  // hard file-size ceiling (VBV allows up to maxrate * duration + bufsize), but for
+  // this 8 s loop both land around 280 KB, inside the landing page's ~350 KB budget.
   ffmpeg([...input, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "300k", "-row-mt", "1", `${base}.webm`]);
   ffmpeg([
     ...input,
