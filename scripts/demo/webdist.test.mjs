@@ -1,11 +1,23 @@
 // Stale-SPA verdict for the demo's web/dist. Run: make test-demo
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { STUB_MARKER, webDistStaleReason } from "./webdist.mjs";
+import { STUB_MARKER, STUB_MAX_BYTES, webDistStaleReason } from "./webdist.mjs";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const PREBUILD = path.join(ROOT, ".github/ci-prebuild.sh");
 
 const OLD = new Date("2026-01-01T00:00:00Z");
 const BUILT = new Date("2026-02-01T00:00:00Z");
@@ -77,9 +89,38 @@ describe("webDistStaleReason", () => {
   });
 
   it("keeps STUB_MARKER in step with .github/ci-prebuild.sh", () => {
-    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-    const script = readFileSync(path.join(root, ".github/ci-prebuild.sh"), "utf8");
+    const script = readFileSync(PREBUILD, "utf8");
     assert.ok(script.includes(`STUB_MARKER='${STUB_MARKER}'`));
+  });
+
+  it("keeps STUB_MAX_BYTES in step with is_stub()'s size threshold", () => {
+    const script = readFileSync(PREBUILD, "utf8");
+    const m = script.match(/\[ "\$size" -lt (\d+) \]/);
+    assert.ok(m, "is_stub() size test not found in ci-prebuild.sh");
+    assert.equal(Number(m[1]), STUB_MAX_BYTES);
+    realBuild();
+    write("dist/index.html", `<!doctype html>${" ".repeat(STUB_MAX_BYTES - 16)}`, NEW);
+    assert.equal(webDistStaleReason(web), "web/dist is the build stub");
+    write("dist/index.html", `<!doctype html>${" ".repeat(STUB_MAX_BYTES - 15)}`, BUILT);
+    assert.equal(webDistStaleReason(web), null);
+  });
+
+  it("classifies the placeholder ci-prebuild.sh actually writes as the stub", () => {
+    // A throwaway repo root outside any git checkout: with no index.html the
+    // script writes its placeholder there and exits.
+    const repo = mkdtempSync(path.join(tmpdir(), "branchdam-prebuild-test-"));
+    try {
+      mkdirSync(path.join(repo, "web/dist/assets"), { recursive: true });
+      execFileSync("bash", [PREBUILD], {
+        cwd: repo,
+        env: { PATH: process.env.PATH, GIT_CEILING_DIRECTORIES: path.dirname(repo) },
+      });
+      const html = readFileSync(path.join(repo, "web/dist/index.html"), "utf8");
+      assert.ok(html.length < STUB_MAX_BYTES);
+      assert.equal(webDistStaleReason(path.join(repo, "web")), "web/dist is the build stub");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   it("honours web-ensure's stale marker", () => {
@@ -112,6 +153,13 @@ describe("webDistStaleReason", () => {
     rmSync(path.join(web, "public"), { recursive: true });
     touch(".", NEW);
     assert.equal(webDistStaleReason(web), "web/ changed after web/dist was built");
+  });
+
+  it("rebuilds instead of crashing on a dangling web/.env symlink", () => {
+    realBuild();
+    symlinkSync(path.join(web, "no-such-target"), path.join(web, ".env"));
+    touch(".", OLD);
+    assert.equal(webDistStaleReason(web), "web/.env is a dangling link or was removed");
   });
 
   it("ignores tsc's tsbuildinfo output", () => {

@@ -8,7 +8,7 @@ import path from "node:path";
 /** Prefix of the placeholder index.html written by .github/ci-prebuild.sh. */
 export const STUB_MARKER = "<!doctype html><title>branchDAM</title>";
 /** ci-prebuild.sh's is_stub() also treats any index.html this small as a stub. */
-const STUB_MAX_BYTES = 200;
+export const STUB_MAX_BYTES = 200;
 
 /**
  * Build inputs next to web/src whose changes also invalidate the bundle:
@@ -67,7 +67,11 @@ export function webDistStaleReason(webRoot) {
   }
   const inputs = readdirSync(webRoot).filter((n) => INPUT_PATTERN.test(n) || INPUT_FILES.includes(n));
   for (const name of inputs.sort()) {
-    if (statSync(path.join(webRoot, name)).mtimeMs > built) return `web/${name} is newer than web/dist`;
+    // Listed but not stat-able: a dangling symlink (say web/.env), or removed
+    // since readdir. Can't prove the bundle current, so rebuild, not crash.
+    const st = statSync(path.join(webRoot, name), { throwIfNoEntry: false });
+    if (!st) return `web/${name} is a dangling link or was removed`;
+    if (st.mtimeMs > built) return `web/${name} is newer than web/dist`;
   }
   // web/ itself changes when a whole entry (say web/public) is removed.
   if (statSync(webRoot).mtimeMs > built) return "web/ changed after web/dist was built";
