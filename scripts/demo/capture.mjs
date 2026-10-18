@@ -61,17 +61,52 @@ async function open(page, url, scrollTo) {
 }
 
 /**
- * The graph sits at the bottom of the detail page, so it's captured as its own element.
+ * The graph sits at the bottom of the detail page, so it's captured as its own element,
+ * with a margin of page background around it: the section has no padding of its own,
+ * so a tight element clip puts the title on the left edge and cuts the depth select.
  * The PNG is re-encoded losslessly (same pixels, smaller file) so a refresh
  * doesn't bloat the repo; sharp is already a web devDependency.
  */
+const ELEMENT_MARGIN = 24;
+
+/** The element's box grown by ELEMENT_MARGIN, in page coordinates, clamped to the document. */
+async function paddedClip(page, locator, margin = ELEMENT_MARGIN) {
+  await locator.scrollIntoViewIfNeeded();
+  const box = await locator.boundingBox();
+  if (!box) throw new Error("element to capture is not visible");
+  const doc = await page.evaluate(() => ({
+    scrollX: window.scrollX,
+    scrollY: window.scrollY,
+    width: document.documentElement.scrollWidth,
+    height: document.documentElement.scrollHeight,
+  }));
+  return clampClip(
+    { x: box.x + doc.scrollX - margin, y: box.y + doc.scrollY - margin, width: box.width + 2 * margin, height: box.height + 2 * margin },
+    doc,
+  );
+}
+
+/** Keeps a clip rect inside a { width, height } document. */
+function clampClip(clip, doc) {
+  const x = Math.max(0, clip.x);
+  const y = Math.max(0, clip.y);
+  return {
+    x,
+    y,
+    width: Math.min(clip.x + clip.width, doc.width) - x,
+    height: Math.min(clip.y + clip.height, doc.height) - y,
+  };
+}
+
 async function shot(page, dir, name, element) {
   mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${name}`);
-  const target = element
-    ? page.locator("section").filter({ has: page.getByText(element, { exact: true }) }).last()
-    : page;
-  await target.screenshot({ path: tmp });
+  if (element) {
+    const section = page.locator("section").filter({ has: page.getByText(element, { exact: true }) }).last();
+    await page.screenshot({ path: tmp, fullPage: true, clip: await paddedClip(page, section) });
+  } else {
+    await page.screenshot({ path: tmp });
+  }
   try {
     await sharp(tmp).png({ compressionLevel: 9, adaptiveFiltering: true, effort: 10 }).toFile(path.join(dir, name));
   } finally {
@@ -143,7 +178,25 @@ async function recordLoop(browser, demo, heroId, outDir) {
   const base = path.join(outDir, "asset-graph");
   const input = ["-ss", offset.toFixed(2), "-i", src, "-an"];
   ffmpeg([...input, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0", "-row-mt", "1", `${base}.webm`]);
-  ffmpeg([...input, "-c:v", "libx264", "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart", `${base}.mp4`]);
+  // CRF alone lets the smooth scroll spike the bitrate (440 KB for 8 s once the
+  // graph went dark-themed); the VBV cap only bites during the scroll, so the
+  // static frames keep CRF 26 quality and the file stays within the landing budget.
+  ffmpeg([
+    ...input,
+    "-c:v",
+    "libx264",
+    "-crf",
+    "26",
+    "-maxrate",
+    "300k",
+    "-bufsize",
+    "1200k",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    `${base}.mp4`,
+  ]);
   ffmpeg(["-sseof", "-0.5", "-i", src, "-frames:v", "1", "-q:v", "3", `${base}.jpg`]);
   rmSync(videoDir, { recursive: true, force: true });
   console.log("wrote asset-graph.{webm,mp4,jpg}");
