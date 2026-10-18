@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { paddedClip } from "./clip.mjs";
 import { DEMO_HEADERS, assetsOf, startDemo } from "./instance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -67,37 +68,6 @@ async function open(page, url, scrollTo) {
  * The PNG is re-encoded losslessly (same pixels, smaller file) so a refresh
  * doesn't bloat the repo; sharp is already a web devDependency.
  */
-const ELEMENT_MARGIN = 24;
-
-/** The element's box grown by ELEMENT_MARGIN, in page coordinates, clamped to the document. */
-async function paddedClip(page, locator, margin = ELEMENT_MARGIN) {
-  await locator.scrollIntoViewIfNeeded();
-  const box = await locator.boundingBox();
-  if (!box) throw new Error("element to capture is not visible");
-  const doc = await page.evaluate(() => ({
-    scrollX: window.scrollX,
-    scrollY: window.scrollY,
-    width: document.documentElement.scrollWidth,
-    height: document.documentElement.scrollHeight,
-  }));
-  return clampClip(
-    { x: box.x + doc.scrollX - margin, y: box.y + doc.scrollY - margin, width: box.width + 2 * margin, height: box.height + 2 * margin },
-    doc,
-  );
-}
-
-/** Keeps a clip rect inside a { width, height } document. */
-function clampClip(clip, doc) {
-  const x = Math.max(0, clip.x);
-  const y = Math.max(0, clip.y);
-  return {
-    x,
-    y,
-    width: Math.min(clip.x + clip.width, doc.width) - x,
-    height: Math.min(clip.y + clip.height, doc.height) - y,
-  };
-}
-
 async function shot(page, dir, name, element) {
   mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${name}`);
@@ -177,10 +147,12 @@ async function recordLoop(browser, demo, heroId, outDir) {
   const src = path.join(videoDir, raw);
   const base = path.join(outDir, "asset-graph");
   const input = ["-ss", offset.toFixed(2), "-i", src, "-an"];
-  ffmpeg([...input, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0", "-row-mt", "1", `${base}.webm`]);
-  // CRF alone lets the smooth scroll spike the bitrate (440 KB for 8 s once the
-  // graph went dark-themed); the VBV cap only bites during the scroll, so the
-  // static frames keep CRF 26 quality and the file stays within the landing budget.
+  // CRF alone lets the smooth scroll spike the bitrate (the mp4 hit 440 KB for 8 s
+  // once the graph went dark-themed). Both encodes get a rate cap that only bites
+  // during the scroll, so the static frames keep their CRF quality and each file
+  // stays within the landing page's ~350 KB per-loop budget: constrained quality
+  // (CRF plus a nonzero -b:v) for VP9, a VBV cap for h264.
+  ffmpeg([...input, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "300k", "-row-mt", "1", `${base}.webm`]);
   ffmpeg([
     ...input,
     "-c:v",
