@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertDemo, assertPortsFree, demoEnv } from "./env.mjs";
 import { generateMedia } from "./media.mjs";
+import { webDistStaleReason } from "./webdist.mjs";
 
 /**
  * A throwaway branchDAM with synthetic media and a populated version graph.
@@ -125,11 +126,17 @@ export async function retryOnConflict(start, { attempts = 30, delayMs = 2000 } =
   }
 }
 
-/** Builds web/dist (embedded into the binary) if needed, then the server binary. */
+/**
+ * Rebuilds web/dist (embedded into the binary) when it is missing or stale,
+ * so a capture never ships an SPA older than the checkout, then builds the
+ * server binary.
+ */
 function buildServer(binary) {
-  if (!existsSync(path.join(ROOT, "web/dist/index.html"))) {
-    console.log("[demo] building the web app...");
+  const stale = webDistStaleReason(path.join(ROOT, "web"));
+  if (stale) {
+    console.log(`[demo] building the web app (${stale})...`);
     execFileSync("npm", ["--prefix", path.join(ROOT, "web"), "run", "build"], { stdio: "inherit" });
+    rmSync(path.join(ROOT, "web/dist/.branchdam-stale"), { force: true });
   }
   console.log("[demo] building the server...");
   execFileSync("go", ["build", "-o", binary, "./cmd/branchdam"], { cwd: ROOT, stdio: "inherit" });
