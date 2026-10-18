@@ -38,7 +38,8 @@ function realBuild() {
   // Over ci-prebuild's 200-byte stub threshold, like a real Vite index.html.
   write("dist/index.html", `<!doctype html><html lang="en"><head>${" ".repeat(400)}`, BUILT);
   // Creating the files bumped their directories; date those before the build too.
-  for (const dir of ["src/pages", "src", "public"]) touch(dir, OLD);
+  for (const dir of ["src/pages", "src", "public", "dist"]) touch(dir, OLD);
+  touch(".", OLD);
 }
 
 beforeEach(() => {
@@ -106,7 +107,30 @@ describe("webDistStaleReason", () => {
     assert.equal(webDistStaleReason(web), "web/public is newer than web/dist");
   });
 
-  for (const name of ["index.html", "package.json", "package-lock.json", "vite.config.ts"])
+  it("rebuilds when a whole web/ entry was removed after the build", () => {
+    realBuild();
+    rmSync(path.join(web, "public"), { recursive: true });
+    touch(".", NEW);
+    assert.equal(webDistStaleReason(web), "web/ changed after web/dist was built");
+  });
+
+  it("ignores tsc's tsbuildinfo output", () => {
+    realBuild();
+    write("tsconfig.app.tsbuildinfo", "{}", NEW);
+    touch(".", OLD);
+    assert.equal(webDistStaleReason(web), null);
+  });
+
+  for (const name of [
+    "index.html",
+    "package.json",
+    "package-lock.json",
+    "vite.config.ts",
+    "tsconfig.json",
+    "tsconfig.app.json",
+    ".env",
+    ".env.production",
+  ])
     it(`rebuilds when web/${name} changed after the build`, () => {
       realBuild();
       write(name, "changed", NEW);
