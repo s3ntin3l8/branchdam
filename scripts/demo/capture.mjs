@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { paddedClip } from "./clip.mjs";
 import { DEMO_HEADERS, assetsOf, startDemo } from "./instance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -61,17 +62,22 @@ async function open(page, url, scrollTo) {
 }
 
 /**
- * The graph sits at the bottom of the detail page, so it's captured as its own element.
+ * The graph sits at the bottom of the detail page, so it's captured as its own element,
+ * with a margin of page background around it: the section has no padding of its own,
+ * so a tight element clip puts the title on the left edge and cuts the depth select.
  * The PNG is re-encoded losslessly (same pixels, smaller file) so a refresh
  * doesn't bloat the repo; sharp is already a web devDependency.
  */
 async function shot(page, dir, name, element) {
   mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${name}`);
-  const target = element
-    ? page.locator("section").filter({ has: page.getByText(element, { exact: true }) }).last()
-    : page;
-  await target.screenshot({ path: tmp });
+  if (element) {
+    const section = page.locator("section").filter({ has: page.getByText(element, { exact: true }) }).last();
+    // fullPage: paddedClip returns document coordinates (see clip.mjs).
+    await page.screenshot({ path: tmp, fullPage: true, clip: await paddedClip(page, section) });
+  } else {
+    await page.screenshot({ path: tmp });
+  }
   try {
     await sharp(tmp).png({ compressionLevel: 9, adaptiveFiltering: true, effort: 10 }).toFile(path.join(dir, name));
   } finally {
@@ -142,8 +148,29 @@ async function recordLoop(browser, demo, heroId, outDir) {
   const src = path.join(videoDir, raw);
   const base = path.join(outDir, "asset-graph");
   const input = ["-ss", offset.toFixed(2), "-i", src, "-an"];
-  ffmpeg([...input, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0", "-row-mt", "1", `${base}.webm`]);
-  ffmpeg([...input, "-c:v", "libx264", "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart", `${base}.mp4`]);
+  // CRF alone lets the smooth scroll spike the bitrate (the mp4 hit 440 KB for 8 s
+  // once the graph went dark-themed). Both encodes get a rate cap that only bites
+  // during the scroll, so the static frames keep their CRF quality: constrained
+  // quality (CRF plus a nonzero -b:v) for VP9, a VBV cap for h264. Neither is a
+  // hard file-size ceiling (VBV allows up to maxrate * duration + bufsize), but for
+  // this 8 s loop both land around 280 KB, inside the landing page's ~350 KB budget.
+  ffmpeg([...input, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "300k", "-row-mt", "1", `${base}.webm`]);
+  ffmpeg([
+    ...input,
+    "-c:v",
+    "libx264",
+    "-crf",
+    "26",
+    "-maxrate",
+    "300k",
+    "-bufsize",
+    "1200k",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    `${base}.mp4`,
+  ]);
   ffmpeg(["-sseof", "-0.5", "-i", src, "-frames:v", "1", "-q:v", "3", `${base}.jpg`]);
   rmSync(videoDir, { recursive: true, force: true });
   console.log("wrote asset-graph.{webm,mp4,jpg}");
