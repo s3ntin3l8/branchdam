@@ -73,6 +73,7 @@ async function shot(page, dir, name, element) {
   const tmp = path.join(dir, `.${name}`);
   if (element) {
     const section = page.locator("section").filter({ has: page.getByText(element, { exact: true }) }).last();
+    // fullPage: paddedClip returns document coordinates (see clip.mjs).
     await page.screenshot({ path: tmp, fullPage: true, clip: await paddedClip(page, section) });
   } else {
     await page.screenshot({ path: tmp });

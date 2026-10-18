@@ -1,7 +1,7 @@
 // Clip math for the demo capture's element shots. Run: make test-demo
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ELEMENT_MARGIN, paddedRect } from "./clip.mjs";
+import { ELEMENT_MARGIN, paddedClip, paddedRect } from "./clip.mjs";
 
 const doc = { scrollX: 0, scrollY: 0, width: 1440, height: 3000 };
 
@@ -28,5 +28,31 @@ describe("paddedRect", () => {
   it("clamps to the document's right and bottom edges", () => {
     const r = paddedRect({ x: 1400, y: 2980, width: 40, height: 20 }, doc, 10);
     assert.deepEqual(r, { x: 1390, y: 2970, width: 50, height: 30 });
+  });
+});
+
+describe("paddedClip", () => {
+  const page = (scroll) => ({ evaluate: async () => ({ ...doc, ...scroll }) });
+  const locator = (box) => {
+    const calls = [];
+    return {
+      calls,
+      scrollIntoViewIfNeeded: async () => calls.push("scroll"),
+      boundingBox: async () => {
+        calls.push("box");
+        return box;
+      },
+    };
+  };
+
+  it("scrolls the element in, then adds the scroll offset to its viewport box", async () => {
+    const loc = locator({ x: 300, y: 40, width: 1000, height: 400 });
+    const clip = await paddedClip(page({ scrollX: 0, scrollY: 1800 }), loc, 10);
+    assert.deepEqual(loc.calls, ["scroll", "box"]);
+    assert.deepEqual(clip, { x: 290, y: 1830, width: 1020, height: 420 });
+  });
+
+  it("refuses an element without a box", async () => {
+    await assert.rejects(paddedClip(page({}), locator(null)), /not visible/);
   });
 });

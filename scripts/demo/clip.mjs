@@ -19,7 +19,12 @@ export function paddedRect(box, doc, margin = ELEMENT_MARGIN) {
   return { x, y, width: right - x, height: bottom - y };
 }
 
-/** Clip for `page.screenshot({ fullPage: true, clip })` around `locator`. */
+/**
+ * Clip for `page.screenshot({ fullPage: true, clip })` around `locator`.
+ * The rect is in document coordinates, which Playwright only uses with
+ * `fullPage: true`; without it the clip is viewport-relative and the scroll
+ * offset would be counted twice.
+ */
 export async function paddedClip(page, locator, margin = ELEMENT_MARGIN) {
   await locator.scrollIntoViewIfNeeded();
   const box = await locator.boundingBox();
