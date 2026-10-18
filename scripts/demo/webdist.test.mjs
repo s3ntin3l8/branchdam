@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -14,7 +15,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { STUB_MARKER, STUB_MAX_BYTES, webDistStaleReason } from "./webdist.mjs";
+import {
+  newestMtime,
+  STUB_MARKER,
+  STUB_MAX_BYTES,
+  webDistStaleReason,
+} from "./webdist.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const PREBUILD = path.join(ROOT, ".github/ci-prebuild.sh");
@@ -116,11 +122,19 @@ describe("webDistStaleReason", () => {
         env: { PATH: process.env.PATH, GIT_CEILING_DIRECTORIES: path.dirname(repo) },
       });
       const html = readFileSync(path.join(repo, "web/dist/index.html"), "utf8");
-      assert.ok(html.length < STUB_MAX_BYTES);
+      assert.ok(Buffer.byteLength(html) < STUB_MAX_BYTES);
       assert.equal(webDistStaleReason(path.join(repo, "web")), "web/dist is the build stub");
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+
+  it("finds the marker anywhere in the first 100 bytes, like is_stub()'s head -c 100", () => {
+    realBuild();
+    write("dist/index.html", `\n${STUB_MARKER}${" ".repeat(STUB_MAX_BYTES)}`, NEW);
+    assert.equal(webDistStaleReason(web), "web/dist is the build stub");
+    write("dist/index.html", `${" ".repeat(100)}${STUB_MARKER}${" ".repeat(STUB_MAX_BYTES)}`, BUILT);
+    assert.equal(webDistStaleReason(web), null);
   });
 
   it("honours web-ensure's stale marker", () => {
@@ -184,4 +198,23 @@ describe("webDistStaleReason", () => {
       write(name, "changed", NEW);
       assert.equal(webDistStaleReason(web), `web/${name} is newer than web/dist`);
     });
+});
+
+describe("newestMtime", () => {
+  it("returns the newest of the directory, its files and subdirectories", () => {
+    realBuild();
+    write("src/pages/Graph.tsx", "changed", NEW);
+    assert.equal(newestMtime(path.join(web, "src")), NEW.getTime());
+  });
+
+  it("returns Infinity when a file vanishes between readdir and stat", () => {
+    realBuild();
+    const gone = path.join(web, "src/pages/Graph.tsx");
+    const stat = (p, opts) => (p === gone ? undefined : statSync(p, opts));
+    assert.equal(newestMtime(path.join(web, "src"), stat), Infinity);
+  });
+
+  it("returns Infinity when the directory itself is gone", () => {
+    assert.equal(newestMtime(path.join(web, "no-such-dir")), Infinity);
+  });
 });

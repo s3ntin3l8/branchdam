@@ -21,14 +21,28 @@ const INPUT_PATTERN = /^(tsconfig(\..+)?\.json|\.env(\..+)?)$/;
 /**
  * Newest mtime (ms) of dir, any file under it, or any subdirectory. Directory
  * mtimes count so a checkout that only deletes or renames a file still reads
- * as newer than the build.
+ * as newer than the build. Infinity when an entry vanishes mid-walk (removed
+ * between readdir and stat): the tree is changing, so it can't be current.
  */
-function newestMtime(dir) {
-  let newest = statSync(dir).mtimeMs;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+export function newestMtime(dir, stat = statSync) {
+  const own = stat(dir, { throwIfNoEntry: false });
+  if (!own) return Infinity;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return Infinity;
+    throw err;
+  }
+  let newest = own.mtimeMs;
+  for (const entry of entries) {
     const p = path.join(dir, entry.name);
-    if (entry.isDirectory()) newest = Math.max(newest, newestMtime(p));
-    else if (entry.isFile()) newest = Math.max(newest, statSync(p).mtimeMs);
+    if (entry.isDirectory()) newest = Math.max(newest, newestMtime(p, stat));
+    else if (entry.isFile()) {
+      const st = stat(p, { throwIfNoEntry: false });
+      if (!st) return Infinity;
+      newest = Math.max(newest, st.mtimeMs);
+    }
   }
   return newest;
 }
@@ -53,7 +67,9 @@ export function webDistStaleReason(webRoot) {
   let built;
   try {
     const st = fstatSync(fd);
-    if (st.size < STUB_MAX_BYTES || readFileSync(fd, "utf8").startsWith(STUB_MARKER))
+    // Same test as ci-prebuild.sh's is_stub(): small, or the marker within
+    // the first 100 bytes (`head -c 100 | grep -qF`).
+    if (st.size < STUB_MAX_BYTES || readFileSync(fd).subarray(0, 100).includes(STUB_MARKER))
       return "web/dist is the build stub";
     built = st.mtimeMs;
   } finally {
@@ -63,7 +79,10 @@ export function webDistStaleReason(webRoot) {
   // web/public is copied into dist verbatim (Vite's publicDir).
   for (const dir of ["src", "public"]) {
     const p = path.join(webRoot, dir);
-    if (existsSync(p) && newestMtime(p) > built) return `web/${dir} is newer than web/dist`;
+    if (!existsSync(p)) continue;
+    const newest = newestMtime(p);
+    if (newest === Infinity) return `web/${dir} changed while it was being checked`;
+    if (newest > built) return `web/${dir} is newer than web/dist`;
   }
   const inputs = readdirSync(webRoot).filter((n) => INPUT_PATTERN.test(n) || INPUT_FILES.includes(n));
   for (const name of inputs.sort()) {
