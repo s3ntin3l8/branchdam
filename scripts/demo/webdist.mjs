@@ -2,7 +2,16 @@
 // Mirrors the Makefile's web-ensure verdict, so `make demo` and the screenshot
 // pipelines never serve a stale SPA after the checkout moves forward, nor the
 // placeholder .github/ci-prebuild.sh writes for `make test`/`make build`.
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 
 /** Prefix of the placeholder index.html written by .github/ci-prebuild.sh. */
@@ -75,15 +84,21 @@ export function webDistStaleReason(webRoot) {
     fd = openSync(index, "r");
   } catch (err) {
     if (err.code === "ENOENT") return "web/dist is missing";
-    throw err;
+    return "web/dist/index.html can't be read";
   }
   let built;
   try {
     const st = fstatSync(fd);
+    let head;
+    try {
+      // A directory index.html opens fine read-only and fails here (EISDIR).
+      head = readFileSync(fd).subarray(0, 100);
+    } catch {
+      return "web/dist/index.html can't be read";
+    }
     // Same test as ci-prebuild.sh's is_stub(): small, or the marker within
     // the first 100 bytes (`head -c 100 | grep -qF`).
-    if (st.size < STUB_MAX_BYTES || readFileSync(fd).subarray(0, 100).includes(STUB_MARKER))
-      return "web/dist is the build stub";
+    if (st.size < STUB_MAX_BYTES || head.includes(STUB_MARKER)) return "web/dist is the build stub";
     built = st.mtimeMs;
   } finally {
     closeSync(fd);
@@ -92,7 +107,9 @@ export function webDistStaleReason(webRoot) {
   // web/public is copied into dist verbatim (Vite's publicDir).
   for (const dir of ["src", "public"]) {
     const p = path.join(webRoot, dir);
-    if (!existsSync(p)) continue;
+    // lstat, not existsSync: a dangling web/src symlink must not read as
+    // "no sources"; newestMtime then can't stat it and returns Infinity.
+    if (!tryStat(lstatSync, p)) continue;
     const newest = newestMtime(p);
     if (newest === Infinity) return `web/${dir} changed or is unreadable`;
     if (newest > built) return `web/${dir} is newer than web/dist`;

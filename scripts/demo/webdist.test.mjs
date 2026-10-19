@@ -170,6 +170,21 @@ describe("webDistStaleReason", () => {
     assert.equal(webDistStaleReason(web), "web/ changed after web/dist was built");
   });
 
+  it("rebuilds instead of crashing when web/dist/index.html is a directory", () => {
+    realBuild();
+    rmSync(path.join(web, "dist/index.html"));
+    mkdirSync(path.join(web, "dist/index.html"));
+    assert.equal(webDistStaleReason(web), "web/dist/index.html can't be read");
+  });
+
+  it("rebuilds on a dangling web/src symlink instead of skipping the sources", () => {
+    realBuild();
+    rmSync(path.join(web, "src"), { recursive: true });
+    symlinkSync(path.join(web, "no-such-src"), path.join(web, "src"));
+    touch(".", OLD);
+    assert.equal(webDistStaleReason(web), "web/src changed or is unreadable");
+  });
+
   it("rebuilds instead of crashing on a dangling web/.env symlink", () => {
     realBuild();
     symlinkSync(path.join(web, "no-such-target"), path.join(web, ".env"));
