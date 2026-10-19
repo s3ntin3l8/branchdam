@@ -19,27 +19,40 @@ const INPUT_FILES = ["index.html", "package.json", "package-lock.json", "vite.co
 const INPUT_PATTERN = /^(tsconfig(\..+)?\.json|\.env(\..+)?)$/;
 
 /**
+ * stat(p) or undefined when p can't be stat'ed at all: gone (ENOENT, a
+ * dangling symlink), replaced mid-walk (ENOTDIR) or unreadable (EACCES).
+ */
+function tryStat(stat, p) {
+  try {
+    return stat(p, { throwIfNoEntry: false });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Newest mtime (ms) of dir, any file under it, or any subdirectory. Directory
  * mtimes count so a checkout that only deletes or renames a file still reads
- * as newer than the build. Infinity when an entry vanishes mid-walk (removed
- * between readdir and stat): the tree is changing, so it can't be current.
+ * as newer than the build. Infinity when any part of the walk can't be read
+ * (an entry removed between readdir and stat, a directory swapped for a file,
+ * no access): the bundle can't be proven current, so the caller rebuilds and
+ * a real problem surfaces from `npm run build` rather than from this check.
  */
 export function newestMtime(dir, stat = statSync) {
-  const own = stat(dir, { throwIfNoEntry: false });
+  const own = tryStat(stat, dir);
   if (!own) return Infinity;
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
-  } catch (err) {
-    if (err.code === "ENOENT") return Infinity;
-    throw err;
+  } catch {
+    return Infinity;
   }
   let newest = own.mtimeMs;
   for (const entry of entries) {
     const p = path.join(dir, entry.name);
     if (entry.isDirectory()) newest = Math.max(newest, newestMtime(p, stat));
     else if (entry.isFile()) {
-      const st = stat(p, { throwIfNoEntry: false });
+      const st = tryStat(stat, p);
       if (!st) return Infinity;
       newest = Math.max(newest, st.mtimeMs);
     }
@@ -81,15 +94,15 @@ export function webDistStaleReason(webRoot) {
     const p = path.join(webRoot, dir);
     if (!existsSync(p)) continue;
     const newest = newestMtime(p);
-    if (newest === Infinity) return `web/${dir} changed while it was being checked`;
+    if (newest === Infinity) return `web/${dir} changed or is unreadable`;
     if (newest > built) return `web/${dir} is newer than web/dist`;
   }
   const inputs = readdirSync(webRoot).filter((n) => INPUT_PATTERN.test(n) || INPUT_FILES.includes(n));
   for (const name of inputs.sort()) {
     // Listed but not stat-able: a dangling symlink (say web/.env), or removed
     // since readdir. Can't prove the bundle current, so rebuild, not crash.
-    const st = statSync(path.join(webRoot, name), { throwIfNoEntry: false });
-    if (!st) return `web/${name} is a dangling link or was removed`;
+    const st = tryStat(statSync, path.join(webRoot, name));
+    if (!st) return `web/${name} can't be read (dangling link, removed or no access)`;
     if (st.mtimeMs > built) return `web/${name} is newer than web/dist`;
   }
   // web/ itself changes when a whole entry (say web/public) is removed.

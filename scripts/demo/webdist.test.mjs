@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -173,7 +174,7 @@ describe("webDistStaleReason", () => {
     realBuild();
     symlinkSync(path.join(web, "no-such-target"), path.join(web, ".env"));
     touch(".", OLD);
-    assert.equal(webDistStaleReason(web), "web/.env is a dangling link or was removed");
+    assert.equal(webDistStaleReason(web), "web/.env can't be read (dangling link, removed or no access)");
   });
 
   it("ignores tsc's tsbuildinfo output", () => {
@@ -216,5 +217,34 @@ describe("newestMtime", () => {
 
   it("returns Infinity when the directory itself is gone", () => {
     assert.equal(newestMtime(path.join(web, "no-such-dir")), Infinity);
+  });
+
+  it("returns Infinity when the directory can't be stat'ed but can be listed", () => {
+    realBuild();
+    const src = path.join(web, "src");
+    const stat = (p, opts) => (p === src ? undefined : statSync(p, opts));
+    assert.equal(newestMtime(src, stat), Infinity);
+  });
+
+  it("returns Infinity when a stat throws something other than ENOENT", () => {
+    realBuild();
+    const gone = path.join(web, "src/main.tsx");
+    const stat = (p, opts) => {
+      if (p === gone) throw Object.assign(new Error("ENOTDIR"), { code: "ENOTDIR" });
+      return statSync(p, opts);
+    };
+    assert.equal(newestMtime(path.join(web, "src"), stat), Infinity);
+  });
+
+  // root reads mode-000 directories anyway, so this can only be shown unprivileged.
+  it("rebuilds rather than throws on an unreadable web/src", { skip: process.getuid?.() === 0 }, () => {
+    realBuild();
+    const pages = path.join(web, "src/pages");
+    chmodSync(pages, 0o000);
+    try {
+      assert.equal(webDistStaleReason(web), "web/src changed or is unreadable");
+    } finally {
+      chmodSync(pages, 0o755);
+    }
   });
 });
