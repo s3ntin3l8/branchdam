@@ -1,5 +1,5 @@
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyflow/react";
-import { labelAnchor, routePath, type LineageFlowEdge } from "../lib/edgeStyle";
+import { LABEL_PAD_X, labelAnchor, placeLabel, routePath, type LineageFlowEdge } from "../lib/edgeStyle";
 
 export default function LineageEdge({
   id,
@@ -22,9 +22,15 @@ export default function LineageEdge({
     waypoints.length > 0
       ? routePath(points)
       : getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[0];
-  const at = labelAnchor(points[0], waypoints, points[points.length - 1], data?.labelT ?? 0.5);
-  const labelX = at.x;
-  const labelY = at.y + (data?.labelDy ?? 0);
+  const source = points[0];
+  const target = points[points.length - 1];
+  // A string label is kept clear of the nodes (see placeLabel); anything else
+  // has no width estimate, so it stays at its anchor.
+  const anchor = labelAnchor(source, waypoints, target, data?.labelT ?? 0.5);
+  const { x: labelX, y: labelY } =
+    typeof label === "string"
+      ? placeLabel(source, waypoints, target, label, data ?? {})
+      : { x: anchor.x, y: anchor.y + (data?.labelDy ?? 0) };
 
   return (
     <>
@@ -38,7 +44,7 @@ export default function LineageEdge({
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               pointerEvents: "none",
-              padding: "2px 4px",
+              padding: `2px ${LABEL_PAD_X}px`,
               borderRadius: 2,
               fontSize: 11,
               whiteSpace: "nowrap",

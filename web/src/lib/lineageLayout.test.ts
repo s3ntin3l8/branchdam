@@ -111,3 +111,26 @@ describe("shared route slots (#601)", () => {
     expect(Math.max(...[...perRank.values()].map((ys) => ys.size))).toBeLessThanOrEqual(2);
   });
 });
+
+describe("lineageRows tie-break (same files, different ids)", () => {
+  it("orders tied nodes by name, so the layout does not depend on ingest order", () => {
+    // Three roots and their children; the same files imported twice get
+    // different ids. Rows by file name must come out identical.
+    const layout = (ids: Record<string, number>) => {
+      const edges = [
+        { sourceNodeId: ids.a, targetNodeId: ids.ac },
+        { sourceNodeId: ids.b, targetNodeId: ids.bc },
+        { sourceNodeId: ids.c, targetNodeId: ids.bc },
+      ];
+      const all = Object.values(ids);
+      const names = new Map(Object.entries(ids).map(([name, id]) => [id, name]));
+      const { rows } = lineageRows(lineageRanks(all, edges), edges, names);
+      return Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, rows.get(id)]));
+    };
+    const first = layout({ a: 1, b: 2, c: 3, ac: 4, bc: 5 });
+    const second = layout({ a: 9, b: 4, c: 7, ac: 2, bc: 1 });
+    expect(second).toEqual(first);
+    expect(first.a).toBeLessThan(first.b!);
+    expect(first.b).toBeLessThan(first.c!);
+  });
+});

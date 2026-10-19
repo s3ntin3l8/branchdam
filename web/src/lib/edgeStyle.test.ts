@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { edgeVisual, labelAnchor, pointAlong, routePath } from "./edgeStyle";
+import { clampLabelX, edgeVisual, estimateLabelWidth, labelAnchor, placeLabel, pointAlong, routePath } from "./edgeStyle";
 
 describe("edgeVisual", () => {
   const base = { relationshipType: "PROXY_OF" as const, confidence: 0.5 };
@@ -78,5 +78,40 @@ describe("labelAnchor (#601)", () => {
     const a = labelAnchor(source, shared, { x: 920, y: -88 }, 0.5);
     const b = labelAnchor(source, shared, { x: 920, y: 132 }, 0.5);
     expect(Math.abs(a.y - b.y)).toBeGreaterThan(25); // more than a label is tall
+  });
+});
+
+describe("label clearance", () => {
+  it("keeps a label inside the gap between the two columns it joins", () => {
+    // The demo hero case: a 34-character label centred at t = 0.3 of a
+    // 300-unit hop used to start under the source node.
+    const w = estimateLabelWidth("DERIVED_FROM (0.85) - needs review");
+    const x = clampLabelX(90, w, 0, 300);
+    expect(x - w / 2).toBeGreaterThan(0);
+    expect(x + w / 2).toBeLessThan(300);
+    // A label that already fits stays where labelSpread put it.
+    expect(clampLabelX(150, 40, 0, 300)).toBe(150);
+  });
+
+  it("centres a label that is wider than the gap", () => {
+    expect(clampLabelX(10, 500, 0, 300)).toBe(150);
+  });
+
+  it("keeps the moved label on its line", () => {
+    const source = { x: 0, y: 0 };
+    const target = { x: 300, y: 100 };
+    const label = "DERIVED_FROM (0.85) - needs review";
+    const at = placeLabel(source, [], target, label, { labelT: 0.3, labelDy: 0 });
+    expect(at.x - estimateLabelWidth(label) / 2).toBeGreaterThan(source.x);
+    expect(at.y).toBeCloseTo(pointAlong([source, target], at.x / 300).y);
+    expect(placeLabel(source, [], target, label, { labelT: 0.3, labelDy: 12 }).y).toBeCloseTo(at.y + 12);
+  });
+
+  it("keeps a routed edge's label clear of the column its last waypoint sits in", () => {
+    // Last waypoint at a column centre (x = 80 for a 160-wide column).
+    const label = "PROXY_OF (0.60) - needs review";
+    const at = placeLabel({ x: -300, y: 0 }, [{ x: 80, y: 50 }], { x: 460, y: 0 }, label, { labelT: 0.3, slotHalfWidth: 80 });
+    expect(at.x - estimateLabelWidth(label) / 2).toBeGreaterThan(160);
+    expect(at.x + estimateLabelWidth(label) / 2).toBeLessThan(460);
   });
 });

@@ -4,7 +4,7 @@ import { Background, Controls, Position, ReactFlow, ReactFlowProvider, type Node
 import "@xyflow/react/dist/style.css";
 import type { AssetGraph, LineageResponse } from "../api/types";
 import { edgeVisual, labelSpread, type LineageFlowEdge } from "../lib/edgeStyle";
-import { lineageRanks, lineageRows } from "../lib/lineageLayout";
+import { compareStrings, lineageRanks, lineageRows } from "../lib/lineageLayout";
 import LineageEdge from "./LineageEdge";
 
 // Columns run left to right, so edges leave a node's right side and enter the
@@ -120,8 +120,20 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
     return { nodes: [], edges: [], isEmpty: true };
   }
 
-  const ranks = lineageRanks(lineage.nodes.map((n) => n.id), lineage.edges);
-  const { rows, routes } = lineageRows(ranks, lineage.edges);
+  // Lay out by file name, not by the order (or ids) the API returns: ids
+  // follow ingest order, so two imports of the same files would otherwise draw
+  // differently. Edge order decides label spread and parallel nudges too.
+  const names = new Map(lineage.nodes.map((n) => [n.id, n.fileName]));
+  const nameOf = (id: number) => names.get(id) ?? "";
+  const lineageEdges = [...lineage.edges].sort(
+    (a, b) =>
+      compareStrings(nameOf(a.sourceNodeId), nameOf(b.sourceNodeId)) ||
+      compareStrings(nameOf(a.targetNodeId), nameOf(b.targetNodeId)) ||
+      compareStrings(a.relationshipType, b.relationshipType) ||
+      a.id - b.id,
+  );
+  const ranks = lineageRanks(lineage.nodes.map((n) => n.id), lineageEdges);
+  const { rows, routes } = lineageRows(ranks, lineageEdges, names);
 
   const nodes: FlowNode[] = [];
   lineage.nodes.forEach((n) => {
@@ -157,14 +169,14 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
   });
 
   // Edges into one node converge on the same handle; fan their labels out.
-  const spread = spreadLabels(lineage.edges, (e) => String(e.targetNodeId));
+  const spread = spreadLabels(lineageEdges, (e) => String(e.targetNodeId));
   // Edges on one source/target pair (different relationship types) share a
   // route; nudge each routed copy apart so none is drawn exactly over another.
   const pairSize = new Map<string, number>();
   const pairSeen = new Map<string, number>();
   const pairKey = (e: { sourceNodeId: number; targetNodeId: number }) => `${e.sourceNodeId}>${e.targetNodeId}`;
-  lineage.edges.forEach((e) => pairSize.set(pairKey(e), (pairSize.get(pairKey(e)) ?? 0) + 1));
-  const edges: LineageFlowEdge[] = lineage.edges.map((e, i) => {
+  lineageEdges.forEach((e) => pairSize.set(pairKey(e), (pairSize.get(pairKey(e)) ?? 0) + 1));
+  const edges: LineageFlowEdge[] = lineageEdges.map((e, i) => {
     const seen = pairSeen.get(pairKey(e)) ?? 0;
     pairSeen.set(pairKey(e), seen + 1);
     const nudge = (seen - (pairSize.get(pairKey(e))! - 1) / 2) * PARALLEL_NUDGE_Y;
@@ -179,6 +191,7 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
         // An edge spanning several columns bends through free slots in the ones
         // between, rather than running behind the nodes there.
         waypoints: routes.get(i)?.map((s) => ({ x: s.rank * LEVEL_GAP_X + NODE_CENTRE.x, y: s.y + NODE_CENTRE.y + nudge })),
+        slotHalfWidth: routes.has(i) ? NODE_WIDTH / 2 : undefined,
       },
     };
   });

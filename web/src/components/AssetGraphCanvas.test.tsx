@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import AssetGraphCanvas, { buildLineageFlow, buildOneHopFlow } from "./AssetGraphCanvas";
-import { pointAlong } from "../lib/edgeStyle";
+import { estimateLabelWidth, placeLabel, pointAlong } from "../lib/edgeStyle";
 import { labelSpread } from "../lib/edgeStyle";
 import type { Edge } from "../api/types";
 
@@ -271,6 +271,73 @@ describe("review-state edge styling", () => {
         }
       }
       expect(violations).toEqual([]);
+    });
+
+    it("never draws a label under a node, over random DAGs", () => {
+      // Labels are slid along their edge to keep siblings apart; a long one
+      // slid towards its source used to start under the source node (the demo
+      // hero's "ERIVED_FROM..."). Check every label box against every node box.
+      let seed = 777;
+      const rand = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+      const boxHeight = 70;
+      const labelHeight = 16;
+      const violations: string[] = [];
+      for (let g = 0; g < 150; g++) {
+        const n = 4 + Math.floor(rand() * 9);
+        const raw: Edge[] = [];
+        let id = 1;
+        for (let a = 1; a <= n; a++) for (let b = a + 1; b <= n; b++) if (rand() < 0.3) raw.push(lineageEdge(id++, a, b));
+        if (raw.length === 0) continue;
+        const { nodes, edges } = buildLineageFlow(1, {
+          rootId: 1,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          nodes: Array.from({ length: n }, (_, i) => node(i + 1)) as any,
+          edges: raw,
+        });
+        const width = Number(nodes[0].style!.width);
+        const pos = new Map(nodes.map((nd) => [nd.id, nd.position]));
+        for (const e of edges) {
+          const s = pos.get(e.source)!;
+          const t = pos.get(e.target)!;
+          const label = e.label as string;
+          const at = placeLabel({ x: s.x + width, y: s.y + 22 }, e.data?.waypoints ?? [], { x: t.x, y: t.y + 22 }, label, e.data);
+          const half = estimateLabelWidth(label) / 2;
+          for (const nd of nodes) {
+            const overlapX = at.x + half > nd.position.x && at.x - half < nd.position.x + width;
+            const overlapY = at.y + labelHeight / 2 > nd.position.y && at.y - labelHeight / 2 < nd.position.y + boxHeight;
+            if (overlapX && overlapY) violations.push(`graph ${g}: label of ${e.id} over node ${nd.id}`);
+          }
+        }
+      }
+      expect(violations).toEqual([]);
+    });
+
+    it("lays the same files out the same way whatever their ids and API order", () => {
+      // Ids follow ingest order, so a second import of the same files gets
+      // other ids; the edges may also come back in another order.
+      const named = (id: number, fileName: string) => ({ ...node(id), fileName });
+      const build = (ids: Record<string, number>, reverse: boolean) => {
+        const edgeList = [
+          lineageEdge(100 + ids.raw, ids.raw, ids.jpg),
+          lineageEdge(200 + ids.raw, ids.raw, ids.edl),
+          lineageEdge(300 + ids.jpg, ids.jpg, ids.edit),
+          lineageEdge(400 + ids.raw2, ids.raw2, ids.edl),
+        ];
+        const flow = buildLineageFlow(ids.raw, {
+          rootId: ids.raw,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          nodes: Object.entries(ids).map(([name, id]) => named(id, name)) as any,
+          edges: reverse ? edgeList.reverse() : edgeList,
+        });
+        const nameOf = new Map(Object.entries(ids).map(([name, id]) => [String(id), name]));
+        return {
+          nodes: Object.fromEntries(flow.nodes.map((nd) => [nameOf.get(nd.id), nd.position])),
+          edges: Object.fromEntries(flow.edges.map((e) => [`${nameOf.get(e.source)}>${nameOf.get(e.target)}`, e.data])),
+        };
+      };
+      const first = build({ raw: 1, raw2: 2, jpg: 3, edl: 4, edit: 5 }, false);
+      const second = build({ raw: 5, raw2: 3, jpg: 1, edl: 2, edit: 4 }, true);
+      expect(second).toEqual(first);
     });
 
     it("is deterministic for the same input and uses the custom edge type", () => {

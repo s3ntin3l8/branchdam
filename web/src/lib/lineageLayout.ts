@@ -60,24 +60,31 @@ export interface RouteSlot {
  * from the same source share their slots (#601), so a master linked to many
  * versions costs one row per crossed column, not one per link.
  *
- * Within a column, items are ordered by the mean height of their parents (then
- * id, for a stable order across refetches) so edges between neighbouring
- * columns run roughly flat instead of crossing; columns are stacked and
- * centred. `routes` is keyed by index into `edges`.
+ * Within a column, items are ordered by the mean height of their parents so
+ * edges between neighbouring columns run roughly flat instead of crossing;
+ * columns are stacked and centred. Ties break on `names` (the file name) and
+ * only then on id: ids follow ingest order, which can differ between two
+ * imports of the same files, so a name-first tie-break gives the same picture
+ * for the same files. `routes` is keyed by index into `edges`.
  */
 export function lineageRows(
   ranks: Map<number, number>,
   edges: LayoutEdge[],
+  names: Map<number, string> = new Map(),
 ): { rows: Map<number, number>; routes: Map<number, RouteSlot[]> } {
   interface Item {
     key: string;
     rank: number;
+    sortName: string;
     sortId: number;
     parents: string[];
   }
   const items = new Map<string, Item>();
   const nodeKey = (id: number) => `n${id}`;
-  ranks.forEach((rank, id) => items.set(nodeKey(id), { key: nodeKey(id), rank, sortId: id, parents: [] }));
+  const nameOf = (id: number) => names.get(id) ?? "";
+  ranks.forEach((rank, id) =>
+    items.set(nodeKey(id), { key: nodeKey(id), rank, sortName: nameOf(id), sortId: id, parents: [] }),
+  );
 
   const slotKeys = new Map<number, string[]>();
   edges.forEach((e, i) => {
@@ -91,7 +98,8 @@ export function lineageRows(
       // handle, so they share the route through the middle columns too and fan
       // out at the end, instead of each reserving a row of its own (#601).
       const key = `d${e.sourceNodeId}:${rank}`;
-      if (!items.has(key)) items.set(key, { key, rank, sortId: e.sourceNodeId, parents: [prev] });
+      if (!items.has(key))
+        items.set(key, { key, rank, sortName: nameOf(e.sourceNodeId), sortId: e.sourceNodeId, parents: [prev] });
       keys.push(key);
       prev = key;
     }
@@ -114,7 +122,13 @@ export function lineageRows(
         const placed = item.parents.filter((p) => y.has(p));
         return placed.length === 0 ? 0 : placed.reduce((sum, p) => sum + y.get(p)!, 0) / placed.length;
       };
-      column.sort((a, b) => barycentre(a) - barycentre(b) || a.sortId - b.sortId || (a.key < b.key ? -1 : 1));
+      column.sort(
+        (a, b) =>
+          barycentre(a) - barycentre(b) ||
+          compareStrings(a.sortName, b.sortName) ||
+          a.sortId - b.sortId ||
+          compareStrings(a.key, b.key),
+      );
       column.forEach((item, i) => y.set(item.key, (i - (column.length - 1) / 2) * ROW_GAP_Y));
     });
 
@@ -125,4 +139,9 @@ export function lineageRows(
     if (keys.length > 0) routes.set(i, keys.map((key) => ({ rank: items.get(key)!.rank, y: y.get(key)! })));
   });
   return { rows, routes };
+}
+
+/** Locale-independent string order, so the layout is the same in every browser. */
+export function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
