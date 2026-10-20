@@ -758,9 +758,12 @@ LIMIT 1;
 
 -- name: ListLiveNodeIDsUnderPrefix :many
 -- Live nodes whose file_path lies in the half-open range [?1, ?2). The watcher
--- passes "<dir>/" and "<dir>0" ('0' sorts right after '/') to find everything
--- under a directory that was removed or moved out. A range scan so it can use
--- idx_media_nodes_file_path.
+-- passes "<dir>/" and the exclusive upper bound of that prefix range -- the
+-- prefix with its final byte incremented, which sorts immediately after
+-- every path under the directory on EVERY platform (a '0' suffix only
+-- worked on POSIX, where '/' is 0x2F and '0' is 0x30; on Windows the
+-- separator is '\' (0x5C), so '0' sorted BEFORE it and the range came out
+-- empty). A range scan so it can use idx_media_nodes_file_path.
 SELECT id FROM media_nodes
 WHERE file_path >= ?1 AND file_path < ?2
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN');
