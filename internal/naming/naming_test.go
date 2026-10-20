@@ -1,6 +1,7 @@
 package naming
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,5 +132,75 @@ func TestRenderPath(t *testing.T) {
 	wantNoCam := "2026/2026-08-29_unknown_camera/IMG_001.JPG"
 	if gotNoCam != wantNoCam {
 		t.Errorf("RenderPath no camera = %q, want %q", gotNoCam, wantNoCam)
+	}
+}
+
+// TestRenderPathRejectsRelativeSegments: a rendered path must never
+// contain a ".." segment. The camera model comes from EXIF metadata,
+// which the file's author controls, and the naming template is
+// operator-configurable -- so "{camera_model}/{original_name}" with a
+// camera model of ".." would render "../IMG.jpg" and walk out of the
+// directory the template meant to name.
+func TestRenderPathRejectsRelativeSegments(t *testing.T) {
+	capturedAt := time.Date(2026, time.August, 29, 14, 30, 0, 0, time.UTC)
+	tpl := "{camera_model}/{original_name}"
+
+	for _, model := range []string{"..", ".", "...", "../..", ".. ", " ..", ". ."} {
+		got := RenderPath(tpl, TemplateVars{
+			CapturedAt:   capturedAt,
+			CameraModel:  model,
+			OriginalName: "IMG_001.JPG",
+		})
+		for _, seg := range strings.Split(got, "/") {
+			if seg == "." || seg == ".." {
+				t.Errorf("RenderPath with camera model %q = %q, which contains the relative segment %q",
+					model, got, seg)
+			}
+		}
+	}
+}
+
+// TestSanitizeSegmentKeepsOrdinaryNames pins that the dot rule only
+// catches a segment made ENTIRELY of dots: a name that merely contains
+// dots is an ordinary filename and must survive untouched.
+func TestSanitizeSegmentKeepsOrdinaryNames(t *testing.T) {
+	cases := map[string]string{
+		"Sony ILCE-7M4":  "Sony ILCE-7M4",
+		"DSC01234.ARW":   "DSC01234.ARW",
+		"photo..jpg":     "photo..jpg",
+		"..leading":      "..leading",
+		"trailing..":     "trailing..",
+		"a.b.c":          "a.b.c",
+		"":               "",
+		"with/slash":     "with_slash",
+		`with\backslash`: `with_backslash`,
+	}
+	for in, want := range cases {
+		if got := sanitizeSegment(in); got != want {
+			t.Errorf("sanitizeSegment(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSanitizeSegmentRejectsWindowsTrimmedSegments pins the trailing-byte
+// variant of the relative-segment rule.
+//
+// Win32 strips trailing dots and trailing spaces from a path segment before
+// it resolves it, so a camera model of ".. " is ".." to the filesystem -- and
+// filepath.IsLocal, which compares a segment to ".." exactly, lets it
+// through. A segment that is nothing but dots and spaces must be replaced
+// here, where it can still be.
+func TestSanitizeSegmentRejectsWindowsTrimmedSegments(t *testing.T) {
+	cases := map[string]string{
+		".. ": "___",
+		" ..": "___",
+		". .": "___",
+		"  ":  "__",
+		" ":   "_",
+	}
+	for in, want := range cases {
+		if got := sanitizeSegment(in); got != want {
+			t.Errorf("sanitizeSegment(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
