@@ -36,6 +36,26 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	ClearMFAPendingSecret(ctx context.Context, id int64) error
+	// The counterpart of UpdateMediaNodeFullHash, which cannot express the
+	// clearing case: it always writes a hash and always sets
+	// indexing_status = 'INDEXED_FULL'. A node whose hash is cleared holds no
+	// full hash at all, so its indexing_status goes back to INDEXED_SHALLOW --
+	// the value pipeline.IndexingStatusFor(nil) pairs with an absent hash.
+	// Leaving it INDEXED_FULL would claim a full hash the row no longer carries.
+	//
+	// Used when the server has just disproved the stored hash but cannot store
+	// the correct one either, because another live node already holds it and
+	// the unique index ux_media_nodes_live_full_hash forbids a second live node
+	// carrying the same hash. The node keeps its identity, its node_uuid, its
+	// edges and its attribution; only the hash goes.
+	//
+	// Clearing is the safe direction to err in: a node with no full_hash
+	// authorises nothing (internal/prune honours a Tier-3 master's hash only
+	// while a SERVER provenance row matches its CURRENT value), whereas a node
+	// holding a hash the server has disproved shadows the content it wrongly
+	// names -- GetMediaNodeByFullHash matches it, so a later file whose true
+	// hash is that one is silently declined.
+	ClearMediaNodeFullHash(ctx context.Context, id int64) error
 	// pipeline.restoreTrashedAssetTx calls this next to UntrashNode. The row
 	// stays (rows are never deleted); a NULL trashed_at means "not trashed".
 	ClearNodeTrashed(ctx context.Context, nodeID int64) error
@@ -256,6 +276,17 @@ type Querier interface {
 	// recoverable rather than merely resettable to some other stored value.
 	DeleteAppSetting(ctx context.Context, key string) error
 	DeleteDevicePairing(ctx context.Context, id int64) error
+	// Removes the provenance row of node ?1 when it names the hash ?2 the
+	// server has just disproved.
+	//
+	// Conditional on the hash on purpose. Every consumer of a provenance row
+	// joins it on the node's CURRENT full_hash -- ListVerifiedTier3Ancestors,
+	// ListPrunableNodes and the re-hash claim query all require
+	// p.full_hash = n.full_hash -- so a row that names some OTHER value is
+	// already inert, and it is the historical record of a hash the server
+	// really did compute. Only the row that asserts the disproved value is
+	// removed.
+	DeleteFullHashProvenance(ctx context.Context, arg DeleteFullHashProvenanceParams) error
 	DeleteMFACredentials(ctx context.Context, userID int64) error
 	DeletePairingAuditForPairing(ctx context.Context, pairingID int64) error
 	DeletePairingKeysForPairing(ctx context.Context, pairingID int64) error

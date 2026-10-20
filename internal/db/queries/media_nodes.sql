@@ -353,6 +353,32 @@ WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED') AND id = ?1;
 -- location (docs/schema.md fix #8's full_hash policy).
 UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1;
 
+-- name: ClearMediaNodeFullHash :exec
+-- The counterpart of UpdateMediaNodeFullHash, which cannot express the
+-- clearing case: it always writes a hash and always sets
+-- indexing_status = 'INDEXED_FULL'. A node whose hash is cleared holds no
+-- full hash at all, so its indexing_status goes back to INDEXED_SHALLOW --
+-- the value pipeline.IndexingStatusFor(nil) pairs with an absent hash.
+-- Leaving it INDEXED_FULL would claim a full hash the row no longer carries.
+--
+-- Used when the server has just disproved the stored hash but cannot store
+-- the correct one either, because another live node already holds it and
+-- the unique index ux_media_nodes_live_full_hash forbids a second live node
+-- carrying the same hash. The node keeps its identity, its node_uuid, its
+-- edges and its attribution; only the hash goes.
+--
+-- Clearing is the safe direction to err in: a node with no full_hash
+-- authorises nothing (internal/prune honours a Tier-3 master's hash only
+-- while a SERVER provenance row matches its CURRENT value), whereas a node
+-- holding a hash the server has disproved shadows the content it wrongly
+-- names -- GetMediaNodeByFullHash matches it, so a later file whose true
+-- hash is that one is silently declined.
+UPDATE media_nodes
+SET full_hash = NULL,
+    indexing_status = CASE WHEN indexing_status = 'INDEXED_FULL' THEN 'INDEXED_SHALLOW' ELSE indexing_status END,
+    updated_at = unixepoch()
+WHERE id = ?1;
+
 -- name: RefreshMediaNodeAfterInPlaceWrite :exec
 -- The metadata-inheritance endpoint (#54) is the first server-initiated
 -- filesystem write: it rewrites a child's file in place via exiftool, which
