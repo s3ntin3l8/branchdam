@@ -1068,6 +1068,19 @@ func processFile(ctx context.Context, deps ScanDeps, location storage.Location, 
 		if fh, err := hashing.FullHash(f); err != nil {
 			deps.logOrDiscard().Warn("pipeline: full hash failed", "path", rec.Path, "err", err)
 		} else {
+			// The BLAKE3 pass streamed the whole file, and the file may have
+			// been rewritten while it did. The pre-hash re-stat above only
+			// proves the bytes were stable up to that point; re-stat the same
+			// open handle now so the digest is known to describe one coherent
+			// byte sequence. A digest over bytes that are already stale must
+			// not be recorded as server-verified -- commitOne treats a
+			// full_hash that contradicts the stored one as a content change,
+			// and a stale digest would otherwise trigger a spurious version
+			// collision.
+			if fi, statErr := f.Stat(); statErr == nil &&
+				(fi.Size() != rec.Size || fi.ModTime().Unix() != rec.ModTime.Unix()) {
+				return nil, fmt.Errorf("%w: %s", ErrFileChangedDuringHash, rec.Path)
+			}
 			result.FullHash = fh
 		}
 	}
