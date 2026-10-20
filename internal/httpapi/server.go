@@ -285,10 +285,35 @@ func New(d Deps) *Server {
 	// both cases; forward-auth identity (mode "both") needs a non-empty list.
 	if cfg := cfgProvider.Effective(); cfg != nil {
 		if len(cfg.HTTP.TrustedProxies) == 0 {
-			log.Warn("http: trustedProxies is empty -- if unset, X-Forwarded-* headers are trusted from any source (backward-compat default); an explicit [] denies all forwarded headers. Set http.trustedProxies to your reverse proxy's IP/CIDR to harden.")
-			if auth.AuthMode(cfg.Auth.Mode) == auth.AuthModeBoth {
+			log.Warn("http: trustedProxies is empty -- if unset, X-Forwarded-* headers are trusted from any source (backward-compat default); an explicit [] denies all forwarded headers. Set http.trustedProxies to your reverse proxy's IP/CIDR to harden. The companion-pairing QR already refuses a forwarded host without it, so the QR will carry this server's own listen address until you set it.")
+		}
+		switch auth.AuthMode(cfg.Auth.Mode) {
+		case auth.AuthModeBoth:
+			if len(cfg.HTTP.TrustedProxies) == 0 {
 				log.Error("auth: mode \"both\" with empty http.trustedProxies -- forward-auth identity headers are IGNORED (forward-auth login disabled; local login still works). Set http.trustedProxies to your ForwardAuth proxy's IP/CIDR to enable forward identity.")
 			}
+		case auth.AuthModeForward, "":
+			// Mode "forward" is the documented contract that ForwardAuth is
+			// the gate: the server does NOT check the peer against
+			// http.trustedProxies in this mode, so the forwarded identity
+			// headers are honoured from whoever can reach the port
+			// (docs/local-auth.md §1). That
+			// is fine behind a proxy that strips those headers and does not
+			// expose the app port -- and a full bypass the moment the port
+			// is reachable directly. Say so at startup, where the operator
+			// can act on it; mode "both" makes the server enforce the
+			// allowlist itself.
+			//
+			// The empty mode is the same case: docs/configuration.md
+			// documents it as "treated as forward", and config.Load
+			// accepts it. cmd/branchdam normalises the mode on its LOCAL
+			// copy of the config, but settings.NewStore snapshotted the
+			// base config before that, and s.cfg() reads the store's
+			// effective config -- so the empty string reaches this switch
+			// unchanged. Without the empty case the warning never fires
+			// for exactly the configuration that needs it most (a config
+			// that never set auth.mode at all).
+			log.Warn("auth: mode \"forward\" -- forward-auth identity headers are honoured from ANY peer, because this mode does not check the peer against http.trustedProxies. The app port must therefore be reachable ONLY through the ForwardAuth proxy (which strips those headers); exposing it directly lets any client assert an admin identity with no credential. Use auth.mode \"both\" to have the server enforce the allowlist itself.")
 		}
 	}
 	s := &Server{
