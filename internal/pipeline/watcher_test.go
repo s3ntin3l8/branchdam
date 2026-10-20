@@ -1078,3 +1078,48 @@ func TestWatchSupervisorDirectoryMovedOutMarksChildrenMissing(t *testing.T) {
 		})
 	}
 }
+
+// TestPrefixRangeEnd: the exclusive upper bound of a prefix range must sort
+// immediately after every path under the prefix, on EVERY platform.
+//
+// The old form appended '0', which only happened to be right on POSIX
+// ('/' is 0x2F, '0' is 0x30). On Windows the separator is '\' (0x5C), so
+// '0' sorted BEFORE it and the half-open range came out empty -- no node
+// under a removed directory was ever marked MISSING.
+//
+// The bound is the prefix with its FINAL byte incremented, carrying into
+// the previous byte while the final one is 0xFF. Appending a byte is not
+// the same thing: for the POSIX root "/" the appended form gives "/0",
+// which sorts BELOW "/a" and so would drop every path under the root.
+func TestPrefixRangeEnd(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{"posix dir", "/a/b/", "/a/b0"},
+		{"windows dir", `C:\a\b\`, `C:\a\b]`},
+		{"root", "/", "0"},
+		{"carries", "/a/\xff", "/a0"},
+		{"carries twice", "/a/\xff/\xff", "/a/\xff0"},
+		{"all 0xff", "\xff\xff", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := prefixRangeEnd(tt.prefix)
+			if got != tt.want {
+				t.Fatalf("prefixRangeEnd(%q) = %q, want %q", tt.prefix, got, tt.want)
+			}
+			// The bound must be strictly greater than every string that
+			// starts with the prefix, and strictly less than the first
+			// string that does not.
+			if tt.prefix != "" && got != "" {
+				under := tt.prefix + "zzz"
+				if tt.prefix >= under || under >= got {
+					t.Errorf("bound %q does not enclose %q", got, under)
+				}
+			}
+		})
+	}
+}
