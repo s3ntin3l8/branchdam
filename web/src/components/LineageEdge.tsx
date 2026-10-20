@@ -26,11 +26,15 @@ export default function LineageEdge({
   const target = points[points.length - 1];
   // A string label is kept clear of the nodes (see placeLabel); anything else
   // has no width estimate, so it stays at its anchor.
-  const anchor = labelAnchor(source, waypoints, target, data?.labelT ?? 0.5);
-  const { x: labelX, y: labelY } =
-    typeof label === "string"
-      ? placeLabel(source, waypoints, target, label, data ?? {})
-      : { x: anchor.x, y: anchor.y + (data?.labelDy ?? 0) };
+  let labelX: number;
+  let labelY: number;
+  if (typeof label === "string") {
+    ({ x: labelX, y: labelY } = placeLabel(source, waypoints, target, label, data ?? {}));
+  } else {
+    const anchor = labelAnchor(source, waypoints, target, data?.labelT ?? 0.5);
+    labelX = anchor.x;
+    labelY = anchor.y + (data?.labelDy ?? 0);
+  }
 
   return (
     <>

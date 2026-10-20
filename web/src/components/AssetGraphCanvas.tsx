@@ -191,7 +191,7 @@ export function buildLineageFlow(rootId: number, lineage: LineageResponse): { no
         // An edge spanning several columns bends through free slots in the ones
         // between, rather than running behind the nodes there.
         waypoints: routes.get(i)?.map((s) => ({ x: s.rank * LEVEL_GAP_X + NODE_CENTRE.x, y: s.y + NODE_CENTRE.y + nudge })),
-        slotHalfWidth: routes.has(i) ? NODE_WIDTH / 2 : undefined,
+        slotHalfWidth: routes.has(i) ? NODE_CENTRE.x : undefined,
       },
     };
   });
