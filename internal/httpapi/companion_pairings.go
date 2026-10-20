@@ -667,19 +667,39 @@ func (s *Server) qrPayloadFor(ctx context.Context) func(agentID, apiKey string) 
 // server is reachable from the phone (Traefik's ForwardAuth normally
 // sets these headers in front of /api/v1/*).
 //
-// The forwarded headers are honoured only from a trusted proxy (same rule
-// as requestOrigin): the host lands in the QR's server= value, so a forged
-// X-Forwarded-Host would make a device send its new key to the attacker.
+// The forwarded HOST is honoured only from an EXPLICITLY configured
+// trusted proxy -- the same rule clientIP applies to X-Forwarded-For
+// (see the comment there). This is deliberately stricter than
+// isTrustedProxy's unset-list default, and it has to be: the host
+// lands in the QR's server= value right next to the companion's
+// plaintext API key, so a forged X-Forwarded-Host points a device's
+// fresh key at whoever chose that host. isTrustedProxy's "nil means
+// trust every source" is acceptable for header-rewriting conveniences
+// that degrade gracefully when misconfigured; it is not acceptable for
+// a value that becomes a credential destination.
+//
+// The forwarded PROTO is not gated the same way: it selects the
+// scheme, not the destination, and gating it would break the
+// TLS-terminating deployments this flow exists for -- the app sees
+// plain HTTP from the proxy, so the public https:// scheme is only
+// knowable from X-Forwarded-Proto. A forged scheme is a downgrade, not
+// a redirection: the device still reaches the server, just without TLS.
 func (s *Server) pairingForwardedMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		trusted := isTrustedProxy(r.RemoteAddr, currentTrustedProxies(s))
+		proxies := currentTrustedProxies(s)
+		trusted := isTrustedProxy(r.RemoteAddr, proxies)
+		// A forwarded host needs an allowlist that says who may set
+		// it. With no list configured there is nobody to vouch for the
+		// peer, so the header is ignored and the QR falls back to the
+		// server's own listen address.
+		hostTrusted := len(proxies) > 0 && trusted
 		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" && trusted {
 			ctx = context.WithValue(ctx, forwardedProtoKey{}, proto)
 		} else if r.TLS != nil {
 			ctx = context.WithValue(ctx, forwardedProtoKey{}, "https")
 		}
-		if host := r.Header.Get("X-Forwarded-Host"); host != "" && trusted {
+		if host := r.Header.Get("X-Forwarded-Host"); host != "" && hostTrusted {
 			ctx = context.WithValue(ctx, forwardedHostKey{}, host)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
