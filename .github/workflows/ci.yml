@@ -22,7 +22,7 @@ jobs:
       has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
       docker_relevant: ${{ steps.docker-filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: check
         run: |
           if [ -f web/package.json ]; then echo "has_web=true" >> "$GITHUB_OUTPUT"; else echo "has_web=false" >> "$GITHUB_OUTPUT"; fi
@@ -32,7 +32,7 @@ jobs:
       # PR-time Docker compile-check to PRs that could plausibly break the
       # image, instead of running it on every PR.
       - id: docker-filter
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
             docker:
@@ -62,15 +62,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # web.Dist() (//go:embed) needs a real web/dist to resolve when
       # golangci-lint type-checks the package graph -- same stub ci-go.yml's
       # reusable workflow runs, kept in sync via the shared script.
       - run: bash .github/ci-prebuild.sh
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # .golangci.yml declares `version: "2"`, which requires a v2.x
           # binary -- pin explicitly rather than floating to "latest" so a
@@ -99,8 +99,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26'
       - run: node --test scripts/demo/*.test.mjs
