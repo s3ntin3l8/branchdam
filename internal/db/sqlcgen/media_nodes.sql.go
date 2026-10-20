@@ -764,13 +764,24 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE document_id = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+LIMIT ?2
 `
+
+type ListLiveNodesByDocumentIDParams struct {
+	DocumentID sql.NullString
+	Limit      int64
+}
 
 // Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 // matching a candidate parent's document_id is a near-certain lineage
 // signal (confidence 0.95).
-func (q *Queries) ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]MediaNode, error) {
-	rows, err := q.db.QueryContext(ctx, listLiveNodesByDocumentID, documentID)
+//
+// Capped at ?2 rows. A document_id names one original document, so a
+// legitimate group is small; the cap bounds what a pathological group
+// (a file with a forged or colliding document_id) can cost. The
+// resolver logs when the cap is actually hit.
+func (q *Queries) ListLiveNodesByDocumentID(ctx context.Context, arg ListLiveNodesByDocumentIDParams) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodesByDocumentID, arg.DocumentID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -906,11 +917,24 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 WHERE file_name = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+LIMIT ?2
 `
 
+type ListLiveNodesByFileNameParams struct {
+	FileName string
+	Limit    int64
+}
+
 // Look up live media nodes sharing exact file_name for fallback path matching.
-func (q *Queries) ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error) {
-	rows, err := q.db.QueryContext(ctx, listLiveNodesByFileName, fileName)
+//
+// Capped at ?2 rows. A file name is NOT unique -- the same name appears
+// in many directories, and a phone camera reuses names -- so this can
+// legitimately match many rows. The cap bounds the work; the caller
+// treats a result that is not exactly one row as an ambiguous match and
+// skips it, so truncating a large group to a cap of ?2 (which is
+// greater than one) cannot turn an ambiguous match into a wrong one.
+func (q *Queries) ListLiveNodesByFileName(ctx context.Context, arg ListLiveNodesByFileNameParams) ([]MediaNode, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveNodesByFileName, arg.FileName, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

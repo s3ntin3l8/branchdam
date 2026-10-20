@@ -663,13 +663,25 @@ type Querier interface {
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
-	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]MediaNode, error)
+	//
+	// Capped at ?2 rows. A document_id names one original document, so a
+	// legitimate group is small; the cap bounds what a pathological group
+	// (a file with a forged or colliding document_id) can cost. The
+	// resolver logs when the cap is actually hit.
+	ListLiveNodesByDocumentID(ctx context.Context, arg ListLiveNodesByDocumentIDParams) ([]MediaNode, error)
 	// T1 (spec 9.5): before assuming two same-fast_hash files at DIFFERENT live
 	// paths are the same content, the pipeline needs every other live node
 	// sharing that fast_hash so it can escalate to full_hash and compare.
 	ListLiveNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error)
 	// Look up live media nodes sharing exact file_name for fallback path matching.
-	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error)
+	//
+	// Capped at ?2 rows. A file name is NOT unique -- the same name appears
+	// in many directories, and a phone camera reuses names -- so this can
+	// legitimately match many rows. The cap bounds the work; the caller
+	// treats a result that is not exactly one row as an ambiguous match and
+	// skips it, so truncating a large group to a cap of ?2 (which is
+	// greater than one) cannot turn an ambiguous match into a wrong one.
+	ListLiveNodesByFileName(ctx context.Context, arg ListLiveNodesByFileNameParams) ([]MediaNode, error)
 	// Tier-2 filenameStem resolver: candidate parents sharing a normalized
 	// filename stem with the child, scored further by capture day / camera /
 	// directory match in internal/graph. Capped at ?2 rows -- defense in depth
