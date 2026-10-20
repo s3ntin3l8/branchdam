@@ -288,8 +288,15 @@ func (s *Server) handlePutSettings(ctx context.Context, in *PutSettingsInput) (*
 		// One actor_audit row per write, with the full diff in
 		// details_json. Best-effort: a failed audit write must not
 		// 500 a successful settings write.
+		//
+		// Secret fields are redacted here. `set` holds the plaintext value
+		// the write actually applied (the store seals it), and actor_audit
+		// rows are retained -- so writing the plaintext would create the one
+		// copy of the secret the rest of the system works to never make,
+		// and rotating the credential would not retire the old one, since it
+		// stays readable in the historical rows.
 		details := map[string]any{
-			"set":   set,
+			"set":   redactSecretSettings(set),
 			"unset": in.Body.Unset,
 		}
 		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), auditPkg.EventSettingsUpdated, "app_setting", "batch", details); err != nil {
@@ -302,4 +309,28 @@ func (s *Server) handlePutSettings(ctx context.Context, in *PutSettingsInput) (*
 	}
 
 	return s.buildSettingsOutput(ctx)
+}
+
+// redactedSettingValue is the placeholder that stands in for a secret
+// field's value in the audit log. It matches the marker internal/email uses
+// for redacted tokens, so "this was redacted" reads the same everywhere.
+const redactedSettingValue = "[REDACTED]"
+
+// redactSecretSettings returns a copy of set in which every field registered
+// as Secret has its value replaced by redactedSettingValue.
+//
+// The copy is what reaches the audit log; the caller's map keeps the
+// plaintext the write needs. A copy is required precisely because the
+// plaintext must not be mutated away -- the store still has to seal it --
+// so redaction happens on the way out to the audit trail, not on the way in.
+func redactSecretSettings(set map[string]any) map[string]any {
+	out := make(map[string]any, len(set))
+	for key, val := range set {
+		if field, ok := settings.Lookup(key); ok && field.Secret {
+			out[key] = redactedSettingValue
+			continue
+		}
+		out[key] = val
+	}
+	return out
 }

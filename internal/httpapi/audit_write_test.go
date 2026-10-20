@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
@@ -134,6 +135,57 @@ func TestHandlePutSettings_WritesActorAudit(t *testing.T) {
 	_, _, ok := findActorAuditRow(t, srv, audit.EventSettingsUpdated)
 	if !ok {
 		t.Error("no settings.updated actor_audit row after handler returned")
+	}
+}
+
+// TestHandlePutSettings_RedactsSecretInActorAudit: a settings write that
+// sets a secret field must not leave the plaintext in the audit trail.
+//
+// The store seals the value, and the GET handler omits it, but the audit
+// row carries the diff -- and actor_audit rows are retained. A plaintext
+// copy would therefore be the one place the secret survives at rest, and it
+// would outlive the rotation of the credential it holds: the old value
+// stays readable in the historical rows.
+func TestHandlePutSettings_RedactsSecretInActorAudit(t *testing.T) {
+	srv := newAuditWiredServer(t, true, true, nil)
+
+	const plaintext = "immich-api-key-plaintext"
+	body := settingsGetJSON(map[string]any{"set": map[string]any{"immich.apiKey": plaintext}})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, adminReq(http.MethodPut, "/api/v1/settings", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+
+	rows, err := srv.db.Reader.ListActorAudit(context.Background(), sqlcgen.ListActorAuditParams{
+		Limit:  200,
+		Offset: 0,
+	})
+	if err != nil {
+		t.Fatalf("ListActorAudit: %v", err)
+	}
+	details := ""
+	found := false
+	for _, r := range rows {
+		if r.Event == audit.EventSettingsUpdated {
+			details = r.DetailsJson
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no settings.updated actor_audit row after handler returned")
+	}
+	if strings.Contains(details, plaintext) {
+		t.Fatalf("the audit row holds the plaintext secret: %s", details)
+	}
+	if !strings.Contains(details, redactedSettingValue) {
+		t.Errorf("the audit row does not record that a secret was set: %s", details)
+	}
+	// The key itself stays in the diff -- only the value is withheld, so the
+	// trail still says which setting changed.
+	if !strings.Contains(details, "immich.apiKey") {
+		t.Errorf("the audit row lost the key name: %s", details)
 	}
 }
 
