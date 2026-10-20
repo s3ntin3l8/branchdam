@@ -38,8 +38,48 @@ func New(cfg Config) *Client {
 		baseURL:   strings.TrimSuffix(cfg.APIURL, "/"),
 		apiKey:    cfg.APIKey,
 		libraryID: cfg.LibraryID,
-		http:      &http.Client{Timeout: 15 * time.Second},
+		http: &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: redirectGuard,
+		},
 	}
+}
+
+// apiKeyHeader carries the Immich API key.
+const apiKeyHeader = "X-Api-Key"
+
+// maxRedirects matches net/http's own default redirect cap.
+const maxRedirects = 10
+
+// redirectGuard stops the API key from crossing a host boundary.
+//
+// net/http forwards a redirect's original headers to the new request,
+// filtering only Authorization, Www-Authenticate, Cookie and Cookie2 --
+// the headers it knows are credentials. A custom header is copied
+// verbatim to ANY host, so a redirect to another host handed the Immich
+// API key to whoever controls that host.
+//
+// A redirect that stays on the same host and port is fine: the key still
+// belongs to the same server, and deployments legitimately redirect (a
+// trailing-slash fix, an http -> https upgrade). Anything else drops the
+// key, so the redirected request fails closed as unauthenticated instead
+// of authenticating to a stranger.
+//
+// Setting CheckRedirect REPLACES net/http's defaultCheckRedirect, so the
+// redirect cap has to be carried over by hand.
+func redirectGuard(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("immich: stopped after %d redirects", maxRedirects)
+	}
+	if len(via) == 0 || req.URL == nil || via[0].URL == nil {
+		return nil
+	}
+	// Host carries the port, so a redirect from immich:2283 to immich:2284
+	// -- a different service on the same name -- drops the key too.
+	if !strings.EqualFold(via[0].URL.Host, req.URL.Host) {
+		req.Header.Del(apiKeyHeader)
+	}
+	return nil
 }
 
 // ErrImmichHTTP is a typed error for a non-2xx response.
@@ -54,6 +94,8 @@ type ErrImmichHTTP struct {
 func (e *ErrImmichHTTP) Error() string {
 	return fmt.Sprintf("immich: http %d: %s", e.Status, e.Body)
 }
+
+// ValidateAPIURL checks that raw is usable as an Immich API base URL.
 
 const (
 	triggerAttempts   = 3
@@ -111,7 +153,7 @@ func (c *Client) triggerOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Api-Key", c.apiKey)
+	req.Header.Set(apiKeyHeader, c.apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)

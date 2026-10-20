@@ -264,3 +264,67 @@ func TestRetryDelay(t *testing.T) {
 		})
 	}
 }
+
+// TestTriggerScanDropsAPIKeyOnCrossHostRedirect: net/http forwards a
+// redirect's original headers to the new request, filtering only the
+// headers it knows are credentials (Authorization, Www-Authenticate,
+// Cookie, Cookie2). A custom header is copied to ANY host, so without a
+// guard a redirect handed the Immich API key to a stranger.
+func TestTriggerScanDropsAPIKeyOnCrossHostRedirect(t *testing.T) {
+	var gotKey atomic.Value
+	gotKey.Store("unset")
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey.Store(r.Header.Get("X-Api-Key"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer other.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/api/libraries/lib/scan", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIURL: srv.URL, APIKey: "secret", LibraryID: "lib"})
+	if err := c.TriggerScan(context.Background()); err != nil {
+		t.Fatalf("TriggerScan: %v", err)
+	}
+	key, _ := gotKey.Load().(string)
+	if key == "unset" {
+		t.Fatal("the redirect was never followed")
+	}
+	if key != "" {
+		t.Errorf("redirected host received X-Api-Key %q, want it stripped", key)
+	}
+}
+
+// TestTriggerScanKeepsAPIKeyOnSameHostRedirect: a redirect that stays on
+// the same host and port is a normal thing for a deployment to do (a
+// trailing-slash fix, an http -> https upgrade), and the key still belongs
+// to that same server.
+func TestTriggerScanKeepsAPIKeyOnSameHostRedirect(t *testing.T) {
+	var gotKey atomic.Value
+	gotKey.Store("unset")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			gotKey.Store(r.Header.Get("X-Api-Key"))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Redirect(w, r, "/ping", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIURL: srv.URL, APIKey: "secret", LibraryID: "lib"})
+	if err := c.TriggerScan(context.Background()); err != nil {
+		t.Fatalf("TriggerScan: %v", err)
+	}
+	key, _ := gotKey.Load().(string)
+	if key == "unset" {
+		t.Fatal("the redirect was never followed")
+	}
+	if key != "secret" {
+		t.Errorf("same-host redirect received X-Api-Key %q, want it kept", key)
+	}
+}
