@@ -139,6 +139,24 @@ func (sv *Supervisor) startLocked(cfg *config.Config) {
 		sv.log.Warn("sync: immich.libraryId is empty or unresolved, not starting the sync worker", "libraryID", params.libraryID)
 		return
 	}
+	// The API URL must be an http(s) URL with a host. This client sends the
+	// Immich API key to whatever host the URL names, so a URL that is not
+	// an http(s) URL is either a typo or a way to point the key somewhere
+	// it does not belong. Refuse to start rather than fail every scan.
+	if err := immich.ValidateAPIURL(params.apiURL); err != nil {
+		sv.log.Warn("sync: immich.apiUrl is not a usable http(s) URL, not starting the sync worker", "err", err)
+		return
+	}
+	// The library id has to be usable as a single URL path segment for the
+	// same reason the API URL has to be usable: immich.New records an
+	// invalid one in the client's own error, so the worker would start and
+	// then fail every trigger once per cycle -- forever, with nothing in
+	// the log to say why. Refuse to start beside the apiURL check, where
+	// the operator will see it.
+	if err := immich.ValidateLibraryID(params.libraryID); err != nil {
+		sv.log.Warn("sync: immich.libraryId is not a usable library id, not starting the sync worker", "err", err)
+		return
+	}
 
 	immichClient := immich.New(immich.Config{
 		APIURL: params.apiURL, APIKey: params.apiKey, LibraryID: params.libraryID,

@@ -328,3 +328,74 @@ func TestTriggerScanKeepsAPIKeyOnSameHostRedirect(t *testing.T) {
 		t.Errorf("same-host redirect received X-Api-Key %q, want it kept", key)
 	}
 }
+
+func TestValidateAPIURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"https", "https://immich.example:2283", false},
+		{"http", "http://immich:2283", false},
+		{"trailing slash", "http://immich:2283/", false},
+		{"path is allowed", "http://immich:2283/immich", false},
+		{"empty", "", true},
+		{"blank", "   ", true},
+		{"no scheme", "immich:2283", true},
+		{"file scheme", "file:///etc/passwd", true},
+		{"gopher scheme", "gopher://immich:2283", true},
+		{"no host", "http://", true},
+		{"userinfo", "http://user:pass@immich:2283", true},
+		{"query string", "http://immich:2283?token=1", true},
+		{"empty query", "http://immich:2283?", true},
+		{"fragment", "http://immich:2283#frag", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateAPIURL(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ValidateAPIURL(%q) error = %v, wantErr %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTriggerScanRejectsInvalidAPIURL: a URL that is not an http(s) URL
+// must not produce a request at all -- the client sends the API key to
+// whatever host the URL names.
+func TestTriggerScanRejectsInvalidAPIURL(t *testing.T) {
+	for _, raw := range []string{"", "file:///etc/passwd", "immich:2283", "http://"} {
+		c := New(Config{APIURL: raw, APIKey: "secret", LibraryID: "lib"})
+		if err := c.TriggerScan(context.Background()); err == nil {
+			t.Errorf("api url %q was accepted, want an error", raw)
+		}
+	}
+}
+
+// TestTriggerScanRejectsAPIURLWithQueryOrFragment: the endpoints are
+// concatenated onto the base URL ("%s/api/libraries/%s/scan"), so a base
+// URL carrying a query string does not produce a request to the endpoint
+// -- it produces path "/" with the whole endpoint swallowed into the
+// query ("token=1/api/libraries/1/scan"). The worker would start and
+// every trigger would fail against a URL the operator never configured,
+// which is exactly what the startup validation exists to prevent.
+func TestTriggerScanRejectsAPIURLWithQueryOrFragment(t *testing.T) {
+	for _, raw := range []string{"http://immich:2283?token=1", "http://immich:2283#frag"} {
+		c := New(Config{APIURL: raw, APIKey: "secret", LibraryID: "1"})
+		if err := c.TriggerScan(context.Background()); err == nil {
+			t.Errorf("api url %q was accepted, want an error", raw)
+		}
+	}
+}
+
+// TestTriggerScanRejectsInvalidLibraryID: the library id becomes one path
+// segment of the scan URL, so a separator or a relative-path segment in it
+// would move the request -- with the API key attached -- off the endpoint.
+func TestTriggerScanRejectsInvalidLibraryID(t *testing.T) {
+	for _, id := range []string{"", ".", "..", "...", "a/b", `a\b`, "../admin"} {
+		c := New(Config{APIURL: "http://immich:2283", APIKey: "secret", LibraryID: id})
+		if err := c.TriggerScan(context.Background()); err == nil {
+			t.Errorf("library id %q was accepted, want an error", id)
+		}
+	}
+}

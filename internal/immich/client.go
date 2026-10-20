@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -31,11 +32,16 @@ type Client struct {
 	apiKey    string
 	libraryID string
 	http      *http.Client
+	// err is set when the configuration cannot be used: an API URL that is
+	// not a usable http(s) URL, or a library id that is not a single path
+	// segment. Every call returns it instead of building a request that
+	// would go somewhere unintended.
+	err error
 }
 
 func New(cfg Config) *Client {
-	return &Client{
-		baseURL:   strings.TrimSuffix(cfg.APIURL, "/"),
+	c := &Client{
+		baseURL:   strings.TrimSuffix(strings.TrimSpace(cfg.APIURL), "/"),
 		apiKey:    cfg.APIKey,
 		libraryID: cfg.LibraryID,
 		http: &http.Client{
@@ -43,6 +49,17 @@ func New(cfg Config) *Client {
 			CheckRedirect: redirectGuard,
 		},
 	}
+	switch {
+	case strings.TrimSpace(cfg.APIURL) == "":
+		c.err = errors.New("immich: api url is empty")
+	default:
+		if err := ValidateAPIURL(cfg.APIURL); err != nil {
+			c.err = err
+		} else if err := ValidateLibraryID(cfg.LibraryID); err != nil {
+			c.err = err
+		}
+	}
+	return c
 }
 
 // apiKeyHeader carries the Immich API key.
@@ -82,6 +99,81 @@ func redirectGuard(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// ValidateAPIURL checks that raw is usable as an Immich API base URL.
+//
+// The scheme must be http or https: anything else is either a typo (a
+// bare "immich:2283" parses as the scheme "immich") or a way to point the
+// client at something that is not the Immich API -- and this client sends
+// the Immich API key to whatever host this names.
+//
+// The URL must carry a host, and must not carry userinfo: the API key
+// belongs in the X-Api-Key header, not in the URL, where it would land in
+// proxy logs and server access logs.
+//
+// Nor may it carry a query string or a fragment. The endpoints are
+// concatenated onto the base URL by fmt.Sprintf ("%s/api/libraries/%s/scan"),
+// so a base URL of "http://host?token=1" does not produce
+// "http://host/api/libraries/1/scan?token=1" -- the query swallows the
+// whole path and the request goes out as path "/" with query
+// "token=1/api/libraries/1/scan". Every trigger then fails against a URL
+// the operator never configured, which is exactly the failure this
+// validation exists to catch before the worker starts.
+func ValidateAPIURL(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return errors.New("immich: api url is empty")
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("immich: invalid api url: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return fmt.Errorf("immich: api url scheme %q is not http or https", u.Scheme)
+	}
+	if u.Host == "" {
+		return errors.New("immich: api url has no host")
+	}
+	if u.User != nil {
+		return errors.New("immich: api url must not carry userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("immich: api url must not carry a query string")
+	}
+	if u.Fragment != "" {
+		return errors.New("immich: api url must not carry a fragment")
+	}
+	return nil
+}
+
+// ValidateLibraryID checks that id is safe to interpolate into the scan
+// path as a single segment.
+//
+// The library id is configuration, and configuration is rewritable at
+// runtime through the settings API, so it is not necessarily the value the
+// operator started with. It must not contain a separator, and it must not
+// be a relative-path segment of its own -- either would move the request
+// off POST /api/libraries/{id}/scan, onto a path of the caller's choosing,
+// with the API key attached.
+//
+// Exported so a caller can refuse to start on an unusable id instead of
+// starting a worker that fails every scan forever -- see
+// internal/sync.Supervisor's own call site.
+func ValidateLibraryID(id string) error {
+	if id == "" {
+		return errors.New("immich: library id is empty")
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("immich: library id %q contains a path separator", id)
+	}
+	// "." and ".." (and "..." and so on) are relative path segments.
+	if strings.Trim(id, ".") == "" {
+		return fmt.Errorf("immich: library id %q is a relative path segment", id)
+	}
+	return nil
+}
+
 // ErrImmichHTTP is a typed error for a non-2xx response.
 type ErrImmichHTTP struct {
 	Status int
@@ -94,8 +186,6 @@ type ErrImmichHTTP struct {
 func (e *ErrImmichHTTP) Error() string {
 	return fmt.Sprintf("immich: http %d: %s", e.Status, e.Body)
 }
-
-// ValidateAPIURL checks that raw is usable as an Immich API base URL.
 
 const (
 	triggerAttempts   = 3
@@ -110,6 +200,12 @@ const (
 // otherwise the exponential backoff applies. Respects ctx cancellation
 // between attempts.
 func (c *Client) TriggerScan(ctx context.Context) error {
+	// A configuration that cannot produce a valid request is not a
+	// transient failure -- retrying it three times would only delay the
+	// error.
+	if c.err != nil {
+		return c.err
+	}
 	var lastErr error
 	wait := triggerBaseWait
 	for attempt := 0; attempt < triggerAttempts; attempt++ {
@@ -148,8 +244,11 @@ func retryDelay(backoff time.Duration, httpErr *ErrImmichHTTP) time.Duration {
 }
 
 func (c *Client) triggerOnce(ctx context.Context) error {
-	url := fmt.Sprintf("%s/api/libraries/%s/scan", c.baseURL, c.libraryID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(nil))
+	if c.err != nil {
+		return c.err
+	}
+	endpoint := fmt.Sprintf("%s/api/libraries/%s/scan", c.baseURL, url.PathEscape(c.libraryID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(nil))
 	if err != nil {
 		return err
 	}
