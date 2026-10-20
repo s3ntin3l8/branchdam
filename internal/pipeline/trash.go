@@ -162,13 +162,14 @@ func trashAssetTx(
 			// bookkeeping row.
 		case loc.ReadOnly || loc.Tier == "TIER3_MASTER_ARCHIVE":
 			// Tier 3 master archives and read-only tiers must NEVER be
-			// written to (AGENTS.md invariant #3: Tier 3 is read-only by
-			// design; a user-initiated "trash" against a Tier 3 master is
-			// a logical-only operation -- the row is marked TRASHED so it
-			// disappears from listings, but the bytes stay on disk
-			// untouched. The original PR #315 behavior was to mark the
-			// row MISSING; the TRASHED state is its explicit-successor
-			// per the EVENT_NODE_DELETED → TRASHED mapping.
+			// physically written to by a user-initiated "trash" (AGENTS.md
+			// invariant 3: Tier 3 IS writable by default -- for
+			// server-governed ingest -- so a Tier-3 trash is a logical-only
+			// operation: the row is marked TRASHED so it disappears from
+			// listings, but the bytes stay on disk untouched). The original
+			// PR #315 behavior was to mark the row MISSING; the TRASHED state
+			// is its explicit-successor per the EVENT_NODE_DELETED → TRASHED
+			// mapping.
 			log.Warn("trash: skipping physical move for read-only/tier3 master; row marked TRASHED logically only",
 				"nodeID", loaded.ID, "tier", loc.Tier, "path", loaded.FilePath)
 		default:
@@ -671,17 +672,24 @@ func purgeLinkedExports(ctx context.Context, q *sqlcgen.Queries, guard *storage.
 		// Exports share the .trash/ buffer with the master so a restore
 		// of the master also restores its exports atomically (the master's
 		// restoreLinkedExports pass looks up .trash/<export rel> just like
-		// the master's own move). For read-only or virtual tiers there is
-		// no bytes to move -- mirror the master's read-only/tier3
+		// the master's own move). For read-only, virtual or Tier-3 tiers
+		// there is no bytes to move -- mirror the master's read-only/tier3
 		// logical-only trash path and leave the export ACTIVE on disk.
+		//
+		// Tier 3 needs its own clause, not just loc.ReadOnly: AGENTS.md
+		// invariant 3 makes a Tier-3 archive WRITABLE by default (the
+		// readOnly flag and a :ro mount are opt-in), so a writable Tier-3
+		// location would otherwise have its bytes physically renamed into
+		// .trash/ -- a write into the master archive that the master path
+		// above refuses to make.
 		if guard != nil && exp.FilePath != "" {
 			expLoc, resolveErr := guard.Resolve(exp.FilePath)
 			if resolveErr != nil {
 				log.Warn("resolve export location", "path", exp.FilePath, "err", resolveErr)
 				continue
 			}
-			if expLoc.ReadOnly || expLoc.IsVirtual {
-				log.Warn("trash: skipping read-only/virtual export; leaving ACTIVE on disk",
+			if expLoc.ReadOnly || expLoc.IsVirtual || expLoc.Tier == "TIER3_MASTER_ARCHIVE" {
+				log.Warn("trash: skipping read-only/virtual/tier3 export; leaving ACTIVE on disk",
 					"exportID", exp.ID, "tier", expLoc.Tier, "path", exp.FilePath)
 				continue
 			}
