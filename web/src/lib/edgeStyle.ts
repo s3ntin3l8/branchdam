@@ -47,6 +47,12 @@ export interface LineageEdgeData extends Record<string, unknown> {
   labelDy: number;
   /** Points the edge bends through, between its endpoints (flow coordinates). */
   waypoints?: { x: number; y: number }[];
+  /**
+   * Half the width of the column a routed edge's last waypoint sits in. The
+   * label's hop starts at that waypoint (a column centre), so the free gap it
+   * may use starts this far to its right (see `clampLabelX`).
+   */
+  slotHalfWidth?: number;
 }
 
 export type LineageFlowEdge = FlowEdge<LineageEdgeData, "lineage">;
@@ -140,8 +146,61 @@ const ROUTED_T_SPAN = 0.2;
  * target), the only stretch that is its own, with `t` (from `labelSpread`,
  * 0.3-0.6) re-ranged to the early part of that hop.
  */
+// Labels render at 11px (LineageEdge). This per-character width is a
+// deliberate over-estimate for that size (caps, digits and underscores
+// included), so a clamped label keeps its clearance even if the font is a
+// little wider than expected.
+const LABEL_CHAR_WIDTH = 6.2;
+/** Horizontal padding LineageEdge puts on each side of a label. */
+export const LABEL_PAD_X = 4;
+/** Minimum space between a label and the node column next to it. */
+const LABEL_NODE_CLEARANCE = 6;
+
+/** Estimated rendered width of an edge label (flow units), padding included. */
+export function estimateLabelWidth(text: string): number {
+  return text.length * LABEL_CHAR_WIDTH + 2 * LABEL_PAD_X;
+}
+
+/**
+ * Keeps a label of `width` centred at `x` inside the gap `[left, right]`
+ * between the two node columns its hop joins. Nodes only ever sit inside
+ * columns, so a label in the gap can't be drawn under one. Sliding a label
+ * along its edge (`labelSpread`) can otherwise push a long label back over the
+ * source node: centred at t = 0.3 of a 300-unit hop, "DERIVED_FROM (0.85) -
+ * needs review" started under the node and read "ERIVED_FROM...". A label
+ * wider than the gap is centred in it.
+ */
+export function clampLabelX(x: number, width: number, left: number, right: number): number {
+  const lo = left + LABEL_NODE_CLEARANCE + width / 2;
+  const hi = right - LABEL_NODE_CLEARANCE - width / 2;
+  if (lo > hi) return (left + right) / 2;
+  return Math.min(hi, Math.max(lo, x));
+}
+
 export function labelAnchor(source: Point, waypoints: Point[], target: Point, t: number): Point {
   if (waypoints.length === 0) return pointAlong([source, target], t);
   const spread = (Math.min(SPREAD_T_TO, Math.max(SPREAD_T_FROM, t)) - SPREAD_T_FROM) / (SPREAD_T_TO - SPREAD_T_FROM);
   return pointAlong([waypoints[waypoints.length - 1], target], ROUTED_T_FROM + ROUTED_T_SPAN * spread);
+}
+
+/**
+ * Where LineageEdge draws an edge's label (its centre, flow coordinates). The
+ * anchor comes from `labelAnchor`; it is then kept inside the free gap of the
+ * label's hop (the whole edge, or a routed edge's last hop, which starts at a
+ * column centre `slotHalfWidth` left of that gap) so it is never under a node,
+ * put back on the line at that x, and nudged by `labelDy`.
+ */
+export function placeLabel(
+  source: Point,
+  waypoints: Point[],
+  target: Point,
+  label: string,
+  { labelT = 0.5, labelDy = 0, slotHalfWidth = 0 }: Partial<Pick<LineageEdgeData, "labelT" | "labelDy" | "slotHalfWidth">> = {},
+): Point {
+  const at = labelAnchor(source, waypoints, target, labelT);
+  const hop = waypoints.length > 0 ? [waypoints[waypoints.length - 1], target] : [source, target];
+  const gapLeft = hop[0].x + (waypoints.length > 0 ? slotHalfWidth : 0);
+  const x = clampLabelX(at.x, estimateLabelWidth(label), gapLeft, hop[1].x);
+  const onLine = x === at.x || hop[1].x === hop[0].x ? at : pointAlong(hop, (x - hop[0].x) / (hop[1].x - hop[0].x));
+  return { x, y: onLine.y + labelDy };
 }
