@@ -24,17 +24,27 @@ type cascadeEnv struct {
 
 func newCascadeEnv(t *testing.T) *cascadeEnv {
 	t.Helper()
+	return newCascadeEnvTier(t, "TIER2_EXPORTS")
+}
+
+// newCascadeEnvTier builds the same env as newCascadeEnv but on a location
+// of the given tier, so a test can place a master and its exports on a
+// Tier-3 archive. Tier 3 is writable by default (AGENTS.md invariant 3),
+// which is exactly what makes the tier worth testing.
+func newCascadeEnvTier(t *testing.T, tier string) *cascadeEnv {
+	t.Helper()
 	ctx := context.Background()
 	database := openTestDB(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
+	name := "cascade-" + tier
 	var loc sqlcgen.StorageLocation
 	require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error
-		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{Name: "exports", RootPath: root, Tier: "TIER2_EXPORTS"})
+		loc, err = q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{Name: name, RootPath: root, Tier: tier})
 		return err
 	}))
-	guard := storage.NewGuard([]storage.Location{{ID: loc.ID, Name: "exports", RootPath: root, Tier: "TIER2_EXPORTS"}})
+	guard := storage.NewGuard([]storage.Location{{ID: loc.ID, Name: name, RootPath: root, Tier: tier}})
 	return &cascadeEnv{db: database, guard: guard, root: root, locID: loc.ID}
 }
 
@@ -196,4 +206,37 @@ func TestRestoreTrashedAsset_RestoresOnlyCascadedExports(t *testing.T) {
 	open, err := env.db.Reader.ListOpenTrashCascadeExports(ctx, master.ID)
 	require.NoError(t, err)
 	require.Empty(t, open, "every cascade must be closed once its export is back")
+}
+
+// TestTrashAsset_Tier3ExportIsNotPhysicallyMoved: a Tier-3 archive is
+// writable by default (AGENTS.md invariant 3), so the export cascade must
+// not read "not read-only" as "safe to rename into .trash/".
+//
+// The master's own trash path refuses to write into a Tier-3 archive -- the
+// row is marked TRASHED and the bytes stay. The export path must refuse
+// too, or a user-initiated trash physically relocates bytes inside the
+// master archive, which is the one thing the master's path refuses to do.
+func TestTrashAsset_Tier3ExportIsNotPhysicallyMoved(t *testing.T) {
+	ctx := context.Background()
+	env := newCascadeEnvTier(t, "TIER3_MASTER_ARCHIVE")
+	log := testLogger()
+
+	master := env.node(t, "master.tif")
+	export := env.node(t, "export.jpg")
+	env.edge(t, master.ID, export.ID, "FINAL_EXPORT", "test", "CONFIRMED")
+
+	_, err := TrashAsset(ctx, env.db, env.guard, log, master.ID, false)
+	require.NoError(t, err)
+
+	require.Equal(t, "TRASHED", env.state(t, master.ID))
+	// The export's bytes must still be where they were.
+	requireOnDisk(t, export, true)
+	// And a row whose bytes were never moved must not claim to be trashed:
+	// there is nothing in .trash/ for a restore to bring back.
+	require.Equal(t, "ACTIVE", env.state(t, export.ID),
+		"an export whose bytes were never moved must not be marked trashed")
+
+	open, err := env.db.Reader.ListOpenTrashCascadeExports(ctx, master.ID)
+	require.NoError(t, err)
+	require.Empty(t, open, "a cascade that never moved anything must not be recorded")
 }

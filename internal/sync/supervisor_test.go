@@ -49,6 +49,32 @@ func TestSupervisorStartDisabledWhenLibraryIDMissing(t *testing.T) {
 	}
 }
 
+// TestSupervisorStartDisabledWhenLibraryIDInvalid: a library id that cannot
+// be a single URL path segment must refuse to start the worker, beside the
+// apiUrl check.
+//
+// immich.New records an invalid id in the client's own error, so a worker
+// started on one would fail every trigger once per cycle -- forever, with
+// nothing in the log to say why.
+func TestSupervisorStartDisabledWhenLibraryIDInvalid(t *testing.T) {
+	for name, libraryID := range map[string]string{
+		"separator":     "abc/def",
+		"backslash":     `abc\def`,
+		"relative path": "..",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sv := NewSupervisor(openTestDB(t), slog.New(slog.DiscardHandler))
+			cfg := &config.Config{Immich: config.Immich{APIURL: "http://immich:2283", APIKey: "k", LibraryID: libraryID, ExportPath: "/e"}}
+			sv.Start(ctx, cfg)
+			if sv.worker != nil {
+				t.Fatalf("Start with libraryId %q started a worker, want none (an unusable libraryId fails every trigger forever)", libraryID)
+			}
+		})
+	}
+}
+
 func TestSupervisorStartEnabledWhenConfigured(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sv := NewSupervisor(openTestDB(t), slog.New(slog.DiscardHandler))

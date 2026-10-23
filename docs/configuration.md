@@ -87,7 +87,7 @@ implications and what happens if that key is absent or lost.
 |---|---|---|---|
 | `readTimeoutSecs` | int | 15 | `http.Server.ReadTimeout`. |
 | `writeTimeoutSecs` | int | 15 | `http.Server.WriteTimeout`. |
-| `trustedProxies` | list of string | unset | IPs / CIDRs (or `"*"`) from which `X-Forwarded-*` headers are honored. **Unset trusts every source** (backward-compat; logs a startup WARN). **An explicit empty list `[]` denies all forwarded headers.** In `auth.mode: both` forward-auth identity headers are honored only from a non-empty list; with it unset/empty, forward login is disabled (local login still works). Restart to change. |
+| `trustedProxies` | list of string | unset | IPs / CIDRs (or `"*"`) from which `X-Forwarded-*` headers are honored. **Unset trusts every source** (backward-compat; logs a startup WARN). **An explicit empty list `[]` denies all forwarded headers.** In `auth.mode: both` forward-auth identity headers are honored only from a non-empty list; with it unset/empty, forward login is disabled (local login still works). The companion-pairing QR is stricter: its `server=` value — the host the paired device's plaintext API key is delivered to — honors `X-Forwarded-Host` **only** from a peer in this list, so with it unset the QR carries the server's own listen address instead. Set it to your reverse proxy's IP/CIDR (Traefik's) for a QR a phone can reach. Restart to change. |
 | `exposeOpenAPI` | bool | `false` | Serves `/openapi.json`, `/openapi.yaml`, and `/docs`. **Recommended `true` for a test deploy**: the route is already behind Authentik like everything else, and a live, always-current API reference beats a hand-written one that drifts. Leave `false` once you're not actively poking at the API. |
 
 ## `workers`

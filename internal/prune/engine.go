@@ -83,8 +83,18 @@ type Result struct {
 // (so a read-only tier or a symlink escape is refused before any DB write
 // -- resolved and defeated by Guard.CheckWrite's own canonicalize step,
 // the same defense TestSymlinkEscapeRefused proves for every other Guard
-// caller), then MarkNodeMissing -- the DB re-verify and the write it gates
-// share one transaction, so they can never observe different states.
+// caller), then MarkNodeMissing.
+//
+// The DB re-verify and the write it gates no longer share one transaction.
+// The filesystem calls sit between them, and they have to: the writer
+// connection is a process-wide resource, and a stat or an unlink on an NFS
+// or SMB mount can block for minutes on a stale handle, so holding the
+// writer across them turns one slow mount into a server-wide write stall.
+// What protects the purge instead is that the verified Tier-3 ancestor set
+// is read on the writer connection both BEFORE the filesystem work and
+// again AFTER it, and the purge proceeds only when the two reads describe
+// the same ancestors -- see the phase comments below.
+//
 // Rows are never deleted, matching this repo's invariant -- a purged node
 // lands in MISSING, the same state a vanished file gets; TouchMediaNode
 // reactivates it if the cache is later regenerated at the same path, and
@@ -96,13 +106,14 @@ type Result struct {
 // (see the pre-compute block below for why this is sufficient) and uses
 // that snapshot as the per-candidate eligibility set inside the transaction
 // loop. A candidate not in the snapshot is aborted with
-// ErrNoLongerEligible. The in-transaction re-check still goes deeper than
-// that snapshot for the critical case: it re-validates every verified
-// Tier-3 ancestor's row in the same writer transaction, so a Tier-3 master
-// going MISSING (or its full_hash getting invalidated) in the milliseconds
-// between the pre-compute and the commit still aborts the purge -- the
+// ErrNoLongerEligible. The authoritative re-check still goes deeper than
+// that snapshot for the critical case: it re-reads every verified Tier-3
+// ancestor's row on the writer connection, so a Tier-3 master that has
+// gone MISSING (or lost its full_hash) by then aborts the purge -- the
 // verified-hash gate the original Plan was re-running inside InTx exists
-// to enforce. The mtime/TTL portion of Plan's own filter is redundant
+// to enforce. The same read is repeated once more after the on-disk
+// verification, so a master archived DURING the filesystem work aborts the
+// purge as well. The mtime/TTL portion of Plan's own filter is redundant
 // across this gap (a candidate's mtime cannot un-age, and ACTIVE -> MISSING
 // on the candidate itself only happens via the InTx's own MarkNodeMissing
 // step, not a concurrent change we'd race with).
@@ -130,6 +141,17 @@ type Result struct {
 // and the remainder untouched; re-running Plan against the same location
 // picks up exactly where it left off.
 func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candidates []Candidate, cutoffUnix int64) []Result {
+	return execute(ctx, database, guard, candidates, cutoffUnix, nil)
+}
+
+// execute is Execute with a test seam.
+//
+// afterVerify, when set, runs between the on-disk verification and the
+// authoritative re-read -- the exact window the phase split opened, and
+// the one a concurrent scan can land its version-collision archive in. A
+// test uses it to archive the Tier-3 master there, which is the write
+// that must abort the purge. It is nil in production.
+func execute(ctx context.Context, database *db.DB, guard *storage.Guard, candidates []Candidate, cutoffUnix int64, afterVerify func()) []Result {
 	// Pre-compute eligibility per unique storage location once, before the
 	// transaction loop. This replaces the previous per-candidate Plan call
 	// inside each InTx, which re-ran the same query for every candidate on
@@ -139,15 +161,24 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 	// InTx back-to-back in a single process, so the window between this
 	// snapshot and each InTx is bounded to milliseconds. The only state
 	// change that can invalidate a Plan row is the candidate's Tier-3
-	// ancestor going MISSING or losing its full_hash, and the InTx body
-	// re-validates exactly that via ListVerifiedTier3Ancestors before any
-	// destructive call -- the TTL/ACTIVE filters Plan encodes cannot be
+	// ancestor going MISSING or losing its full_hash, and the first phase
+	// below re-validates exactly that via ListVerifiedTier3Ancestors before
+	// any destructive call -- and the second phase re-reads the same set
+	// again after the filesystem work, so a master archived in between
+	// aborts the purge too. The TTL/ACTIVE filters Plan encodes cannot be
 	// invalidated in the opposite direction (a node's mtime cannot un-age,
-	// and ACTIVE -> MISSING on the candidate itself is the InTx's own
-	// MarkNodeMissing step, not a concurrent state we'd race with). So
-	// the only thing the InTx check is doing that Plan was also doing is
-	// re-reading the ancestor's liveness, and it does so under the writer
-	// transaction, which sees the up-to-date row.
+	// and ACTIVE -> MISSING on the candidate itself is the MarkNodeMissing
+	// step, not a concurrent state we'd race with). So the only thing the
+	// re-validation is doing that Plan was also doing is re-reading the
+	// ancestor's liveness, and it does so under the writer transaction,
+	// which sees the up-to-date row.
+	//
+	// The destructive calls are deliberately OUTSIDE that transaction. The
+	// single writer connection is a process-wide resource, and the
+	// filesystem calls in the path (an Lstat per ancestor, the unlink) can
+	// block for a long time on an NFS or SMB mount -- a stale NFS handle
+	// can block for minutes. Holding the writer across them turns a slow
+	// mount into a server-wide write stall.
 	locations := make(map[int64][]Candidate)
 	for _, c := range candidates {
 		locations[c.StorageLocationID] = append(locations[c.StorageLocationID], c)
@@ -190,7 +221,8 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 		// ancestor + candidate Lstats can be slow on NFS/SMB mounts, and a
 		// candidate that fails them never needs the write lock. This is only
 		// an optimization -- the authoritative re-verification (invariant 7)
-		// still runs inside the transaction immediately before Guard.Remove.
+		// still runs in phase 2, after the transaction is closed and
+		// immediately before Guard.Remove.
 		if !eligibleMap[c.NodeID] {
 			results = append(results, Result{Candidate: c, Purged: false, Err: ErrNoLongerEligible})
 			continue
@@ -206,26 +238,112 @@ func Execute(ctx context.Context, database *db.DB, guard *storage.Guard, candida
 		// a false negative (skipping a candidate the in-tx check would pass):
 		// a harmless pessimization, never a correctness issue -- do not infer
 		// perfect parity with the in-tx check.
+		//
+		// Phase 1 -- the authoritative re-verification, DATABASE ONLY. The
+		// single writer connection is a process-wide resource, so nothing that
+		// touches the filesystem may happen while it is held: an Lstat or an
+		// unlink on an NFS or SMB mount can block for seconds, and a stale
+		// NFS handle can block for minutes, stalling every write the server
+		// does for the duration. So the ancestors are read here, on the
+		// writer connection (so the read sees the up-to-date row rather than
+		// a reader snapshot), and the transaction is closed before any
+		// filesystem call.
+		var ancestors []sqlcgen.ListVerifiedTier3AncestorsRow
 		err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 			if !eligibleMap[c.NodeID] {
 				return ErrNoLongerEligible
 			}
-			ancestors, err := q.ListVerifiedTier3Ancestors(ctx, c.NodeID)
+			a, err := q.ListVerifiedTier3Ancestors(ctx, c.NodeID)
 			if err != nil {
 				return err
 			}
-			gone, err := verifyOnDisk(c, ancestors)
-			if err != nil {
-				return err
-			}
-			if !gone {
-				if err := guard.Remove(c.FilePath); err != nil {
-					return err
-				}
-			}
-			return q.MarkNodeMissing(ctx, c.NodeID)
+			ancestors = a
+			return nil
 		})
 		if err != nil {
+			results = append(results, Result{Candidate: c, Purged: false, Err: err})
+			continue
+		}
+
+		// Phase 2 -- the filesystem work, with NO writer connection held.
+		// This is where invariant 7 is actually enforced: every verified
+		// Tier-3 ancestor must still be on disk with the size and mtime it
+		// had when its full_hash was verified, and only then may the
+		// candidate be unlinked. Holding the writer across these calls was
+		// what made a slow mount a server-wide stall.
+		gone, err := verifyOnDisk(c, ancestors)
+		if err != nil {
+			results = append(results, Result{Candidate: c, Purged: false, Err: err})
+			continue
+		}
+		if afterVerify != nil {
+			afterVerify()
+		}
+
+		// Phase 2.5 -- the authoritative re-read, once more, immediately
+		// before the unlink.
+		//
+		// Phase 1 read the ancestors BEFORE the Lstat above, and that
+		// Lstat can block for seconds on a Tier-3 master on an NFS or SMB
+		// mount. Long enough for a concurrent scan to archive that master
+		// and insert its successor -- the version-collision path
+		// internal/pipeline.Commit takes when the master's bytes changed
+		// under it. That archive is exactly what makes the prune gate
+		// fail closed: the archived row leaves ListVerifiedTier3Ancestors,
+		// so the candidate's edge chain no longer reaches a live, verified
+		// Tier-3 master, and the purge must stop -- the Tier-1 cache may
+		// be the last copy of the bytes the successor no longer holds.
+		//
+		// So the ancestors are read AGAIN here, on the writer connection,
+		// after the filesystem work and immediately before the unlink, and
+		// the purge proceeds only if the set is the SAME one that was
+		// verified on disk. A master that was archived, replaced or
+		// re-verified in the meantime changes the set, and the purge is
+		// abandoned.
+		//
+		// What this cannot close: an archive that commits in the sliver
+		// between this transaction's commit and the unlink syscall. It
+		// needs a whole writer transaction to land there, and the window
+		// is the handful of instructions Guard.Remove spends on its own
+		// path checks -- not the seconds the Lstat above can take. The
+		// alternative (holding the writer across the unlink) is the
+		// server-wide write stall this phase split exists to avoid.
+		var fresh []sqlcgen.ListVerifiedTier3AncestorsRow
+		err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+			a, qerr := q.ListVerifiedTier3Ancestors(ctx, c.NodeID)
+			if qerr != nil {
+				return qerr
+			}
+			fresh = a
+			return nil
+		})
+		if err != nil {
+			results = append(results, Result{Candidate: c, Purged: false, Err: err})
+			continue
+		}
+		if !sameAncestors(ancestors, fresh) {
+			results = append(results, Result{Candidate: c, Purged: false, Err: ErrNoLongerEligible})
+			continue
+		}
+		if !gone {
+			if err := guard.Remove(c.FilePath); err != nil {
+				results = append(results, Result{Candidate: c, Purged: false, Err: err})
+				continue
+			}
+		}
+
+		// Phase 3 -- record the outcome.
+		//
+		// The unlink is not transactional: the file is already gone before
+		// this write lands. If the write fails, the node still claims a
+		// file that no longer exists. That is not left dangling: the next
+		// plan pass re-verifies the candidate, verifyOnDisk reports it
+		// gone, and the node is marked MISSING then without another
+		// unlink. The candidate is reported as an error rather than as a
+		// successful purge, so the caller does not count it as reclaimed.
+		if err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.MarkNodeMissing(ctx, c.NodeID)
+		}); err != nil {
 			results = append(results, Result{Candidate: c, Purged: false, Err: err})
 			continue
 		}
@@ -266,4 +384,42 @@ func verifyOnDisk(c Candidate, ancestors []sqlcgen.ListVerifiedTier3AncestorsRow
 		return false, ErrFileChangedSincePlan
 	}
 	return false, nil
+}
+
+// sameAncestors reports whether two authoritative reads of a candidate's
+// verified Tier-3 ancestors describe the same set.
+//
+// The comparison is by node id and over the whole row the query returns --
+// the path, the size, the mtime and the location -- not by position:
+// ListVerifiedTier3Ancestors has no ORDER BY, so two reads of an unchanged
+// lineage can return the same rows in a different order.
+//
+// A difference in either the membership or the recorded values means the
+// lineage changed under the purge -- the master was archived and replaced,
+// or its row was re-verified -- and the purge must fail closed.
+func sameAncestors(verified, fresh []sqlcgen.ListVerifiedTier3AncestorsRow) bool {
+	if len(verified) != len(fresh) {
+		return false
+	}
+	byID := make(map[int64]sqlcgen.ListVerifiedTier3AncestorsRow, len(verified))
+	for _, row := range verified {
+		byID[row.ID] = row
+	}
+	for _, row := range fresh {
+		other, ok := byID[row.ID]
+		if !ok {
+			return false
+		}
+		// Compare the whole row, not a hand-picked subset of the columns:
+		// the on-disk verification above was done against the values the
+		// first read returned, so ANY change to what the query returns --
+		// the path, the size, the mtime, the location -- invalidates it.
+		// A concurrent scan's TouchMediaNode refreshes mtime_unix while
+		// leaving the id and the SERVER provenance in place, so the value
+		// branch is reachable, not theoretical.
+		if other != row {
+			return false
+		}
+	}
+	return true
 }

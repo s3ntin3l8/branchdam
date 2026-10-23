@@ -26,6 +26,21 @@ import (
 // Per-result behavior:
 //   - A live node already exists at this path with the SAME fast_hash:
 //     TouchMediaNode (same content, seen again).
+//   - ...but the freshly computed full_hash CONTRADICTS the stored one: the
+//     bytes changed and the fast hash could not see it (a same-size in-place
+//     rewrite outside the three sampled windows). The stored hash and its
+//     SERVER provenance would then vouch for bytes that are no longer on
+//     disk, which internal/prune would honour -- letting it delete a Tier-1
+//     cache that still holds the original content. Treated as a version
+//     collision: the old row is archived, the successor is inserted.
+//   - ...and the stored hash was one the SERVER never vouched for (a paired
+//     device's assertion, or a provenance row naming another value): such a
+//     hash carries no authority, so the disagreement is not evidence of a
+//     content change and the node is NOT versioned -- it keeps its identity
+//     and adopts the hash the server computed. When that hash already
+//     belongs to another live node and the unique index forbids storing it
+//     here, the disproved hash is CLEARED instead, so the node stops
+//     shadowing the content it wrongly names (see clearDisprovedFullHash).
 //   - A live node already exists at this path with a DIFFERENT fast_hash:
 //     version collision (docs/schema.md fix #3) -- archive the old row,
 //     insert a new one, link superseded_by. Archiving happens BEFORE
@@ -77,6 +92,45 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 	switch {
 	case err == nil:
 		if existing.FastHash != nil && *existing.FastHash == r.FastHash {
+			// The full hash is the authority on whether the bytes changed.
+			// fast_hash samples only three 2 MiB windows, so a same-size
+			// in-place rewrite outside them leaves the fast hash
+			// bit-identical (internal/hashing). When the freshly computed
+			// BLAKE3 contradicts a SERVER-vouched one, the bytes DID
+			// change, and the stored full_hash -- plus the SERVER provenance
+			// vouching for it -- now describes bytes that are no longer on
+			// disk.
+			//
+			// That is not only bookkeeping. internal/prune treats a node
+			// with a server-verified full_hash as a valid Tier-3 ancestor,
+			// so a stale hash would let the purge delete the Tier-1 cache
+			// that still holds the ORIGINAL bytes. Take the same path a
+			// fast-hash change takes -- archive the old row, insert the
+			// successor -- so the stale hash stops vouching.
+			//
+			// "the bytes DID change" holds only for a hash the SERVER
+			// itself vouched for. A hash a paired device asserted (or one
+			// whose provenance row no longer matches the stored value)
+			// carries no authority: internal/prune honours a Tier-3
+			// master's hash only while a SERVER provenance row matches it,
+			// so an AGENT-only hash authorises nothing and there is no
+			// stale vouch to withdraw. A disagreement there says nothing
+			// about the bytes -- it is not a content change, and treating
+			// it as one would archive the node on the strength of a value
+			// the server never verified, stranding the node's creator
+			// attribution and every edge on the archived row. The server's
+			// own freshly computed hash is the truth instead (the same
+			// treatment a node with no hash at all gets), and the node
+			// keeps its identity.
+			if fullHashContradicts(existing.FullHash, r.FullHash) {
+				vouched, err := serverVouchedFullHash(ctx, q, existing)
+				if err != nil {
+					return err
+				}
+				if vouched {
+					return commitContentChange(ctx, q, locationID, existing, r, stats, uploadedByUserID, log)
+				}
+			}
 			stats.Touched++
 			if err := q.TouchMediaNode(ctx, sqlcgen.TouchMediaNodeParams{
 				ID:        existing.ID,
@@ -84,15 +138,54 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			}); err != nil {
 				return err
 			}
-			// A full hash computed this pass for a node that has none (it was
-			// indexed before the hash could be computed, or a later in-place
-			// write cleared it) is kept: dropping it left the node's Tier-1
-			// caches permanently un-prunable. Never replaces an existing one,
-			// and is skipped if another live node already owns that content.
-			if r.FullHash != "" && (existing.FullHash == nil || *existing.FullHash == "") {
-				if skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log); err != nil {
+			// The full hash computed this pass, and the provenance it earns.
+			//
+			//   - A node with no stored hash gets the hash this pass
+			//     computed: it was indexed before the hash could be
+			//     computed, or a later in-place write cleared it. Dropping
+			//     it left the node's Tier-1 caches permanently un-prunable.
+			//   - A node whose stored hash this pass recomputed to the same
+			//     value is server-computed now, even if a paired device
+			//     asserted it first (#505).
+			//   - A node whose stored hash this pass CONTRADICTS, and that
+			//     the SERVER never vouched for, keeps its identity and
+			//     adopts the server's own hash. The stored value was an
+			//     unverified assertion; the server has just read the bytes,
+			//     so its hash is the truth -- and overwriting it clears the
+			//     bad assertion without minting a new node_uuid.
+			//
+			// Never replaces an existing one that the SERVER vouched for
+			// (that case is a version collision above), and is skipped if
+			// another live node already owns that content.
+			switch {
+			case r.FullHash == "":
+				// Nothing computed this pass: nothing to compare, nothing
+				// to store.
+			case existing.FullHash != nil && *existing.FullHash == r.FullHash:
+				if err := db.RecordFullHashSource(ctx, q, existing.ID, &r.FullHash, db.HashSourceServer); err != nil {
+					return fmt.Errorf("record full_hash provenance: %w", err)
+				}
+			default:
+				skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log)
+				if err != nil {
 					return err
-				} else if !skip {
+				}
+				if skip {
+					// The freshly computed hash is already held by another
+					// live node, so the unique index forbids storing it
+					// here. The node's own stored hash is not an
+					// alternative either: the server has just read the
+					// bytes and disproved it, so keeping it would (a) let
+					// GetMediaNodeByFullHash match this node for the
+					// wrong hash, silently declining every later file
+					// whose true hash it is, and (b) never self-heal,
+					// because every later pass computes the same
+					// contradicting hash and takes the same skip. Clear
+					// it -- see clearDisprovedFullHash.
+					if err := clearDisprovedFullHash(ctx, q, existing); err != nil {
+						return err
+					}
+				} else {
 					if err := q.UpdateMediaNodeFullHash(ctx, sqlcgen.UpdateMediaNodeFullHashParams{
 						ID:       existing.ID,
 						FullHash: &r.FullHash,
@@ -102,13 +195,6 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 					if err := db.RecordFullHashSource(ctx, q, existing.ID, &r.FullHash, db.HashSourceServer); err != nil {
 						return fmt.Errorf("record full_hash provenance: %w", err)
 					}
-				}
-			} else if r.FullHash != "" && *existing.FullHash == r.FullHash {
-				// This pass recomputed the stored hash from the bytes and got
-				// the same value, so it is server-computed now even if a
-				// paired device asserted it first (#505).
-				if err := db.RecordFullHashSource(ctx, q, existing.ID, &r.FullHash, db.HashSourceServer); err != nil {
-					return fmt.Errorf("record full_hash provenance: %w", err)
 				}
 			}
 			// A node seen unchanged still backfills metadata: one indexed
@@ -123,10 +209,31 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 			// XMP-xmpMM:DerivedFrom from getting stuck invisible in the DB.
 			return reconcileAllMetadata(ctx, q, existing, r, stats, log)
 		}
-		// Defensive: only matters when another writer raced a live node with
-		// this hash in; do not remove as "unreachable".
+		// The fast hash differs, so the bytes at this path changed and the
+		// node's stored full_hash no longer describes them. That holds
+		// whichever way this branch ends, so the superseded row must not
+		// keep vouching for bytes that are no longer there: a SERVER
+		// provenance on a stale hash is exactly what internal/prune reads as
+		// "this Tier-3 master still holds what it held", and acting on it
+		// would let the purge delete a Tier-1 cache that still holds the
+		// original content.
+		//
+		// Defensive: the skip case only matters when another writer raced a
+		// live node with this hash in; do not remove as "unreachable".
 		if skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log); skip || err != nil {
-			return err
+			if err != nil {
+				return err
+			}
+			// The new content is already indexed elsewhere, so the unique
+			// index ux_media_nodes_live_full_hash forbids a second live node
+			// carrying it: no successor is inserted, the same outcome as a
+			// byte-identical copy at a second path. The superseded row is
+			// archived anyway.
+			if err := q.ArchiveMediaNode(ctx, existing.ID); err != nil {
+				return fmt.Errorf("archive superseded node: %w", err)
+			}
+			stats.VersionCollisions++
+			return nil
 		}
 		return commitVersionCollision(ctx, q, locationID, existing, r, stats, uploadedByUserID, log)
 
@@ -136,6 +243,70 @@ func commitOne(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Resu
 	default:
 		return fmt.Errorf("get live node by path: %w", err)
 	}
+}
+
+// fullHashContradicts reports whether r's freshly computed full hash
+// disagrees with the one stored on the node. A node with no stored hash --
+// never hashed, or cleared by an in-place write
+// (RefreshMediaNodeAfterInPlaceWrite) -- contradicts nothing: the value is
+// simply absent, and the touched branch's existing "store the hash we now
+// have" case handles it.
+func fullHashContradicts(stored *string, computed string) bool {
+	return computed != "" && stored != nil && *stored != "" && *stored != computed
+}
+
+// serverVouchedFullHash reports whether node's stored full_hash is one the
+// SERVER itself verified: a full_hash_provenance row whose source is SERVER
+// and whose recorded hash is the node's CURRENT stored hash.
+//
+// Both halves matter. The source says who computed the value -- a paired
+// device's assertion is AGENT and authorises nothing until internal/rehash
+// re-reads the file and matches it -- and the recorded hash says the row
+// still vouches for the value the node stores NOW, not for an older one it
+// once vouched for.
+//
+// A node with no stored hash, no provenance row, or a row that names another
+// hash is not vouched for: there is no SERVER assertion about its current
+// hash, so a disagreement with the hash this pass computed says nothing about
+// whether the bytes changed.
+func serverVouchedFullHash(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) (bool, error) {
+	if node.FullHash == nil || *node.FullHash == "" {
+		return false, nil
+	}
+	prov, err := q.GetFullHashProvenance(ctx, node.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read full_hash provenance: %w", err)
+	}
+	return prov.Source == db.HashSourceServer && prov.FullHash == *node.FullHash, nil
+}
+
+// commitContentChange handles a node whose bytes changed in place while its
+// fast_hash stayed the same -- the same-size rewrite the fast hash cannot
+// see. It mirrors commitVersionCollision (archive the superseded row, insert
+// the successor) because the situation is the same one: the content at this
+// path is no longer the content the node describes.
+//
+// The difference is the duplicate-content case: when the new content is
+// already indexed at another live path, the unique index
+// ux_media_nodes_live_full_hash forbids a second live node carrying that
+// hash. The superseded row is archived anyway -- its stored hash no longer
+// describes the bytes on disk and must stop vouching for them -- and no
+// successor is inserted, which is how a byte-identical copy at a second path
+// is already handled (skipDuplicateContent).
+func commitContentChange(ctx context.Context, q *sqlcgen.Queries, locationID int64, existing sqlcgen.MediaNode, r Result, stats *Stats, uploadedByUserID int64, log *slog.Logger) error {
+	if skip, err := skipDuplicateContent(ctx, q, r, existing.ID, stats, log); err != nil {
+		return err
+	} else if skip {
+		if err := q.ArchiveMediaNode(ctx, existing.ID); err != nil {
+			return fmt.Errorf("archive superseded node: %w", err)
+		}
+		stats.VersionCollisions++
+		return nil
+	}
+	return commitVersionCollision(ctx, q, locationID, existing, r, stats, uploadedByUserID, log)
 }
 
 func commitVersionCollision(ctx context.Context, q *sqlcgen.Queries, locationID int64, existing sqlcgen.MediaNode, r Result, stats *Stats, uploadedByUserID int64, log *slog.Logger) error {
@@ -304,6 +475,48 @@ func skipDuplicateContent(ctx context.Context, q *sqlcgen.Queries, r Result, sel
 	log.Debug("pipeline: identical content already indexed at another path; not indexing this copy",
 		"path", r.Path, "existingNodeID", existing.ID, "existingPath", existing.FilePath)
 	return true, nil
+}
+
+// clearDisprovedFullHash removes a stored full_hash the server has just
+// disproved, together with the provenance row that asserts it.
+//
+// Called from the touched branch's default case: the freshly computed hash
+// contradicts the stored one, and it cannot be stored either -- another
+// live node already holds it, and the unique index
+// ux_media_nodes_live_full_hash forbids a second live node carrying it.
+//
+// The stored value is then known to be wrong, and keeping it is what makes
+// the node shadow the content it wrongly names: GetMediaNodeByFullHash
+// would match this node for the stale hash, so a later file whose TRUE
+// hash is that one would be silently declined, with nothing in the log
+// beyond a duplicate counter. It also never self-heals -- every later pass
+// computes the same contradicting hash and takes the same skip.
+//
+// The node keeps its identity, its node_uuid, its edges and its
+// attribution: only the hash goes. A node with no full_hash authorises
+// nothing (internal/prune honours a Tier-3 master's hash only while a
+// SERVER provenance row matches its CURRENT value), which is the safe
+// direction to err in -- the node is de-duplicated rather than credited
+// with a hash nobody verified.
+//
+// The provenance row is deleted only when it names the disproved value. A
+// row naming an older hash is already inert -- every consumer joins the
+// provenance on the node's current full_hash -- and is the historical
+// record of a hash the server really did compute, so it is kept.
+func clearDisprovedFullHash(ctx context.Context, q *sqlcgen.Queries, node sqlcgen.MediaNode) error {
+	if node.FullHash == nil || *node.FullHash == "" {
+		return nil
+	}
+	if err := q.ClearMediaNodeFullHash(ctx, node.ID); err != nil {
+		return fmt.Errorf("clear disproved full_hash: %w", err)
+	}
+	if err := q.DeleteFullHashProvenance(ctx, sqlcgen.DeleteFullHashProvenanceParams{
+		NodeID:   node.ID,
+		FullHash: *node.FullHash,
+	}); err != nil {
+		return fmt.Errorf("delete disproved full_hash provenance: %w", err)
+	}
+	return nil
 }
 
 // IndexingStatusFor is the indexing_status a freshly inserted node gets for

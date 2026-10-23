@@ -36,6 +36,26 @@ type Querier interface {
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
 	ClearMFAPendingSecret(ctx context.Context, id int64) error
+	// The counterpart of UpdateMediaNodeFullHash, which cannot express the
+	// clearing case: it always writes a hash and always sets
+	// indexing_status = 'INDEXED_FULL'. A node whose hash is cleared holds no
+	// full hash at all, so its indexing_status goes back to INDEXED_SHALLOW --
+	// the value pipeline.IndexingStatusFor(nil) pairs with an absent hash.
+	// Leaving it INDEXED_FULL would claim a full hash the row no longer carries.
+	//
+	// Used when the server has just disproved the stored hash but cannot store
+	// the correct one either, because another live node already holds it and
+	// the unique index ux_media_nodes_live_full_hash forbids a second live node
+	// carrying the same hash. The node keeps its identity, its node_uuid, its
+	// edges and its attribution; only the hash goes.
+	//
+	// Clearing is the safe direction to err in: a node with no full_hash
+	// authorises nothing (internal/prune honours a Tier-3 master's hash only
+	// while a SERVER provenance row matches its CURRENT value), whereas a node
+	// holding a hash the server has disproved shadows the content it wrongly
+	// names -- GetMediaNodeByFullHash matches it, so a later file whose true
+	// hash is that one is silently declined.
+	ClearMediaNodeFullHash(ctx context.Context, id int64) error
 	// pipeline.restoreTrashedAssetTx calls this next to UntrashNode. The row
 	// stays (rows are never deleted); a NULL trashed_at means "not trashed".
 	ClearNodeTrashed(ctx context.Context, nodeID int64) error
@@ -256,6 +276,17 @@ type Querier interface {
 	// recoverable rather than merely resettable to some other stored value.
 	DeleteAppSetting(ctx context.Context, key string) error
 	DeleteDevicePairing(ctx context.Context, id int64) error
+	// Removes the provenance row of node ?1 when it names the hash ?2 the
+	// server has just disproved.
+	//
+	// Conditional on the hash on purpose. Every consumer of a provenance row
+	// joins it on the node's CURRENT full_hash -- ListVerifiedTier3Ancestors,
+	// ListPrunableNodes and the re-hash claim query all require
+	// p.full_hash = n.full_hash -- so a row that names some OTHER value is
+	// already inert, and it is the historical record of a hash the server
+	// really did compute. Only the row that asserts the disproved value is
+	// removed.
+	DeleteFullHashProvenance(ctx context.Context, arg DeleteFullHashProvenanceParams) error
 	DeleteMFACredentials(ctx context.Context, userID int64) error
 	DeletePairingAuditForPairing(ctx context.Context, pairingID int64) error
 	DeletePairingKeysForPairing(ctx context.Context, pairingID int64) error
@@ -622,20 +653,35 @@ type Querier interface {
 	ListEdgesForNodes(ctx context.Context, dollar_1 string) ([]ListEdgesForNodesRow, error)
 	ListKeysByPairing(ctx context.Context, pairingID int64) ([]DevicePairingKey, error)
 	// Live nodes whose file_path lies in the half-open range [?1, ?2). The watcher
-	// passes "<dir>/" and "<dir>0" ('0' sorts right after '/') to find everything
-	// under a directory that was removed or moved out. A range scan so it can use
-	// idx_media_nodes_file_path.
+	// passes "<dir>/" and the exclusive upper bound of that prefix range -- the
+	// prefix with its final byte incremented, which sorts immediately after
+	// every path under the directory on EVERY platform (a '0' suffix only
+	// worked on POSIX, where '/' is 0x2F and '0' is 0x30; on Windows the
+	// separator is '\' (0x5C), so '0' sorted BEFORE it and the range came out
+	// empty). A range scan so it can use idx_media_nodes_file_path.
 	ListLiveNodeIDsUnderPrefix(ctx context.Context, arg ListLiveNodeIDsUnderPrefixParams) ([]int64, error)
 	// Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 	// matching a candidate parent's document_id is a near-certain lineage
 	// signal (confidence 0.95).
-	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]MediaNode, error)
+	//
+	// Capped at ?2 rows. A document_id names one original document, so a
+	// legitimate group is small; the cap bounds what a pathological group
+	// (a file with a forged or colliding document_id) can cost. The
+	// resolver logs when the cap is actually hit.
+	ListLiveNodesByDocumentID(ctx context.Context, arg ListLiveNodesByDocumentIDParams) ([]MediaNode, error)
 	// T1 (spec 9.5): before assuming two same-fast_hash files at DIFFERENT live
 	// paths are the same content, the pipeline needs every other live node
 	// sharing that fast_hash so it can escalate to full_hash and compare.
 	ListLiveNodesByFastHash(ctx context.Context, fastHash *string) ([]MediaNode, error)
 	// Look up live media nodes sharing exact file_name for fallback path matching.
-	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]MediaNode, error)
+	//
+	// Capped at ?2 rows. A file name is NOT unique -- the same name appears
+	// in many directories, and a phone camera reuses names -- so this can
+	// legitimately match many rows. The cap bounds the work; the caller
+	// treats a result that is not exactly one row as an ambiguous match and
+	// skips it, so truncating a large group to a cap of ?2 (which is
+	// greater than one) cannot turn an ambiguous match into a wrong one.
+	ListLiveNodesByFileName(ctx context.Context, arg ListLiveNodesByFileNameParams) ([]MediaNode, error)
 	// Tier-2 filenameStem resolver: candidate parents sharing a normalized
 	// filename stem with the child, scored further by capture day / camera /
 	// directory match in internal/graph. Capped at ?2 rows -- defense in depth

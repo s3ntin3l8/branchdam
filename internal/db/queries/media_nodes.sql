@@ -200,6 +200,11 @@ WHERE fast_hash = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
 -- Tier-2 xmpOriginalDocumentID resolver: a child's XMP:OriginalDocumentID
 -- matching a candidate parent's document_id is a near-certain lineage
 -- signal (confidence 0.95).
+--
+-- Capped at ?2 rows. A document_id names one original document, so a
+-- legitimate group is small; the cap bounds what a pathological group
+-- (a file with a forged or colliding document_id) can cost. The
+-- resolver logs when the cap is actually hit.
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -209,7 +214,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE document_id = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
+WHERE document_id = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+LIMIT ?2;
 
 -- name: ListLiveNodesByFilenameStem :many
 -- Tier-2 filenameStem resolver: candidate parents sharing a normalized
@@ -253,6 +259,13 @@ WHERE camera_serial = ?1
 
 -- name: ListLiveNodesByFileName :many
 -- Look up live media nodes sharing exact file_name for fallback path matching.
+--
+-- Capped at ?2 rows. A file name is NOT unique -- the same name appears
+-- in many directories, and a phone camera reuses names -- so this can
+-- legitimately match many rows. The cap bounds the work; the caller
+-- treats a result that is not exactly one row as an ambiguous match and
+-- skips it, so truncating a large group to a cap of ?2 (which is
+-- greater than one) cannot turn an ambiguous match into a wrong one.
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -262,7 +275,8 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        camera_serial, lens_model, thumb_state, thumb_attempts, source_path_hash,
        uploaded_by_user_id
 FROM media_nodes
-WHERE file_name = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED');
+WHERE file_name = ?1 AND lifecycle_state NOT IN ('ARCHIVED','TRASHED')
+LIMIT ?2;
 
 -- name: UpdateMediaNodeGraphStatus :exec
 UPDATE media_nodes SET graph_status = ?2, updated_at = unixepoch() WHERE id = ?1;
@@ -352,6 +366,32 @@ WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED') AND id = ?1;
 -- with another live node or the file lives on a TIER3_MASTER_ARCHIVE
 -- location (docs/schema.md fix #8's full_hash policy).
 UPDATE media_nodes SET full_hash = ?2, indexing_status = 'INDEXED_FULL', updated_at = unixepoch() WHERE id = ?1;
+
+-- name: ClearMediaNodeFullHash :exec
+-- The counterpart of UpdateMediaNodeFullHash, which cannot express the
+-- clearing case: it always writes a hash and always sets
+-- indexing_status = 'INDEXED_FULL'. A node whose hash is cleared holds no
+-- full hash at all, so its indexing_status goes back to INDEXED_SHALLOW --
+-- the value pipeline.IndexingStatusFor(nil) pairs with an absent hash.
+-- Leaving it INDEXED_FULL would claim a full hash the row no longer carries.
+--
+-- Used when the server has just disproved the stored hash but cannot store
+-- the correct one either, because another live node already holds it and
+-- the unique index ux_media_nodes_live_full_hash forbids a second live node
+-- carrying the same hash. The node keeps its identity, its node_uuid, its
+-- edges and its attribution; only the hash goes.
+--
+-- Clearing is the safe direction to err in: a node with no full_hash
+-- authorises nothing (internal/prune honours a Tier-3 master's hash only
+-- while a SERVER provenance row matches its CURRENT value), whereas a node
+-- holding a hash the server has disproved shadows the content it wrongly
+-- names -- GetMediaNodeByFullHash matches it, so a later file whose true
+-- hash is that one is silently declined.
+UPDATE media_nodes
+SET full_hash = NULL,
+    indexing_status = CASE WHEN indexing_status = 'INDEXED_FULL' THEN 'INDEXED_SHALLOW' ELSE indexing_status END,
+    updated_at = unixepoch()
+WHERE id = ?1;
 
 -- name: RefreshMediaNodeAfterInPlaceWrite :exec
 -- The metadata-inheritance endpoint (#54) is the first server-initiated
@@ -732,9 +772,12 @@ LIMIT 1;
 
 -- name: ListLiveNodeIDsUnderPrefix :many
 -- Live nodes whose file_path lies in the half-open range [?1, ?2). The watcher
--- passes "<dir>/" and "<dir>0" ('0' sorts right after '/') to find everything
--- under a directory that was removed or moved out. A range scan so it can use
--- idx_media_nodes_file_path.
+-- passes "<dir>/" and the exclusive upper bound of that prefix range -- the
+-- prefix with its final byte incremented, which sorts immediately after
+-- every path under the directory on EVERY platform (a '0' suffix only
+-- worked on POSIX, where '/' is 0x2F and '0' is 0x30; on Windows the
+-- separator is '\' (0x5C), so '0' sorted BEFORE it and the range came out
+-- empty). A range scan so it can use idx_media_nodes_file_path.
 SELECT id FROM media_nodes
 WHERE file_path >= ?1 AND file_path < ?2
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN');
