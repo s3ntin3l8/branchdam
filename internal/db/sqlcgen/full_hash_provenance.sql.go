@@ -10,6 +10,31 @@ import (
 	"database/sql"
 )
 
+const deleteFullHashProvenance = `-- name: DeleteFullHashProvenance :exec
+DELETE FROM full_hash_provenance
+WHERE node_id = ?1 AND full_hash = ?2
+`
+
+type DeleteFullHashProvenanceParams struct {
+	NodeID   int64
+	FullHash string
+}
+
+// Removes the provenance row of node ?1 when it names the hash ?2 the
+// server has just disproved.
+//
+// Conditional on the hash on purpose. Every consumer of a provenance row
+// joins it on the node's CURRENT full_hash -- ListVerifiedTier3Ancestors,
+// ListPrunableNodes and the re-hash claim query all require
+// p.full_hash = n.full_hash -- so a row that names some OTHER value is
+// already inert, and it is the historical record of a hash the server
+// really did compute. Only the row that asserts the disproved value is
+// removed.
+func (q *Queries) DeleteFullHashProvenance(ctx context.Context, arg DeleteFullHashProvenanceParams) error {
+	_, err := q.db.ExecContext(ctx, deleteFullHashProvenance, arg.NodeID, arg.FullHash)
+	return err
+}
+
 const getFullHashProvenance = `-- name: GetFullHashProvenance :one
 SELECT node_id, full_hash, source, recorded_at, rehash_state,
        rehash_checked_at, rehash_attempts, rehash_computed,

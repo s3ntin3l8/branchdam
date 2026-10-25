@@ -566,6 +566,153 @@ func TestExecuteAbortsWhenNoLongerEligible(t *testing.T) {
 	}
 }
 
+// TestSameAncestorsDetectsAChangedAncestor covers the two ways the
+// verified-ancestor set can change under a purge.
+//
+// Membership: the Tier-3 master was archived and replaced, so the id is no
+// longer in the set. Values: it is the SAME node, but a concurrent scan's
+// TouchMediaNode refreshed its mtime_unix (or the size, or the location)
+// while leaving the id and the SERVER provenance in place -- so the
+// on-disk verification the purge did a moment earlier compared against
+// values the row no longer carries, and the purge must give up.
+//
+// The value branch is reachable, not theoretical: an unchanged master that
+// a scan merely re-touches is exactly that case.
+func TestSameAncestorsDetectsAChangedAncestor(t *testing.T) {
+	base := sqlcgen.ListVerifiedTier3AncestorsRow{
+		ID:                7,
+		FilePath:          "/archive/master.mov",
+		StorageLocationID: 3,
+		MtimeUnix:         1000,
+		SizeBytes:         4096,
+	}
+	changed := func(mutate func(r *sqlcgen.ListVerifiedTier3AncestorsRow)) []sqlcgen.ListVerifiedTier3AncestorsRow {
+		row := base
+		mutate(&row)
+		return []sqlcgen.ListVerifiedTier3AncestorsRow{row}
+	}
+	cases := []struct {
+		name  string
+		fresh []sqlcgen.ListVerifiedTier3AncestorsRow
+		want  bool
+	}{
+		{"unchanged", []sqlcgen.ListVerifiedTier3AncestorsRow{base}, true},
+		{"archived and replaced", changed(func(r *sqlcgen.ListVerifiedTier3AncestorsRow) { r.ID = 8 }), false},
+		{"same node, refreshed mtime", changed(func(r *sqlcgen.ListVerifiedTier3AncestorsRow) { r.MtimeUnix = 1001 }), false},
+		{"same node, changed size", changed(func(r *sqlcgen.ListVerifiedTier3AncestorsRow) { r.SizeBytes = 4097 }), false},
+		{"same node, moved path", changed(func(r *sqlcgen.ListVerifiedTier3AncestorsRow) { r.FilePath = "/archive/other.mov" }), false},
+		{"same node, another location", changed(func(r *sqlcgen.ListVerifiedTier3AncestorsRow) { r.StorageLocationID = 4 }), false},
+		{"no ancestors left", nil, false},
+		{"an extra ancestor appeared", []sqlcgen.ListVerifiedTier3AncestorsRow{base, {ID: 8, FilePath: "/archive/other.mov", StorageLocationID: 3, MtimeUnix: 1000, SizeBytes: 4096}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameAncestors([]sqlcgen.ListVerifiedTier3AncestorsRow{base}, tc.fresh); got != tc.want {
+				t.Errorf("sameAncestors = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecuteAbortsWhenTheAncestorIsArchivedDuringTheFilesystemWork proves
+// the second half of the prune gate.
+//
+// Splitting the prune into phases -- so the writer connection is no longer
+// held across the filesystem work -- reopened a window the single
+// transaction had closed: a concurrent scan can archive the Tier-3 master
+// and insert its successor (the version-collision path internal/pipeline
+// .Commit takes when the master's bytes changed under it) while the purge
+// is verifying the master's file on disk.
+//
+// That archive is precisely what makes the gate fail closed: the archived
+// row leaves ListVerifiedTier3Ancestors, so the candidate's edge chain no
+// longer reaches a live, verified Tier-3 master. Without the authoritative
+// re-read, the purge would unlink the Tier-1 cache -- possibly the last
+// copy of the bytes the successor no longer holds -- after the master it
+// was verified against had already been archived.
+//
+// The archive is injected through the afterVerify seam: the exact moment
+// the phase split opened.
+func TestExecuteAbortsWhenTheAncestorIsArchivedDuringTheFilesystemWork(t *testing.T) {
+	database := openTestDB(t)
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache.jpg")
+	if err := os.WriteFile(filePath, []byte("cache content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	fileInfo, err := os.Lstat(filePath)
+	if err != nil {
+		t.Fatalf("lstat file: %v", err)
+	}
+
+	tier1ID := seedLocation(t, database, "t1", root, "TIER1_LOCAL_SCRATCH", false, true)
+	tier3Root := t.TempDir()
+	tier3Path := filepath.Join(tier3Root, "master.jpg")
+	if err := os.WriteFile(tier3Path, []byte("master content"), 0o644); err != nil {
+		t.Fatalf("write master file: %v", err)
+	}
+	tier3Stat, err := os.Lstat(tier3Path)
+	if err != nil {
+		t.Fatalf("lstat tier3 file: %v", err)
+	}
+	tier3ID := seedLocation(t, database, "t3", tier3Root, "TIER3_MASTER_ARCHIVE", true, false)
+	guard := storage.NewGuard([]storage.Location{{ID: tier1ID, Name: "t1", RootPath: root, Tier: "TIER1_LOCAL_SCRATCH", ReadOnly: false}})
+
+	master := seedNode(t, database, nodeSpec{
+		locationID: tier3ID,
+		path:       tier3Path,
+		sizeBytes:  tier3Stat.Size(),
+		mtimeUnix:  tier3Stat.ModTime().Unix(),
+		fullHash:   hash64("master"),
+	})
+	candidateNode := seedNode(t, database, nodeSpec{locationID: tier1ID, path: filePath, mtimeUnix: oldMtime})
+	seedEdge(t, database, master.ID, candidateNode.ID, "AUTO_ACCEPTED")
+
+	if got, err := Plan(context.Background(), database.Reader, tier1ID, cutoffUnix); err != nil || len(got) != 1 {
+		t.Fatalf("Plan = %+v, %v; want one candidate", got, err)
+	}
+
+	// The concurrent write the phase split has to survive: the master is
+	// archived while the purge is verifying the disk.
+	var archiveErr error
+	archived := false
+	results := execute(context.Background(), database, guard, []Candidate{{
+		NodeID: candidateNode.ID, FilePath: candidateNode.FilePath, FileName: candidateNode.FileName,
+		StorageLocationID: tier1ID, MtimeUnix: fileInfo.ModTime().Unix(), SizeBytes: fileInfo.Size(),
+	}}, cutoffUnix, func() {
+		archiveErr = database.InTx(context.Background(), func(q *sqlcgen.Queries) error {
+			if err := q.ArchiveMediaNode(context.Background(), master.ID); err != nil {
+				return err
+			}
+			archived = true
+			return nil
+		})
+	})
+	if archiveErr != nil {
+		t.Fatalf("archive master: %v", archiveErr)
+	}
+	if !archived {
+		t.Fatal("the afterVerify seam never ran -- the test did not exercise the window")
+	}
+
+	if len(results) != 1 || results[0].Purged {
+		t.Fatalf("results = %+v, want a single refused (not purged) result", results)
+	}
+	if !errors.Is(results[0].Err, ErrNoLongerEligible) {
+		t.Errorf("err = %v, want ErrNoLongerEligible", results[0].Err)
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		t.Errorf("Tier-1 cache file missing after refused purge (stat err = %v), want it to survive", err)
+	}
+	after, err := database.Reader.GetMediaNodeByID(context.Background(), candidateNode.ID)
+	if err != nil {
+		t.Fatalf("GetMediaNodeByID: %v", err)
+	}
+	if after.LifecycleState != "ACTIVE" {
+		t.Errorf("lifecycle_state = %q, want ACTIVE (unchanged)", after.LifecycleState)
+	}
+}
+
 // TestExecuteRefusesAgentAssertedAncestor covers #505 at Execute time: a
 // live Tier-3 ancestor whose full_hash was only asserted by a paired device
 // -- or whose server-computed provenance no longer matches the node's

@@ -609,12 +609,37 @@ func (w *WatcherSupervisor) handleRemoval(ctx context.Context, path string, seen
 	return true
 }
 
+// prefixRangeEnd returns the exclusive upper bound of the range of paths
+// that start with prefix: the prefix with its final byte incremented
+// (carrying into the previous byte when the final one is 0xFF).
+//
+// It returns "" when every byte of the prefix is 0xFF -- there is no
+// greater prefix, so the range is empty by definition.
+func prefixRangeEnd(prefix string) string {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] == 0xFF {
+			continue
+		}
+		b[i]++
+		return string(b[:i+1])
+	}
+	return ""
+}
+
 // handleDirectoryRemoval marks every live node under dir MISSING and reports
 // whether any changed. It is a no-op for a path nothing lives under.
 func (w *WatcherSupervisor) handleDirectoryRemoval(ctx context.Context, dir string, failed *atomic.Int32) bool {
 	prefix := strings.TrimRight(dir, string(filepath.Separator)) + string(filepath.Separator)
-	// Half-open range [dir/, dir0): '0' is the byte after '/'.
-	end := strings.TrimRight(dir, string(filepath.Separator)) + "0"
+	// Half-open range [prefix, prefixRangeEnd(prefix)).
+	//
+	// The upper bound is the prefix with its final byte INCREMENTED, not
+	// the prefix plus '0'. The old form only happened to work on POSIX,
+	// where the separator '/' (0x2F) sorts immediately before '0' (0x30).
+	// On Windows the separator is '\' (0x5C), so '0' sorted BEFORE it and
+	// the range came out EMPTY -- no node under a removed directory was ever
+	// marked MISSING, and the directory's assets stayed listed as live.
+	end := prefixRangeEnd(prefix)
 	ids, err := w.deps.DB.Reader.ListLiveNodeIDsUnderPrefix(ctx, sqlcgen.ListLiveNodeIDsUnderPrefixParams{FilePath: prefix, FilePath_2: end})
 	if err != nil {
 		failed.Add(1)

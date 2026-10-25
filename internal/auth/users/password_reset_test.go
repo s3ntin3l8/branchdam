@@ -21,6 +21,16 @@ import (
 // the Issue 10 clearing assertions.
 func newPasswordResetService(t *testing.T, ttl time.Duration) (*Service, *PasswordResetService, *db.DB) {
 	t.Helper()
+	svc, reset, database, _ := newPasswordResetServiceWithPath(t, ttl)
+	return svc, reset, database
+}
+
+// newPasswordResetServiceWithPath is newPasswordResetService plus the
+// database file's path, for the test that reads the login_audit rows
+// straight from the file (the generated query layer does not select the
+// details column).
+func newPasswordResetServiceWithPath(t *testing.T, ttl time.Duration) (*Service, *PasswordResetService, *db.DB, string) {
+	t.Helper()
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "users.db")
 	database, err := db.Open(context.Background(), dbPath)
@@ -28,7 +38,7 @@ func newPasswordResetService(t *testing.T, ttl time.Duration) (*Service, *Passwo
 	t.Cleanup(func() { _ = database.Close() })
 	svc := NewService(database, testSecretBase64, ServiceOptions{})
 	reset := NewPasswordResetService(svc, PasswordResetServiceOptions{TokenTTL: ttl})
-	return svc, reset, database
+	return svc, reset, database, dbPath
 }
 
 // makeLocalUser inserts a local user with the given email so the
@@ -353,6 +363,44 @@ func TestConfirmPasswordReset_BadTokenDoesNotRevoke(t *testing.T) {
 	sess, err := svc.GetSessionByCookieID(context.Background(), cookie)
 	require.NoError(t, err)
 	assert.False(t, sess.RevokedAt.Valid, "session must remain active on a failed (wrong-token) confirm -- matches the no-side-effects invariant for ErrTokenNotFound")
+}
+
+// TestAdminResetPassword_PlaintextNeverReachesTheAuditTrail pins the
+// invariant AdminResetPassword's doc comment states: the new plaintext
+// exists in exactly one place, the HTTP response body.
+//
+// The login_audit table is append-only and retained, so a plaintext
+// written there would be the one copy of the credential the rest of
+// the system works to never make -- and rotating the password would
+// not retire it, because the historical row would still hold it. This
+// reads the rows straight from the database file: the generated query
+// layer does not select the details column.
+func TestAdminResetPassword_PlaintextNeverReachesTheAuditTrail(t *testing.T) {
+	svc, reset, _, dbPath := newPasswordResetServiceWithPath(t, time.Hour)
+	id := makeLocalUser(t, svc, "alice", "alice@example.com", "old password", false)
+
+	result, err := reset.AdminResetPassword(context.Background(), id, "admin:bob", "127.0.0.1", "test")
+	require.NoError(t, err)
+	require.NotEmpty(t, result.NewPassword)
+
+	raw, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+
+	rows, err := raw.QueryContext(context.Background(), "SELECT COALESCE(details, '') FROM login_audit")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	seen := 0
+	for rows.Next() {
+		var details string
+		require.NoError(t, rows.Scan(&details))
+		seen++
+		assert.NotContains(t, details, result.NewPassword,
+			"the admin-reset plaintext must not be written to the audit trail")
+	}
+	require.NoError(t, rows.Err())
+	assert.Greater(t, seen, 0, "the admin reset should have written at least one audit row")
 }
 
 // TestAdminResetPassword_ClearsMFACredentials pins Issue 10 (PR #459

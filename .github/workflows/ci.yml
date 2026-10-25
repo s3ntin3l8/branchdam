@@ -22,7 +22,7 @@ jobs:
       has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
       docker_relevant: ${{ steps.docker-filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: check
         run: |
           if [ -f web/package.json ]; then echo "has_web=true" >> "$GITHUB_OUTPUT"; else echo "has_web=false" >> "$GITHUB_OUTPUT"; fi
@@ -32,7 +32,7 @@ jobs:
       # PR-time Docker compile-check to PRs that could plausibly break the
       # image, instead of running it on every PR.
       - id: docker-filter
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
             docker:
@@ -44,7 +44,7 @@ jobs:
 
   backend:
     name: Go (build · vet · test)
-    uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@a80bd75142af1ac69bd3fe9ccfb40342a45978d4 # main @ 2026-10-19
     with:
       # GO-2026-5932: golang.org/x/crypto/openpgp subpackage is unmaintained
       # and unsafe by design. We import x/crypto ONLY for argon2id
@@ -53,7 +53,8 @@ jobs:
       # this ID if/when the upstream module drops the openpgp subpackage
       # or the advisory is otherwise resolved.
       govulncheck-ignore: GO-2026-5932
-    secrets: inherit
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   golangci-lint:
     name: golangci-lint
@@ -61,15 +62,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # web.Dist() (//go:embed) needs a real web/dist to resolve when
       # golangci-lint type-checks the package graph -- same stub ci-go.yml's
       # reusable workflow runs, kept in sync via the shared script.
       - run: bash .github/ci-prebuild.sh
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # .golangci.yml declares `version: "2"`, which requires a v2.x
           # binary -- pin explicitly rather than floating to "latest" so a
@@ -84,21 +85,22 @@ jobs:
     # the "Set up Node.js" step -- skip cleanly instead of going red on every
     # PR between now and then. Self-activates the moment PR 10 adds the file.
     if: needs.detect.outputs.has_web == 'true'
-    uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@a80bd75142af1ac69bd3fe9ccfb40342a45978d4 # main @ 2026-10-19
     with:
       node-version: '26'
       working-directory: web
       cache-dependency-path: web/package-lock.json
       test-script: test:coverage
-    secrets: inherit
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   demo-guard:
     name: Demo isolation guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26'
       - run: node --test scripts/demo/*.test.mjs
@@ -126,7 +128,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@8faf8fb7c08cb833cd8cd1a8701a14c93dd62060 # main @ 2026-10-21
     with:
       image-name: ${{ github.repository }}
       # Build-only on PRs; build + push :edge (cosign-signed) on push to main.
@@ -135,23 +137,15 @@ jobs:
       # CGO is on (mattn/go-sqlite3, see docs/schema.md), so the arm64 leg genuinely
       # compiles C — deliberately excluded from the PR-fast lane, not just slow there.
       platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-      # Stamp the commit the image was built from into the embedded SPA via
-      # BRANCHDAM_BUILD_ID, so Settings → "UI build" can warn about a stale
-      # embedded SPA vs. a server that was rebuilt without rebuilding the SPA.
-      # Matches Dockerfile:16 ARG BRANCHDAM_BUILD_ID=dev-docker.
-      #
-      # The PR leg's image is build-only (never pushed), so the stamp there
-      # is never observed by anything running it -- only :edge and release
-      # images reach an operator. The PR-time docker build is kept because
-      # the paths-filter gate above ensures it runs only when a touched file
-      # could plausibly break the image (Dockerfile, lockfiles, go.mod), and
-      # it's the only CI leg that exercises the Dockerfile's actual build
-      # flags (CGO_ENABLED=1, -trimpath, -X main.version) and the alpine
-      # base. First real run of this line is the next push to main; the
-      # docker job is SKIPPED on this PR because detect's paths-filter does
-      # not match .github/workflows/*.
-      #
-      # docker-publish.yml's `build-args` is multiline key=value, one per
-      # line.
-      build-args: BRANCHDAM_BUILD_ID=${{ github.sha }}
-    secrets: inherit
+      # No caller build-args. The pinned workflow appends
+      # COMMIT_SHA=<git rev-parse HEAD of this checkout> itself
+      # (s3ntin3l8/.github#97). The previous pin (2026-10-19) does not,
+      # so dropping BRANCHDAM_BUILD_ID=${{ github.sha }} without moving
+      # the pin would stamp dev-docker on :edge. release.yml pins the
+      # same workflow and still passes BRANCHDAM_BUILD_ID=<tag>, which
+      # wins over COMMIT_SHA.
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

@@ -55,6 +55,20 @@ SELECT node_id, full_hash, source, recorded_at, rehash_state,
 FROM full_hash_provenance
 WHERE node_id = ?1;
 
+-- name: DeleteFullHashProvenance :exec
+-- Removes the provenance row of node ?1 when it names the hash ?2 the
+-- server has just disproved.
+--
+-- Conditional on the hash on purpose. Every consumer of a provenance row
+-- joins it on the node's CURRENT full_hash -- ListVerifiedTier3Ancestors,
+-- ListPrunableNodes and the re-hash claim query all require
+-- p.full_hash = n.full_hash -- so a row that names some OTHER value is
+-- already inert, and it is the historical record of a hash the server
+-- really did compute. Only the row that asserts the disproved value is
+-- removed.
+DELETE FROM full_hash_provenance
+WHERE node_id = ?1 AND full_hash = ?2;
+
 -- name: ListRehashCandidates :many
 -- internal/rehash's claim query: up to batch_limit live Tier-3 nodes, in
 -- node id order after after_id, whose current full_hash is only

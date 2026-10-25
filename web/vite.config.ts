@@ -1,46 +1,10 @@
 /// <reference types="vitest/config" />
-import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import path, { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-
-// resolveBuildId returns a short, human-readable identifier for this
-// SPA build. CI / Docker set BRANCHDAM_BUILD_ID (matching the same env
-// the backend Dockerfile uses for `-X main.version`); locally we fall
-// back to `git rev-parse --short HEAD` with a `-dirty` marker so a
-// developer running `npm run build` sees something more useful than
-// "dev" -- and can spot uncommitted SPA changes from the Settings
-// page. Final fallback: `dev-<UTC date>`, e.g. for tarball checkouts
-// without .git.
-function resolveBuildId(): string {
-  const fromEnv = process.env.BRANCHDAM_BUILD_ID?.trim();
-  if (fromEnv) return fromEnv;
-  try {
-    const sha = execSync("git rev-parse --short HEAD", {
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-      .toString()
-      .trim();
-    if (!sha) throw new Error("empty");
-    let dirty = "";
-    try {
-      const porcelain = execSync("git status --porcelain", {
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-        .toString()
-        .trim();
-      if (porcelain) dirty = "-dirty";
-    } catch {
-      // status failing is fine -- leave it un-dirty (e.g. tarball
-      // checkout without .git).
-    }
-    return `${sha}${dirty}`;
-  } catch {
-    return `dev-${new Date().toISOString().slice(0, 10)}`;
-  }
-}
+import { resolveBuildId } from "./resolve-build-id.ts";
 
 // branchdamBuildStamp writes a one-line BUILD_ID into the emitted
 // outDir (web/dist/BUILD_ID) so the Go server can read it from the
@@ -113,7 +77,7 @@ export default defineConfig({
     env: { NODE_ENV: "development" },
     globals: true,
     setupFiles: ["src/test/setup.ts"],
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "resolve-build-id.test.ts"],
     coverage: {
       provider: "v8",
       // json-summary feeds the CI coverage gate; lcov is what Codecov

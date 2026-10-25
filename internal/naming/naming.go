@@ -126,6 +126,20 @@ func splitBase(name string) (stem, ext string) {
 	return name[:dot], name[dot+1:]
 }
 
+// sanitizeSegment makes s safe to use as a single path segment.
+//
+// Separators and the characters Windows forbids in a filename are
+// replaced with "_". A segment that is nothing but dots is replaced too:
+// "." and ".." are relative-path segments, so a segment that is one of
+// them walks out of the directory it was meant to name.
+//
+// That is not hypothetical here. The camera model comes from EXIF
+// metadata, which whoever wrote the file controls, and the naming
+// template is operator-configurable (ingest.namingTemplate): a template
+// of "{camera_model}/{original_name}" with a camera model of ".."
+// renders "../IMG.jpg". The upload engine's filepath.IsLocal check
+// catches the escape today -- this is the layer that stops the bad
+// segment from ever being rendered in the first place.
 func sanitizeSegment(s string) string {
 	if s == "" {
 		return s
@@ -134,7 +148,19 @@ func sanitizeSegment(s string) string {
 		"/", "_", "\\", "_", ":", "_", "*", "_", "?", "_",
 		"\"", "_", "<", "_", ">", "_", "|", "_",
 	)
-	return replacer.Replace(s)
+	out := replacer.Replace(s)
+	// "." and ".." (and "..." and so on) are relative path segments.
+	//
+	// Trailing SPACES count too. Win32 strips trailing dots AND trailing
+	// spaces from a path segment before it resolves it, so ".. " is ".." to
+	// the filesystem -- while filepath.IsLocal compares a segment to ".."
+	// exactly and lets ".. " through. Trimming both characters catches the
+	// trailing-byte variant here, where it can still be replaced, instead of
+	// leaving it to the upload engine's IsLocal check.
+	if strings.Trim(out, ". ") == "" {
+		return strings.Repeat("_", len(out))
+	}
+	return out
 }
 
 // RenderPath renders a relative path using tpl and vars.

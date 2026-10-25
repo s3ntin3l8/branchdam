@@ -20,7 +20,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/release-please.yml@a80bd75142af1ac69bd3fe9ccfb40342a45978d4 # main @ 2026-10-19
 
   image:
     name: Build and push release image
@@ -30,15 +30,18 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@8faf8fb7c08cb833cd8cd1a8701a14c93dd62060 # main @ 2026-10-21
     with:
       image-name: ${{ github.repository }}
       push-release: true
       release-tag: ${{ needs.release-please.outputs.tag_name }}
+      # Same docker-publish pin as ci.yml (s3ntin3l8/.github#97), so a
+      # release build also receives COMMIT_SHA and the build-arg check.
+      # BRANCHDAM_BUILD_ID below still wins: UI build stays the tag.
       # Stamp the release tag (e.g. v1.2.3) into the embedded SPA via
       # BRANCHDAM_BUILD_ID. release-please already stamps the matching
       # bare-semver version (e.g. 1.2.3) into main.version via
-      # -ldflags on Dockerfile:50-52, so the v-prefix on tag_name is
+      # -ldflags on Dockerfile:57-60, so the v-prefix on tag_name is
       # the only difference: Settings will read "Version: 1.2.3" and
       # "UI build: v1.2.3" on a clean release image. They refer to the
       # same release, just with/without the v prefix.
@@ -54,4 +57,8 @@ jobs:
       # docker-publish.yml's `build-args` is multiline key=value, one
       # per line.
       build-args: BRANCHDAM_BUILD_ID=${{ needs.release-please.outputs.tag_name }}
-    secrets: inherit
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
