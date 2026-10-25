@@ -1,8 +1,9 @@
 module github.com/s3ntin3l8/branchdam
 
-go 1.27.2
+go 1.27.3
 
 require (
+	github.com/boombuler/barcode v1.1.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/corona10/goimagehash v1.1.0
 	github.com/danielgtaylor/huma/v2 v2.39.1
@@ -10,7 +11,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/pressly/goose/v3 v3.29.0
-	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stretchr/testify v1.12.1
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.58.0

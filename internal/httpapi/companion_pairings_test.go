@@ -399,6 +399,11 @@ func TestCompanionPairings_QRPayloadEncodedCorrectly(t *testing.T) {
 	// Direct unit test on the closure the HTTP layer uses. Easier than
 	// extracting a QR from a real response.
 	srv, _, _ := newPairingTestServer(t)
+	// A forwarded host is only honoured from a configured trusted proxy,
+	// so the test has to be one: httptest.NewRequest's peer is
+	// 192.0.2.1.
+	srv.cfg().HTTP.TrustedProxies = []string{"192.0.2.1"}
+	t.Cleanup(func() { srv.cfg().HTTP.TrustedProxies = nil })
 
 	// Build a request with X-Forwarded-* and run the middleware so the
 	// returned context has the forwarded values injected.
@@ -439,6 +444,30 @@ func TestCompanionPairings_QRPayloadIgnoresForwardedHostFromUntrustedPeer(t *tes
 	assert.NotContains(t, payload, "evil.example.org")
 }
 
+// TestCompanionPairings_QRPayloadIgnoresForwardedHostWithNoProxyList
+// pins the stricter half of the rule: with http.trustedProxies UNSET,
+// isTrustedProxy's backward-compat default trusts every source, and
+// honouring the header on that basis would let any peer that can reach
+// the port choose the host the companion's plaintext key is delivered
+// to. The host needs an allowlist that says who may set it; without one
+// the QR carries the server's own listen address instead.
+func TestCompanionPairings_QRPayloadIgnoresForwardedHostWithNoProxyList(t *testing.T) {
+	srv, _, _ := newPairingTestServer(t)
+	require.Empty(t, srv.cfg().HTTP.TrustedProxies, "this test is about the unset case")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/companion/pairings", nil)
+	req.RemoteAddr = "203.0.113.9:5555"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "evil.example.org")
+	capturedCtx := req.Context()
+	srv.pairingForwardedMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+	})).ServeHTTP(httptest.NewRecorder(), req)
+
+	payload := string(srv.qrPayloadFor(capturedCtx)("a", "k"))
+	assert.NotContains(t, payload, "evil.example.org")
+}
+
 // TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser pins
 // the contract that the mobile app relies on: the QR payload emitted by
 // qrPayloadFor() must be parseable by a standard `application/x-www-form
@@ -448,6 +477,9 @@ func TestCompanionPairings_QRPayloadIgnoresForwardedHostFromUntrustedPeer(t *tes
 // iOS AppleQrParser, see s3ntin3l8/branchdam-mobile#141) decode against.
 func TestCompanionPairings_QRPayloadRoundTripsViaStandardQueryParser(t *testing.T) {
 	srv, _, _ := newPairingTestServer(t)
+	// The forwarded host is only honoured from a configured trusted proxy.
+	srv.cfg().HTTP.TrustedProxies = []string{"192.0.2.1"}
+	t.Cleanup(func() { srv.cfg().HTTP.TrustedProxies = nil })
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/companion/pairings", nil)
 	req.Header.Set("X-Forwarded-Proto", "https")

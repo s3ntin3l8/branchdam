@@ -67,7 +67,11 @@ func New[K comparable](workerCount, queueDepth int) *Pool[K] {
 // does not block until ctx is done. Call Drain (after cancelling ctx) to
 // wait for in-flight work to finish during shutdown.
 func (p *Pool[K]) Run(ctx context.Context) {
+	// Stored under mu: Submit reads it from another goroutine, and the
+	// race detector is right to flag a plain field write here.
+	p.mu.Lock()
 	p.ctx = ctx
+	p.mu.Unlock()
 	p.wg.Add(1)
 	go p.closeOnDone(ctx)
 	for i := 0; i < p.workerCount; i++ {
@@ -97,11 +101,11 @@ func (p *Pool[K]) workerLoop(ctx context.Context) {
 // dequeued before shutdown still gets its completion bookkeeping released,
 // instead of leaving a caller's wg.Wait() blocked forever.
 //
-// Submit checks p.ctx.Err() synchronously before taking p.mu, so any
-// Submit call that arrives after ctx cancellation is refused immediately
-// without waiting for this goroutine to run. The `closed` flag under p.mu
-// is the final guard for the drain: Submit's channel send and this drain
-// are strictly ordered by the same lock.
+// Submit checks p.ctx.Err() under p.mu, so any Submit call that arrives
+// after ctx cancellation is refused immediately without waiting for this
+// goroutine to run. The `closed` flag under p.mu is the final guard for
+// the drain: Submit's channel send and this drain are strictly ordered by
+// the same lock.
 //
 // This runs as a single dedicated goroutine, tracked by Run alongside the
 // workers, rather than each worker independently racing ctx.Done() against
@@ -174,7 +178,7 @@ func (p *Pool[K]) runJob(ctx context.Context, job Job[K]) {
 // should not keep submitting new work after shutdown has begun.
 //
 // Submit also refuses once the Pool's own Run context is done: p.ctx.Err()
-// is checked synchronously before taking p.mu, closing the race window
+// is checked under p.mu, before the job is queued, closing the race window
 // between ctx cancellation and closeOnDone acquiring the lock. The `closed`
 // flag under p.mu is the final guard -- see closeOnDone's doc comment for
 // why these two checks are strictly ordered: an earlier version only had
@@ -207,9 +211,11 @@ func (p *Pool[K]) SubmitWait(ctx context.Context, job Job[K]) bool {
 			return false
 		}
 		var pool <-chan struct{}
+		p.mu.Lock()
 		if p.ctx != nil {
 			pool = p.ctx.Done()
 		}
+		p.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return false
@@ -227,13 +233,15 @@ func (p *Pool[K]) trySubmit(ctx context.Context, job Job[K]) (ok, retry bool) {
 	if ctx.Err() != nil {
 		return false, false
 	}
-	if p.ctx != nil && p.ctx.Err() != nil {
-		return false, false
-	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// The pool's own context is read under the mutex: Run stores it and
+	// Submit reads it, from different goroutines.
+	if p.ctx != nil && p.ctx.Err() != nil {
+		return false, false
+	}
 	if p.closed {
 		return false, false
 	}

@@ -1,9 +1,8 @@
-// Package qr is a thin wrapper around skip2/go-qrcode that emits SVG
-// for the /api/v1/companion/pairings/{id}/qr.svg endpoint.
+// Package qr emits an SVG QR code for the
+// /api/v1/companion/pairings/{id}/qr.svg endpoint.
 //
-// skip2/go-qrcode itself only renders PNG; we read its Bitmap() output
-// (a [][]bool where each cell is a module's on/off state) and rasterize
-// it to an inline SVG path. SVG (not PNG) so the operator can resize
+// The encoder is github.com/boombuler/barcode/qr. We rasterize its module
+// grid to an inline SVG path. SVG (not PNG) so the operator can resize
 // the browser's QR panel without pixelation, the file is text and
 // diffable for security review, and it inlines cleanly into React via
 // dangerouslySetInnerHTML if a future SPA revision prefers that over
@@ -19,9 +18,11 @@ package qr
 import (
 	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 
-	qrc "github.com/skip2/go-qrcode"
+	"github.com/boombuler/barcode"
+	qrc "github.com/boombuler/barcode/qr"
 )
 
 // DefaultSize is the SVG viewBox edge length. 256 is the smallest size
@@ -39,11 +40,11 @@ const DefaultSize = 256
 // per-module size, so the viewBox attribute is the source of truth.
 const quietZoneModules = 4
 
-// RecoveryLevel maps onto qrc's recovery level constants: L (~7%), M
-// (~15%, default), Q (~25%), H (~30%) -- higher recovery means more
-// error correction and a denser pattern. Medium is qrc.New's default
+// RecoveryLevel maps onto the encoder's error-correction levels: L (~7%),
+// M (~15%, default), Q (~25%), H (~30%) -- higher recovery means more
+// error correction and a denser pattern. Medium is the encoder's default
 // when recovery isn't specified.
-const RecoveryLevel = qrc.Medium
+const RecoveryLevel = qrc.M
 
 // RenderSVG returns the QR code for payload as an SVG document. The
 // returned bytes are a complete SVG (`<?xml ...><svg ...>...</svg>`)
@@ -59,25 +60,57 @@ func RenderSVG(payload string, size int) ([]byte, error) {
 	if size <= 0 {
 		size = DefaultSize
 	}
-	code, err := qrc.New(payload, RecoveryLevel)
+	code, err := qrc.Encode(payload, RecoveryLevel, qrc.Auto)
 	if err != nil {
 		return nil, fmt.Errorf("qr: new code: %w", err)
 	}
-	return renderSVGFromBitmap(code, size)
+	return renderSVGFromBitmap(bitmapOf(code), size)
+}
+
+// bitmapOf reads the encoder's module grid as a [][]bool of module
+// on/off states, the shape the SVG rasterizer below expects.
+//
+// The encoder hands back an image.Image rather than a boolean grid, so
+// the grid is read one module at a time: a module is dark when its
+// colour is the scheme's foreground. The scheme is taken from the
+// barcode itself (the encoder may be asked for a custom one) and falls
+// back to black, which is what qr.Encode's default scheme uses.
+func bitmapOf(code barcode.Barcode) [][]bool {
+	bounds := code.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return nil
+	}
+	// The variable must be the color.Color INTERFACE: color.Black is a
+	// color.Gray16 value, and a color.Gray16-typed variable cannot hold
+	// ColorScheme().Foreground, which is a color.Color.
+	var foreground color.Color = color.Black
+	if coloured, ok := code.(barcode.BarcodeColor); ok {
+		foreground = coloured.ColorScheme().Foreground
+	}
+	bitmap := make([][]bool, height)
+	for y := 0; y < height; y++ {
+		row := make([]bool, width)
+		for x := 0; x < width; x++ {
+			row[x] = code.At(x, y) == foreground
+		}
+		bitmap[y] = row
+	}
+	return bitmap
 }
 
 // renderSVGFromBitmap constructs an SVG document from a pre-built QR code.
-// The version of skip2/go-qrcode vendored here predates the upstream
-// SVG() method, so we read Bitmap() (a [][]bool of module on/off
-// states) and rasterize it to an inline SVG <path>. See qr_test.go for
+// The encoder renders to an image rather than to SVG, so we read the
+// module grid and rasterize it to an inline SVG <path>. See qr_test.go for
 // the rendered-shape assertions.
-func renderSVGFromBitmap(code *qrc.QRCode, size int) ([]byte, error) {
-	bitmap := code.Bitmap()
-
-	// Each row of the bitmap is one side of the QR code; quiet zone
-	// (the white border skip2's PNG render adds automatically) is faked
+func renderSVGFromBitmap(bitmap [][]bool, size int) ([]byte, error) {
+	// Each row of the bitmap is one side of the QR code; the quiet zone
+	// (the white border the encoder's own rasterizers add) is faked
 	// here by padding each side with `quietZoneModules` cells of false.
 	n := len(bitmap)
+	if n == 0 {
+		return nil, errors.New("qr: empty code")
+	}
 	padded := n + 2*quietZoneModules
 	cellSize := float64(size) / float64(padded)
 

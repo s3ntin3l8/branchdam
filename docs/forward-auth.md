@@ -105,6 +105,16 @@ gets its own key via `POST /api/v1/companion/pairings` (see
 [`agent-api.md`](agent-api.md)). There is no shared server-wide key to
 configure or rotate.
 
+The pairing QR has to carry the *public* URL — the host a phone can reach —
+and that host lands in the QR next to the device's plaintext API key. So the
+QR's `server=` value honors `X-Forwarded-Host` only from a peer listed in
+`http.trustedProxies` (see [`configuration.md`](configuration.md)); with the
+list unset the QR falls back to the server's own listen address, which a
+phone cannot reach. **Set `http.trustedProxies` to Traefik's IP/CIDR** if you
+pair devices. `X-Forwarded-Proto` is *not* gated the same way: it selects the
+scheme rather than the destination, and the app sees plain HTTP from Traefik,
+so the public `https://` scheme is only knowable from that header.
+
 The browser side needs no configuration of its own: `BrowserChain` trusts whatever
 `X-Authentik-*` headers arrive, because Traefik's `strip-identity@file → authentik@file` chain
 (§2) is what makes that trust well-founded. branchDAM has no equivalent of runway's

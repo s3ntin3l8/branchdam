@@ -21,15 +21,38 @@ import (
 const FilenameStemCandidateCap = 500
 const filenameStemCandidateCap = FilenameStemCandidateCap
 
+// documentIDCandidateCap bounds ListLiveNodesByDocumentID's result set.
+//
+// A document_id names one original document, so a legitimate group of
+// live nodes sharing one is small -- the xmpOriginalDocumentID resolver
+// scores each of them as a candidate parent at confidence 0.95. The cap
+// bounds what a pathological group (a file with a forged or colliding
+// document_id) can cost. Hitting it means candidate parents were
+// dropped, so it is worth a WARN rather than a silent truncation.
+const DocumentIDCandidateCap = 500
+const documentIDCandidateCap = DocumentIDCandidateCap
+
+// fileNameCandidateCap bounds ListLiveNodesByFileName's result set.
+//
+// A file name is NOT unique: the same name appears in many directories
+// and phone cameras reuse names, so a legitimate group can be large.
+// The consumer (the project-sidecar resolver's filename fallback) only
+// uses a match when it is EXACTLY one node and skips an ambiguous one
+// otherwise, so a cap greater than one cannot turn an ambiguous match
+// into a wrong one -- truncating a group of N to a cap of M (M > 1)
+// still leaves "more than one", which is still skipped.
+const FileNameCandidateCap = 500
+const fileNameCandidateCap = FileNameCandidateCap
+
 // querier is the subset of sqlcgen.Querier lookup.go needs -- narrowed so
 // this package doesn't need the full generated interface just to read two
 // query results.
 type querier interface {
-	ListLiveNodesByDocumentID(ctx context.Context, documentID sql.NullString) ([]sqlcgen.MediaNode, error)
+	ListLiveNodesByDocumentID(ctx context.Context, arg sqlcgen.ListLiveNodesByDocumentIDParams) ([]sqlcgen.MediaNode, error)
 	ListLiveNodesByFilenameStem(ctx context.Context, arg sqlcgen.ListLiveNodesByFilenameStemParams) ([]sqlcgen.MediaNode, error)
 	ListTier3Candidates(ctx context.Context, arg sqlcgen.ListTier3CandidatesParams) ([]sqlcgen.MediaNode, error)
 	GetLiveNodeByPath(ctx context.Context, filePath string) (sqlcgen.MediaNode, error)
-	ListLiveNodesByFileName(ctx context.Context, fileName string) ([]sqlcgen.MediaNode, error)
+	ListLiveNodesByFileName(ctx context.Context, arg sqlcgen.ListLiveNodesByFileNameParams) ([]sqlcgen.MediaNode, error)
 }
 
 // dbLookup implements Lookup against a real *sqlcgen.Queries (i.e.
@@ -44,9 +67,23 @@ func NewLookup(reader querier) Lookup {
 }
 
 func (l *dbLookup) ByOriginalDocumentID(ctx context.Context, documentID string) ([]Node, error) {
-	rows, err := l.q.ListLiveNodesByDocumentID(ctx, sql.NullString{String: documentID, Valid: documentID != ""})
+	rows, err := l.q.ListLiveNodesByDocumentID(ctx, sqlcgen.ListLiveNodesByDocumentIDParams{
+		DocumentID: sql.NullString{String: documentID, Valid: documentID != ""},
+		Limit:      documentIDCandidateCap,
+	})
 	if err != nil {
 		return nil, err
+	}
+	if len(rows) == documentIDCandidateCap {
+		// Exactly at the cap: it may have truncated a larger result set, or
+		// there may genuinely be exactly this many live matches -- the
+		// distinction isn't knowable from a LIMIT'd query, so this logs
+		// conservatively rather than silently under-resolving either way.
+		slog.Warn("graph live-node lookup hit the candidate cap",
+			"lookup", "original_document_id",
+			"document_id", documentID,
+			"cap", documentIDCandidateCap,
+		)
 	}
 	return toNodes(rows), nil
 }
@@ -111,9 +148,25 @@ func (l *dbLookup) ByFileName(ctx context.Context, fileName string) ([]Node, err
 	if fileName == "" {
 		return nil, nil
 	}
-	rows, err := l.q.ListLiveNodesByFileName(ctx, fileName)
+	rows, err := l.q.ListLiveNodesByFileName(ctx, sqlcgen.ListLiveNodesByFileNameParams{
+		FileName: fileName,
+		Limit:    fileNameCandidateCap,
+	})
 	if err != nil {
 		return nil, err
+	}
+	if len(rows) == fileNameCandidateCap {
+		// Exactly at the cap: it may have truncated a larger result set, or
+		// there may genuinely be exactly this many live matches -- the
+		// distinction isn't knowable from a LIMIT'd query, so this logs
+		// conservatively. Either way the result is NOT exactly one row, so
+		// the caller still treats the reference as ambiguous and skips it:
+		// a truncated group cannot become a wrong single match.
+		slog.Warn("graph live-node lookup hit the candidate cap",
+			"lookup", "file_name",
+			"file_name", fileName,
+			"cap", fileNameCandidateCap,
+		)
 	}
 	return toNodes(rows), nil
 }

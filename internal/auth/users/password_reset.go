@@ -321,9 +321,14 @@ type AdminResetResult struct {
 }
 
 // AdminResetPassword rotates a user's password, returning a fresh
-// 16-byte base64url-encoded plaintext. The plaintext surfaces in the
-// HTTP response (and is logged to the admin-audit row in PR #408).
-// It is NOT persisted -- only the argon2id hash is stored.
+// 16-byte base64url-encoded plaintext.
+//
+// The HTTP response body is the ONLY place the plaintext exists. It is
+// not persisted: only the argon2id hash is stored, and the login-audit
+// row records the actor, the target user id and the kind of reset --
+// never the credential. The audit table is append-only and retained, so
+// a plaintext written there would outlive the rotation that was meant
+// to retire it.
 func (p *PasswordResetService) AdminResetPassword(ctx context.Context, targetUserID int64, actor string, ip, userAgent string) (AdminResetResult, error) {
 	user, err := p.svc.GetUserByID(ctx, targetUserID)
 	if err != nil {
