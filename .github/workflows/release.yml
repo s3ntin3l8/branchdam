@@ -38,7 +38,7 @@ jobs:
       # Stamp the release tag (e.g. v1.2.3) into the embedded SPA via
       # BRANCHDAM_BUILD_ID. release-please already stamps the matching
       # bare-semver version (e.g. 1.2.3) into main.version via
-      # -ldflags on Dockerfile:50-52, so the v-prefix on tag_name is
+      # -ldflags on Dockerfile:58-60, so the v-prefix on tag_name is
       # the only difference: Settings will read "Version: 1.2.3" and
       # "UI build: v1.2.3" on a clean release image. They refer to the
       # same release, just with/without the v prefix.

@@ -6,14 +6,22 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 COPY web/ ./
-# BRANCHDAM_BUILD_ID is read by vite's branchdamBuildStamp plugin
-# (web/vite.config.ts) and stamped into both the JS bundle as
-# __BRANCHDAM_BUILD__ and into web/dist/BUILD_ID. Operators compare
-# it on the Settings page against the server's `-X main.version`
-# (Config.version) to spot a stale embed. `docker build` sets
-# BRANCHDAM_BUILD_ID via the CI workflow's `--build-arg`; locally
-# `make build-embed` falls back to `git rev-parse --short HEAD`.
-ARG BRANCHDAM_BUILD_ID=dev-docker
+# The SPA build id (Settings → "UI build") is resolved by vite as
+# BRANCHDAM_BUILD_ID || COMMIT_SHA || dev-docker and stamped into the
+# JS bundle as __BRANCHDAM_BUILD__ and into web/dist/BUILD_ID
+# (web/vite.config.ts). BRANCHDAM_BUILD_ID is the explicit override
+# release.yml still passes (the release tag). COMMIT_SHA is the commit
+# the shared docker-publish workflow actually checked out
+# (s3ntin3l8/.github#97) — not github.sha. Both ARGs stay in this web
+# stage: the value is baked into the bundle, and the final debian stage
+# never mentions them, which the shared build-arg check allows. Empty
+# defaults so an unset override does not shadow COMMIT_SHA. A local
+# `docker build` sets neither (.git is not in the context) and vite
+# falls back to dev-docker; a host `npm run build` still uses
+# `git rev-parse --short HEAD`.
+ARG COMMIT_SHA=""
+ARG BRANCHDAM_BUILD_ID=""
+ENV COMMIT_SHA=$COMMIT_SHA
 ENV BRANCHDAM_BUILD_ID=$BRANCHDAM_BUILD_ID
 RUN npm run build
 
