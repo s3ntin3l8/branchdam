@@ -1,57 +1,10 @@
 /// <reference types="vitest/config" />
-import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import path, { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-
-// resolveBuildId is stamped into __BRANCHDAM_BUILD__ and web/dist/BUILD_ID.
-// Precedence, so a release still shows its tag and a PR/edge image shows
-// the commit it was actually built from (s3ntin3l8/.github#97, #611):
-//
-//   BRANCHDAM_BUILD_ID  explicit override. release.yml passes the tag.
-//   COMMIT_SHA          injected by docker-publish from `git rev-parse HEAD`
-//                       of the checkout — not `${{ github.sha }}`, which is
-//                       only the commit that triggered the caller.
-//   dev-docker          neither set. A local `docker build` lands here
-//                       (.git is dockerignored, so there is no SHA to read).
-//
-// On a host checkout with neither env var set we still prefer
-// `git rev-parse --short HEAD`, plus `-dirty` when the worktree is dirty.
-// Vite applies `define` to the dev server too, and Settings compares the
-// inlined id with the embedded BUILD_ID after stripping that suffix — a
-// dirty `make dev-web` must not look like a stale embed. dev-docker is the
-// fallback when git isn't available (image build, tarball).
-function resolveBuildId(): string {
-  const override = process.env.BRANCHDAM_BUILD_ID?.trim();
-  if (override) return override;
-  const commit = process.env.COMMIT_SHA?.trim();
-  if (commit) return commit;
-  try {
-    const sha = execSync("git rev-parse --short HEAD", {
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-      .toString()
-      .trim();
-    if (!sha) throw new Error("empty");
-    let dirty = "";
-    try {
-      const porcelain = execSync("git status --porcelain", {
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-        .toString()
-        .trim();
-      if (porcelain) dirty = "-dirty";
-    } catch {
-      // status failing is fine -- leave it un-dirty (e.g. tarball
-      // checkout without .git).
-    }
-    return `${sha}${dirty}`;
-  } catch {
-    return "dev-docker";
-  }
-}
+import { resolveBuildId } from "./resolve-build-id.ts";
 
 // branchdamBuildStamp writes a one-line BUILD_ID into the emitted
 // outDir (web/dist/BUILD_ID) so the Go server can read it from the
@@ -124,7 +77,7 @@ export default defineConfig({
     env: { NODE_ENV: "development" },
     globals: true,
     setupFiles: ["src/test/setup.ts"],
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "resolve-build-id.test.ts"],
     coverage: {
       provider: "v8",
       // json-summary feeds the CI coverage gate; lcov is what Codecov

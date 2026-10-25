@@ -141,8 +141,9 @@ jobs:
       # COMMIT_SHA=<git rev-parse HEAD of this checkout> itself
       # (s3ntin3l8/.github#97). The previous pin (2026-10-19) does not,
       # so dropping BRANCHDAM_BUILD_ID=${{ github.sha }} without moving
-      # the pin would stamp dev-docker on :edge. release.yml still passes
-      # BRANCHDAM_BUILD_ID=<tag>, which wins over COMMIT_SHA.
+      # the pin would stamp dev-docker on :edge. release.yml pins the
+      # same workflow and still passes BRANCHDAM_BUILD_ID=<tag>, which
+      # wins over COMMIT_SHA.
     secrets:
       REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

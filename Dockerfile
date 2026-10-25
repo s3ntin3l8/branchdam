@@ -6,19 +6,18 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 COPY web/ ./
-# The SPA build id (Settings → "UI build") is resolved by vite as
-# BRANCHDAM_BUILD_ID || COMMIT_SHA || dev-docker and stamped into the
-# JS bundle as __BRANCHDAM_BUILD__ and into web/dist/BUILD_ID
-# (web/vite.config.ts). BRANCHDAM_BUILD_ID is the explicit override
-# release.yml still passes (the release tag). COMMIT_SHA is the commit
-# the shared docker-publish workflow actually checked out
-# (s3ntin3l8/.github#97) — not github.sha. Both ARGs stay in this web
-# stage: the value is baked into the bundle, and the final debian stage
-# never mentions them, which the shared build-arg check allows. Empty
-# defaults so an unset override does not shadow COMMIT_SHA. A local
-# `docker build` sets neither (.git is not in the context) and vite
-# falls back to dev-docker; a host `npm run build` still uses
-# `git rev-parse --short HEAD`.
+# The SPA build id (Settings → "UI build") is stamped into the JS
+# bundle as __BRANCHDAM_BUILD__ and into web/dist/BUILD_ID
+# (web/resolve-build-id.ts). BRANCHDAM_BUILD_ID is the explicit override
+# release.yml still passes (the release tag) and always wins. Otherwise
+# a checkout's `git rev-parse --short HEAD` wins, so a stray host
+# COMMIT_SHA cannot outrank the real commit. COMMIT_SHA — injected by
+# docker-publish from the checked-out commit (s3ntin3l8/.github#97), not
+# github.sha — applies only once .git is gone, which it is here. Last
+# resort is dev-docker. Both ARGs stay in this web stage: the value is
+# baked into the bundle, and the final debian stage never mentions
+# them, which the shared build-arg check allows. Empty defaults so an
+# unset override does not shadow COMMIT_SHA.
 ARG COMMIT_SHA=""
 ARG BRANCHDAM_BUILD_ID=""
 ENV COMMIT_SHA=$COMMIT_SHA
