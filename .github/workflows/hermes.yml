@@ -44,7 +44,8 @@ name: Hermes (review)
 # own head ref, so a fork PR can edit or delete the `head.repo.full_name` guard
 # (or re-point `uses:`); an in-file or in-callee guard is therefore NOT the trust
 # boundary. The real control is the repo setting Settings -> Actions -> General ->
-# "Require approval for all outside collaborators" (tracked in
+# "Fork pull request workflows from outside collaborators" -> "Require approval
+# for all outside collaborators" (tracked in
 # s3ntin3l8/.github#139), which must stay on: the runner (filesystem, LAN
 # access) is what is at stake, not the token.
 # (The fork guard also lives in the reusable workflow as defense-in-depth; it
