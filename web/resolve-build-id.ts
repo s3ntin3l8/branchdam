@@ -32,7 +32,7 @@ function gitShortHead(): string | null {
 
 // resolveBuildId is stamped into __BRANCHDAM_BUILD__ and web/dist/BUILD_ID.
 //
-//   BRANCHDAM_BUILD_ID  explicit override. release.yml passes the tag.
+//   BRANCHDAM_BUILD_ID  explicit override. release-please.yml passes the tag.
 //   git short SHA       the checkout, when .git is present. Consulted
 //                       before COMMIT_SHA so a stray exported COMMIT_SHA
 //                       on a host cannot outrank `git rev-parse`.

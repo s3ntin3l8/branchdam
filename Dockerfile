@@ -9,7 +9,7 @@ COPY web/ ./
 # The SPA build id (Settings → "UI build") is stamped into the JS
 # bundle as __BRANCHDAM_BUILD__ and into web/dist/BUILD_ID
 # (web/resolve-build-id.ts). BRANCHDAM_BUILD_ID is the explicit override
-# release.yml still passes (the release tag) and always wins. Otherwise
+# release-please.yml still passes (the release tag) and always wins. Otherwise
 # a checkout's `git rev-parse --short HEAD` wins, so a stray host
 # COMMIT_SHA cannot outrank the real commit. COMMIT_SHA — injected by
 # docker-publish from the checked-out commit (s3ntin3l8/.github#97), not
