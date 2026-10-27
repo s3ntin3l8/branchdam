@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.27.2](https://github.com/s3ntin3l8/branchdam/compare/v0.27.1...v0.27.2) (2026-10-27)
+
+
+### Bug Fixes
+
+* **demo:** cap the landing loop's mp4 bitrate and pad the graph still ([#603](https://github.com/s3ntin3l8/branchdam/issues/603)) ([e324ebb](https://github.com/s3ntin3l8/branchdam/commit/e324ebb80afb9e6a01e769d33c5737d3605d1c03))
+* **demo:** rebuild a stale web/dist before embedding it ([#605](https://github.com/s3ntin3l8/branchdam/issues/605)) ([cdb7982](https://github.com/s3ntin3l8/branchdam/commit/cdb7982acae287a0e94f5d6f68349fe9c22434dc))
+* **demo:** rebuild, not crash, on a dangling web/ build input ([#606](https://github.com/s3ntin3l8/branchdam/issues/606)) ([f102ae1](https://github.com/s3ntin3l8/branchdam/commit/f102ae1c699766e471a65900e9df1723e47936d4))
+* **deps:** move the Go toolchain to 1.27.3 for GO-2026-6809 ([#613](https://github.com/s3ntin3l8/branchdam/issues/613)) ([8846355](https://github.com/s3ntin3l8/branchdam/commit/88463552845cf01e976fadb52723a83501985c57))
+* **security:** remediate the 2026-10-20 audit findings ([5988fd6](https://github.com/s3ntin3l8/branchdam/commit/5988fd6160257557e20fba2d51c72c7bfb5454ac))
+* **web:** keep lineage labels off nodes and lay out by file name ([#607](https://github.com/s3ntin3l8/branchdam/issues/607)) ([198cf84](https://github.com/s3ntin3l8/branchdam/commit/198cf84a0f6ff0f8d3958587eaf19ea41398371a))
+
 ## [0.27.1](https://github.com/s3ntin3l8/branchdam/compare/v0.27.0...v0.27.1) (2026-10-17)
 
 
