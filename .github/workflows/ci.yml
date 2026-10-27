@@ -137,13 +137,11 @@ jobs:
       # CGO is on (mattn/go-sqlite3, see docs/schema.md), so the arm64 leg genuinely
       # compiles C — deliberately excluded from the PR-fast lane, not just slow there.
       platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-      # No caller build-args. The pinned workflow appends
+      # No caller build-args. docker-publish@main appends
       # COMMIT_SHA=<git rev-parse HEAD of this checkout> itself
-      # (s3ntin3l8/.github#97). The previous pin (2026-10-19) does not,
-      # so dropping BRANCHDAM_BUILD_ID=${{ github.sha }} without moving
-      # the pin would stamp dev-docker on :edge. release-please.yml pins the
-      # same workflow and still passes BRANCHDAM_BUILD_ID=<tag>, which
-      # wins over COMMIT_SHA.
+      # (s3ntin3l8/.github#97), so the :edge image is stamped without a
+      # BRANCHDAM_BUILD_ID build-arg. release-please.yml calls the same workflow
+      # and still passes BRANCHDAM_BUILD_ID=<tag>, which wins over COMMIT_SHA.
     secrets:
       REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

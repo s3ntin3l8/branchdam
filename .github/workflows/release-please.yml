@@ -36,7 +36,7 @@ jobs:
       image-name: ${{ github.repository }}
       push-release: true
       release-tag: ${{ needs.release-please.outputs.tag_name }}
-      # Same docker-publish pin as ci.yml (s3ntin3l8/.github#97), so a
+      # Same docker-publish@main as ci.yml (s3ntin3l8/.github#97), so a
       # release build also receives COMMIT_SHA and the build-arg check.
       # BRANCHDAM_BUILD_ID below still wins: UI build stays the tag.
       # Stamp the release tag (e.g. v1.2.3) into the embedded SPA via
