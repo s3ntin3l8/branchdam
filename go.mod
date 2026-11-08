@@ -6,7 +6,7 @@ require (
 	github.com/boombuler/barcode v1.1.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/corona10/goimagehash v1.1.0
-	github.com/danielgtaylor/huma/v2 v2.39.1
+	github.com/danielgtaylor/huma/v2 v2.40.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.52
@@ -20,7 +20,7 @@ require (
 )
 
 require (
-	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/sethvargo/go-retry v0.5.0 // indirect
