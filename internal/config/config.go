@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -84,6 +85,7 @@ type Config struct {
 	Database   Database `yaml:"database"`
 	HTTP       HTTP     `yaml:"http"`
 	Workers    Workers  `yaml:"workers"`
+	Clock      Clock    `yaml:"clock"`
 	Agent      Agent    `yaml:"agent"`
 	Authz      Authz    `yaml:"authz"`
 	Auth       Auth     `yaml:"auth"`
@@ -322,6 +324,37 @@ type Workers struct {
 	PerceptualHash bool `yaml:"perceptualHash"`
 }
 
+// Clock fixes the server's clock for a demo instance (internal/clock). Only
+// scripts/demo sets it, and the server refuses it unless BRANCHDAM_DEMO=1.
+type Clock struct {
+	// Fixed is an RFC 3339 instant (with an offset, e.g. 2026-10-15T09:00:00Z).
+	// Every timestamp the server writes or shows, and every UUIDv7 it
+	// generates, is derived from it and no longer advances. Empty (default) is
+	// the system clock.
+	Fixed string `yaml:"fixed"`
+}
+
+// FixedInstant is Clock.Fixed parsed; ok is false when the clock is not fixed.
+func (c Clock) FixedInstant() (t time.Time, ok bool, err error) {
+	if c.Fixed == "" {
+		return time.Time{}, false, nil
+	}
+	t, err = time.Parse(time.RFC3339, c.Fixed)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("clock.fixed %q is not an RFC 3339 instant (e.g. 2026-10-15T09:00:00Z)", c.Fixed)
+	}
+	return t, true, nil
+}
+
+func validateClock(cfg Config) error {
+	if _, ok, err := cfg.Clock.FixedInstant(); err != nil {
+		return err
+	} else if ok && os.Getenv("BRANCHDAM_DEMO") != "1" {
+		return errors.New("clock.fixed freezes the server's clock and is only for the demo instance (BRANCHDAM_DEMO=1)")
+	}
+	return nil
+}
+
 // Agent configures the machine-principal auth chain (internal/auth, PR 8).
 // The historical shared-secret `apiKey` field (env-var
 // BRANCHDAM_AGENT_API_KEY, env-bootstrap principal) was retired in
@@ -525,6 +558,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if err := validateAuthMode(cfg); err != nil {
+		return cfg, fmt.Errorf("config validation: %w", err)
+	}
+
+	if err := validateClock(cfg); err != nil {
 		return cfg, fmt.Errorf("config validation: %w", err)
 	}
 

@@ -35,6 +35,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 )
@@ -105,7 +107,7 @@ func New(u *users.Service, cfg Config) *Middleware {
 		cfg.AbsoluteTimeout = 30 * 24 * time.Hour
 	}
 	if cfg.Now == nil {
-		cfg.Now = time.Now
+		cfg.Now = clock.Now
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)

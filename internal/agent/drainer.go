@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
@@ -40,7 +42,7 @@ type Drainer struct {
 
 	// now is the clock retry scheduling reads: both the "is this row due"
 	// cutoff and the next_attempt_at a retryable failure is deferred to.
-	// time.Now by default; tests inject a fake one via WithClock.
+	// clock.Now by default; tests inject a fake one via WithClock.
 	now func() time.Time
 
 	// nudge, if set, is called once after a drain pass (ProcessPending)
@@ -111,7 +113,7 @@ func NewDrainer(database *db.DB, guard *storage.Guard, log *slog.Logger, opts ..
 		guard:      guard,
 		log:        log,
 		maxRetries: DefaultMaxRetries,
-		now:        time.Now,
+		now:        clock.Now,
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -197,7 +199,7 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 		batchSize = 50
 	}
 
-	start := time.Now()
+	start := clock.Real()
 	var stats DrainStats
 
 	var events []sqlcgen.ListPendingAgentEventsRow
@@ -354,7 +356,7 @@ func (d *Drainer) ProcessPending(ctx context.Context, batchSize int) (DrainStats
 // later pass once their next_attempt_at has passed (Start's ticker).
 func (d *Drainer) DrainAll(ctx context.Context) (DrainStats, error) {
 	var totalStats DrainStats
-	start := time.Now()
+	start := clock.Real()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -562,7 +564,7 @@ func (d *Drainer) applyNodeCreated(ctx context.Context, q *sqlcgen.Queries, ev s
 
 	mtime := p.MtimeUnix
 	if mtime == 0 {
-		mtime = time.Now().Unix()
+		mtime = clock.Now().Unix()
 	}
 
 	agentUserID := d.resolveAgentUserID(ctx, q, ev.AgentID)
@@ -1042,7 +1044,7 @@ func (d *Drainer) applyPathRebased(ctx context.Context, q *sqlcgen.Queries, ev s
 	}
 	mtime := p.MtimeUnix
 	if mtime == 0 {
-		mtime = time.Now().Unix()
+		mtime = clock.Now().Unix()
 	}
 
 	if lookupErr == nil {

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/storage"
 )
 
@@ -194,7 +196,7 @@ func (w *TrashWorker) PurgeOnce(ctx context.Context) (TrashPruneResult, error) {
 	if retentionDays <= 0 {
 		return TrashPruneResult{}, nil
 	}
-	return PurgeAllTrash(ctx, w.guard, retentionDays, time.Now().UTC(), w.trashTimes)
+	return PurgeAllTrash(ctx, w.guard, retentionDays, clock.Now().UTC(), w.trashTimes)
 }
 
 // Start launches the background ticker for periodic trash purge.

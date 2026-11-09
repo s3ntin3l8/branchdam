@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/apierr"
 )
 
@@ -159,7 +161,7 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 	}
 	nowFn := cfg.Now
 	if nowFn == nil {
-		nowFn = time.Now
+		nowFn = clock.Now
 	}
 	maxBody := cfg.SignedMaxBodyBytes
 	if maxBody <= 0 {

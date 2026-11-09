@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/google/uuid"
+	"github.com/s3ntin3l8/branchdam/internal/clock"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -548,7 +548,7 @@ func IndexingStatusFor(fullHash *string) string {
 }
 
 func insertNewNode(ctx context.Context, q *sqlcgen.Queries, locationID int64, r Result, uploadedByUserID int64, log *slog.Logger) (sqlcgen.MediaNode, error) {
-	id, err := uuid.NewV7()
+	id, err := clock.NewV7()
 	if err != nil {
 		return sqlcgen.MediaNode{}, fmt.Errorf("mint node_uuid: %w", err)
 	}

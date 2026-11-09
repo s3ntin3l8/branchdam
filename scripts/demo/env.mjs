@@ -24,7 +24,8 @@ const RESERVED_PORTS = new Set(["8080"]);
 export function demoEnv(demoDir, vars = {}, parent = process.env) {
   const env = {};
   for (const key of PASSTHROUGH) if (parent[key] !== undefined) env[key] = parent[key];
-  return { ...env, HOME: path.join(demoDir, "home"), TMPDIR: path.join(demoDir, "tmp"), ...vars };
+  // BRANCHDAM_DEMO=1 is what lets the server accept `clock.fixed` (a frozen clock is for demos only).
+  return { ...env, HOME: path.join(demoDir, "home"), TMPDIR: path.join(demoDir, "tmp"), BRANCHDAM_DEMO: "1", ...vars };
 }
 
 const inside = (dir, p) => {

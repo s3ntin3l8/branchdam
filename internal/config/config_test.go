@@ -412,3 +412,45 @@ func TestLoadAuthMode(t *testing.T) {
 		})
 	}
 }
+
+func TestClockFixed(t *testing.T) {
+	const yaml = "clock:\n  fixed: \"2026-10-15T09:00:00Z\"\n"
+
+	t.Run("unset is the system clock", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, "listenAddr: \":9090\"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if _, ok, _ := cfg.Clock.FixedInstant(); ok {
+			t.Fatal("clock fixed by default")
+		}
+	})
+
+	t.Run("accepted in a demo", func(t *testing.T) {
+		t.Setenv("BRANCHDAM_DEMO", "1")
+		cfg, err := Load(writeConfig(t, yaml))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		at, ok, err := cfg.Clock.FixedInstant()
+		if err != nil || !ok || at.Unix() != 1792054800 {
+			t.Fatalf("FixedInstant = %v %v %v", at, ok, err)
+		}
+	})
+
+	t.Run("refused outside a demo", func(t *testing.T) {
+		t.Setenv("BRANCHDAM_DEMO", "")
+		if _, err := Load(writeConfig(t, yaml)); err == nil || !strings.Contains(err.Error(), "BRANCHDAM_DEMO") {
+			t.Fatalf("err = %v, want a refusal naming BRANCHDAM_DEMO", err)
+		}
+	})
+
+	t.Run("must be an RFC 3339 instant", func(t *testing.T) {
+		t.Setenv("BRANCHDAM_DEMO", "1")
+		for _, bad := range []string{"2026-10-15", "2026-10-15T09:00:00", "yesterday"} {
+			if _, err := Load(writeConfig(t, "clock:\n  fixed: \""+bad+"\"\n")); err == nil || !strings.Contains(err.Error(), "RFC 3339") {
+				t.Errorf("%q: err = %v, want an RFC 3339 error", bad, err)
+			}
+		}
+	})
+}

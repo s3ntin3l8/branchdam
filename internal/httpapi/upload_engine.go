@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/zeebo/blake3"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -244,7 +245,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 	}
 	cleanFilename := filepath.Base(filepath.Clean(rawFilename))
 	if cleanFilename == "" || cleanFilename == "." || cleanFilename == "/" || cleanFilename == "\\" {
-		cleanFilename = "upload_" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".bin"
+		cleanFilename = "upload_" + strconv.FormatInt(clock.Real().UnixNano(), 10) + ".bin"
 	}
 	if strings.Contains(cleanFilename, "/") || strings.Contains(cleanFilename, "\\") || strings.Contains(cleanFilename, "..") {
 		return nil, ErrInvalidFilename
@@ -260,7 +261,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 
 	capturedAtUnix := params.CapturedAtUnix
 	if capturedAtUnix == 0 {
-		capturedAtUnix = time.Now().Unix()
+		capturedAtUnix = clock.Now().Unix()
 	}
 	capturedAt := time.Unix(capturedAtUnix, 0).UTC()
 
@@ -347,7 +348,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 		targetFileName = suffixedName
 	}
 
-	nodeID, err := uuid.NewV7()
+	nodeID, err := clock.NewV7()
 	if err != nil {
 		_ = outFile.Close()
 		_ = s.removeFile(targetPath)
@@ -492,7 +493,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 						}
 					} else {
 						exportCreated = true
-						if expID, err := uuid.NewV7(); err == nil {
+						if expID, err := clock.NewV7(); err == nil {
 							exportUUIDStr = expID.String()
 						}
 					}
@@ -519,7 +520,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 			FileName:           targetFileName,
 			FileExt:            ext,
 			SizeBytes:          bytesWritten,
-			MtimeUnix:          time.Now().Unix(),
+			MtimeUnix:          clock.Now().Unix(),
 			FastHash:           nullFast,
 			FullHash:           nullFull,
 			IndexingStatus:     pipeline.IndexingStatusFor(nullFull),
@@ -583,7 +584,7 @@ func (s *Server) processUploadedStream(ctx context.Context, params UploadParams)
 				FileName:          targetFileName,
 				FileExt:           ext,
 				SizeBytes:         bytesWritten,
-				MtimeUnix:         time.Now().Unix(),
+				MtimeUnix:         clock.Now().Unix(),
 				FastHash:          nullFast,
 				FullHash:          exportFullHash,
 				IndexingStatus:    pipeline.IndexingStatusFor(exportFullHash),

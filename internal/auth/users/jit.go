@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/clock"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -77,7 +78,7 @@ func getOrCreateForwardJIT(ctx context.Context, svc *Service, name, email string
 	if !errors.Is(err, ErrUserNotFound) {
 		return sqlcgen.GetUserByEmailSourceRow{}, err
 	}
-	created, err := svc.CreateForwardJITUser(ctx, name, email, isAdmin, time.Now().Unix(), "forward:"+name)
+	created, err := svc.CreateForwardJITUser(ctx, name, email, isAdmin, clock.Now().Unix(), "forward:"+name)
 	if err != nil {
 		// Race: a concurrent JIT for the same email just won the
 		// UNIQUE-constraint race. Re-lookup and return the winner.
@@ -109,7 +110,7 @@ func getOrCreateForwardJITByUsername(ctx context.Context, svc *Service, username
 	if !errors.Is(err, ErrUserNotFound) {
 		return sqlcgen.GetUserByUsernameRow{}, err
 	}
-	created, err := svc.CreateForwardJITUser(ctx, username, "", true, time.Now().Unix(), "forward:"+username)
+	created, err := svc.CreateForwardJITUser(ctx, username, "", true, clock.Now().Unix(), "forward:"+username)
 	if err != nil {
 		existing2, lookupErr := svc.GetUserByUsername(ctx, username)
 		if lookupErr == nil && existing2.Source == "forward-jit" {

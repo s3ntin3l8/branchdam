@@ -44,6 +44,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/google/uuid"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -530,7 +532,7 @@ func moveToTrashLogged(guard *storage.Guard, rootPath, filePath, nodeUUID string
 	// not this mtime. Stamping it still keeps the purge's mtime fallback
 	// -- for copies no TRASHED node owns -- counting from the move, so a
 	// failure here is only worth a warning.
-	now := time.Now().UTC()
+	now := clock.Now().UTC()
 	if chErr := guard.Chtimes(trashPath, now, now); chErr != nil {
 		log.Warn("stamp trash mtime", "path", trashPath, "err", chErr)
 	}

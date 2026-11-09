@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/clock"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -98,7 +99,7 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 	// An expiry in the past mints a well-formed token that 401s on
 	// first use -- the silent-dead-credential shape the owner-liveness
 	// check exists to prevent. Reject it at the boundary.
-	if in.Body.ExpiresAt != 0 && in.Body.ExpiresAt <= time.Now().Unix() {
+	if in.Body.ExpiresAt != 0 && in.Body.ExpiresAt <= clock.Now().Unix() {
 		return nil, huma.Error400BadRequest("expiresAt is in the past", nil)
 	}
 

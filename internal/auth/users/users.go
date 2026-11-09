@@ -47,6 +47,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"golang.org/x/crypto/argon2"
 
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -174,7 +176,7 @@ func NewService(database *db.DB, secretKeyBase64 string, opts ServiceOptions) *S
 	}
 	nowFn := opts.Now
 	if nowFn == nil {
-		nowFn = time.Now
+		nowFn = clock.Now
 	}
 	return &Service{
 		db:        database,
@@ -503,7 +505,7 @@ func (s *Service) SetSessionMFAVerified(ctx context.Context, sessionID int64) er
 	return s.withTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.SetSessionMFAVerified(ctx, sqlcgen.SetSessionMFAVerifiedParams{
 			ID:            sessionID,
-			MfaVerifiedAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			MfaVerifiedAt: sql.NullInt64{Int64: clock.Now().Unix(), Valid: true},
 		})
 	})
 }

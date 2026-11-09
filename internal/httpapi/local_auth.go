@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/s3ntin3l8/branchdam/internal/audit"
@@ -144,7 +146,7 @@ func (s *Server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 	// future move to a multi-writer pool. The setup token is implicit:
 	// the count being zero IS the token.
 	var userID int64
-	now := time.Now()
+	now := clock.Now()
 	err := s.db.InTx(r.Context(), func(q *sqlcgen.Queries) error {
 		count, err := q.CountUsers(r.Context())
 		if err != nil {
@@ -280,7 +282,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Check if MFA is enabled.
 	mfaEnabled := s.localAuth.mfa != nil && s.localAuth.mfa.HasMFA(r.Context(), user.ID)
 
-	now := time.Now()
+	now := clock.Now()
 	_, cookieValue, err := s.localAuth.users.MintCookieValue()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "mint cookie: "+err.Error())
@@ -414,7 +416,7 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := adminActorName(r)
-	now := time.Now().Unix()
+	now := clock.Now().Unix()
 	user, err := s.localAuth.users.CreateLocalUser(r.Context(), username, email, password, body.IsAdmin, now, actor)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -499,7 +501,7 @@ func (s *Server) handleAdminDisableUser(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "get user: "+err.Error())
 		return
 	}
-	now := time.Now()
+	now := clock.Now()
 	if err := s.localAuth.users.DisableUser(r.Context(), id, now); err != nil {
 		if errors.Is(err, users.ErrLastLocalAdmin) {
 			writeJSONError(w, http.StatusConflict, "cannot disable the last active local admin")

@@ -34,6 +34,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
 	"github.com/s3ntin3l8/branchdam/internal/db"
@@ -193,7 +195,7 @@ func NewService(database *db.DB, log *slog.Logger, pepper []byte, box *secrets.B
 	return &Service{db: database, log: log, nowFn: nowUnix, pepper: pepper, box: box}
 }
 
-func nowUnix() int64 { return time.Now().Unix() }
+func nowUnix() int64 { return clock.Now().Unix() }
 
 // CreatePairing mints a new device pairing: a unique agent_id, an
 // initial API key, the rendered QR SVG, and a PAIR_CREATED +

@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -2202,7 +2204,7 @@ func (s *Server) handleAgentEvent(ctx context.Context, in *AgentEventInput) (*Ag
 			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "lookup agent event", err)
 		}
 	} else {
-		id, err := uuid.NewV7()
+		id, err := clock.NewV7()
 		if err != nil {
 			return nil, apierr.New(http.StatusInternalServerError, apierr.CodeInternal, "mint event id", err)
 		}
@@ -2341,7 +2343,7 @@ func (s *Server) handleAgentHandshake(ctx context.Context, in *AgentHandshakeInp
 	out := &AgentHandshakeOutput{}
 	out.Body.OK = true
 	out.Body.ServerVersion = s.version
-	out.Body.ServerTimeUnix = time.Now().Unix()
+	out.Body.ServerTimeUnix = clock.Now().Unix()
 	out.Body.AcknowledgedEventUUID = ackUUID
 	out.Body.PendingEventsCount = pendingCount
 	out.Body.NamingTemplate = namingTpl
@@ -2519,7 +2521,7 @@ func (s *Server) handleAgentRebase(ctx context.Context, in *AgentRebaseInput) (*
 	}
 	mtime := in.Body.MtimeUnix
 	if mtime == 0 {
-		mtime = time.Now().Unix()
+		mtime = clock.Now().Unix()
 	}
 
 	var retiredNode, notOwner, hashConflict bool
@@ -3173,7 +3175,7 @@ func (s *Server) handleAgentTelemetry(ctx context.Context, in *AgentTelemetryInp
 
 	out := &AgentTelemetryOutput{}
 	out.Body.OK = true
-	out.Body.AcknowledgedAtUnix = time.Now().Unix()
+	out.Body.AcknowledgedAtUnix = clock.Now().Unix()
 	return out, nil
 }
 
@@ -3250,7 +3252,7 @@ func (s *Server) handleListAgentTelemetry(ctx context.Context, _ *struct{}) (*Li
 	if err != nil {
 		return nil, huma.Error500InternalServerError("list agent telemetry", err)
 	}
-	nowUnix := time.Now().Unix()
+	nowUnix := clock.Now().Unix()
 	out := &ListAgentTelemetryOutput{}
 	out.Body.Agents = make([]agentScratchHealthDTO, len(rows))
 	for i, r := range rows {
@@ -3588,7 +3590,7 @@ func (s *Server) handleStorageHealth(ctx context.Context, _ *struct{}) (*storage
 	})
 	out.Body.Locations = dtos
 
-	nowUnix := time.Now().Unix()
+	nowUnix := clock.Now().Unix()
 	out.Body.Agents = make([]agentScratchHealthDTO, len(rawAgents))
 	for i, a := range rawAgents {
 		out.Body.Agents[i] = toAgentScratchHealthDTO(a, nowUnix)
@@ -3694,7 +3696,7 @@ func (s *Server) handlePrune(ctx context.Context, in *PruneInput) (*PruneOutput,
 		// not a config error, just nothing to plan.
 		return out, nil
 	}
-	cutoffUnix := time.Now().Add(-time.Duration(ttlHours) * time.Hour).Unix()
+	cutoffUnix := clock.Now().Add(-time.Duration(ttlHours) * time.Hour).Unix()
 
 	candidates, err := prune.Plan(ctx, s.db.Reader, loc.ID, cutoffUnix)
 	if err != nil {
