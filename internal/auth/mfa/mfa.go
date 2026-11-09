@@ -54,6 +54,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/secrets"
@@ -109,7 +111,7 @@ func (s *Service) Setup(ctx context.Context, userID int64, username string) (*Se
 		return nil, fmt.Errorf("encrypt secret: %w", err)
 	}
 
-	now := time.Now().Unix()
+	now := clock.Now().Unix()
 	if err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		return q.SetMFAPendingSecret(ctx, sqlcgen.SetMFAPendingSecretParams{
 			ID:                        userID,
@@ -189,7 +191,7 @@ func (s *Service) Enable(ctx context.Context, userID int64, code string) ([]stri
 		return nil, fmt.Errorf("decrypt pending secret: %w", err)
 	}
 
-	now := time.Now().Unix()
+	now := clock.Now().Unix()
 	step := now / int64(DefaultTOTPPeriod)
 	if !validateTOTP(secret, code, step) {
 		return nil, fmt.Errorf("invalid TOTP code")
@@ -264,7 +266,7 @@ func (s *Service) Disable(ctx context.Context, userID int64, verifyPassword func
 	if err != nil {
 		return fmt.Errorf("decrypt secret: %w", err)
 	}
-	now := time.Now().Unix()
+	now := clock.Now().Unix()
 	step := now / int64(creds.Period)
 	// Same replay protection as ValidateTOTPCode: a code whose step was
 	// already consumed (e.g. the one just used for the login challenge,
@@ -318,7 +320,9 @@ func (s *Service) ValidateTOTPCode(ctx context.Context, userID int64, code strin
 		return false, fmt.Errorf("decrypt secret: %w", err)
 	}
 
-	now := time.Now().Unix()
+	// The TOTP step is read against the user's authenticator, whatever the
+	// server's (possibly frozen) clock says.
+	now := clock.Real().Unix()
 	step := now / int64(creds.Period)
 
 	acceptedStep, ok := acceptTOTP(secret, code, step, creds.LastUsedStep)
@@ -367,7 +371,7 @@ func (s *Service) ValidateRecoveryCode(ctx context.Context, userID int64, code s
 		return false, fmt.Errorf("find recovery code: %w", err)
 	}
 
-	now := time.Now().Unix()
+	now := clock.Now().Unix()
 	// Atomicity note: MarkRecoveryCodeUsed's UPDATE is gated on
 	// used_at IS NULL (sqlc :execrows), so even if two concurrent
 	// ValidateRecoveryCode calls both passed FindUnusedRecoveryCode

@@ -16,6 +16,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 	"github.com/pressly/goose/v3"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
 
@@ -61,7 +62,26 @@ var commonPragmas = []string{
 	"PRAGMA mmap_size=268435456",
 }
 
+// registerClock replaces SQLite's built-in unixepoch() on this connection with
+// the server's clock (internal/clock), so a DEFAULT (unixepoch()) and an
+// `updated_at = unixepoch()` agree with the time the Go code reads, and a frozen
+// demo clock (clock.fixed) reaches every timestamp the database writes. Every
+// call site in the schema and the queries uses the zero-argument form.
+//
+// Unlike the built-in, which is constant within a statement, this is read at
+// each call: a single statement that sets two columns from unixepoch() can
+// straddle a second boundary.
+func registerClock(conn *sqlite3.SQLiteConn) error {
+	if err := conn.RegisterFunc("unixepoch", clock.Unix, false); err != nil {
+		return fmt.Errorf("register unixepoch: %w", err)
+	}
+	return nil
+}
+
 func applyCommonPragmas(conn *sqlite3.SQLiteConn) error {
+	if err := registerClock(conn); err != nil {
+		return err
+	}
 	for _, p := range commonPragmas {
 		if _, err := conn.Exec(p, nil); err != nil {
 			return fmt.Errorf("apply pragma %q: %w", p, err)

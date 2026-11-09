@@ -6,11 +6,26 @@ run:
 linters:
   enable:
     - errcheck
+    - forbidigo
     - govet
     - ineffassign
     - misspell
     - staticcheck
     - unused
+
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: '^time\.Now$'
+          msg: use clock.Now for a stored or shown time, clock.Real for a deadline or a measurement (internal/clock)
+        - pattern: '^uuid\.NewV7$'
+          msg: use clock.NewV7, which follows the server's clock (internal/clock)
+  exclusions:
+    rules:
+      - path: internal/clock/
+        linters: [forbidigo]
+      - path: _test\.go
+        linters: [forbidigo]
 
 formatters:
   enable:

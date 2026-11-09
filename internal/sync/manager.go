@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
@@ -114,7 +116,7 @@ func (m *Manager) Enqueue(ctx context.Context, node Node, remote string) error {
 		_, err = q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
 			NodeID: node.ID, Remote: remote, SyncStatus: "PENDING_CLOUD_PUSH",
 			RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
-			LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			LastAttemptAt: sql.NullInt64{Int64: clock.Now().Unix(), Valid: true},
 		})
 		return err
 	})
@@ -158,7 +160,7 @@ func (m *Manager) ProcessPending(ctx context.Context, remote string, batchSize i
 			if _, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
 				NodeID: r.NodeID, Remote: remote, SyncStatus: "PUSHING",
 				RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
-				LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+				LastAttemptAt: sql.NullInt64{Int64: clock.Now().Unix(), Valid: true},
 			}); err != nil {
 				return err
 			}
@@ -210,7 +212,7 @@ func (m *Manager) RecoverStalePushing(ctx context.Context, remote string, olderT
 		var err error
 		n, err = q.ResetRemoteSyncStateStale(ctx, sqlcgen.ResetRemoteSyncStateStaleParams{
 			Remote:        remote,
-			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-olderThan).Unix(), Valid: true},
+			LastAttemptAt: sql.NullInt64{Int64: clock.Now().Add(-olderThan).Unix(), Valid: true},
 		})
 		return err
 	})
@@ -233,7 +235,7 @@ func (m *Manager) RecoverFailedPushes(ctx context.Context, remote string, olderT
 		var err error
 		n, err = q.ResetRemoteSyncStateFailed(ctx, sqlcgen.ResetRemoteSyncStateFailedParams{
 			Remote:        remote,
-			LastAttemptAt: sql.NullInt64{Int64: time.Now().Add(-olderThan).Unix(), Valid: true},
+			LastAttemptAt: sql.NullInt64{Int64: clock.Now().Add(-olderThan).Unix(), Valid: true},
 			RetryCount:    int64(maxRetries),
 		})
 		return err
@@ -283,7 +285,7 @@ func (m *Manager) setBatchStatus(ctx context.Context, nodeIDs []int64, remote, s
 				if _, err := q.UpsertRemoteSyncState(ctx, sqlcgen.UpsertRemoteSyncStateParams{
 					NodeID: id, Remote: remote, SyncStatus: status,
 					RemoteAssetID: sql.NullString{}, LastError: sql.NullString{},
-					LastAttemptAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+					LastAttemptAt: sql.NullInt64{Int64: clock.Now().Unix(), Valid: true},
 				}); err != nil {
 					return err
 				}

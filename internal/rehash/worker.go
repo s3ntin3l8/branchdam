@@ -36,6 +36,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
@@ -142,7 +144,7 @@ func WithMismatchRetryAfter(d time.Duration) Option {
 	}
 }
 
-// WithClock overrides time.Now, for tests of the ERROR retry window.
+// WithClock overrides clock.Now, for tests of the ERROR retry window.
 func WithClock(now func() time.Time) Option {
 	return func(w *Worker) {
 		if now != nil {
@@ -164,7 +166,7 @@ func NewWorker(database *db.DB, guard *storage.Guard, log *slog.Logger, opts ...
 		batchPause:         DefaultBatchPause,
 		retryAfter:         DefaultRetryAfter,
 		mismatchRetryAfter: DefaultMismatchRetryAfter,
-		now:                time.Now,
+		now:                clock.Now,
 	}
 	for _, opt := range opts {
 		opt(w)

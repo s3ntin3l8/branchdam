@@ -22,6 +22,8 @@ package ratelimit
 import (
 	"sync"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/clock"
 )
 
 // Config bundles the rate-limit thresholds.
@@ -72,7 +74,7 @@ func NewFromConfig(cfg Config) *Limiter {
 		now: cfg.Now,
 	}
 	if l.now == nil {
-		l.now = time.Now
+		l.now = clock.Real
 	}
 	l.maxFailuresFast = cfg.MaxFailuresFast
 	if l.maxFailuresFast <= 0 {

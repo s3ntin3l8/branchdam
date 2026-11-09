@@ -4,7 +4,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { fixDemoNodeUuids, fixDemoTimestamps, parseDemoNow } from "./clock.mjs";
+import { parseDemoNow, serverInstant } from "./clock.mjs";
 import { assertDemo, assertPortsFree, demoEnv } from "./env.mjs";
 import { DEMO_HEADERS } from "./headers.mjs";
 import { generateMedia } from "./media.mjs";
@@ -14,7 +14,7 @@ import { webDistStaleReason } from "./webdist.mjs";
  * A throwaway branchDAM with synthetic media and a populated version graph.
  *
  *   make demo          # serve it until Ctrl-C, then delete everything
- *   DEMO_NOW=2026-10-15T10:00:00Z make demo   # the same, with the run's timestamps fixed (clock.mjs)
+ *   DEMO_NOW=2026-10-15T10:00:00Z make demo   # the same, on a frozen server clock (clock.mjs)
  *
  * It prints `DEMO_READY url=...` once it is serving; `make screenshots` and `make visual-check`
  * (visual-kit, see visual/) start it that way and stop it with SIGTERM.
@@ -37,6 +37,8 @@ export const DEMO_PORT = process.env.DEMO_PORT ?? "3975";
  * the file saying the same thing.
  */
 export function renderConfig(cfg) {
+  // The server freezes its clock at `clock.fixed` (and refuses it outside a demo).
+  const clock = cfg.clock?.fixed ? `clock:\n  fixed: ${JSON.stringify(cfg.clock.fixed)}\n` : "";
   const q = (v) => JSON.stringify(String(v));
   const locations = cfg.storageLocations
     .map(
@@ -70,7 +72,7 @@ trash:
 # way: the asset list and the audit queue are ordered by id, and a pool of workers would shuffle them.
 workers:
   hashWorkers: 1
-storageLocations:
+${clock}storageLocations:
 ${locations}
 `;
 }
@@ -145,10 +147,8 @@ function buildServer(binary) {
 }
 
 export async function startDemo({ keep = false } = {}) {
-  // DEMO_NOW is validated before anything starts; `since` is what tells the run's timestamps from the
-  // synthetic media's (see clock.mjs).
+  // DEMO_NOW is validated before anything starts; it becomes the server's frozen clock (see clock.mjs).
   const demoNow = process.env.DEMO_NOW?.trim() ? parseDemoNow(process.env.DEMO_NOW) : null;
-  const since = Math.floor(Date.now() / 1000) - 2;
   await assertPortsFree([DEMO_PORT]);
   // A fixed path, so asset paths in captures read cleanly and identically on
   // every run. Created exclusively: mkdir(2) is atomic, so of two demos started
@@ -176,6 +176,7 @@ export async function startDemo({ keep = false } = {}) {
     auth: { mode: "forward" },
     immich: { apiUrl: "", exportPath: path.join(dirs.exports, "immich") },
     metadata: { autoInherit: false },
+    clock: { fixed: demoNow ? serverInstant(demoNow) : "" },
     storageLocations: [
       { name: "archive", rootPath: dirs.archive, tier: "TIER3_MASTER_ARCHIVE", readOnly: true },
       { name: "staging", rootPath: dirs.staging, tier: "TIER0_LOCAL_STAGING", readOnly: false },
@@ -262,14 +263,8 @@ export async function startDemo({ keep = false } = {}) {
         serverAlive,
       );
     await thumbnailsDone();
-    if (demoNow) {
-      // The node UUIDs carry the real clock and random bits; fixing them sends the thumbnails (cached under the
-      // UUID) back to the worker, so wait for it again, and only then fix the timestamps it just stamped.
-      await fixDemoNodeUuids(cfg.database.path, demoNow);
-      await thumbnailsDone();
-      await fixDemoTimestamps(cfg.database.path, demoNow, since);
-      console.log(`[demo] clock fixed at ${demoNow.toISOString()}`);
-    }
+    if (demoNow)
+      console.log(`[demo] server clock frozen at ${cfg.clock.fixed} (DEMO_NOW ${demoNow.toISOString()})`);
     return { demoDir, url, api, stop };
   } catch (err) {
     await stop();

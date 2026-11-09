@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
 )
@@ -78,7 +80,7 @@ type PATLookupResult struct {
 // revoked by re-minting without touching the middleware.
 type PATMiddleware struct {
 	Lookup func(ctx context.Context, presented string) (PATLookupResult, error)
-	// Now is overridable for tests. Defaults to time.Now.
+	// Now is overridable for tests. Defaults to clock.Now.
 	Now func() time.Time
 	// TouchLastUsed is the optional callback for bumping
 	// user_pats.last_used_at on every authenticated request. The
@@ -156,7 +158,7 @@ func (m *PATMiddleware) shouldTouch(hash string, now time.Time) bool {
 // path the same way it does today.
 func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 	if m.Now == nil {
-		m.Now = time.Now
+		m.Now = clock.Now
 	}
 	if len(m.Pepper) == 0 {
 		panic("auth: PATMiddleware.Pepper is required (use the pairing pepper)")
@@ -407,8 +409,8 @@ func (s *PATService) Middleware(scope string) *PATMiddleware {
 }
 
 // timeNowUnix indirection so tests can override "now" without
-// touching time.Now globally.
-var timeNowUnix = func() int64 { return time.Now().Unix() }
+// touching the clock globally.
+var timeNowUnix = func() int64 { return clock.Now().Unix() }
 
 // ErrPATOwnerNotAdmin is returned by Mint when the requested owner
 // has no users row, isn't is_admin=1, or has disabled_at set. The
@@ -643,7 +645,7 @@ const bootstrapLockRetryInterval = 100 * time.Millisecond
 // indefinitely: the acquire either succeeds or fails loud with a
 // descriptive error within the bound.
 func flockExclusive(f *os.File, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+	deadline := clock.Real().Add(timeout)
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -652,7 +654,7 @@ func flockExclusive(f *os.File, timeout time.Duration) error {
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			return fmt.Errorf("acquire bootstrap lock: %w", err)
 		}
-		if time.Now().After(deadline) {
+		if clock.Real().After(deadline) {
 			return fmt.Errorf("acquire bootstrap lock: timed out after %s waiting for a concurrent boot to finish (the peer is wedged, not dead -- investigate before retrying)", timeout)
 		}
 		time.Sleep(bootstrapLockRetryInterval)

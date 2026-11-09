@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/s3ntin3l8/branchdam/internal/agent"
 	"github.com/s3ntin3l8/branchdam/internal/audit"
 	"github.com/s3ntin3l8/branchdam/internal/auth"
@@ -77,6 +79,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// A demo instance's clock is fixed before anything reads it, the database
+	// (whose unixepoch() is the same clock) included.
+	if at, ok, _ := cfg.Clock.FixedInstant(); ok {
+		clock.Freeze(at)
+		log.Warn("clock is FROZEN (clock.fixed, demo instance only)", "at", at.UTC().Format(time.RFC3339))
+	}
 
 	database, err := db.Open(ctx, cfg.Database.Path)
 	if err != nil {
@@ -833,7 +842,7 @@ func reconcileOrphanedScanJobs(ctx context.Context, database *db.DB, log *slog.L
 // recent jobs (< 7 days), and jobs that recorded activity (files_seen > 0)
 // are retained.
 func pruneOldZeroEventWatchJobs(ctx context.Context, database *db.DB, log *slog.Logger) (int64, error) {
-	cutoff := time.Now().Add(-7 * 24 * time.Hour).Unix()
+	cutoff := clock.Now().Add(-7 * 24 * time.Hour).Unix()
 	var n int64
 	err := database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		var err error

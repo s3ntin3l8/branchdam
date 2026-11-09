@@ -24,6 +24,9 @@ http:
   #   - 192.168.0.0/16
   #   - "*"  # trust all (same as unset)
 
+# clock:                          # demo instances only (needs BRANCHDAM_DEMO=1): freeze the server's clock
+#   fixed: "2026-10-15T09:00:00Z" # RFC 3339; every timestamp and UUIDv7 derives from it
+
 workers:
   hashWorkers: 0                  # 0 = auto (min(4, NumCPU)); hashing is I/O
                                    # bound on a NAS, going wide thrashes disks

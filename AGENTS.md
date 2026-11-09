@@ -27,7 +27,7 @@ make dev-all    # Both together
 sqlc generate    # Run after editing migrations or queries; commit internal/db/sqlcgen/
 
 # Demo, screenshots, visual checks (Docker, visual-kit; needs go, ffmpeg, exiftool)
-make demo                        # throwaway instance on :3975; DEMO_NOW=<ISO date-time> fixes its timestamps
+make demo                        # throwaway instance on :3975; DEMO_NOW=<ISO date-time> freezes its server clock
 make visual-check ROUTES=assets  # before/after of the pages a UI change touches (REPEAT=2: determinism)
 make visual-baseline             # regenerate visual/baselines (or comment /update-baselines on the PR)
 make screenshots                 # docs/screenshots (README); make screenshots-landing OUT=<dir> for the landing page
@@ -49,9 +49,10 @@ every scene). The PR description gets a **Visual check** section: routes, what c
 page or state needs a scene in `visual/scenes.json` (tags `check`, `audit`, `presentation`).
 
 - **Determinism.** After changing the demo or a scene, run `make visual-check REPEAT=2` (the launcher recaptures the
-  working tree itself): it must report no determinism failure. The demo is built to repeat: `DEMO_NOW` moves what a
-  run wrote (timestamps, node UUIDs) to fixed values (`scripts/demo/clock.mjs`) because the Go server's clock cannot
-  be faked, and one hash worker makes the scan number nodes and edges in the same order every run. Both matter for
+  working tree itself): it must report no determinism failure. The demo is built to repeat: `DEMO_NOW` freezes the
+  server's clock an hour earlier (`internal/clock`, config key `clock.fixed`; every timestamp, SQLite's `unixepoch()`
+  and node UUIDs follow it; new server code must read time through `clock.Now`/`clock.Real`, lint enforces it), and
+  one hash worker makes the scan number nodes and edges in the same order every run. Both matter for
   the asset list and the audit queue, which are ordered by id.
 - **`baseHarness`** renders the base with the head's `scripts/demo` (so a PR that fixes the demo is not compared
   against the bug it fixes) and the merge base's server and web app. A PR that changes `scripts/demo` together with

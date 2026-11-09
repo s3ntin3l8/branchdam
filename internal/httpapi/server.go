@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam/internal/clock"
+
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
@@ -710,7 +712,7 @@ func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 
 func logMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+		start := clock.Real()
 		next.ServeHTTP(w, r)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			log.Debug("request", "method", r.Method, "path", sanitizeForLog(r.URL.Path), "dur", time.Since(start))

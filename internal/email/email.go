@@ -18,6 +18,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam/internal/clock"
 )
 
 // Notifier sends transactional email. Implementations must be safe
@@ -159,7 +161,7 @@ func (s *smtpSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 	// not ctx, after the initial dial.
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
-		deadline = time.Now().Add(sendTimeout)
+		deadline = clock.Real().Add(sendTimeout)
 	}
 
 	// Build the raw MIME message.
