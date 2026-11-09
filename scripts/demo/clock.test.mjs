@@ -42,6 +42,7 @@ describe("fixDemoTimestamps", () => {
                           CHECK (disabled_at IS NULL OR disabled_at >= created_at));
       CREATE TABLE scan_jobs (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER,
                               updated_at INTEGER NOT NULL, files_seen INTEGER);
+      CREATE TABLE node_creators (node_uuid TEXT PRIMARY KEY REFERENCES media_nodes(node_uuid), agent_id TEXT);
       CREATE TABLE plain (id INTEGER PRIMARY KEY, name TEXT);
     `);
     return { file, db };
@@ -116,6 +117,21 @@ describe("fixDemoTimestamps", () => {
       ],
       "only a READY thumbnail has a cached file to lose",
     );
+  });
+
+  it("moves the rows that reference a node's UUID along with it", async () => {
+    const { file, db } = database("children.db");
+    db.exec(`INSERT INTO media_nodes (id, node_uuid, first_seen_at, created_at) VALUES (1, 'old-a', ${START}, ${START}), (2, 'old-b', ${START}, ${START});
+      INSERT INTO node_creators VALUES ('old-b', 'agent-1')`);
+    db.close();
+
+    await fixDemoNodeUuids(file, NOW);
+
+    const check = new DatabaseSync(file);
+    const uuid = check.prepare("SELECT node_uuid FROM media_nodes WHERE id = 2").get().node_uuid;
+    const creator = check.prepare("SELECT * FROM node_creators").get();
+    check.close();
+    assert.equal(creator.node_uuid, uuid);
   });
 
   it("builds distinct UUIDv7s from the fixed instant", () => {

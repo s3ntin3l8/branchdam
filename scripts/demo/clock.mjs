@@ -118,9 +118,30 @@ export async function fixDemoNodeUuids(dbPath, demoNow) {
   const db = new DatabaseSync(dbPath);
   try {
     db.exec("PRAGMA busy_timeout = 10000");
-    const nodes = db.prepare("SELECT id FROM media_nodes ORDER BY id").all();
+    // node_creators and node_uuid_aliases reference media_nodes(node_uuid) (the demo seeds neither today, but an
+    // agent-created node or a dedup alias would): rewrite their rows with the parent's, and let the constraint be
+    // judged at commit, once the keys agree again.
+    const children = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('node_creators', 'node_uuid_aliases')",
+      )
+      .all()
+      .map((t) => db.prepare(`UPDATE ${quote(t.name)} SET node_uuid = ? WHERE node_uuid = ?`));
+    const nodes = db.prepare("SELECT id, node_uuid FROM media_nodes ORDER BY id").all();
     const update = db.prepare("UPDATE media_nodes SET node_uuid = ? WHERE id = ?");
-    nodes.forEach((node, i) => update.run(fixedNodeUuid(fixedMs, i), node.id));
+    db.exec("BEGIN");
+    try {
+      db.exec("PRAGMA defer_foreign_keys = ON");
+      nodes.forEach((node, i) => {
+        const fixed = fixedNodeUuid(fixedMs, i);
+        update.run(fixed, node.id);
+        for (const child of children) child.run(fixed, node.node_uuid);
+      });
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
     db.exec("UPDATE media_nodes SET thumb_state = 'PENDING', thumb_attempts = 0 WHERE thumb_state = 'READY'");
     return nodes.length;
   } finally {

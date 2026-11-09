@@ -75,7 +75,7 @@ ${locations}
 `;
 }
 
-/** The asset list, whichever wrapper the API uses (capture.mjs relies on this too). */
+/** The asset list, whichever wrapper the API uses. */
 export const assetsOf = (body) => (Array.isArray(body) ? body : (body?.assets ?? body?.items ?? []));
 
 /** True once a child has exited, by exit code or by signal (then exitCode stays null). */
