@@ -30,7 +30,9 @@ var frozen atomic.Pointer[time.Time]
 var counter atomic.Uint64
 
 // Freeze fixes Now at t. Call it once at startup, before anything reads the
-// clock; there is no way to move a frozen clock on, by design.
+// clock; there is no way to move a frozen clock on, by design. Freezing again
+// starts the frozen UUIDv7s over, so a second Freeze to the same instant
+// re-issues values it already handed out (tests only).
 func Freeze(t time.Time) {
 	t = t.UTC()
 	frozen.Store(&t)

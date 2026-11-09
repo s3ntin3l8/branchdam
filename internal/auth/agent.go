@@ -161,7 +161,9 @@ func AgentChainWithConfig(cfg AgentConfig, log *slog.Logger) func(http.Handler) 
 	}
 	nowFn := cfg.Now
 	if nowFn == nil {
-		nowFn = clock.Now
+		// The skew window is measured against the agent's own clock, which a
+		// frozen server clock (demo) does not move.
+		nowFn = clock.Real
 	}
 	maxBody := cfg.SignedMaxBodyBytes
 	if maxBody <= 0 {

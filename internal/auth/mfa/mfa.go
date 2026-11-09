@@ -320,7 +320,9 @@ func (s *Service) ValidateTOTPCode(ctx context.Context, userID int64, code strin
 		return false, fmt.Errorf("decrypt secret: %w", err)
 	}
 
-	now := clock.Now().Unix()
+	// The TOTP step is read against the user's authenticator, whatever the
+	// server's (possibly frozen) clock says.
+	now := clock.Real().Unix()
 	step := now / int64(creds.Period)
 
 	acceptedStep, ok := acceptTOTP(secret, code, step, creds.LastUsedStep)

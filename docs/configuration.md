@@ -98,6 +98,14 @@ implications and what happens if that key is absent or lost.
 | `fullHashPolicy` | string | `tier3_and_collision` | One of `always` / `tier3_and_collision` / `never`. Controls when the expensive BLAKE3-256 `full_hash` runs, versus relying on the cheap xxHash64 `fast_hash` remap key alone. |
 | `perceptualHash` | bool | `true` | **Missing from `config.example.yaml` — this is the default, not something the template shows you turning on.** Enables pHash extraction (`internal/hashing.PerceptualHash`, via `internal/probe`'s RAW-preview fallback chain when a file isn't natively decodable). Everything Tier-3 heuristic matching does (Hamming distance ≤ 10) depends on this being on. Turn it off only if you want faster scans and don't need Tier-3 spatial-temporal matching. |
 
+## `clock`
+
+Demo instances only (`scripts/demo`, `make demo`).
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `fixed` | string (RFC 3339, e.g. `2026-10-15T09:00:00Z`) | unset (the system clock) | Freezes the server's clock (`internal/clock`) at that instant: every timestamp it writes or shows (SQLite's `unixepoch()` included) and every UUIDv7 it generates derive from it, and nothing advances. **The server refuses the key unless `BRANCHDAM_DEMO=1`** and logs a startup WARN when it is set. Deadlines, timeouts, throttle windows, agent request-signing skew and TOTP steps keep running on the real clock. A frozen clock reaches `ServerTimeUnix` in the agent handshake, so a device paired to such an instance sees a large skew against its own clock. |
+
 ## `agent`
 
 | Key | Type | Default | Effect |
