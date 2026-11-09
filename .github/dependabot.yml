@@ -41,3 +41,11 @@ updates:
       docker-images:
         patterns:
           - "*"
+
+  # The visual-kit image `make screenshots` / `make visual-check` render in (visual/Dockerfile). A bump moves the
+  # browser and fonts, so it recaptures the check's base and can make the committed baselines stale: regenerate
+  # them (`make visual-baseline`, or `/update-baselines` on the PR) in the same change if the shots move.
+  - package-ecosystem: "docker"
+    directory: "/visual"
+    schedule:
+      interval: "weekly"

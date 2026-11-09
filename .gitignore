@@ -72,3 +72,10 @@ compose.override.yml
 # Developer worktrees (per AGENTS.md make wt convention; existing .worktrees/ line untouched)
 .wt/
 landing-shots/
+
+# visual-kit: the launcher extracted from the pinned image, the check's reports and captures, and a folder it is writing.
+visual/.kit/
+visual/.out/
+*.staging
+# Audit evidence stays local (make screenshots-audit); the report is the committed artifact.
+docs/audit/assets/

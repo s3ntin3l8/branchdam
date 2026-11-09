@@ -4,7 +4,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { fixDemoNodeUuids, fixDemoTimestamps, parseDemoNow } from "./clock.mjs";
 import { assertDemo, assertPortsFree, demoEnv } from "./env.mjs";
+import { DEMO_HEADERS } from "./headers.mjs";
 import { generateMedia } from "./media.mjs";
 import { webDistStaleReason } from "./webdist.mjs";
 
@@ -12,7 +14,10 @@ import { webDistStaleReason } from "./webdist.mjs";
  * A throwaway branchDAM with synthetic media and a populated version graph.
  *
  *   make demo          # serve it until Ctrl-C, then delete everything
- *   make screenshots   # scripts/demo/capture.mjs drives startDemo()
+ *   DEMO_NOW=2026-10-15T10:00:00Z make demo   # the same, with the run's timestamps fixed (clock.mjs)
+ *
+ * It prints `DEMO_READY url=...` once it is serving; `make screenshots` and `make visual-check`
+ * (visual-kit, see visual/) start it that way and stop it with SIGTERM.
  *
  * Everything lives in one mkdtemp directory: a config written from scratch
  * (the checkout's config.yaml is never read), the SQLite database, thumbnails
@@ -24,13 +29,6 @@ import { webDistStaleReason } from "./webdist.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const DEMO_PORT = process.env.DEMO_PORT ?? "3975";
-
-/** What the demo browser and scripts send in place of an auth proxy. */
-export const DEMO_HEADERS = {
-  "X-Authentik-Username": "demo",
-  "X-Authentik-Email": "demo@example.com",
-  "X-Authentik-Groups": "branchdam-admins",
-};
 
 /**
  * Renders the server config. Every path is emitted as a double-quoted scalar
@@ -68,6 +66,10 @@ metadata:
   autoInherit: ${cfg.metadata.autoInherit === true}
 trash:
   retentionDays: 0
+# One hash worker, so the scan indexes files in walk order and every run numbers its nodes and edges the same
+# way: the asset list and the audit queue are ordered by id, and a pool of workers would shuffle them.
+workers:
+  hashWorkers: 1
 storageLocations:
 ${locations}
 `;
@@ -142,7 +144,11 @@ function buildServer(binary) {
   execFileSync("go", ["build", "-o", binary, "./cmd/branchdam"], { cwd: ROOT, stdio: "inherit" });
 }
 
-export async function startDemo({ keep = false, quiet = false } = {}) {
+export async function startDemo({ keep = false } = {}) {
+  // DEMO_NOW is validated before anything starts; `since` is what tells the run's timestamps from the
+  // synthetic media's (see clock.mjs).
+  const demoNow = process.env.DEMO_NOW?.trim() ? parseDemoNow(process.env.DEMO_NOW) : null;
+  const since = Math.floor(Date.now() / 1000) - 2;
   await assertPortsFree([DEMO_PORT]);
   // A fixed path, so asset paths in captures read cleanly and identically on
   // every run. Created exclusively: mkdir(2) is atomic, so of two demos started
@@ -217,7 +223,7 @@ export async function startDemo({ keep = false, quiet = false } = {}) {
     server = spawn(binary, ["-config", configPath], {
       cwd: dirs.run,
       env,
-      stdio: ["ignore", quiet ? "ignore" : "inherit", "inherit"],
+      stdio: ["ignore", "inherit", "inherit"],
     });
     // Without a listener a failed spawn (ENOENT, EACCES on a noexec TMPDIR) is
     // an uncaught 'error' event that bypasses the catch below and its cleanup.
@@ -248,12 +254,22 @@ export async function startDemo({ keep = false, quiet = false } = {}) {
       }
     }
     // Let the thumbnail worker catch up before anyone looks.
-    await waitFor(
-      async () => assetsOf(await api("/api/v1/assets?limit=500")).every((a) => a.thumbState !== "PENDING"),
-      "thumbnails",
-      undefined,
-      serverAlive,
-    );
+    const thumbnailsDone = () =>
+      waitFor(
+        async () => assetsOf(await api("/api/v1/assets?limit=500")).every((a) => a.thumbState !== "PENDING"),
+        "thumbnails",
+        undefined,
+        serverAlive,
+      );
+    await thumbnailsDone();
+    if (demoNow) {
+      // The node UUIDs carry the real clock and random bits; fixing them sends the thumbnails (cached under the
+      // UUID) back to the worker, so wait for it again, and only then fix the timestamps it just stamped.
+      await fixDemoNodeUuids(cfg.database.path, demoNow);
+      await thumbnailsDone();
+      await fixDemoTimestamps(cfg.database.path, demoNow, since);
+      console.log(`[demo] clock fixed at ${demoNow.toISOString()}`);
+    }
     return { demoDir, url, api, stop };
   } catch (err) {
     await stop();
@@ -265,7 +281,7 @@ export async function startDemo({ keep = false, quiet = false } = {}) {
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   const demo = await startDemo({ keep: process.argv.includes("--keep") });
-  console.log(`
+  console.log(`DEMO_READY url=${demo.url}
 [demo] branchDAM demo is up: ${demo.url}
 [demo] Forward-auth mode: browsing needs no login. Actions (confirm a link,
 [demo] scan, trash) need the proxy headers, e.g. from a header-injecting extension:

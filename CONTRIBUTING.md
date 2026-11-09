@@ -74,6 +74,36 @@ activates when a caller passes `test-shards > 1` -- this repo does not, so the s
 skipped. New contract tests added under `web/src/styles/` (theme, hardcoded-token ban) run on
 every push, so prefer focused fixtures over heavy `render()` trees when adding new contracts.
 
+## Demo instance and screenshots
+
+`make demo` starts a throwaway branchDAM with synthetic media and a populated version graph on `127.0.0.1:3975`
+(its own config, database and storage roots under `/tmp/branchdam-demo`, a clean environment, Ctrl-C deletes it).
+It needs Go, `ffmpeg` and `exiftool`. With `DEMO_NOW=2026-10-15T10:00:00Z` set, it also moves the timestamps and
+node UUIDs the run wrote to fixed values once indexing is done, so the pages read the same on any day (the Go
+server's own clock is not touched).
+
+The screenshots and the per-change visual check run in a pinned
+[visual-kit](https://github.com/s3ntin3l8/visual-kit) image (Docker) against that demo; the pages are the scenes in
+`visual/scenes.json`.
+
+| Command | What it does |
+| --- | --- |
+| `make screenshots` | the README images into `docs/screenshots/` (dark and light, desktop and mobile; commit them) |
+| `make screenshots-landing OUT=<dir>` | the landing-page stills and the asset-graph loop for personal-landing's `npm run assets:sync branchdam` |
+| `make screenshots-audit AUDIT=YYYY-MM-<scope>-<topic>` | desktop, tablet and phone stills of every page into `docs/audit/assets/` (local only) |
+| `make visual-check [ROUTES=a,b] [BASE=ref]` | renders the merge base and your working tree and reports what changed (`visual/.out/check/report/`); `REPEAT=2` also proves the capture repeats |
+| `make visual-baseline` | regenerates `visual/baselines/`, the committed check shots of the scenes flagged `"baseline": true` |
+
+- **On a pull request** the visual check runs for UI changes (advisory) and posts its report as a comment, with a
+  separate `visual / health` check for new console errors and serious axe findings.
+- **`/update-baselines`**: comment it on a pull request (write access, branch in this repository) and CI regenerates
+  `visual/baselines/` and pushes one commit of the images that really changed to that branch.
+- **Weekly refresh** (`visual-refresh.yml`, Mondays, or run it from the Actions tab): regenerates the README images
+  and the baselines and, only when one changed by more than the pixel tolerance, opens or updates one pull request
+  each (`bot/refresh-screenshots`, `bot/refresh-baselines`). Review the images, then merge or close it.
+- The asset paths in the captures read `/tmp/branchdam-demo/...`; if your shell sets `TMPDIR` to something else, run
+  `TMPDIR=/tmp make screenshots` so your images match what CI renders.
+
 ## PR title
 
 Must use a [Conventional Commits](https://www.conventionalcommits.org/) prefix (`feat:`,
