@@ -78,9 +78,11 @@ every push, so prefer focused fixtures over heavy `render()` trees when adding n
 
 `make demo` starts a throwaway branchDAM with synthetic media and a populated version graph on `127.0.0.1:3975`
 (its own config, database and storage roots under `/tmp/branchdam-demo`, a clean environment, Ctrl-C deletes it).
-It needs Go, `ffmpeg` and `exiftool`. With `DEMO_NOW=2026-10-15T10:00:00Z` set, it also moves the timestamps and
-node UUIDs the run wrote to fixed values once indexing is done, so the pages read the same on any day (the Go
-server's own clock is not touched).
+It needs Go, `ffmpeg` and `exiftool`. With `DEMO_NOW=2026-10-15T10:00:00Z` set, the server's clock
+(`internal/clock`) is frozen an hour before it (config key `clock.fixed`, accepted only with `BRANCHDAM_DEMO=1`, which
+the demo sets), so every timestamp and node UUID reads the same on any day. A frozen clock does not advance: the
+scan jobs on the jobs page all show one instant and a 0 s duration. Server code reads time through `internal/clock`
+(`clock.Now` for a stored or shown time, `clock.Real` for deadlines and measurements); lint rejects `time.Now`.
 
 The screenshots and the per-change visual check run in a pinned
 [visual-kit](https://github.com/s3ntin3l8/visual-kit) image (Docker) against that demo; the pages are the scenes in

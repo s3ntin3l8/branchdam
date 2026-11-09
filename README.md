@@ -142,8 +142,8 @@ version graph on `127.0.0.1:3975`. It writes its own config, database and
 storage roots under `/tmp/branchdam-demo` (never the checkout's `config.yaml`),
 runs with a clean environment, keeps Immich and metadata write-back off, and
 deletes everything on Ctrl-C. `scripts/demo/env.mjs` enforces that, and
-`make test-demo` tests it. `DEMO_NOW=<ISO date-time>` fixes what the run
-wrote with a clock (`scripts/demo/clock.mjs`), so the pages read the same on any day.
+`make test-demo` tests it. `DEMO_NOW=<ISO date-time>` freezes the
+server's clock (`internal/clock`, `scripts/demo/clock.mjs`), so the pages read the same on any day.
 `make screenshots` regenerates `docs/screenshots/` from that demo;
 `make screenshots-landing OUT=<dir>` writes 2x stills plus a short loop;
 `make visual-check ROUTES=assets,/jobs` shows what a UI change does to the pages
