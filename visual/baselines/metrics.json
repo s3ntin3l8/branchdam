@@ -1,0 +1,228 @@
+{
+  "assets.desktop.dark.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 16
+      },
+      {
+        "id": "empty-table-header",
+        "impact": "minor",
+        "nodes": 1
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "assets.desktop.light.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 4
+      },
+      {
+        "id": "empty-table-header",
+        "impact": "minor",
+        "nodes": 1
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "assets.phone.dark.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "empty-table-header",
+        "impact": "minor",
+        "nodes": 1
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "assets.phone.light.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "empty-table-header",
+        "impact": "minor",
+        "nodes": 1
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "asset-graph.desktop.dark.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 5
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "asset-graph.desktop.light.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 2
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "asset-graph.phone.dark.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 5
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "asset-graph.phone.light.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 1
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "audit-queue.desktop.dark.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 108
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "audit-queue.desktop.light.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 20
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "audit-queue.phone.dark.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 94
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  },
+  "audit-queue.phone.light.png": {
+    "status": 200,
+    "overflow": false,
+    "unnamed": 0,
+    "unnamedSample": [],
+    "offscreen": 0,
+    "offscreenSample": [],
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": 6
+      }
+    ],
+    "console": [
+      "Executing inline script violates the following Content Security Policy directive 'default-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-WzckgwhPoE8mcbyEXM8MuSM+XV5HvBDplghMEyWUSgg='), or a nonce ('nonce-...') is required to enable inline execution. Note also that 'script-src' was "
+    ]
+  }
+}

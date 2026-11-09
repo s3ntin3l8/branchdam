@@ -25,10 +25,47 @@ make dev-all    # Both together
 
 # Codegen & Data Layer
 sqlc generate    # Run after editing migrations or queries; commit internal/db/sqlcgen/
+
+# Demo, screenshots, visual checks (Docker, visual-kit; needs go, ffmpeg, exiftool)
+make demo                        # throwaway instance on :3975; DEMO_NOW=<ISO date-time> fixes its timestamps
+make visual-check ROUTES=assets  # before/after of the pages a UI change touches (REPEAT=2: determinism)
+make visual-baseline             # regenerate visual/baselines (or comment /update-baselines on the PR)
+make screenshots                 # docs/screenshots (README); make screenshots-landing OUT=<dir> for the landing page
 ```
 
 > **`sqlc generate` Risk Note:** `internal/db/queries/*.sql` files must be ASCII-only. sqlc v1.31.1's SQLite engine slices statement spans using rune offsets as if they were byte offsets, so any multi-byte UTF-8 character (even in a `--` comment) corrupts every later statement in the file -- dropped placeholder digits, truncated `RETURNING` lists, stray garbage lines. `internal/db/queries_ascii_test.go`'s `TestQueryFilesAreASCII` enforces this under `make check`; see docs/schema.md's "sqlc risk: non-ASCII in query comments" section and [sqlc#4372](https://github.com/sqlc-dev/sqlc/issues/4372)/[#4523](https://github.com/sqlc-dev/sqlc/issues/4523). Fixed upstream by [sqlc#4535](https://github.com/sqlc-dev/sqlc/pull/4535) but not yet in a release past v1.31.1 -- drop this rule once one ships.
 > **SQL Syntax Traps:** Recursive CTE anchor `SELECT`s must explicitly alias every column (`SELECT sqlc.arg(x) AS id`) or sqlc's SQLite parser fails with `*ast.ResTarget has nil name`.
+
+## UI changes
+
+**Look at every UI change before calling it done.** Run `make visual-check ROUTES=<the pages you touched>`
+(Docker; routes are scene names or paths from `visual/scenes.json`, e.g. `ROUTES=assets,/jobs`): it renders the
+merge base and your working tree against `make demo` in the pinned
+[visual-kit](https://github.com/s3ntin3l8/visual-kit) image and writes `visual/.out/check/report/`
+(`index.html` side by side, `summary.md`). Open the changed and new shots and read the deltas (axe, console errors,
+horizontal overflow, unnamed controls): a diff is intended, a regression, or flake (then fix the demo or the settle
+logic in `visual/hooks.mjs`, or give that one scene a `maxDiffPixels` with the reason; never raise the threshold for
+every scene). The PR description gets a **Visual check** section: routes, what changed and why, axe delta. A new
+page or state needs a scene in `visual/scenes.json` (tags `check`, `audit`, `presentation`).
+
+- **Determinism.** After changing the demo or a scene, run `make visual-check REPEAT=2` (the launcher recaptures the
+  working tree itself): it must report no determinism failure. The demo is built to repeat: `DEMO_NOW` moves what a
+  run wrote (timestamps, node UUIDs) to fixed values (`scripts/demo/clock.mjs`) because the Go server's clock cannot
+  be faked, and one hash worker makes the scan number nodes and edges in the same order every run. Both matter for
+  the asset list and the audit queue, which are ordered by id.
+- **`baseHarness`** renders the base with the head's `scripts/demo` (so a PR that fixes the demo is not compared
+  against the bug it fixes) and the merge base's server and web app. A PR that changes `scripts/demo` together with
+  the code it depends on can therefore fail to start its base demo, and then every scene reports "new" (the reason is
+  only a stderr line).
+- **Baselines.** The scenes flagged `"baseline": true` have committed shots in `visual/baselines/`: regenerate them
+  in the PR that moves those pages (`make visual-baseline`, or comment `/update-baselines` on the PR).
+- **README and landing screenshots** come from `make screenshots` / `make screenshots-landing` and are refreshed
+  weekly by `.github/workflows/visual-refresh.yml` (one rolling PR each for the screenshots and the baselines).
+  Regenerate them yourself when a screen they show changes; they are rendered on `/tmp/branchdam-demo` paths, so run
+  with `TMPDIR=/tmp` if your session sets another. The loop re-encodes differently on every run, so `make screenshots`
+  does not keep it in `docs/screenshots`.
+- The `storage-health` page shows the host's real disk usage, so it is in `check` and `audit` (masked) but not in the
+  README or landing set.
 
 ## Architecture & Package Responsibilities
 

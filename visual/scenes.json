@@ -1,0 +1,104 @@
+{
+  "$schema": "https://raw.githubusercontent.com/s3ntin3l8/visual-kit/main/schema/scenes.schema.json",
+  "demo": {
+    "start": "make demo",
+    "url": "http://127.0.0.1:3975",
+    "readyOutput": "DEMO_READY",
+    "startTimeoutSec": 600,
+    "env": {
+      "DEMO_NOW": "2026-10-15T10:00:00Z"
+    }
+  },
+  "cacheKeyFiles": [".github/visual-setup.sh"],
+  "baseHarness": ["scripts/demo"],
+  "clock": "2026-10-15T10:00:00Z",
+  "scenes": [
+    {
+      "name": "assets",
+      "path": "/assets",
+      "tags": ["presentation", "check", "audit"],
+      "baseline": true
+    },
+    {
+      "name": "asset-detail",
+      "path": "/assets",
+      "tags": ["presentation", "check", "audit"],
+      "steps": [
+        {
+          "click": "text=DSC01101.ARW"
+        }
+      ],
+      "settle": "text=Multi-hop Lineage Graph"
+    },
+    {
+      "name": "asset-graph",
+      "path": "/assets",
+      "tags": ["presentation", "check", "audit"],
+      "baseline": true,
+      "steps": [
+        {
+          "click": "text=DSC01101.ARW"
+        },
+        {
+          "wait": 1500
+        },
+        {
+          "hover": "text=Multi-hop Lineage Graph"
+        },
+        {
+          "wait": 1500
+        }
+      ],
+      "settle": "text=Multi-hop Lineage Graph",
+      "target": "section:has(h2:text-is(\"Multi-hop Lineage Graph\")) >> nth=-1",
+      "padding": 24
+    },
+    {
+      "name": "asset-graph-loop",
+      "path": "/assets",
+      "tags": ["presentation"],
+      "stills": false,
+      "steps": [
+        {
+          "wait": 1200
+        },
+        {
+          "click": "text=DSC01101.ARW"
+        },
+        {
+          "wait": 1500
+        },
+        {
+          "hover": "text=Multi-hop Lineage Graph"
+        },
+        {
+          "wait": 1500
+        }
+      ],
+      "loop": {
+        "tailSec": 1.5
+      }
+    },
+    {
+      "name": "audit-queue",
+      "path": "/audit",
+      "tags": ["presentation", "check", "audit"],
+      "baseline": true
+    },
+    {
+      "name": "jobs",
+      "path": "/jobs",
+      "tags": ["presentation", "check", "audit"]
+    },
+    {
+      "name": "storage-health",
+      "path": "/storage-health",
+      "tags": ["check", "audit"],
+      "mask": [
+        "div.flex.justify-between.text-xs:has(> span:text-matches(\"^Capacity Used\"))",
+        "div.h-2\\.5.w-full.rounded-full",
+        "div.grid.grid-cols-3 > div:nth-child(n+2)"
+      ]
+    }
+  ]
+}
