@@ -43,6 +43,9 @@ describe("fixDemoTimestamps", () => {
       CREATE TABLE scan_jobs (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER,
                               updated_at INTEGER NOT NULL, files_seen INTEGER);
       CREATE TABLE node_creators (node_uuid TEXT PRIMARY KEY REFERENCES media_nodes(node_uuid), agent_id TEXT);
+      CREATE TABLE node_uuid_aliases (alias_uuid TEXT PRIMARY KEY,
+                                      node_uuid TEXT NOT NULL REFERENCES media_nodes(node_uuid),
+                                      CHECK (alias_uuid <> node_uuid));
       CREATE TABLE plain (id INTEGER PRIMARY KEY, name TEXT);
     `);
     return { file, db };
@@ -122,7 +125,8 @@ describe("fixDemoTimestamps", () => {
   it("moves the rows that reference a node's UUID along with it", async () => {
     const { file, db } = database("children.db");
     db.exec(`INSERT INTO media_nodes (id, node_uuid, first_seen_at, created_at) VALUES (1, 'old-a', ${START}, ${START}), (2, 'old-b', ${START}, ${START});
-      INSERT INTO node_creators VALUES ('old-b', 'agent-1')`);
+      INSERT INTO node_creators VALUES ('old-b', 'agent-1');
+      INSERT INTO node_uuid_aliases VALUES ('dup-of-a', 'old-a')`);
     db.close();
 
     await fixDemoNodeUuids(file, NOW);
@@ -130,8 +134,32 @@ describe("fixDemoTimestamps", () => {
     const check = new DatabaseSync(file);
     const uuid = check.prepare("SELECT node_uuid FROM media_nodes WHERE id = 2").get().node_uuid;
     const creator = check.prepare("SELECT * FROM node_creators").get();
+    const alias = check.prepare("SELECT * FROM node_uuid_aliases").get();
+    const first = check.prepare("SELECT node_uuid FROM media_nodes WHERE id = 1").get().node_uuid;
     check.close();
     assert.equal(creator.node_uuid, uuid);
+    assert.equal(alias.node_uuid, first);
+    assert.equal(
+      alias.alias_uuid,
+      "dup-of-a",
+      "the alias itself is another node's name for it, not ours to change",
+    );
+  });
+
+  it("leaves every UUID as it was when a reference cannot follow", async () => {
+    const { file, db } = database("rollback.db");
+    // An alias already named like the node's fixed UUID: once the node takes it, the alias's CHECK refuses.
+    const taken = fixedNodeUuid((NOW.getTime() / 1000 - 3600) * 1000, 0);
+    db.exec(`INSERT INTO media_nodes (id, node_uuid, first_seen_at, created_at) VALUES (1, 'old-a', ${START}, ${START});
+      INSERT INTO node_uuid_aliases VALUES ('${taken}', 'old-a')`);
+    db.close();
+
+    await assert.rejects(fixDemoNodeUuids(file, NOW));
+
+    const check = new DatabaseSync(file);
+    const uuid = check.prepare("SELECT node_uuid FROM media_nodes").get().node_uuid;
+    check.close();
+    assert.equal(uuid, "old-a");
   });
 
   it("builds distinct UUIDv7s from the fixed instant", () => {
