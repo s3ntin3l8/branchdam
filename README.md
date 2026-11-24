@@ -42,7 +42,7 @@ ForwardAuth, on SQLite in WAL mode.
 All media in these captures is synthetic: `make screenshots` renders it with
 ffmpeg and exiftool, ingests it into a throwaway demo instance, and captures the
 UI in a pinned [visual-kit](https://github.com/s3ntin3l8/visual-kit) image (see
-[Development](#development--contributing)). A weekly workflow refreshes them.
+[Development](#development--contributing)). A weekly workflow refreshes them; comment `/refresh-screenshots` on a pull request to run it on demand.
 
 ---
 
