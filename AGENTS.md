@@ -61,7 +61,8 @@ page or state needs a scene in `visual/scenes.json` (tags `check`, `audit`, `pre
 - **Baselines.** The scenes flagged `"baseline": true` have committed shots in `visual/baselines/`: regenerate them
   in the PR that moves those pages (`make visual-baseline`, or comment `/update-baselines` on the PR).
 - **README and landing screenshots** come from `make screenshots` / `make screenshots-landing` and are refreshed
-  weekly by `.github/workflows/visual-refresh.yml` (one rolling PR each for the screenshots and the baselines).
+  weekly by `.github/workflows/visual-refresh.yml` (one rolling PR each for the screenshots and the baselines; comment
+  `/refresh-screenshots` on a PR to run it on demand).
   Regenerate them yourself when a screen they show changes; they are rendered on `/tmp/branchdam-demo` paths, so run
   with `TMPDIR=/tmp` if your session sets another. The loop re-encodes differently on every run, so `make screenshots`
   does not keep it in `docs/screenshots`.

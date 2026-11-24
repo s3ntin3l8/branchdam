@@ -103,6 +103,9 @@ The screenshots and the per-change visual check run in a pinned
 - **Weekly refresh** (`visual-refresh.yml`, Mondays, or run it from the Actions tab): regenerates the README images
   and the baselines and, only when one changed by more than the pixel tolerance, opens or updates one pull request
   each (`bot/refresh-screenshots`, `bot/refresh-baselines`). Review the images, then merge or close it.
+- **`/refresh-screenshots`**: comment it on a pull request (write access) to run that same refresh on demand, so a
+  stale refresh pull request can be regenerated without waiting for Monday. The refresh pull requests carry this
+  reminder in their description.
 - The asset paths in the captures read `/tmp/branchdam-demo/...`; if your shell sets `TMPDIR` to something else, run
   `TMPDIR=/tmp make screenshots` so your images match what CI renders.
 

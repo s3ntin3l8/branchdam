@@ -5,11 +5,15 @@ name: Visual refresh
 # job does the same for the committed visual baselines (`make visual-baseline`, PR from `bot/refresh-baselines`):
 # the safety net for a UI PR that moved a baseline scene and forgot `/update-baselines`. The mechanics, the
 # tolerance and the self-approval of the PR's held checks live in the shared workflow in s3ntin3l8/.github
-# (visual-refresh.yml); `workflow_dispatch` runs both on demand.
+# (visual-refresh.yml); `workflow_dispatch` runs both on demand, and so does a `/refresh-screenshots` comment on a
+# pull request (the `issue_comment` trigger runs from the default branch; the shared workflow itself refuses a
+# commenter without write access).
 on:
   schedule:
     - cron: "29 5 * * 1"
   workflow_dispatch:
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -18,12 +22,15 @@ permissions:
 
 jobs:
   refresh:
-    if: ${{ !github.event.repository.fork }}
+    # `issue_comment` fires for every comment in the repo: only a writer's `/refresh-screenshots` on a PR gets
+    # through (`author_association` is a noise filter; the shared workflow checks the collaborator permission).
+    if: ${{ !github.event.repository.fork && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/refresh-screenshots') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) }}
     uses: s3ntin3l8/.github/.github/workflows/visual-refresh.yml@main
     with:
       node-version: "26"
       paths: "docs/screenshots"
       title: "chore(uiux): refresh screenshots"
+      footer: "Out of date? Comment `/refresh-screenshots` on a pull request to regenerate this one and the baselines now (repository writers only)."
 
   # After the screenshots job, never beside it: the shared workflow runs one refresh at a time per repo, and a
   # third queued run would be dropped. `!cancelled()` so a failed screenshots refresh does not skip this one.
@@ -32,7 +39,8 @@ jobs:
   # not PNG or JSON, so a non-constant stamp in visual/baselines/.visual-kit would fail this job.
   baselines:
     needs: refresh
-    if: ${{ !cancelled() && !github.event.repository.fork }}
+    # Same comment filter as `refresh`: a job that `needs:` another and runs on `!cancelled()` is not skipped with it.
+    if: ${{ !cancelled() && !github.event.repository.fork && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/refresh-screenshots') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) }}
     uses: s3ntin3l8/.github/.github/workflows/visual-refresh.yml@main
     with:
       node-version: "26"
@@ -41,3 +49,4 @@ jobs:
       branch: bot/refresh-baselines
       title: "chore(uiux): refresh visual baselines"
       allow-json: true
+      footer: "Out of date? Comment `/refresh-screenshots` on a pull request to regenerate this one and the screenshots now (repository writers only)."
