@@ -24,6 +24,7 @@ jobs:
   refresh:
     # `issue_comment` fires for every comment in the repo: only a writer's `/refresh-screenshots` on a PR gets
     # through (`author_association` is a noise filter; the shared workflow checks the collaborator permission).
+    # Keep this comment filter identical to the `baselines` job's: if they drift one job runs and the other skips.
     if: ${{ !github.event.repository.fork && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/refresh-screenshots') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) }}
     uses: s3ntin3l8/.github/.github/workflows/visual-refresh.yml@main
     with:
@@ -40,6 +41,8 @@ jobs:
   baselines:
     needs: refresh
     # Same comment filter as `refresh`: a job that `needs:` another and runs on `!cancelled()` is not skipped with it.
+    # Keep it identical to the `refresh` job's. A refused commenter gets one reply per job; that is the cost of
+    # `!cancelled()`, which lets baselines refresh even when the screenshots refresh failed.
     if: ${{ !cancelled() && !github.event.repository.fork && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/refresh-screenshots') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) }}
     uses: s3ntin3l8/.github/.github/workflows/visual-refresh.yml@main
     with:
