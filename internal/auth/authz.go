@@ -35,8 +35,9 @@ func writeForbidden(w http.ResponseWriter, detail string) {
 //   - the session middleware (internal/auth/session) for cookie
 //     sessions -- the original and still the common case;
 //   - PATMiddleware.RequirePAT (issue #453 PR E) for Bearer-token
-//     admin PATs -- UserID is the token owner's users.id, IsAdmin is
-//     true (PATs are admin-only in this PR), MFAVerified is true (the
+//     PATs -- UserID is the token owner's users.id. IsAdmin is true
+//     for non-MCP tokens (lookup proved a live admin) and the owner's
+//     actual is_admin for an MCP-only token. MFAVerified is true (the
 //     token itself is the second factor).
 //
 // Absent means "no local session or PAT authenticated this request"
@@ -145,6 +146,13 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 // headers merges to AuthProvider "local" -- the local account is the
 // acting identity, so its is_admin column decides there too. Forward-auth
 // principals (including forward-JIT ones) keep the group policy unchanged.
+// A PAT principal is decided by localView.IsAdmin alone, the same way a
+// local login is: RequirePAT sets that flag from the owner's real
+// is_admin for an MCP-only token and to true for every other token.
+// Without this, an empty authz.groups list (the solo-homelab default)
+// would treat a non-admin MCP token as an admin on any route that
+// reached RequireAdmin, because a PAT principal is not AuthProviderLocal
+// and carries no groups of its own.
 //
 // This does NOT reproduce RequireAdmin's GET/HEAD/OPTIONS bypass or its
 // unconditional pass for KindMachine -- those are properties of *which
@@ -160,7 +168,7 @@ func IsAdmin(p Principal, allowedGroups []string, localView LocalUserView) bool 
 	if localView.IsAdmin {
 		return true
 	}
-	if p.AuthProvider == AuthProviderLocal {
+	if p.AuthProvider == AuthProviderLocal || p.AuthProvider == AuthProviderPAT {
 		return false
 	}
 	if len(allowedGroups) == 0 {

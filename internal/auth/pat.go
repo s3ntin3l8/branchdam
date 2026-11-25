@@ -64,6 +64,11 @@ type PATLookupResult struct {
 	// Principal's Name/Email. Empty Username falls back to "pat:<id>".
 	Username string
 	Email    string
+	// IsAdmin is the owner's users.is_admin at lookup time. RequirePAT
+	// copies it onto LocalUserView only for MCP-only tokens; every
+	// other token keeps IsAdmin=true because the lookup predicate
+	// already proved the owner is a live admin.
+	IsAdmin bool
 }
 
 // PATMiddleware validates an `Authorization: Bearer bdam_pat_...`
@@ -101,7 +106,15 @@ type PATMiddleware struct {
 	// requested scope must appear in the token's list (string-equal).
 	// Empty requested scope ("any authenticated PAT") is always
 	// satisfied -- the caller is opting out of scope enforcement.
+	// Ignored when AnyOf is non-empty.
 	Scope string
+	// AnyOf, when non-empty, admits the token when scopeSatisfied holds
+	// for at least one listed scope (or the token carries "*"). Used by
+	// /mcp, which must be reachable by any single mcp:* grant: an
+	// mcp:review-only token still has to reach the per-tool checks.
+	// scopeSatisfied itself stays exact-match; a Scope of "mcp:*" would
+	// admit only a token that literally holds that string.
+	AnyOf []string
 
 	// touchMu/lastTouch back the in-process last_used_at throttle:
 	// a per-hashed-key timestamp of the most recent async touch, so
@@ -210,7 +223,11 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 			UserID:        result.UserID,
 			Authenticated: true,
 		}
-		if !scopeSatisfied(result.Scopes, m.Scope) {
+		if !scopeAdmitted(result.Scopes, m.Scope, m.AnyOf) {
+			if len(m.AnyOf) > 0 {
+				http.Error(w, "token lacks any of scopes "+strings.Join(m.AnyOf, ", "), http.StatusForbidden)
+				return
+			}
 			http.Error(w, fmt.Sprintf("token lacks scope %q", m.Scope), http.StatusForbidden)
 			return
 		}
@@ -238,25 +255,26 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 		//   - RequireAdmin/IsAdmin: the PAT principal carries no
 		//     forward-auth Groups, so without the local-`is_admin`
 		//     override every write route would 403 the moment
-		//     authz.groups is non-empty. Lookup has already verified
-		//     the token's owner is a live admin (is_admin=1,
-		//     disabled_at IS NULL -- see GetUserPATByHash), so
-		//     IsAdmin=true here reflects the owner's current
-		//     authority, not authority frozen at mint time; a
-		//     demoted or disabled owner's token fails Lookup instead.
-		//     Route-level granularity comes from the middleware
-		//     Scope, not from the admin flag.
+		//     authz.groups is non-empty. Non-MCP tokens keep
+		//     IsAdmin=true: Lookup has already verified the owner is
+		//     a live admin. MCP-only tokens copy the owner's actual
+		//     is_admin, so a non-admin assistant credential does not
+		//     pass RequireAdmin anywhere.
 		//   - MFAGate: MFAVerified=true so a PAT-authenticated
 		//     request isn't mistaken for a half-authed password-only
 		//     session -- the token itself is the second factor.
 		//   - Handlers: LocalUserView.UserID is the token owner's
 		//     users.id, letting /api/v1/users/me/pats resolve the
 		//     owner without a second lookup.
+		isAdmin := true
+		if MCPOnlyScopes(result.Scopes) {
+			isAdmin = result.IsAdmin
+		}
 		ctx := withPrincipal(r.Context(), principal)
 		ctx = withPATScopes(ctx, result.Scopes)
 		ctx = WithLocalUserView(ctx, LocalUserView{
 			UserID:      result.UserID,
-			IsAdmin:     true,
+			IsAdmin:     isAdmin,
 			MFAVerified: true,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -291,6 +309,20 @@ func withPATScopes(ctx context.Context, scopes []string) context.Context {
 func PATScopesFrom(ctx context.Context) ([]string, bool) {
 	scopes, ok := ctx.Value(patScopesKey{}).([]string)
 	return scopes, ok
+}
+
+// HasScope reports whether the PAT that authenticated this request
+// satisfies scope. It is false when no PAT is on the context (a
+// session or forward-auth principal), so callers cannot treat a human
+// click as an assistant grant. "*" on the token satisfies every scope,
+// matching scopeSatisfied; the helper does not treat "mcp:*" as a
+// prefix match.
+func HasScope(ctx context.Context, scope string) bool {
+	scopes, ok := PATScopesFrom(ctx)
+	if !ok {
+		return false
+	}
+	return scopeSatisfied(scopes, scope)
 }
 
 // extractBearerPAT pulls the bdam_pat_ token out of the Authorization
@@ -351,6 +383,39 @@ func scopeSatisfied(scopes []string, requested string) bool {
 	return false
 }
 
+// scopeAdmitted is the route gate. AnyOf, when non-empty, passes when
+// scopeSatisfied holds for at least one listed scope. Otherwise it
+// falls through to the single-scope check, including the empty-scope
+// "any authenticated PAT" opt-out.
+func scopeAdmitted(scopes []string, requested string, anyOf []string) bool {
+	if len(anyOf) == 0 {
+		return scopeSatisfied(scopes, requested)
+	}
+	for _, s := range anyOf {
+		if scopeSatisfied(scopes, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// MCPOnlyScopes reports whether scopes is a non-empty list in which
+// every entry is an MCP grant (the "mcp:" prefix). A mixed list such
+// as mcp:read plus admin is not MCP-only: it keeps the live-admin
+// mint and lookup rule. The prefix is case-sensitive, matching the
+// GLOB 'mcp:*' predicate in GetUserPATByHash.
+func MCPOnlyScopes(scopes []string) bool {
+	if len(scopes) == 0 {
+		return false
+	}
+	for _, s := range scopes {
+		if !strings.HasPrefix(s, "mcp:") {
+			return false
+		}
+	}
+	return true
+}
+
 // slogDefault returns the package-default logger. Extracted so the
 // middleware can be constructed without an explicit logger -- admin
 // route wiring doesn't carry one through, and the auth-failure log
@@ -408,15 +473,27 @@ func (s *PATService) Middleware(scope string) *PATMiddleware {
 	}
 }
 
+// MiddlewareAnyOf builds a PATMiddleware that admits a token holding
+// any one of scopes (or "*"). See PATMiddleware.AnyOf.
+func (s *PATService) MiddlewareAnyOf(scopes ...string) *PATMiddleware {
+	return &PATMiddleware{
+		Lookup:        s.Lookup,
+		TouchLastUsed: s.TouchLastUsed,
+		Pepper:        s.pepper,
+		AnyOf:         scopes,
+	}
+}
+
 // timeNowUnix indirection so tests can override "now" without
 // touching the clock globally.
 var timeNowUnix = func() int64 { return clock.Now().Unix() }
 
-// ErrPATOwnerNotAdmin is returned by Mint when the requested owner
-// has no users row, isn't is_admin=1, or has disabled_at set. The
-// PAT lookup query authenticates only live-admin-owned tokens, so
-// minting for such an owner would return a token that 401s on first
-// use -- a silent dead credential. The HTTP layer maps this to 403.
+// ErrPATOwnerNotAdmin is returned by Mint when the owner has no users
+// row, is disabled, or is a non-admin asking for a scope list that is
+// not MCP-only. Non-MCP tokens authenticate only for a live admin, so
+// minting one for anyone else would return a token that 401s on first
+// use. A live non-admin (disabled_at IS NULL) may mint an MCP-only
+// token. The HTTP layer maps this to 403.
 var ErrPATOwnerNotAdmin = errors.New("PAT owner is not a live admin")
 
 // ErrPATInvalidScope is returned by Mint when a requested scope is
@@ -432,8 +509,13 @@ var ErrPATInvalidScope = errors.New("scope is not grantable")
 // httpapi (patScopeFor) -- a scope no route group consults is a
 // permanently dead grant. "*" is the wildcard the bootstrap PAT
 // carries; "admin" is the catch-all every unscoped admin route group
-// requires.
-var PATGrantableScopes = []string{"admin", "pats:write", "pairings:write", "*"}
+// requires. The mcp:* scopes are independent grants (mcp:review does
+// not imply mcp:read); /mcp admits any one of them via MiddlewareAnyOf.
+var PATGrantableScopes = []string{
+	"admin", "pats:write", "pairings:write",
+	"mcp:read", "mcp:review", "mcp:enrich",
+	"*",
+}
 
 // Mint creates a new PAT. Returns (plaintext, row, error). The
 // plaintext is shown to the operator exactly once via the API
@@ -445,13 +527,13 @@ var PATGrantableScopes = []string{"admin", "pats:write", "pairings:write", "*"}
 // An empty list is rejected: the token would authenticate but pass
 // no route group's scope gate (a silent dead credential).
 //
-// The owner must be a live admin: the lookup query authenticates
-// tokens only when the owner's users row has is_admin = 1 AND
-// disabled_at IS NULL, so minting for anyone else would return a
-// well-formed token that 401s on first use. Mint checks the owner's
-// status in the SAME transaction as the insert -- a demotion racing
-// the mint fails the mint, not the other way around. A failed check
-// returns ErrPATOwnerNotAdmin; the HTTP layer maps it to 403.
+// The owner of a non-MCP token must be a live admin: the lookup query
+// authenticates those tokens only when is_admin = 1 AND disabled_at
+// IS NULL. A live non-admin may mint an MCP-only token (every scope
+// starts with "mcp:"). Mint checks the owner's status in the SAME
+// transaction as the insert -- a demotion or disable racing the mint
+// fails the mint, not the other way around. A failed check returns
+// ErrPATOwnerNotAdmin; the HTTP layer maps it to 403.
 func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes []string, expiresAt int64) (string, *sqlcgen.UserPat, error) {
 	plaintext, err := mintPATPlaintext()
 	if err != nil {
@@ -492,7 +574,10 @@ func (s *PATService) Mint(ctx context.Context, userID int64, name string, scopes
 			}
 			return fmt.Errorf("check owner admin status: %w", err)
 		}
-		if status.IsAdmin != 1 || status.DisabledAt.Valid {
+		// Disabled owners fail closed for every scope list. A live
+		// non-admin may mint only an MCP-only token; any other list
+		// (including a mix of mcp:* and admin) keeps the live-admin rule.
+		if status.DisabledAt.Valid || (status.IsAdmin != 1 && !MCPOnlyScopes(scopes)) {
 			return ErrPATOwnerNotAdmin
 		}
 		r, err := q.CreateUserPAT(ctx, sqlcgen.CreateUserPATParams{
@@ -543,12 +628,13 @@ func (s *PATService) Revoke(ctx context.Context, patID, userID int64) (bool, err
 // sql.ErrNoRows when no live row matches. Reads go through the
 // reader pool -- the hot auth path never touches the writer.
 //
-// Authority is checked here, not frozen at mint: the query joins the
-// owner row and filters on users.is_admin = 1 AND disabled_at IS
-// NULL, so demoting or disabling the owner invalidates every live
-// token of theirs on their next request (the same posture the session
-// middleware takes). A demoted owner's token surfaces as
-// sql.ErrNoRows -> 401, matching a revoked token.
+// Authority is checked here, not frozen at mint. The query joins the
+// owner and requires disabled_at IS NULL, plus either is_admin = 1 or
+// an MCP-only scope list. Demoting the owner invalidates their
+// non-MCP tokens; disabling the owner invalidates every token. The
+// Go check repeats the admin-or-MCP-only half so a loosened query
+// cannot admit a non-admin's admin token. A rejected token surfaces
+// as sql.ErrNoRows -> 401, matching a revoked token.
 func (s *PATService) Lookup(ctx context.Context, presented string) (PATLookupResult, error) {
 	hashed := hashToken(s.pepper, presented)
 	row, err := s.db.Reader.GetUserPATByHash(ctx, hashed)
@@ -569,11 +655,16 @@ func (s *PATService) Lookup(ctx context.Context, presented string) (PATLookupRes
 	if err != nil {
 		return PATLookupResult{}, fmt.Errorf("decode scopes: %w", err)
 	}
+	admin := row.OwnerIsAdmin == 1
+	if !admin && !MCPOnlyScopes(scopes) {
+		return PATLookupResult{}, sql.ErrNoRows
+	}
 	return PATLookupResult{
 		UserID:   row.UserID,
 		Scopes:   scopes,
 		Username: row.OwnerUsername,
 		Email:    row.OwnerEmail.String,
+		IsAdmin:  admin,
 	}, nil
 }
 

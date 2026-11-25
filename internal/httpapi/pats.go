@@ -26,13 +26,12 @@ import (
 //                                         the id matches no live PAT
 //                                         owned by the caller)
 //
-// All three require RequireAdmin (only admins mint/revoke/list admin
-// PATs -- regular users don't have PATs) plus the "pats:write" scope
-// when the caller is a PAT (see patScopeFor in server.go). The PAT
-// middleware (auth.PATMiddleware.RequirePAT) is wired into these
-// routes so an admin's PAT can hit them too; a non-admin PAT gets
-// 403 from the RequireAdmin check that runs after RequirePAT
-// attaches its Principal.
+// All three require an authenticated user. Admins may mint any
+// grantable scope list. A live non-admin may mint, list and revoke
+// only their own MCP-only tokens (see auth.MCPOnlyScopes and
+// isOwnPATManagement); any other scope list is 403 from Mint. When
+// the caller is a PAT, patScopeFor additionally requires pats:write
+// -- an MCP-only token therefore 403s here and cannot mint anything.
 
 // --- registration ---
 
@@ -122,11 +121,11 @@ func (s *Server) handleCreatePAT(ctx context.Context, in *CreatePATInput) (*Crea
 	plaintext, row, err := s.patService.Mint(ctx, uid, in.Body.Name, in.Body.Scopes, in.Body.ExpiresAt)
 	if err != nil {
 		if errors.Is(err, auth.ErrPATOwnerNotAdmin) {
-			// The PAT lookup authenticates only live-admin-owned
-			// tokens; minting for anyone else would return a
-			// well-formed token that 401s on first use. Fail here
-			// with a clear 403 instead of issuing a dead credential.
-			return nil, huma.Error403Forbidden("PAT owner is not a live admin (demoted, disabled, or no local admin row)", err)
+			// Non-MCP tokens authenticate only for a live admin.
+			// A live non-admin may mint an MCP-only list; anything
+			// else (admin, a mix, a disabled owner) is a 403 rather
+			// than a token that would 401 on first use.
+			return nil, huma.Error403Forbidden("only a live admin may mint that scope list; a live non-admin may mint MCP-only tokens", err)
 		}
 		if errors.Is(err, auth.ErrPATInvalidScope) {
 			// Scopes outside the grantable allowlist would mint a
