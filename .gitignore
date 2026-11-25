@@ -71,7 +71,7 @@ compose.override.yml
 /docs/superpowers/
 .superpowers/
 
-# Developer worktrees (per AGENTS.md make wt convention; existing .worktrees/ line untouched)
+# Agent worktrees: one per branch under .wt/<name> (AGENTS.md Workflow Conventions)
 .wt/
 landing-shots/
 
