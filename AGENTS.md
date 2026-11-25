@@ -38,9 +38,8 @@ This repo's non-obvious correctness invariants are in `.claude/skills/branchdam/
 - **CI has no codegen step.** A migration or query change without a committed `internal/db/sqlcgen/` breaks `go build ./...` on `main`. Query files must stay ASCII-only and recursive-CTE anchors must alias every column (skill §2, `docs/schema.md`).
 - **Hand-synced contracts:** browser DTOs (any `json:` struct in `internal/httpapi/*.go` outside `/agent`) → `web/src/api/types.ts` + `client.ts`; agent API DTOs → `make contract-fixtures`; new agent error codes → `docs/agent-api.md`'s table. branchdam-agent and branchdam-mobile copy `docs/contract/fixtures` in with `make contract-sync` and test against it, so an agent DTO, error-code or hashing change also needs a follow-up issue (or PR) in each of those repos.
 - **PR titles feed release-please** (squash-merge title → changelog). Existing scopes include `upload`, `uiux` and `ci`. PRs use `.github/pull_request_template.md`, issues `.github/ISSUE_TEMPLATE/issue-blueprint.md`.
-- **Review bot:** Hermes (`s3ntin3l8-hermes[bot]`) auto-reviews every non-draft same-repo PR on open; request reviews as the Workflow Conventions describe. `main` has `required_conversation_resolution`: every inline thread blocks merge until replied to and resolved.
+- **Review bot:** Hermes (`s3ntin3l8-hermes[bot]`) auto-reviews every non-draft same-repo PR on open, except `mullion/task-*` branches (Task Master runs its own review there, `hermes.yml`); request reviews as the Workflow Conventions describe. `main` has `required_conversation_resolution`: every inline thread blocks merge until replied to and resolved.
 - **release-please PRs** never get CI checks reported; the owner merges them past the required checks (CONTRIBUTING.md "Branch protection").
-- **Skill and reviewer exist twice:** `.claude/skills/<n>/SKILL.md` ↔ `.agents/skills/<n>/SKILL.md` and `.claude/agents/<n>.md` ↔ `.agents/skills/<n>/SKILL.md` (same body; Claude Code reads `.claude/`, the other CLIs read `.agents/`). Edit both together; `scripts/check-agent-mirrors.sh` (pre-commit) fails on drift.
 
 ## Commands
 

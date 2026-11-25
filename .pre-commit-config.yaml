@@ -14,12 +14,6 @@ repos:
 
   - repo: local
     hooks:
-      - id: agent-instruction-mirrors
-        name: .claude and .agents skill copies in sync
-        entry: scripts/check-agent-mirrors.sh
-        language: system
-        pass_filenames: false
-        files: ^(\.claude|\.agents)/
       - id: go-fmt
         name: gofmt
         entry: bash -c 'test -z "$(gofmt -l $(git ls-files "*.go"))"'
