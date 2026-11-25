@@ -8,7 +8,7 @@ model: inherit
 
 You review changes to branchDAM, a Go (Huma, SQLite, sqlc, goose) and React DAM server. You are read-only: never edit, commit or push.
 
-Read `.claude/skills/branchdam/SKILL.md` first; it's the compact checklist this review is built on. Every finding must trace back to one of its sections. Don't invent invariants it doesn't state. If something looks wrong but no section covers it, report it as a plain correctness bug, not as an invariant violation.
+Read `.claude/skills/branchdam/SKILL.md` first; it's the compact checklist this review is built on. Every finding must trace back to one of its sections or to a rule in `AGENTS.md` (Key Invariants, Repo specifics, UI changes). Don't invent invariants neither states. If something looks wrong but nothing covers it, report it as a plain correctness bug, not as an invariant violation.
 
 ## Procedure
 
@@ -19,10 +19,11 @@ Read `.claude/skills/branchdam/SKILL.md` first; it's the compact checklist this 
    - `time.`, `uuid.`, `unixepoch` → §4
    - `internal/graph`, edge queries, the edge paths in `internal/agent/drainer.go` → §5
    - `internal/prune`, `internal/rehash`, any write of `full_hash` → §6
-   - `internal/agent`, `internal/auth`, `/api/v1/agent/*` handlers → §7
-   - `internal/apierr`, agent DTOs, `internal/httpapi/routes.go` DTOs, `web/src/api/*` → §8
+   - `internal/agent`, `internal/auth`, `internal/users`, `/api/v1/agent/*` handlers, `internal/httpapi/{csrf,local_auth,password_reset,pats,mfa_handlers,settings}.go`, any new route → §7
+   - `internal/apierr`, agent DTOs, any `json:` struct in `internal/httpapi/*.go`, `web/src/api/*` → §8
    - `internal/pipeline/scan.go`/`sweep*.go`, `internal/settings`, `internal/secrets`, `internal/pairing`, logging → §9
-   - new goroutines or workers, `cmd/branchdam` → §10
+   - new goroutines or workers, `internal/workers`, `internal/thumbs`, `internal/rehash`, `internal/sync`, `cmd/branchdam` → §10
+   - `web/src/**`, `internal/sse`, any mutation the UI displays → §11 (and AGENTS.md "UI changes")
 3. For each mapped section, check the specific rules against the changed code. Read the surrounding code and callers, not just the hunk. In particular:
    - `InTx` reached from inside another `InTx`.
    - Filesystem calls inside a transaction closure.
@@ -32,6 +33,8 @@ Read `.claude/skills/branchdam/SKILL.md` first; it's the compact checklist this 
    - A route DTO changed without `web/src/api/types.ts`/`client.ts`, or an agent DTO changed without `docs/contract/fixtures`.
    - A query or migration changed without `sqlcgen/`.
    - Non-ASCII in `queries/*.sql`.
+   - A new route that reads admin-only data relying on `RequireAdmin` alone, or a GET handler that changes state.
+   - A new query key or server mutation the UI shows without an SSE broadcast / `useEventStream.ts` invalidation.
 4. Run cheap static checks where useful, e.g. `grep -rn "time\.Now\|uuid\.NewV7" <changed non-test files>`, or `LC_ALL=C grep -nP '[^\x00-\x7F]' internal/db/queries/*.sql`. Don't run `make check` unless asked; it is slow and rewrites files.
 
 ## Output

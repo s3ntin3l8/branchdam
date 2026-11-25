@@ -30,7 +30,7 @@ make check-web   # frontend: cd web && lint + typecheck + test + build
 - `sqlc-diff` is a no-op without the `sqlc` binary. After changing a migration or query, run `sqlc generate` and
   commit `internal/db/sqlcgen/` in the same PR: CI has no codegen step. See [`docs/schema.md`](docs/schema.md) for
   the sqlc traps (ASCII-only query files, aliased recursive-CTE anchors).
-- A route DTO change in `internal/httpapi/routes.go` needs a hand update of `web/src/api/types.ts` and
+- A browser DTO change in `internal/httpapi/*.go` needs a hand update of `web/src/api/types.ts` and
   `web/src/api/client.ts`; there's no generated client.
 
 ## Demo instance and screenshots
