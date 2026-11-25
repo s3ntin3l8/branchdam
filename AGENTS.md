@@ -38,7 +38,7 @@ This repo's non-obvious correctness invariants are in `.claude/skills/branchdam/
 - **CI has no codegen step.** A migration or query change without a committed `internal/db/sqlcgen/` breaks `go build ./...` on `main`. Query files must stay ASCII-only and recursive-CTE anchors must alias every column (skill §2, `docs/schema.md`).
 - **Hand-synced contracts:** browser route DTOs (`internal/httpapi/routes.go`) → `web/src/api/types.ts` + `client.ts`; agent API DTOs → `make contract-fixtures`; new agent error codes → `docs/agent-api.md`'s table.
 - **PR titles feed release-please** (squash-merge title → changelog). Existing scopes include `upload`, `uiux` and `ci`. PRs use `.github/pull_request_template.md`, issues `.github/ISSUE_TEMPLATE/issue-blueprint.md`.
-- **Review bot:** Hermes (`s3ntin3l8-hermes[bot]`) auto-reviews every non-draft same-repo PR on open, so don't request a review right after opening; use `mullion review` only for a re-review after pushing fixes. `main` has `required_conversation_resolution`: every inline thread blocks merge until replied to and resolved.
+- **Review bot:** Hermes (`s3ntin3l8-hermes[bot]`) auto-reviews every non-draft same-repo PR on open; request reviews as the Workflow Conventions describe. `main` has `required_conversation_resolution`: every inline thread blocks merge until replied to and resolved.
 - **release-please PRs** never get CI checks reported; the owner merges them past the required checks (CONTRIBUTING.md "Branch protection").
 
 ## Commands
