@@ -41,11 +41,22 @@ anything branchDAM itself checks. Full walkthrough: [`forward-auth.md` §1](forw
 ## 2. Traefik: file middlewares
 
 Define `strip-identity` and `authentik` in your dynamic config (`@file` provider). The exact
-YAML is in [`forward-auth.md` §2](forward-auth.md#2-traefik-the-three-router-split) — copy it
+YAML is in [`forward-auth.md` §2](forward-auth.md#2-traefik-the-four-router-split) — copy it
 as-is. The one detail worth restating here because it's easy to get backwards: `strip-identity`
-must be attached to **both** of branchDAM's routers, not just the browser one. The agent router
-bypasses Authentik by design, so nothing upstream of branchDAM would otherwise strip a
+must be attached to **both** of branchDAM's routers that bypass Authentik (the agent router and the MCP router), not just the browser one. Those routers
+bypass Authentik by design, so nothing upstream of branchDAM would otherwise strip a
 client-forged `X-Authentik-Username` header on that path.
+
+The MCP router is the same shape as the agent router, at priority 150, middleware
+`strip-identity` only. The rule is `Path(\`/mcp\`) || PathPrefix(\`/mcp/\`)` rather than a
+bare `PathPrefix(\`/mcp\`)`, so a path that only starts with those letters (and is not
+the MCP endpoint) still goes through Authentik. It does not attach `authentik`.
+Assistants authenticate with a bearer personal access token (`mcp.enabled` must also
+be true; see [`configuration.md`](configuration.md)):
+
+```sh
+claude mcp add --transport http branchdam https://<host>/mcp --header "Authorization: Bearer bdam_pat_..."
+```
 
 ## 3. `compose.override.yaml`
 
@@ -58,6 +69,7 @@ services:
   branchdam:
     labels:
       traefik.http.routers.branchdam-agent.rule: "Host(`dam.yourdomain.example`) && PathPrefix(`/api/v1/agent`)"
+      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.yourdomain.example`) && (Path(`/mcp`) || PathPrefix(`/mcp/`))"
       traefik.http.routers.branchdam.rule: "Host(`dam.yourdomain.example`)"
       traefik.http.routers.branchdam-outpost.rule: "Host(`dam.yourdomain.example`) && PathPrefix(`/outpost.goauthentik.io/`)"
     volumes:

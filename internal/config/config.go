@@ -102,6 +102,7 @@ type Config struct {
 	Ingest     Ingest     `yaml:"ingest"`
 	Trash      Trash      `yaml:"trash"`
 	Metadata   Metadata   `yaml:"metadata"`
+	MCP        MCP        `yaml:"mcp"`
 }
 
 // Metadata configures EXIF/XMP identity metadata inheritance.
@@ -109,6 +110,17 @@ type Metadata struct {
 	// AutoInherit enables automated metadata inheritance (EXIF/XMP tags)
 	// from winning parent edge to child on edge confirmation or auto-acceptance (default true).
 	AutoInherit bool `yaml:"autoInherit"`
+}
+
+// MCP configures the in-process Model Context Protocol server.
+// Changing it requires a process restart: the HTTP mux mounts /mcp
+// once, from the config loaded at startup.
+type MCP struct {
+	// Enabled mounts the Streamable HTTP MCP server at /mcp.
+	// Default false: /mcp stays 404 until an operator turns it on.
+	// Clients authenticate with a personal access token only; a
+	// browser session or forward-auth identity is not accepted.
+	Enabled bool `yaml:"enabled"`
 }
 
 // Trash configures the soft-delete trash buffer and automated retention.

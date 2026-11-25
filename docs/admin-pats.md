@@ -110,9 +110,10 @@ wrapper (`patScopeFor` in `internal/httpapi/server.go`):
 `/mcp` uses an any-of gate (`PATService.MiddlewareAnyOf`). The
 underlying scope check is still exact-match-or-wildcard, so a token
 must hold one of those three scopes (or `*`). `mcp:review` does not
-imply `mcp:read`. An `mcp:review`-only token reaches `/mcp`; the
-per-tool checks (a later change) decide what it may call. Until the
-MCP handler exists, `/mcp` answers 404 after that gate.
+imply `mcp:read`. An `mcp:review`-only token reaches `/mcp`; each read
+tool checks `mcp:read` and returns a forbidden tool error without it.
+When `mcp.enabled` is false, `/mcp` answers 404 after that gate. A
+request with no PAT is 401, including a valid session cookie.
 
 An MCP-only token on any other path gets 403: its scopes satisfy
 neither `admin`, `pats:write` nor `pairings:write`.

@@ -33,6 +33,7 @@ import (
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/email"
 	"github.com/s3ntin3l8/branchdam/internal/graph"
+	"github.com/s3ntin3l8/branchdam/internal/mcp"
 	"github.com/s3ntin3l8/branchdam/internal/pairing"
 	"github.com/s3ntin3l8/branchdam/internal/pipeline"
 	"github.com/s3ntin3l8/branchdam/internal/probe"
@@ -432,15 +433,28 @@ func (s *Server) Handler() http.Handler {
 	// Web browser multipart upload
 	mux.HandleFunc("POST /api/v1/upload", s.handleWebUpload)
 	mux.Handle("GET /", s.spaHandler())
-	// The MCP server is a later change. Register the methods MCP
-	// uses so a token that passed the scope gate gets 404 from the
-	// router. "GET /" is the SPA catch-all; an unregistered POST
-	// on that path is 405, and an unregistered GET is the SPA
-	// shell. A later issue replaces these with the real handler.
-	mux.HandleFunc("GET /mcp", http.NotFound)
-	mux.HandleFunc("GET /mcp/", http.NotFound)
-	mux.HandleFunc("POST /mcp", http.NotFound)
-	mux.HandleFunc("POST /mcp/", http.NotFound)
+	// /mcp is the in-process MCP server when mcp.enabled is set.
+	// Register every method the streamable transport uses. "GET /" is
+	// the SPA catch-all: an unregistered GET would be the shell, and
+	// an unregistered POST would be 405. A method-unspecified "/mcp"
+	// pattern conflicts with "GET /" and panics at registration.
+	// Disabled stays 404, including for a PAT that passed the scope
+	// gate. Non-PAT requests never get here: openAPIMiddleware answers
+	// 401 first.
+	if cfg := s.cfg(); cfg != nil && cfg.MCP.Enabled {
+		mcpHandler := mcp.New(mcp.Deps{Backend: mcpBackend{s}, Version: s.version})
+		mux.Handle("GET /mcp", mcpHandler)
+		mux.Handle("GET /mcp/", mcpHandler)
+		mux.Handle("POST /mcp", mcpHandler)
+		mux.Handle("POST /mcp/", mcpHandler)
+		mux.Handle("DELETE /mcp", mcpHandler)
+		mux.Handle("DELETE /mcp/", mcpHandler)
+	} else {
+		mux.HandleFunc("GET /mcp", http.NotFound)
+		mux.HandleFunc("GET /mcp/", http.NotFound)
+		mux.HandleFunc("POST /mcp", http.NotFound)
+		mux.HandleFunc("POST /mcp/", http.NotFound)
+	}
 
 	var agentCfg auth.AgentConfig
 	if cfg := s.cfg(); cfg != nil {
@@ -682,14 +696,19 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Log
 			next.ServeHTTP(w, r)
 			return
 		}
-		// /mcp is not an admin route. The PAT scope gate (any mcp:*
-		// grant, or *) already ran. RequireAdmin would 403 a
-		// non-admin owner's token on POST before the router could
-		// 404, and the MCP handler (a later issue) would be
-		// unreachable. IsAdmin on the LocalUserView stays the
+		// /mcp is not an admin route, and it is not a session or
+		// forward-auth route. The PAT scope gate (any mcp:* grant, or
+		// *) already ran when a token was presented. Anything else --
+		// no credential, a session cookie, forward-auth headers -- is
+		// 401, even when that credential would pass RequireAdmin on
+		// the rest of the API. IsAdmin on the LocalUserView stays the
 		// owner's real flag, so the token still fails RequireAdmin
 		// on every other path.
-		if isPATOnMCP(r) {
+		if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
+			if !isPATOnMCP(r) {
+				http.Error(w, "personal access token required", http.StatusUnauthorized)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

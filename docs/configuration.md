@@ -117,6 +117,12 @@ Demo instances only (`scripts/demo`, `make demo`).
 
 Agent authentication is per-device pairing only — no shared `apiKey` field exists. Each paired device gets its own key via `POST /api/v1/companion/pairings` (see [`agent-api.md`](agent-api.md)).
 
+## `mcp`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `enabled` | bool | `false` | Mounts the in-process MCP server (Streamable HTTP) at `/mcp`. Off, that path stays 404. On, it accepts **only** a personal access token (`mcp:read` for the read tools; `mcp:review` can connect but those tools refuse). A browser session or Authentik forward-auth identity is 401, even a valid admin one. Restart to change: the route is registered once at startup. See [`deploy.md`](deploy.md) for the Traefik router that lets a bearer token reach it, and [`mcp.md`](mcp.md) for the tool list. |
+
 ## `authz`
 
 | Key | Type | Default | Effect |
