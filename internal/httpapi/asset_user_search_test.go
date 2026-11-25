@@ -162,6 +162,15 @@ func TestHandleListAssets_QSearchesFileNameServerSide(t *testing.T) {
 		t.Fatalf("q=100%%: total=%d names=%v, want only 100%%_crop.png", body.Total, got)
 	}
 
+	// Underscores separate filename segments, including numeric segments.
+	for query, want := range map[string]string{"0001": "DSC_0001.ARW", "100%_crop": "100%_crop.png"} {
+		code, result := getAssets(t, srv, url.Values{"q": {query}})
+		got := assetNames(result)
+		if code != http.StatusOK || result.Total != 1 || len(got) != 1 || got[0] != want {
+			t.Fatalf("q=%s: status=%d total=%d names=%v, want %s", query, code, result.Total, got, want)
+		}
+	}
+
 	// An exact node UUID (any case) finds its node, as the node picker's
 	// old client-side filter did.
 	_, body = getAssets(t, srv, url.Values{"q": {"UUID-SEARCH-2"}})

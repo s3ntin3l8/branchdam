@@ -439,12 +439,13 @@ func nameQueryParam(q string) sql.NullString {
 
 // assetFTSQuery quotes each user term so operators, quotes and punctuation
 // cannot become FTS query syntax. The only syntax we add is AND and prefix *.
+// Always return valid MATCH syntax, even when no searchable terms remain.
 func assetFTSQuery(q string) sql.NullString {
-	// Mirror unicode61 word categories, plus our explicit %/_ token characters.
+	// Mirror unicode61 word categories, plus our explicit % token character.
 	// Splitting punctuation here ensures EVERY token receives a prefix marker,
 	// rather than only the final token in a quoted multi-token phrase.
 	terms := strings.FieldsFunc(q, func(r rune) bool {
-		return r != '%' && r != '_' && !unicode.IsLetter(r) && !unicode.IsNumber(r) &&
+		return r != '%' && !unicode.IsLetter(r) && !unicode.IsNumber(r) &&
 			!unicode.IsMark(r) && !unicode.Is(unicode.Co, r)
 	})
 	if len(terms) == 0 {

@@ -15,7 +15,7 @@ FROM media_nodes n JOIN storage_locations s ON s.id = n.storage_location_id;
 CREATE VIRTUAL TABLE media_nodes_fts USING fts5(
     file_name, relative_path, meta,
     content='', contentless_delete=1, prefix='2 3 4',
-    tokenize="unicode61 tokenchars '%_'"
+    tokenize="unicode61 tokenchars '%'"
 );
 
 INSERT INTO media_nodes_fts(rowid, file_name, relative_path, meta)
