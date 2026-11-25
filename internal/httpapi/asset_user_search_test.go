@@ -123,7 +123,7 @@ func assetNames(b assetListBody) []string {
 }
 
 // TestHandleListAssets_QSearchesFileNameServerSide: ?q= narrows the list
-// (and its total) to a case-insensitive file_name substring across the
+// (and its total) to a case-insensitive file_name prefix across the
 // whole table, keeps % and _ literal, and on the unfiltered path still
 // hides TRASHED rows.
 func TestHandleListAssets_QSearchesFileNameServerSide(t *testing.T) {
@@ -283,5 +283,85 @@ func TestHandleListUsers_QAndIDs(t *testing.T) {
 	body = getUsers(t, srv, url.Values{"limit": {"5"}})
 	if body.Total != 31 || len(body.Users) != 5 {
 		t.Fatalf("unfiltered: total=%d len=%d", body.Total, len(body.Users))
+	}
+}
+
+func TestHandleListAssets_FTSSearch(t *testing.T) {
+	srv, _ := newSearchTestServer(t)
+	seedSearchNodes(t, srv, []searchNode{
+		{name: "clip.mov", camera: "Alpha"},
+		{name: "another.mov", camera: "Alpha"},
+		{name: "NEAR.mov"},
+		{name: "BJÖRN.mp4"},
+	})
+	ctx := context.Background()
+	for _, statement := range []string{
+		`INSERT INTO node_metadata(node_id,source,key,value) SELECT id,'exiftool','EXIF:Model','Sony Sony Sony' FROM media_nodes WHERE file_name='clip.mov'`,
+		`INSERT INTO node_metadata(node_id,source,key,value) SELECT id,'exiftool','EXIF:Model','Sony' FROM media_nodes WHERE file_name='another.mov'`,
+		`UPDATE media_nodes SET file_path='/tmp/search-loc/vacation/clip.mov' WHERE file_name='clip.mov'`,
+	} {
+		if _, err := srv.db.ExecInTx(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{"sony", "son", "SONY", `"sony"`, "sony*", "-sony"} {
+		code, body := getAssets(t, srv, url.Values{"q": {q}})
+		if code != http.StatusOK || body.Total != 2 || len(body.Assets) != 2 {
+			t.Fatalf("q=%q status=%d total=%d assets=%v", q, code, body.Total, assetNames(body))
+		}
+	}
+	// Relevance beats reverse insertion order; explicit sorts override relevance.
+	for _, filtered := range []bool{false, true} {
+		for _, sort := range []string{"", "newest", "name_asc"} {
+			query := url.Values{"q": {"sony"}}
+			if sort != "" {
+				query.Set("sort", sort)
+			}
+			if filtered {
+				query.Set("cameraModel", "Alpha")
+			}
+			code, body := getAssets(t, srv, query)
+			want := "clip.mov"
+			if sort != "" {
+				want = "another.mov"
+			}
+			if code != http.StatusOK || len(body.Assets) != 2 || body.Assets[0].FileName != want {
+				t.Fatalf("query=%v status=%d assets=%v want first %s", query, code, assetNames(body), want)
+			}
+			query.Set("limit", "1")
+			query.Set("offset", "1")
+			code, body = getAssets(t, srv, query)
+			if code != http.StatusOK || body.Total != 2 || len(body.Assets) != 1 || body.Assets[0].FileName == want {
+				t.Fatalf("pagination query=%v status=%d body=%+v", query, code, body)
+			}
+		}
+	}
+	for _, q := range []string{"vaca", "sony vaca", "son-vac"} {
+		code, body := getAssets(t, srv, url.Values{"q": {q}})
+		if code != http.StatusOK || body.Total != 1 || body.Assets[0].FileName != "clip.mov" {
+			t.Fatalf("path search %q: status=%d body=%+v", q, code, body)
+		}
+	}
+	code, body := getAssets(t, srv, url.Values{"q": {"björ"}})
+	if code != http.StatusOK || body.Total != 1 || body.Assets[0].FileName != "BJÖRN.mp4" {
+		t.Fatalf("Unicode prefix: status=%d body=%+v", code, body)
+	}
+	for _, q := range []string{`"`, `*`, `-`, `NEAR`, `NEAR(sony, 2)`, `sony OR missing`, `meta:sony`, `{`, `"* - NEAR`} {
+		code, _ := getAssets(t, srv, url.Values{"q": {q}})
+		if code != http.StatusOK {
+			t.Errorf("syntax input %q: status %d", q, code)
+		}
+	}
+	code, body = getAssets(t, srv, url.Values{"q": {"NEAR"}})
+	if code != http.StatusOK || body.Total != 1 || body.Assets[0].FileName != "NEAR.mov" {
+		t.Fatalf("NEAR must be literal: status=%d body=%+v", code, body)
+	}
+	code, body = getAssets(t, srv, url.Values{"q": {"sony OR missing"}})
+	if code != http.StatusOK || body.Total != 0 {
+		t.Fatalf("OR must be literal: status=%d body=%+v", code, body)
+	}
+	code, body = getAssets(t, srv, url.Values{"q": {"sony"}, "cameraModel": {"Canon"}})
+	if code != http.StatusOK || body.Total != 0 {
+		t.Fatalf("filter must combine: status=%d body=%+v", code, body)
 	}
 }

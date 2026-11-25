@@ -10,7 +10,7 @@ services:
     # and web/embed.go's //go:embed fails to compile without at least the
     # stub. The frontend service below serves the real app via Vite's dev
     # server instead; this container's embedded copy is never used in dev.
-    command: sh -c "bash .github/ci-prebuild.sh && go run ./cmd/branchdam -config /config/config.yaml -debug"
+    command: sh -c "bash .github/ci-prebuild.sh && go run -tags sqlite_fts5 ./cmd/branchdam -config /config/config.yaml -debug"
     env_file: .env
     environment:
       - BRANCHDAM_CONFIG=/config/config.yaml

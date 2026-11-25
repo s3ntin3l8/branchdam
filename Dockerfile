@@ -55,7 +55,7 @@ COPY . .
 # freshly built SPA
 COPY --from=web /web/dist ./web/dist
 RUN VERSION="$(sed -n 's/.*: *"\([0-9][^"]*\)".*/\1/p' .release-please-manifest.json)"; \
-    CGO_ENABLED=1 GOOS=linux go build -trimpath \
+    CGO_ENABLED=1 GOOS=linux go build -tags sqlite_fts5 -trimpath \
       -ldflags="-s -w -X main.version=${VERSION:-dev}" \
       -o /out/branchdam ./cmd/branchdam
 

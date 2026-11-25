@@ -59,10 +59,10 @@ dev-config: ## Render config.dev.yaml -> $(CONFIG) if missing, and create data/s
 	@mkdir -p data/storage/archive data/storage/staging data/storage/exports data/storage/projects data/storage/scratch
 
 dev: web-ensure ## Run the server with live config, building web/dist first if missing
-	go run ./cmd/branchdam -config config.yaml
+	go run -tags sqlite_fts5 ./cmd/branchdam -config config.yaml
 
 dev-api: web-ensure dev-config ## Run the Go API only (:8080), bootstrapping config.yaml if missing
-	go run ./cmd/branchdam -config $(CONFIG) -debug
+	go run -tags sqlite_fts5 ./cmd/branchdam -config $(CONFIG) -debug
 
 web/node_modules: web/package.json web/package-lock.json ## (file target) install frontend deps
 	cd web && npm ci
@@ -72,7 +72,7 @@ dev-web: web/node_modules ## Run the Vite dev server only (:5173, proxies /api -
 
 dev-all: web-ensure dev-config web/node_modules ## Run API + Vite together in one terminal (Ctrl-C stops both)
 	@trap 'kill 0' EXIT INT TERM; \
-	go run ./cmd/branchdam -config $(CONFIG) -debug & \
+	go run -tags sqlite_fts5 ./cmd/branchdam -config $(CONFIG) -debug & \
 	(cd web && npm run dev) & \
 	wait
 
@@ -130,7 +130,7 @@ test-demo: ## Tests for the demo's isolation guard
 	node --test scripts/demo/*.test.mjs
 
 test: web-stub ## Run tests with race detector
-	go test -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
+	go test -tags sqlite_fts5 -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
 
 test-coverage: test ## Alias for test (coverage.txt is always produced)
 
@@ -142,7 +142,7 @@ fmt: ## Format Go code
 	goimports -w . 2>/dev/null || true
 
 vet: web-stub ## Run go vet
-	go vet ./...
+	go vet -tags sqlite_fts5 ./...
 
 tidy: ## Tidy Go modules
 	go mod tidy
@@ -152,13 +152,13 @@ tidy: ## Tidy Go modules
 # cannot type-check a newer module.
 vulncheck: ## Check for known vulnerabilities
 	GOTOOLCHAIN=$$(go env GOVERSION)+auto go install golang.org/x/vuln/cmd/govulncheck@latest
-	$$(go env GOPATH)/bin/govulncheck ./...
+	$$(go env GOPATH)/bin/govulncheck -tags sqlite_fts5 ./...
 
 build: web-stub ## Build all packages (embeds whatever web/dist contains -- see `build-embed`)
-	go build ./...
+	go build -tags sqlite_fts5 ./...
 
 build-embed: web-ensure ## Build all packages with a fresh web/dist embedded (local full-build convenience)
-	go build ./...
+	go build -tags sqlite_fts5 ./...
 
 golangci-lint: web-stub ## Run the pinned golangci-lint (required CI check; make lint does NOT cover this)
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
@@ -179,7 +179,7 @@ check: lint test test-demo build golangci-lint ## Backend pre-PR gate (NOTE: lin
 check-web: web-lint web-typecheck web-test web-build ## Frontend pre-PR gate
 
 contract-fixtures: web-stub ## Regenerate docs/contract/fixtures (agent API wire shapes) from the server DTOs
-	go test ./internal/httpapi/ -run 'TestContractFixtures$$' -count=1 -update-contract
+	go test -tags sqlite_fts5 ./internal/httpapi/ -run 'TestContractFixtures$$' -count=1 -update-contract
 
 sqlc-generate: ## Regenerate internal/db/sqlcgen from internal/db/queries
 	sqlc generate

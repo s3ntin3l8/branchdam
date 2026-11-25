@@ -15,7 +15,7 @@
 ## Test plan / Verification
 
 - [ ] `make lint` (pre-commit: gofmt, go vet, go mod tidy, sqlc-diff)
-- [ ] `make test` — `go test -race ./...`
+- [ ] `make test` — `go test -tags sqlite_fts5 -race ./...`
 - [ ] `make build`
 - [ ] golangci-lint (v2.x — `.golangci.yml` is `version: "2"`; CI pins v2.14.0 — see CONTRIBUTING.md)
 - [ ] Frontend changes: `cd web && npm run lint && npm run typecheck && npm run test && npm run build`

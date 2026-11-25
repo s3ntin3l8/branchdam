@@ -171,6 +171,12 @@ type MediaNode struct {
 	UploadedByUserID   sql.NullInt64
 }
 
+type MediaNodesFt struct {
+	FileName     string
+	RelativePath string
+	Meta         string
+}
+
 type MfaCredential struct {
 	UserID           int64
 	SecretEncrypted  string
@@ -340,4 +346,11 @@ type VMediaEdgesResolved struct {
 	ChildLifecycleState  string
 	ParentAlive          bool
 	ParentMissing        bool
+}
+
+type VMediaNodesSearch struct {
+	Rowid        int64
+	FileName     string
+	RelativePath interface{}
+	Meta         interface{}
 }

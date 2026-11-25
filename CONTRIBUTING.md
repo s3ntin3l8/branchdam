@@ -24,7 +24,7 @@ See [`AGENTS.md`](AGENTS.md) for the full architecture and package tour.
 
 `make install-hooks` wires up local git hooks: the `pre-commit` stage runs gofmt, `go vet`,
 `go mod tidy`, and `sqlc-diff` on every commit; the `pre-push` stage additionally runs
-`go test -race` and `govulncheck`. Run the same checks manually before opening a PR:
+`go test -tags sqlite_fts5 -race` and `govulncheck`. Run the same checks manually before opening a PR:
 
 ```bash
 make check
@@ -50,7 +50,7 @@ Be precise about what each of these does and doesn't cover:
 - `sqlc-diff` is a no-op if the `sqlc` binary isn't installed on your machine. If you changed
   `internal/db/migrations/*.sql` or `internal/db/queries/*.sql`, run `sqlc generate` yourself
   and commit `internal/db/sqlcgen/` in the same PR -- CI has no codegen step, so a stale
-  `sqlcgen/` breaks `go build ./...` on `main`, not just your branch.
+  `sqlcgen/` breaks `go build -tags sqlite_fts5 ./...` on `main`, not just your branch.
 
 If you changed a route DTO in `internal/httpapi/routes.go`, hand-update
 `web/src/api/types.ts` and `web/src/api/client.ts` to match -- there's no generated client yet.

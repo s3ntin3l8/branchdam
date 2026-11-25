@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/s3ntin3l8/branchdam/internal/clock"
 
@@ -415,18 +416,18 @@ type ListAssetsInput struct {
 	// "My uploads" filter pins it to the request's own id via the
 	// /api/v1/me + /api/v1/users round-trip. 0 disables the filter.
 	UploadedByUserID int64 `query:"uploadedByUserId" default:"0"`
-	// Q is a case-insensitive substring match on file_name (ASCII case
-	// folding only -- SQLite's lower()). Leading/trailing whitespace is
-	// trimmed; an empty q disables the filter. % and _ are literal.
+	// Q searches filename, relative path and selected camera/project metadata.
+	// Tokens are quoted FTS5 prefixes combined with AND.
+	// Exact UUIDs also match; blank disables q.
 	Q string `query:"q" maxLength:"256"`
 	// Sort picks the list order from a fixed whitelist; anything else is
 	// a 422 from Huma's enum validation before the handler runs. The
-	// default ("" / newest) keeps the historical id DESC order. Every
-	// sort tiebreaks on id so paging stays stable.
-	Sort string `query:"sort" enum:"newest,name_asc,name_desc,created_asc,created_desc,captured_asc,captured_desc" default:"newest"`
+	// default uses bm25 for q, otherwise id DESC; explicit newest uses id DESC.
+	// Every sort tiebreaks on id so paging stays stable.
+	Sort string `query:"sort" enum:"newest,name_asc,name_desc,created_asc,created_desc,captured_asc,captured_desc"`
 }
 
-// nameQueryParam normalises ListAssetsInput.Q / ListUsersInput.Q into
+// nameQueryParam normalises literal asset/user search input into
 // the nullable name_query the sqlc queries take: NULL when blank.
 func nameQueryParam(q string) sql.NullString {
 	q = strings.TrimSpace(q)
@@ -434,6 +435,26 @@ func nameQueryParam(q string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: q, Valid: true}
+}
+
+// assetFTSQuery quotes each user term so operators, quotes and punctuation
+// cannot become FTS query syntax. The only syntax we add is AND and prefix *.
+func assetFTSQuery(q string) sql.NullString {
+	// Mirror unicode61 word categories, plus our explicit %/_ token characters.
+	// Splitting punctuation here ensures EVERY token receives a prefix marker,
+	// rather than only the final token in a quoted multi-token phrase.
+	terms := strings.FieldsFunc(q, func(r rune) bool {
+		return r != '%' && r != '_' && !unicode.IsLetter(r) && !unicode.IsNumber(r) &&
+			!unicode.IsMark(r) && !unicode.Is(unicode.Co, r)
+	})
+	if len(terms) == 0 {
+		// An empty quoted phrase matches nothing; NULL/empty MATCH is invalid.
+		return sql.NullString{String: `""`, Valid: true}
+	}
+	for i, term := range terms {
+		terms[i] = `"` + strings.ReplaceAll(term, `"`, `""`) + `"*`
+	}
+	return sql.NullString{String: strings.Join(terms, " AND "), Valid: true}
 }
 
 type ListAssetsOutput struct {
@@ -477,8 +498,9 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 	// unfiltered path's ARCHIVED/TRASHED exclusion rather than switching
 	// to the filtered path's "every lifecycle state" semantics.
 	nameQuery := nameQueryParam(in.Q)
+	ftsQuery := assetFTSQuery(in.Q)
 	sortKey := in.Sort
-	if sortKey == "" {
+	if sortKey == "" && !nameQuery.Valid {
 		sortKey = "newest"
 	}
 
@@ -488,12 +510,14 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 
 	if !hasFilters {
 		rows, err = s.db.Reader.ListMediaNodes(ctx, sqlcgen.ListMediaNodesParams{
-			Limit: in.Limit, Offset: in.Offset, NameQuery: nameQuery, Sort: sortKey,
+			Limit: in.Limit, Offset: in.Offset, NameQuery: nameQuery, FtsQuery: ftsQuery, Sort: sortKey,
 		})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("list assets", err)
 		}
-		total, err = s.db.Reader.CountMediaNodesSearch(ctx, nameQuery)
+		total, err = s.db.Reader.CountMediaNodesSearch(ctx, sqlcgen.CountMediaNodesSearchParams{
+			NameQuery: nameQuery, FtsQuery: ftsQuery,
+		})
 		if err != nil {
 			total = int64(len(rows))
 		}
@@ -502,6 +526,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			Limit:             in.Limit,
 			Offset:            in.Offset,
 			NameQuery:         nameQuery,
+			FtsQuery:          ftsQuery,
 			Sort:              sortKey,
 			LifecycleState:    lifecycleState,
 			CameraModel:       cameraModel,
@@ -515,6 +540,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		}
 		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{
 			NameQuery:         nameQuery,
+			FtsQuery:          ftsQuery,
 			LifecycleState:    lifecycleState,
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,
