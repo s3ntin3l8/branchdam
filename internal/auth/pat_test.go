@@ -525,7 +525,7 @@ func TestRequirePAT_PrincipalIsTokenOwner(t *testing.T) {
 	} {
 		mw := &PATMiddleware{
 			Lookup: func(context.Context, string) (PATLookupResult, error) {
-				return PATLookupResult{UserID: 42, Scopes: []string{"*"}, Username: tc.username, Email: "a@example.com"}, nil
+				return PATLookupResult{UserID: 42, PATID: 7, Scopes: []string{"*"}, Username: tc.username, Email: "a@example.com"}, nil
 			},
 			Pepper: patTestPepper,
 		}
@@ -540,8 +540,8 @@ func TestRequirePAT_PrincipalIsTokenOwner(t *testing.T) {
 			return req
 		}())
 
-		if got.UserID != 42 || got.AuthProvider != AuthProviderPAT {
-			t.Errorf("principal (UserID, AuthProvider) = (%d, %q), want (42, %q)", got.UserID, got.AuthProvider, AuthProviderPAT)
+		if got.UserID != 42 || got.AuthProvider != AuthProviderPAT || got.PATID != 7 {
+			t.Errorf("principal (UserID, AuthProvider, PATID) = (%d, %q, %d), want (42, %q, 7)", got.UserID, got.AuthProvider, got.PATID, AuthProviderPAT)
 		}
 		if got.Name != tc.wantName || got.Email != "a@example.com" {
 			t.Errorf("principal (Name, Email) = (%q, %q), want (%q, a@example.com)", got.Name, got.Email, tc.wantName)

@@ -69,6 +69,9 @@ type PATLookupResult struct {
 	// other token keeps IsAdmin=true because the lookup predicate
 	// already proved the owner is a live admin.
 	IsAdmin bool
+	// PATID is user_pats.id of the row Lookup just read. RequirePAT
+	// copies it onto Principal so actor_audit can name the token.
+	PATID int64
 }
 
 // PATMiddleware validates an `Authorization: Bearer bdam_pat_...`
@@ -221,6 +224,7 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 			ExternalUID:   fmt.Sprintf("pat:%s", HashPrefix(hash)),
 			AuthProvider:  AuthProviderPAT,
 			UserID:        result.UserID,
+			PATID:         result.PATID,
 			Authenticated: true,
 		}
 		if !scopeAdmitted(result.Scopes, m.Scope, m.AnyOf) {
@@ -661,6 +665,7 @@ func (s *PATService) Lookup(ctx context.Context, presented string) (PATLookupRes
 	}
 	return PATLookupResult{
 		UserID:   row.UserID,
+		PATID:    row.ID,
 		Scopes:   scopes,
 		Username: row.OwnerUsername,
 		Email:    row.OwnerEmail.String,

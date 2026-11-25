@@ -3820,6 +3820,12 @@ type auditEntryOut struct {
 	ResourceID   string `json:"resourceId,omitempty"`
 	DetailsJSON  string `json:"detailsJson,omitempty"`
 	CreatedAt    int64  `json:"createdAt"`
+	// AuthProvider, PatID and PatName are set on activity rows.
+	// Login rows leave them empty. PatID is null when no token acted
+	// (omitempty would drop the key; the activity contract is null).
+	AuthProvider string `json:"authProvider,omitempty"`
+	PatID        *int64 `json:"patId"`
+	PatName      string `json:"patName,omitempty"`
 }
 
 type AuditOutput struct {
@@ -3892,6 +3898,16 @@ func (s *Server) handleAudit(ctx context.Context, in *AuditInput) (*AuditOutput,
 				out.ResourceType = r.ResourceType
 			}
 			out.DetailsJSON = r.DetailsJSON
+			if r.AuthProvider.Valid {
+				out.AuthProvider = r.AuthProvider.String
+			}
+			if r.PatID.Valid {
+				v := r.PatID.Int64
+				out.PatID = &v
+			}
+			if r.PatName.Valid {
+				out.PatName = r.PatName.String
+			}
 			entries[i] = out
 		}
 		total = n

@@ -69,7 +69,14 @@ Two parallel logs:
 - `actor_audit`: cross-cutting admin event log. Written by every
   write route (settings, restart, storage-location, prune, scan).
   Resolves `Principal` → `(actor_user_id, actor_kind, actor_name)`:
-  user / machine / system / anonymous.
+  user / machine / system / anonymous. Each row also records the
+  credential: `auth_provider` (`authentik`, `local`, `pat`, or
+  `oauth`; NULL for machine, system and anonymous actors, and for
+  rows written before the column existed) and `pat_id` (the
+  `user_pats` row, NULL when the actor was not a personal access
+  token). A forward-auth principal has an empty
+  `Principal.AuthProvider`; that is stored as `authentik`, never as
+  an empty string. `oauth` is reserved for a later connector.
 - `login_audit`: PR #407's local-auth login/reset log. Owned by
   `internal/auth/users`.
 
@@ -99,7 +106,7 @@ is preferred over a failed response with no audit trail.
 | `POST /api/v1/edges` (manual link) | A manual edge is created `CONFIRMED`, so it writes `actor_audit('edge.review_confirmed')` with the same details plus `source: "manual"`. `previousState` is the state the upsert replaced when the (source, target, relationship) edge already existed, and is omitted for a fresh insert. Not written for a refused (404/409/422) create. |
 | `POST /api/v1/edges/{id}/reset-review` | Writes `actor_audit('edge.review_reset')` with the decision it undid (`previousState`, `previousReviewedBy`, `previousReviewedAt`). |
 | `POST /api/v1/companion/pairings` | Sets `device_pairings.user_id` from the creating request's resolved user id. |
-| `GET /api/v1/audit?type=activity\|login` | Merged actor_audit + login_audit read. |
+| `GET /api/v1/audit?type=activity\|login` | Merged actor_audit + login_audit read. Activity entries include `authProvider`, `patId` (null when no token acted) and `patName` (the token name, from a join on `user_pats`). |
 | `GET /api/v1/users` | Admin-only read of the users table. `?q=` is a case-insensitive username/email substring and `?ids=1,2,3` restricts it to specific users; `total` honours both. |
 | `GET /api/v1/assets?uploadedByUserId=N` | "My uploads" filter. |
 
@@ -112,6 +119,9 @@ is preferred over a failed response with no audit trail.
   page of users).
 - `Me.attributionUserId` plumbed through `useMe()`; the SPA pins it
   on the assets query for the filter.
+- `AuditLogPage`: activity rows with `patName` set show a
+  "via token <name>" chip next to the actor, so a token's action is
+  visible without opening the details JSON.
 
 ## Cross-references
 

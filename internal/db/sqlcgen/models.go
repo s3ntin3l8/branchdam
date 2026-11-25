@@ -18,6 +18,8 @@ type ActorAudit struct {
 	ResourceID   sql.NullString
 	DetailsJson  string
 	CreatedAt    int64
+	AuthProvider sql.NullString
+	PatID        sql.NullInt64
 }
 
 type AgentScratchTelemetry struct {

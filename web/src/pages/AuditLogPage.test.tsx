@@ -64,6 +64,30 @@ describe("AuditLogPage", () => {
     expect(screen.getByText(/Hide Details/i)).toBeInTheDocument();
   });
 
+  it("shows a via-token chip when patName is set", async () => {
+    vi.mocked(api.listAudit).mockResolvedValueOnce({
+      entries: [
+        {
+          id: 2,
+          source: "actor_audit",
+          actorKind: "user",
+          actorName: "alice",
+          event: "edge.review_confirmed",
+          authProvider: "pat",
+          patId: 9,
+          patName: "claude-desktop",
+          createdAt: 1700000000,
+        },
+      ],
+      total: 1,
+    });
+
+    renderWithClient(<AuditLogPage />);
+
+    expect(await screen.findByText("via token claude-desktop")).toBeInTheDocument();
+    expect(screen.getByText("alice")).toBeInTheDocument();
+  });
+
   it("shows empty state when no entries returned", async () => {
     vi.mocked(api.listAudit).mockResolvedValueOnce({
       entries: [],

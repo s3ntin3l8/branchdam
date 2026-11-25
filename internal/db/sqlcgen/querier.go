@@ -90,7 +90,8 @@ type Querier interface {
 	// it was once valid.
 	ConsumePasswordResetToken(ctx context.Context, arg ConsumePasswordResetTokenParams) (PasswordResetToken, error)
 	// Counterpart to ListActorAudit -- must apply identical WHERE so
-	// pagination totals match the visible rows.
+	// pagination totals match the visible rows. No join: the filters only
+	// touch actor_audit columns, and the LEFT JOIN does not drop rows.
 	CountActorAudit(ctx context.Context, arg CountActorAuditParams) (int64, error)
 	CountAttributionUsers(ctx context.Context) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
@@ -520,6 +521,11 @@ type Querier interface {
 	// views can filter "everything by user X" or "everything the system did"
 	// without parsing the name string.
 	//
+	// auth_provider + pat_id record the credential. auth_provider is NULL
+	// for machine/system/anonymous actors and for rows written before the
+	// columns existed. pat_id is the user_pats row when a token acted.
+	// pat_name is that token's display name (LEFT JOIN; NULL when pat_id is).
+	//
 	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 	// "SQL Syntax Traps" note.
 	InsertActorAudit(ctx context.Context, arg InsertActorAuditParams) error
@@ -557,7 +563,8 @@ type Querier interface {
 	// table hazard it would be for a per-row event stream like audit_queue.
 	// Filters are all sqlc.narg so a caller can filter on any subset
 	// (a user-scoped "what did I do" view is actor_user_id + maybe event).
-	ListActorAudit(ctx context.Context, arg ListActorAuditParams) ([]ActorAudit, error)
+	// Columns are qualified: user_pats also has id and created_at.
+	ListActorAudit(ctx context.Context, arg ListActorAuditParams) ([]ListActorAuditRow, error)
 	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
 	// Global pending list -- used by the admin-UI pending-resets panel
 	// (PR #408). The query is intentionally cheap: the
