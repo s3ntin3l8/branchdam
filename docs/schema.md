@@ -276,8 +276,9 @@ affected nodes. Storage-root changes also refresh relative paths. All updates
 share the writer's transaction, so a rollback also rolls back the search index.
 The migration backfills existing nodes and its Down removes all search objects.
 
-The `unicode61` tokenizer folds case and diacritics, with `%` and `_` retained as
-token characters to preserve literal filename searches. Prefix indexes cover
+The `unicode61` tokenizer folds case and diacritics, with `%` retained as a
+token character to preserve literal filename searches. Underscores separate tokens,
+so `q=0001` matches `DSC_0001.ARW`. Prefix indexes cover
 lengths 2, 3 and 4 (other prefix lengths still work). FTS5 is required:
 all Go build/test/vet entry points use `-tags sqlite_fts5`, golangci-lint sets
 `build-tags`, and the shared Go CI workflow receives the tag through
@@ -290,8 +291,8 @@ when tests are built without the tag.
 metadata. Each token is quoted (embedded quotes doubled)
 and suffixed with `*`; terms combine with `AND`. User input never becomes FTS5
 operators: `NEAR`, `-`, quotes and `*` are literal input to the tokenizer.
-Punctuation separates tokens except for the literal `%` and `_` token characters. Empty/whitespace
-`q` disables search. The maximum is 256 characters.
+Punctuation, including underscores, separates tokens except for the literal `%`
+token character. Empty/whitespace `q` disables search. The maximum is 256 characters.
 
 An exact `node_uuid` (case-insensitive for ASCII UUIDs) also matches. `%` and `_` are not
 wildcards. Existing structural filters combine with search and the total uses
