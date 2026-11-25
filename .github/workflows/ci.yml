@@ -43,6 +43,8 @@ jobs:
               - 'web/package-lock.json'
 
   backend:
+    # .github/ci-prebuild.sh exports GOFLAGS=-tags=sqlite_fts5 via GITHUB_ENV
+    # for every vet/build/test invocation inside the shared workflow.
     name: Go (build · vet · test)
     uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
     with:

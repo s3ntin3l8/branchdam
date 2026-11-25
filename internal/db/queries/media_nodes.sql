@@ -2,6 +2,14 @@
 -- Backs GET /api/v1/assets. Excludes archived rows by default -- an
 -- archived node is reachable via its successor's superseded history, not
 -- the main asset list.
+-- Materialize once: flattening this join makes MATCH/rank quadratic.
+-- Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(sqlc.narg('fts_query'), '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -14,17 +22,20 @@ FROM media_nodes
 -- p carries the search/sort params as a one-row derived table: sqlc's
 -- SQLite engine neither rewrites a param inside ORDER BY nor survives a
 -- LIKE ... ESCAPE clause, so both go through p's columns instead.
--- name_query is a plain case-insensitive substring of file_name (instr, so
--- the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
--- only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+-- fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+-- sort is whitelisted by the handler;
 -- an unknown value falls through every CASE to the id DESC tiebreak.
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
+                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query,
                    CAST(sqlc.arg('sort') AS TEXT) AS sort_key) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL)
 ORDER BY
+  CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
+    coalesce(h.score, 0.0) END ASC,
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
   CASE WHEN p.sort_key IN ('captured_asc', 'captured_desc') THEN captured_at_unix IS NULL END ASC,
@@ -51,15 +62,33 @@ WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
 -- the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 -- by excluding ARCHIVED and superseded rows and applying the same optional
 -- name_query (NULL = no search).
+-- Materialize once: flattening this join makes MATCH/rank quadratic.
+-- Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(sqlc.narg('fts_query'), '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT COUNT(*)
 FROM media_nodes
-CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query) AS p
+CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
+                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query));
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL);
 
 -- name: ListMediaNodesFiltered :many
+-- Materialize once: flattening this join makes MATCH/rank quadratic.
+-- Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(sqlc.narg('fts_query'), '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -72,12 +101,13 @@ FROM media_nodes
 -- p carries the search/sort params as a one-row derived table: sqlc's
 -- SQLite engine neither rewrites a param inside ORDER BY nor survives a
 -- LIKE ... ESCAPE clause, so both go through p's columns instead.
--- name_query is a plain case-insensitive substring of file_name (instr, so
--- the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
--- only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+-- fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+-- sort is whitelisted by the handler;
 -- an unknown value falls through every CASE to the id DESC tiebreak.
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
+                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query,
                    CAST(sqlc.arg('sort') AS TEXT) AS sort_key) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
 -- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 -- sqlc's SQLite type inference only picks up the column's own (nullable)
 -- type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -88,9 +118,11 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL)
 ORDER BY
+  CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
+    coalesce(h.score, 0.0) END ASC,
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
   CASE WHEN p.sort_key IN ('captured_asc', 'captured_desc') THEN captured_at_unix IS NULL END ASC,
@@ -105,9 +137,19 @@ ORDER BY
 LIMIT ?1 OFFSET ?2;
 
 -- name: CountMediaNodesFiltered :one
+-- Materialize once: flattening this join makes MATCH/rank quadratic.
+-- Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(sqlc.narg('fts_query'), '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT COUNT(*)
 FROM media_nodes
-CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query) AS p
+CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
+                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
 -- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 -- sqlc's SQLite type inference only picks up the column's own (nullable)
 -- type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -118,8 +160,8 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (storage_location_id = sqlc.narg('storage_location_id') OR sqlc.narg('storage_location_id') IS NULL)
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query));
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL);
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes

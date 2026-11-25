@@ -17,6 +17,13 @@
 # speed; the warning is a hint, not a failure.
 set -euo pipefail
 
+# The shared ci-go workflow has no build-tags input. Its pre-build hook runs
+# before vet/build/test, so GITHUB_ENV supplies the tag to all subsequent Go
+# commands (including gotestsum and govulncheck) without changing shared CI.
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  echo "GOFLAGS=${GOFLAGS:-} -tags=sqlite_fts5" >> "$GITHUB_ENV"
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 INDEX="$REPO_ROOT/web/dist/index.html"
 SRC_DIR="$REPO_ROOT/web/src"

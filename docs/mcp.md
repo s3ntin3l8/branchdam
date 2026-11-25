@@ -52,16 +52,12 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
    PAT (or which PAT) was used. A PAT principal's `ExternalUID` carries
    `pat:<hash prefix>`, but it is not persisted.
 5. **Search.**
-   - `q` is a substring match on `file_name`
-     (`instr(lower(file_name), lower(?))`, not `LIKE`, because sqlc
-     can't handle `LIKE ... ESCAPE`). It is case-insensitive for ASCII
-     only, because SQLite's `lower()` doesn't fold non-ASCII, so `björn`
-     won't match `BJÖRN.jpg`. FTS5's `unicode61` tokenizer in phase 3
-     fixes that too. It **also** matches an exact
-     `node_uuid`, so a pasted UUID finds its node
-     (`internal/db/queries/media_nodes.sql`).
-   - There is no FTS: `mattn/go-sqlite3` is built without the
-     `sqlite_fts5` tag.
+   - `q` uses FTS5 prefix search over filename, relative path and selected
+     camera/project metadata, with bm25 ranking unless `sort` is explicit.
+     Exact `node_uuid` lookup remains supported.
+     Input terms are quoted, never accepted as FTS query syntax. See
+     [asset API search notes](schema.md#asset-api-q-and-sorting) for details.
+   - `mattn/go-sqlite3` is built with the `sqlite_fts5` tag.
    - The perceptual hash is read only by the graph resolver and by
      `GET /api/v1/edges/audit`, which shows `phashDistance` between an
      edge's endpoints. There is no "find similar" query.

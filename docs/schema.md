@@ -243,3 +243,64 @@ Every migration after `00001_init.sql`, in order:
   additionally `os.Lstat`s the candidate file immediately before `guard.Remove`, aborting with
   `ErrFileChangedSincePlan` on an `(mtime, size)` mismatch against what `Plan` recorded. A file
   already gone on its own is treated as success (nothing left to remove; node still lands in `MISSING`).
+
+## Asset full-text search (migration 00045)
+
+`media_nodes_fts` is an FTS5 contentless-delete table keyed by the node's integer
+`id` (`rowid`). It stores tokens for `file_name`, `relative_path` and `meta`,
+without duplicating the original text. `v_media_nodes_search` assembles the text
+for backfill and trigger maintenance. Relative paths omit the storage location's
+root and leading separator; paths outside that root retain their stored value.
+
+`meta` combines the promoted `media_nodes.camera_model` and `lens_model` with
+these selected `node_metadata.key` values (all sources):
+
+| Keys | Contents |
+|---|---|
+| `EXIF:Make`, `EXIF:Model` | Camera make/model |
+| `EXIF:LensModel` | Lens |
+| `EXIF:DateTimeOriginal` | Raw capture date/time |
+| `project_name`, `timeline_name` | Project/timeline names, when present |
+
+`internal/metadata` plans the EXIF inheritance keys; `internal/pipeline` persists
+make, lens and raw capture date as metadata, but camera model normally lives in
+the promoted column. Current project parsers do not persist project/timeline
+names into `node_metadata`; the two name keys are indexed when supplied, without
+adding parser behavior here. Tags, descriptions and annotations are excluded.
+
+Migration 00045 is a narrow exception to the no-triggers rule: triggers maintain
+only this derived search index, never lifecycle, lineage or audit timestamps.
+Node inserts, relevant column updates and deletes update the index; selected
+metadata inserts, updates (including key/node changes) and deletes reindex the
+affected nodes. Storage-root changes also refresh relative paths. All updates
+share the writer's transaction, so a rollback also rolls back the search index.
+The migration backfills existing nodes and its Down removes all search objects.
+
+The `unicode61` tokenizer folds case and diacritics, with `%` retained as a
+token character to preserve literal filename searches. Underscores separate tokens,
+so `q=0001` matches `DSC_0001.ARW`. Prefix indexes cover
+lengths 2, 3 and 4 (other prefix lengths still work). FTS5 is required:
+all Go build/test/vet entry points use `-tags sqlite_fts5`, golangci-lint sets
+`build-tags`, and the shared Go CI workflow receives the tag through
+`.github/ci-prebuild.sh` and `GITHUB_ENV`. `TestFTS5CompiledIn` deliberately fails
+when tests are built without the tag.
+
+### Asset API `q` and sorting
+
+`GET /api/v1/assets?q=sony` searches filenames, relative paths and the selected
+metadata. Each token is quoted (embedded quotes doubled)
+and suffixed with `*`; terms combine with `AND`. User input never becomes FTS5
+operators: `NEAR`, `-`, quotes and `*` are literal input to the tokenizer.
+Punctuation, including underscores, separates tokens except for the literal `%`
+token character. Empty/whitespace `q` disables search. The maximum is 256 characters.
+
+An exact `node_uuid` (case-insensitive for ASCII UUIDs) also matches. `%` and `_` are not
+wildcards. Existing structural filters combine with search and the total uses
+the same predicate as the result list. Default lifecycle/supersession exclusions
+are unchanged.
+
+With `q` and no `sort`, results use ascending FTS5 `rank` (the default bm25 score;
+lower is better), with exact UUID matches
+after FTS hits. Equal scores use `id DESC` for stable pagination. An explicit
+`sort=newest` or any other allowed sort overrides relevance; without `q`, the
+default remains `id DESC`.

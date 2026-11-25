@@ -103,6 +103,8 @@ type Querier interface {
 	// Count of live nodes, matching ListMediaNodes' ARCHIVED/TRASHED and
 	// superseded exclusions with no search applied.
 	CountMediaNodes(ctx context.Context) (int64, error)
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -112,7 +114,9 @@ type Querier interface {
 	// the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 	// by excluding ARCHIVED and superseded rows and applying the same optional
 	// name_query (NULL = no search).
-	CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error)
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+	CountMediaNodesSearch(ctx context.Context, arg CountMediaNodesSearchParams) (int64, error)
 	// Last-admin guard for DisableUser / SetAdmin(false): the number of
 	// enabled source='local' admins other than ?1. Only source='local' rows
 	// count -- they are the accounts that can log in with a password and
@@ -720,20 +724,22 @@ type Querier interface {
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 	// p carries the search/sort params as a one-row derived table: sqlc's
 	// SQLite engine neither rewrites a param inside ORDER BY nor survives a
 	// LIKE ... ESCAPE clause, so both go through p's columns instead.
-	// name_query is a plain case-insensitive substring of file_name (instr, so
-	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-	// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+	// sort is whitelisted by the handler;
 	// an unknown value falls through every CASE to the id DESC tiebreak.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 	// p carries the search/sort params as a one-row derived table: sqlc's
 	// SQLite engine neither rewrites a param inside ORDER BY nor survives a
 	// LIKE ... ESCAPE clause, so both go through p's columns instead.
-	// name_query is a plain case-insensitive substring of file_name (instr, so
-	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-	// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+	// sort is whitelisted by the handler;
 	// an unknown value falls through every CASE to the id DESC tiebreak.
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)

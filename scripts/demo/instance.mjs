@@ -143,7 +143,7 @@ function buildServer(binary) {
     rmSync(path.join(ROOT, "web/dist/.branchdam-stale"), { force: true });
   }
   console.log("[demo] building the server...");
-  execFileSync("go", ["build", "-o", binary, "./cmd/branchdam"], { cwd: ROOT, stdio: "inherit" });
+  execFileSync("go", ["build", "-tags", "sqlite_fts5", "-o", binary, "./cmd/branchdam"], { cwd: ROOT, stdio: "inherit" });
 }
 
 export async function startDemo({ keep = false } = {}) {
