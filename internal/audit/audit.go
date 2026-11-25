@@ -127,6 +127,15 @@ type Entry struct {
 	DetailsJSON  string
 	CreatedAt    int64
 	CreatedAtRFC time.Time
+	// AuthProvider is the credential that acted: authentik, local, pat
+	// or (later) oauth. Invalid for machine, system and anonymous rows,
+	// and for rows written before the column existed.
+	AuthProvider sql.NullString
+	// PatID / PatName identify the personal access token when one was
+	// used. PatName comes from user_pats.name and is empty when the
+	// token row is gone or PatID was never set.
+	PatID   sql.NullInt64
+	PatName sql.NullString
 }
 
 // Filter is the input to ListActivity. Zero values mean "no filter on
@@ -178,6 +187,8 @@ func (s *Service) WriteActorAudit(ctx context.Context, p auth.Principal, event, 
 			ResourceType: resourceType,
 			ResourceID:   ridArg,
 			DetailsJson:  detailsJSON,
+			AuthProvider: auditAuthProvider(p, kind),
+			PatID:        auditPatID(p),
 		})
 	})
 }
@@ -285,6 +296,9 @@ func (s *Service) ListActivity(ctx context.Context, f Filter, limit, offset int6
 				DetailsJSON:  r.DetailsJson,
 				CreatedAt:    r.CreatedAt,
 				CreatedAtRFC: time.Unix(r.CreatedAt, 0).UTC(),
+				AuthProvider: r.AuthProvider,
+				PatID:        r.PatID,
+				PatName:      r.PatName,
 			})
 		}
 		countParams := sqlcgen.CountActorAuditParams{
@@ -307,6 +321,30 @@ func (s *Service) ListActivity(ctx context.Context, f Filter, limit, offset int6
 		return nil, 0, err
 	}
 	return entries, total, nil
+}
+
+// auditAuthProvider is the value stored in actor_audit.auth_provider.
+// A KindUser principal with an empty AuthProvider is forward-auth:
+// principal.go documents that empty means authentik, and the column
+// CHECK rejects ”. Machine, system and anonymous actors get NULL.
+func auditAuthProvider(p auth.Principal, kind string) sql.NullString {
+	if kind != ActorKindUser {
+		return sql.NullString{}
+	}
+	provider := p.AuthProvider
+	if provider == "" {
+		provider = "authentik"
+	}
+	return sql.NullString{String: provider, Valid: true}
+}
+
+// auditPatID persists Principal.PATID when the request authenticated
+// with a personal access token. Zero stays NULL.
+func auditPatID(p auth.Principal) sql.NullInt64 {
+	if p.PATID == 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: p.PATID, Valid: true}
 }
 
 // ErrInvalidPrincipal is returned by WriteActorAudit when the Principal

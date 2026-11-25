@@ -329,6 +329,11 @@ export default function AuditLogPage() {
                     <span className="ml-1.5 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400 font-mono">
                       {e.actorKind}
                     </span>
+                    {e.patName ? (
+                      <span className="ml-1.5 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                        via token {e.patName}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="py-2 pr-4 text-xs font-mono text-indigo-300 font-semibold">
                     {e.event}

@@ -74,6 +74,12 @@ func TestWriteActorAudit_UserPrincipalResolves(t *testing.T) {
 	if details["old"] != "256" || details["new"] != "512" {
 		t.Errorf("details = %v, want old=256 new=512", details)
 	}
+	if !got.AuthProvider.Valid || got.AuthProvider.String != "authentik" {
+		t.Errorf("auth_provider = %+v, want authentik (empty Principal.AuthProvider)", got.AuthProvider)
+	}
+	if got.PatID.Valid || got.PatName.Valid {
+		t.Errorf("pat attribution = (%+v, %+v), want unset", got.PatID, got.PatName)
+	}
 }
 
 func TestWriteActorAudit_SystemActor(t *testing.T) {
@@ -95,6 +101,9 @@ func TestWriteActorAudit_SystemActor(t *testing.T) {
 	if !entries[0].ActorUserID.Valid {
 		t.Errorf("system actor must have actor_user_id set to the system user id")
 	}
+	if entries[0].AuthProvider.Valid || entries[0].PatID.Valid {
+		t.Errorf("system credential = (%+v, %+v), want NULL, NULL", entries[0].AuthProvider, entries[0].PatID)
+	}
 }
 
 func TestWriteActorAudit_MachinePrincipal(t *testing.T) {
@@ -114,6 +123,9 @@ func TestWriteActorAudit_MachinePrincipal(t *testing.T) {
 	if entries[0].ActorName != "agent-1" {
 		t.Errorf("actor_name = %q, want %q", entries[0].ActorName, "agent-1")
 	}
+	if entries[0].AuthProvider.Valid || entries[0].PatID.Valid {
+		t.Errorf("machine credential = (%+v, %+v), want NULL, NULL", entries[0].AuthProvider, entries[0].PatID)
+	}
 }
 
 func TestWriteActorAudit_UnauthenticatedBecomesAnonymous(t *testing.T) {
@@ -129,6 +141,45 @@ func TestWriteActorAudit_UnauthenticatedBecomesAnonymous(t *testing.T) {
 	}
 	if entries[0].ActorKind != ActorKindAnonymous {
 		t.Errorf("actor_kind = %q, want %q", entries[0].ActorKind, ActorKindAnonymous)
+	}
+	if entries[0].AuthProvider.Valid || entries[0].PatID.Valid {
+		t.Errorf("anonymous credential = (%+v, %+v), want NULL, NULL", entries[0].AuthProvider, entries[0].PatID)
+	}
+}
+
+func TestWriteActorAudit_LocalAndPATProviders(t *testing.T) {
+	svc, _ := newAuditService(t)
+	ctx := context.Background()
+	local := auth.Principal{
+		Kind: auth.KindUser, Name: "bob", ExternalUID: "bob",
+		AuthProvider: auth.AuthProviderLocal, Authenticated: true,
+	}
+	if err := svc.WriteActorAudit(ctx, local, EventSettingsUpdated, "app_setting", "k", nil); err != nil {
+		t.Fatalf("local write: %v", err)
+	}
+	// A non-zero PATID without a user_pats row must fail the foreign
+	// key. The HTTP test covers a real token id; here zero stays NULL
+	// while the provider is still recorded.
+	pat := auth.Principal{
+		Kind: auth.KindUser, Name: "bob", ExternalUID: "pat:abcd",
+		AuthProvider: auth.AuthProviderPAT, UserID: 1, Authenticated: true,
+	}
+	if err := svc.WriteActorAudit(ctx, pat, EventRestart, "system", "", nil); err != nil {
+		t.Fatalf("pat write: %v", err)
+	}
+	entries, _, err := svc.ListActivity(ctx, Filter{}, 10, 0)
+	if err != nil {
+		t.Fatalf("ListActivity: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	// Newest first: the PAT write, then the local write.
+	if !entries[0].AuthProvider.Valid || entries[0].AuthProvider.String != auth.AuthProviderPAT || entries[0].PatID.Valid {
+		t.Errorf("pat row credential = (%+v, %+v), want pat, NULL", entries[0].AuthProvider, entries[0].PatID)
+	}
+	if !entries[1].AuthProvider.Valid || entries[1].AuthProvider.String != auth.AuthProviderLocal || entries[1].PatID.Valid {
+		t.Errorf("local row credential = (%+v, %+v), want local, NULL", entries[1].AuthProvider, entries[1].PatID)
 	}
 }
 

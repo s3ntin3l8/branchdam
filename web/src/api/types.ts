@@ -764,6 +764,12 @@ export interface AuditEntry {
   resourceId?: string;
   detailsJson?: string;
   createdAt: number;
+  // Activity rows only. authProvider is authentik, local, pat or oauth.
+  // patId is null when no personal access token acted. patName is the
+  // token's name when patId is set.
+  authProvider?: string;
+  patId?: number | null;
+  patName?: string;
 }
 
 export interface AuditQueryParams {

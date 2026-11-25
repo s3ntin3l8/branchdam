@@ -86,6 +86,11 @@ const AuthProviderPAT = "pat"
 // PAT chain sets it (AuthProvider == AuthProviderPAT); zero everywhere
 // else, where internal/users.ResolveOrCreate derives the id from
 // (AuthProvider, ExternalUID) instead.
+//
+// PATID is the user_pats.id of the token that authenticated this
+// request. Set only by RequirePAT; zero for sessions, forward-auth,
+// machines and system actors. WriteActorAudit persists a non-zero
+// value so a token's actions can be told apart from the owner's.
 type Principal struct {
 	Kind          Kind
 	Name          string
@@ -94,6 +99,7 @@ type Principal struct {
 	ExternalUID   string
 	AuthProvider  string
 	UserID        int64
+	PATID         int64
 	Authenticated bool
 }
 

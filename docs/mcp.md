@@ -126,7 +126,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
   `'authentik'` for a `KindUser` principal with an empty provider, never
   `''`, and NULL for machine and system actors.
 - **Audit view:** `GET /api/v1/audit` returns them. The web activity
-  log shows a token-name chip ("via PAT 'claude-desktop'").
+  log shows a token-name chip ("via token <name>").
 
 ### 0c. Ingress
 
