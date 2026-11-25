@@ -131,7 +131,9 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 ### 0c. Ingress
 
 - **Router:** add a Traefik router to `compose.yaml` at priority 150:
-  - rule ``PathPrefix(`/mcp`)``
+  - rule ``Path(`/mcp`) || PathPrefix(`/mcp/`)`` (not a bare
+    ``PathPrefix(`/mcp`)``, which would also skip Authentik for any
+    other path that only starts with those letters)
   - middlewares: `strip-identity` only (no Authentik)
 
   This mirrors the agent router. The PAT (and in phase 2 the OAuth

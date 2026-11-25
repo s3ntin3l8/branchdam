@@ -81,6 +81,13 @@ agent:
   skipSignaturePaths:
     - /api/v1/agent/upload
 
+mcp:
+  # In-process MCP server at /mcp (Streamable HTTP). Off by default:
+  # the path 404s until this is true, and changing it needs a restart.
+  # Clients must present a personal access token; see docs/deploy.md
+  # for the Traefik router and the claude mcp add example.
+  enabled: false
+
 authz:
   # Groups permitted admin (write) access on browser-routed endpoints.
   # Empty list (default) permits all authenticated users and logs a WARN at startup.

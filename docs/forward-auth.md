@@ -25,9 +25,9 @@ The outpost asserts identity via headers on the request it forwards through:
 `X-Authentik-Username`, `X-Authentik-Email`, `X-Authentik-Groups` (pipe-`|`-delimited --
 branchDAM's `internal/auth.BrowserChain` splits on `|`, not `,`).
 
-## 2. Traefik: the three-router split
+## 2. Traefik: the four-router split
 
-branchDAM's `compose.yaml` ships three routers on one service, which is the fix for a real
+branchDAM's `compose.yaml` ships four routers on one service, which is the fix for a real
 defect in the original spec's compose file (two `traefik.http.services.*` blocks, neither
 router setting `.service=`, which Traefik can't resolve). Each has an explicit `.service=` and
 `priority` -- never rely on rule-length ordering to decide which router wins.
@@ -42,6 +42,13 @@ labels:
   traefik.http.routers.branchdam-agent.priority: "100"
   traefik.http.routers.branchdam-agent.service: "branchdam"
   traefik.http.routers.branchdam-agent.middlewares: "strip-identity@file"
+
+  # MCP -- bypasses ForwardAuth. Bearer personal access token, not SSO.
+  # strip-identity only; the rule is /mcp and nothing else.
+  traefik.http.routers.branchdam-mcp.rule: "Host(`dam.example.com`) && (Path(`/mcp`) || PathPrefix(`/mcp/`))"
+  traefik.http.routers.branchdam-mcp.priority: "150"
+  traefik.http.routers.branchdam-mcp.service: "branchdam"
+  traefik.http.routers.branchdam-mcp.middlewares: "strip-identity@file"
 
   # Browser UI -- behind ForwardAuth
   traefik.http.routers.branchdam.rule: "Host(`dam.example.com`)"
@@ -88,8 +95,10 @@ This is the load-bearing detail, and it's easy to get backwards. The agent route
 (`branchdam-agent`) **bypasses** `authentik@file` entirely -- that's the whole point, since a
 workstation agent authenticates with a shared key, not an interactive SSO session. But bypassing
 the outpost means nothing upstream of branchDAM ever strips a client-supplied
-`X-Authentik-Username` header on that path. Without `strip-identity@file` on *both* routers, a
-request straight to `/api/v1/agent/*` could set `X-Authentik-Username: admin` itself and have it
+`X-Authentik-Username` header on that path. Without `strip-identity@file` on every
+router that reaches branchDAM (the browser router, the agent router and the MCP
+router), a request straight to `/api/v1/agent/*` or `/mcp` could set
+`X-Authentik-Username: admin` itself and have it
 survive all the way to the application.
 
 `internal/auth.AgentChain` also strips these headers in Go, unconditionally, before checking the

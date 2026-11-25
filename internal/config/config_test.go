@@ -45,6 +45,20 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.Metadata.AutoInherit {
 		t.Error("Metadata.AutoInherit default = false, want true")
 	}
+	if cfg.MCP.Enabled {
+		t.Error("MCP.Enabled default = true, want false")
+	}
+}
+
+func TestLoadMCPEnabled(t *testing.T) {
+	path := writeConfig(t, "mcp:\n  enabled: true\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.MCP.Enabled {
+		t.Error("MCP.Enabled = false, want true")
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
