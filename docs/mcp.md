@@ -52,9 +52,12 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
    PAT (or which PAT) was used. A PAT principal's `ExternalUID` carries
    `pat:<hash prefix>`, but it is not persisted.
 5. **Search.**
-   - `q` is a case-insensitive substring match on `file_name`
+   - `q` is a substring match on `file_name`
      (`instr(lower(file_name), lower(?))`, not `LIKE`, because sqlc
-     can't handle `LIKE ... ESCAPE`). It **also** matches an exact
+     can't handle `LIKE ... ESCAPE`). It is case-insensitive for ASCII
+     only, because SQLite's `lower()` doesn't fold non-ASCII, so `björn`
+     won't match `BJÖRN.jpg`. FTS5's `unicode61` tokenizer in phase 3
+     fixes that too. It **also** matches an exact
      `node_uuid`, so a pasted UUID finds its node
      (`internal/db/queries/media_nodes.sql`).
    - There is no FTS: `mattn/go-sqlite3` is built without the
@@ -90,10 +93,18 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 - **`patScopeFor`** routes `/mcp` to a middleware entry that admits
   any token holding **at least one** `mcp:*` scope (or `*`). The
   route gate does not demand `mcp:read`, because that would turn away
-  an `mcp:review`-only token before its tools run. The per-tool check
-  decides what each call may do. An MCP-only token presented on **any
-  other path** gets a 403, because its scopes never satisfy `admin`,
-  `pats:write` or `pairings:write`.
+  an `mcp:review`-only token before its tools run.
+  - **Mechanism:** `scopeSatisfied` matches only an exact scope or `*`,
+    and stays unchanged. A `patHandlers` entry keyed `mcp:*` would
+    admit only a token literally holding `mcp:*`.
+  - **Instead:** `PATMiddleware` gains an any-of form
+    (`PATService.MiddlewareAnyOf("mcp:read", "mcp:review", "mcp:enrich")`).
+    It passes when `scopeSatisfied` holds for at least one listed
+    scope, and the `/mcp` entry in `patHandlers` uses it.
+
+  The per-tool check decides what each call may do. An MCP-only token
+  presented on **any other path** gets a 403, because its scopes never
+  satisfy `admin`, `pats:write` or `pairings:write`.
 - **Scope check helper:** `auth.PATScopesFrom(ctx)` already exposes
   the token's scopes to handlers. The MCP layer uses it (via
   `scopeSatisfied`, exported as `auth.HasScope`) for per-tool checks.
