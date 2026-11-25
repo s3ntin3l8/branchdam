@@ -626,10 +626,14 @@ type Querier interface {
 	// in the outer WHERE, correctly collapses to a single BeforeID field.)
 	//
 	// Optional server-side filters (tier, resolver, relationship_type,
-	// min_confidence) are resolved once in the f CTE -- each CAST so sqlc types
-	// the param -- and applied identically to total_rows and the page, so
-	// total is the size of the FILTERED queue and keyset paging walks only
-	// the filtered rows. NULL means "no filter".
+	// min_confidence, review_source) are resolved once in the f CTE -- each
+	// CAST so sqlc types the param -- and applied identically to total_rows
+	// and the page, so total is the size of the FILTERED queue and keyset
+	// paging walks only the filtered rows. NULL means "no filter".
+	// review_source is the exception: when it is set, the page is edges with
+	// that source (an assistant confirm is CONFIRMED, so it has left
+	// NEEDS_REVIEW) instead of the NEEDS_REVIEW queue. When it is NULL the
+	// queue predicate is unchanged.
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
 	// Distinct resolvers across the whole NEEDS_REVIEW queue, for the audit
 	// page's resolver filter -- the options must come from the server now that
@@ -1181,9 +1185,10 @@ type Querier interface {
 	// review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
 	// is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
 	// states, and only a human decision is a human's to undo. reviewed_at /
-	// reviewed_by are cleared: the schema only requires them for
-	// CONFIRMED/REJECTED, and keeping them would claim a review that no longer
-	// stands (the actor_audit row written by the handler keeps the history).
+	// reviewed_by / review_source are cleared: the schema only requires
+	// reviewed_at for CONFIRMED/REJECTED, and keeping them would claim a
+	// review that no longer stands (the actor_audit row written by the
+	// handler keeps the history).
 	ResetMediaEdgeReview(ctx context.Context, id int64) (int64, error)
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound

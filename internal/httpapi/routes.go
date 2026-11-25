@@ -835,6 +835,9 @@ type edgeDTO struct {
 	Confidence       float64 `json:"confidence"`
 	ReviewState      string  `json:"reviewState"`
 	Resolver         string  `json:"resolver"`
+	// ReviewSource is human, assistant, or empty when a resolver wrote the
+	// edge or the decision was reset.
+	ReviewSource string `json:"reviewSource,omitempty"`
 }
 
 func toEdgeDTO(e sqlcgen.MediaEdge) edgeDTO {
@@ -842,6 +845,7 @@ func toEdgeDTO(e sqlcgen.MediaEdge) edgeDTO {
 		ID: e.ID, SourceNodeID: e.SourceNodeID, TargetNodeID: e.TargetNodeID,
 		RelationshipType: e.RelationshipType, Confidence: e.Confidence,
 		ReviewState: e.ReviewState, Resolver: e.Resolver,
+		ReviewSource: reviewSourceString(e.ReviewSource),
 	}
 }
 
@@ -1000,6 +1004,7 @@ func (s *Server) handleAssetLineage(ctx context.Context, in *AssetLineageInput) 
 			Confidence:       e.Confidence,
 			ReviewState:      e.ReviewState,
 			Resolver:         e.Resolver,
+			ReviewSource:     reviewSourceString(e.ReviewSource),
 		})
 	}
 
@@ -1293,6 +1298,17 @@ type CreateEdgeOutput struct {
 }
 
 func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*CreateEdgeOutput, error) {
+	return s.createManualEdge(ctx, in.Body.SourceNodeID, in.Body.TargetNodeID, in.Body.RelationshipType, reviewSourceHuman)
+}
+
+// createManualEdge is POST /api/v1/edges and the MCP create_edge tool.
+// source is reviewSourceHuman from REST and reviewSourceAssistant from MCP.
+// The Body copy keeps the validation that follows identical for both callers.
+func (s *Server) createManualEdge(ctx context.Context, sourceNodeID, targetNodeID int64, relationshipType, reviewSource string) (*CreateEdgeOutput, error) {
+	in := &CreateEdgeInput{}
+	in.Body.SourceNodeID = sourceNodeID
+	in.Body.TargetNodeID = targetNodeID
+	in.Body.RelationshipType = relationshipType
 	if in.Body.SourceNodeID == in.Body.TargetNodeID {
 		return nil, huma.Error422UnprocessableEntity("self-loop edge is forbidden")
 	}
@@ -1391,12 +1407,16 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
+		if hadPrior && reviewSource == reviewSourceAssistant && assistantBlocked(prior) {
+			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
+		}
 
 		edge, err := q.CreateManualMediaEdge(ctx, sqlcgen.CreateManualMediaEdgeParams{
 			SourceNodeID:     in.Body.SourceNodeID,
 			TargetNodeID:     in.Body.TargetNodeID,
 			RelationshipType: in.Body.RelationshipType,
 			ReviewedBy:       reviewerName(ctx),
+			ReviewSource:     reviewSourceValue(reviewSource),
 		})
 		if err != nil {
 			return err
@@ -1431,8 +1451,14 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 	if hadPrior {
 		details["previousState"] = prior.ReviewState
 		addPreviousReview(details, prior)
+		if prior.ReviewSource.Valid {
+			details["previousReviewSource"] = prior.ReviewSource.String
+		}
 	}
 	details["reviewState"] = createdEdge.ReviewState
+	if createdEdge.ReviewSource.Valid {
+		details["reviewSource"] = createdEdge.ReviewSource.String
+	}
 	details["source"] = "manual"
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewConfirmed, createdEdge.ID, details)
 
@@ -1449,6 +1475,7 @@ func (s *Server) handleCreateEdge(ctx context.Context, in *CreateEdgeInput) (*Cr
 		Confidence:       createdEdge.Confidence,
 		ReviewState:      createdEdge.ReviewState,
 		Resolver:         createdEdge.Resolver,
+		ReviewSource:     reviewSourceString(createdEdge.ReviewSource),
 	}
 	return out, nil
 }
@@ -1472,6 +1499,10 @@ type AuditQueueInput struct {
 	Resolver         string  `query:"resolver" maxLength:"128"`
 	RelationshipType string  `query:"relationshipType"`
 	MinConfidence    float64 `query:"minConfidence" default:"0" minimum:"0" maximum:"1"`
+	// ReviewSource, when "assistant", lists assistant-reviewed edges
+	// instead of the NEEDS_REVIEW queue. Those edges are CONFIRMED or
+	// REJECTED, so they are not in the queue. Empty keeps the queue.
+	ReviewSource string `query:"reviewSource"`
 }
 
 type auditNodeDTO struct {
@@ -1496,6 +1527,7 @@ type auditEntryDTO struct {
 	EvidenceJSON        string       `json:"evidenceJson"`
 	ParentAlive         bool         `json:"parentAlive"`
 	ParentMissing       bool         `json:"parentMissing"`
+	ReviewSource        string       `json:"reviewSource,omitempty"`
 	SourceNode          auditNodeDTO `json:"sourceNode"`
 	TargetNode          auditNodeDTO `json:"targetNode"`
 	CaptureDeltaSeconds *int64       `json:"captureDeltaSeconds,omitempty"`
@@ -1538,6 +1570,13 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 	}
 	if in.MinConfidence > 0 {
 		params.MinConfidence = sql.NullFloat64{Float64: in.MinConfidence, Valid: true}
+	}
+	switch in.ReviewSource {
+	case "":
+	case reviewSourceAssistant:
+		params.ReviewSource = sql.NullString{String: reviewSourceAssistant, Valid: true}
+	default:
+		return nil, huma.Error422UnprocessableEntity("unknown reviewSource " + strconv.Quote(in.ReviewSource))
 	}
 	rows, err := s.db.Reader.ListAuditQueueDetailed(ctx, params)
 	if err != nil {
@@ -1616,6 +1655,7 @@ func (s *Server) handleAuditQueue(ctx context.Context, in *AuditQueueInput) (*Au
 			EvidenceJSON:        r.EvidenceJson,
 			ParentAlive:         r.ParentAlive,
 			ParentMissing:       r.ParentMissing,
+			ReviewSource:        reviewSourceString(r.ReviewSource),
 			SourceNode:          sn,
 			TargetNode:          tn,
 			CaptureDeltaSeconds: captureDelta,
@@ -1635,6 +1675,40 @@ type EdgeReviewOutput struct {
 	Body struct {
 		OK bool `json:"ok"`
 	}
+}
+
+const (
+	reviewSourceHuman     = "human"
+	reviewSourceAssistant = "assistant"
+)
+
+func reviewSourceValue(source string) sql.NullString {
+	if source == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: source, Valid: true}
+}
+
+// assistantBlocked reports a decision an assistant must not undo: an
+// explicit human review_source, or a CONFIRMED/REJECTED row with no
+// source. The latter is a review written before review_source existed.
+// Resolver states (NEEDS_REVIEW, AUTO_ACCEPTED) and assistant decisions
+// are not blocked.
+func assistantBlocked(edge sqlcgen.MediaEdge) bool {
+	if edge.ReviewSource.Valid && edge.ReviewSource.String == reviewSourceHuman {
+		return true
+	}
+	if !edge.ReviewSource.Valid && (edge.ReviewState == "CONFIRMED" || edge.ReviewState == "REJECTED") {
+		return true
+	}
+	return false
+}
+
+func reviewSourceString(v sql.NullString) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.String
 }
 
 func reviewerName(ctx context.Context) sql.NullString {
@@ -1733,76 +1807,126 @@ func (s *Server) writeEdgeAudit(ctx context.Context, event string, edgeID int64,
 }
 
 func (s *Server) handleConfirmEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
+	if err := s.confirmEdge(ctx, in.ID, reviewSourceHuman); err != nil {
+		return nil, err
+	}
+	out := &EdgeReviewOutput{}
+	out.Body.OK = true
+	return out, nil
+}
+
+// confirmEdge is POST /api/v1/edges/{id}/confirm and the MCP confirm_edge
+// tool. source is reviewSourceHuman from REST and reviewSourceAssistant
+// from MCP. The audit row uses the request principal, so an MCP confirm
+// records the PAT.
+func (s *Server) confirmEdge(ctx context.Context, id int64, source string) error {
 	var targetNodeID int64
 	var confirmedEdge, afterEdge sqlcgen.MediaEdge
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		edge, err := q.GetMediaEdge(ctx, in.ID)
+		edge, err := q.GetMediaEdge(ctx, id)
 		if err != nil {
 			return err
 		}
-		targetNodeID, err = q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		if source == reviewSourceAssistant && assistantBlocked(edge) {
+			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
+		}
+		targetNodeID, err = q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{
+			ID: id, ReviewedBy: reviewerName(ctx), ReviewSource: reviewSourceValue(source),
+		})
 		if err != nil {
 			return err
 		}
 		confirmedEdge = edge
 		// Read back so the audit row's reviewState is what the database
 		// now holds, not a literal this handler assumes it wrote.
-		if afterEdge, err = q.GetMediaEdge(ctx, in.ID); err != nil {
+		if afterEdge, err = q.GetMediaEdge(ctx, id); err != nil {
 			return err
 		}
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, huma.Error404NotFound("edge not found")
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return humaErr
 		}
-		return nil, huma.Error500InternalServerError("confirm edge", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return huma.Error404NotFound("edge not found")
+		}
+		return huma.Error500InternalServerError("confirm edge", err)
 	}
 	details := edgeAuditDetails(confirmedEdge)
 	details["previousState"] = confirmedEdge.ReviewState
+	addPreviousReview(details, confirmedEdge)
+	if confirmedEdge.ReviewSource.Valid {
+		details["previousReviewSource"] = confirmedEdge.ReviewSource.String
+	}
 	details["reviewState"] = afterEdge.ReviewState
+	if afterEdge.ReviewSource.Valid {
+		details["reviewSource"] = afterEdge.ReviewSource.String
+	}
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewConfirmed, confirmedEdge.ID, details)
 
 	if confirmedEdge.Tier != 3 && pipeline.ValidParentRelationships[confirmedEdge.RelationshipType] {
 		s.autoInherit(ctx, targetNodeID)
 	}
+	return nil
+}
 
+func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
+	if err := s.rejectEdge(ctx, in.ID, reviewSourceHuman); err != nil {
+		return nil, err
+	}
 	out := &EdgeReviewOutput{}
 	out.Body.OK = true
 	return out, nil
 }
 
-func (s *Server) handleRejectEdge(ctx context.Context, in *EdgeReviewInput) (*EdgeReviewOutput, error) {
+// rejectEdge is POST /api/v1/edges/{id}/reject and the MCP reject_edge tool.
+func (s *Server) rejectEdge(ctx context.Context, id int64, source string) error {
 	var rejectedEdge, afterEdge sqlcgen.MediaEdge
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		edge, err := q.GetMediaEdge(ctx, in.ID)
+		edge, err := q.GetMediaEdge(ctx, id)
 		if err != nil {
 			return err
 		}
-		targetNodeID, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{ID: in.ID, ReviewedBy: reviewerName(ctx)})
+		if source == reviewSourceAssistant && assistantBlocked(edge) {
+			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
+		}
+		targetNodeID, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{
+			ID: id, ReviewedBy: reviewerName(ctx), ReviewSource: reviewSourceValue(source),
+		})
 		if err != nil {
 			return err
 		}
 		rejectedEdge = edge
-		// See handleConfirmEdge: reviewState is read back, not assumed.
-		if afterEdge, err = q.GetMediaEdge(ctx, in.ID); err != nil {
+		// See confirmEdge: reviewState is read back, not assumed.
+		if afterEdge, err = q.GetMediaEdge(ctx, id); err != nil {
 			return err
 		}
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, huma.Error404NotFound("edge not found")
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return humaErr
 		}
-		return nil, huma.Error500InternalServerError("reject edge", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return huma.Error404NotFound("edge not found")
+		}
+		return huma.Error500InternalServerError("reject edge", err)
 	}
 	details := edgeAuditDetails(rejectedEdge)
 	details["previousState"] = rejectedEdge.ReviewState
+	addPreviousReview(details, rejectedEdge)
+	if rejectedEdge.ReviewSource.Valid {
+		details["previousReviewSource"] = rejectedEdge.ReviewSource.String
+	}
 	details["reviewState"] = afterEdge.ReviewState
+	if afterEdge.ReviewSource.Valid {
+		details["reviewSource"] = afterEdge.ReviewSource.String
+	}
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewRejected, rejectedEdge.ID, details)
-	out := &EdgeReviewOutput{}
-	out.Body.OK = true
-	return out, nil
+	return nil
 }
 
 // --- /api/v1/edges/{id}/reset-review ---
@@ -1816,19 +1940,23 @@ type EdgeResetReviewOutput struct {
 	}
 }
 
-// handleResetEdgeReview undoes a human review decision: a CONFIRMED or
-// REJECTED edge goes back to NEEDS_REVIEW (and so back into the audit
-// queue). It is the only path out of a human-locked state, and it is
-// itself human-only (invariant 6): an admin signed in through a browser
+// handleResetEdgeReview undoes a review decision: a CONFIRMED or REJECTED
+// edge goes back to NEEDS_REVIEW (and so back into the audit queue) and
+// review_source is cleared with reviewed_at and reviewed_by. The REST
+// route is human-only (invariant 6): an admin signed in through a browser
 // session, never a machine/agent principal and never a personal access
-// token (a PAT carries KindUser but no person need be present), and never
-// for a resolver state (AUTO_ACCEPTED, NEEDS_REVIEW), which is not a human
-// decision to undo -- that is a 409. The reset is written to actor_audit
-// with the decision it undid.
+// token. The MCP reset_edge_review tool calls resetEdgeReview directly and
+// is gated by mcp:review instead of this REST check. It still cannot reset
+// a human decision: review_source human, or a CONFIRMED/REJECTED row with
+// no source (written before the column existed). Resetting an assistant
+// decision is allowed. An assistant reset-then-confirm is not a way around
+// the overwrite guard.
+// AUTO_ACCEPTED and NEEDS_REVIEW are resolver states, not a decision to
+// undo, and that is a 409. The reset is written to actor_audit with the
+// decision it undid.
 //
-// It changes review_state only. Metadata a confirm already wrote into the
-// child's file (autoInherit, handleConfirmEdge) stays there; the reset
-// does not rewrite files.
+// Metadata a confirm already wrote into the child's file (autoInherit)
+// stays there; the reset does not rewrite files.
 func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput) (*EdgeResetReviewOutput, error) {
 	if err := s.requireSettingsAdmin(ctx); err != nil {
 		return nil, err
@@ -1836,16 +1964,22 @@ func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput)
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindUser || !p.Authenticated || p.AuthProvider == auth.AuthProviderPAT {
 		return nil, huma.Error403Forbidden("only a person signed in to the web UI can reset a review decision")
 	}
+	return s.resetEdgeReview(ctx, in.ID, reviewSourceHuman)
+}
 
+func (s *Server) resetEdgeReview(ctx context.Context, id int64, source string) (*EdgeResetReviewOutput, error) {
 	errNotHumanReviewed := errors.New("edge is not human-reviewed")
 	var before sqlcgen.MediaEdge
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		edge, err := q.GetMediaEdge(ctx, in.ID)
+		edge, err := q.GetMediaEdge(ctx, id)
 		if err != nil {
 			return err
 		}
 		before = edge
-		targetNodeID, err := q.ResetMediaEdgeReview(ctx, in.ID)
+		if source == reviewSourceAssistant && assistantBlocked(edge) {
+			return huma.Error409Conflict("a human review cannot be reset by an assistant")
+		}
+		targetNodeID, err := q.ResetMediaEdgeReview(ctx, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			// The edge exists (GetMediaEdge found it), so the state
 			// guard is what matched nothing.
@@ -1857,9 +1991,13 @@ func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput)
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return nil, humaErr
+		}
 		switch {
 		case errors.Is(err, errNotHumanReviewed):
-			return nil, huma.Error409Conflict(fmt.Sprintf("edge %d is %s; only a CONFIRMED or REJECTED review can be reset", in.ID, before.ReviewState))
+			return nil, huma.Error409Conflict(fmt.Sprintf("edge %d is %s; only a CONFIRMED or REJECTED review can be reset", id, before.ReviewState))
 		case errors.Is(err, sql.ErrNoRows):
 			return nil, huma.Error404NotFound("edge not found")
 		default:
@@ -1870,6 +2008,9 @@ func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput)
 	details := edgeAuditDetails(before)
 	details["previousState"] = before.ReviewState
 	addPreviousReview(details, before)
+	if before.ReviewSource.Valid {
+		details["previousReviewSource"] = before.ReviewSource.String
+	}
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewReset, before.ID, details)
 
 	out := &EdgeResetReviewOutput{}

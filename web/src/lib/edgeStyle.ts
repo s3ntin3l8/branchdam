@@ -16,7 +16,7 @@ const relColor: Record<string, string> = {
 // CONFIRMED / AUTO_ACCEPTED link, and a REJECTED edge (if one is ever
 // returned) is dotted and faded.
 export function edgeVisual(
-  e: Pick<Edge, "relationshipType" | "confidence" | "reviewState">,
+  e: Pick<Edge, "relationshipType" | "confidence" | "reviewState" | "reviewSource">,
   strokeWidth?: number
 ): { style: CSSProperties; label: string } {
   const style: CSSProperties = { stroke: relColor[e.relationshipType] ?? "var(--graph-edge-default)" };
@@ -29,6 +29,9 @@ export function edgeVisual(
     style.strokeDasharray = "2 4";
     style.opacity = 0.4;
     label += " - rejected";
+  }
+  if (e.reviewSource === "assistant") {
+    label += " AI";
   }
   return { style, label };
 }

@@ -24,6 +24,12 @@ describe("edgeVisual", () => {
     expect(v.style.opacity).toBeLessThan(1);
     expect(v.label).toMatch(/rejected/);
   });
+
+  it("marks an assistant decision with AI", () => {
+    const v = edgeVisual({ ...base, reviewState: "CONFIRMED", reviewSource: "assistant" });
+    expect(v.label).toBe("PROXY_OF (0.50) AI");
+    expect(v.style.strokeDasharray).toBeUndefined();
+  });
 });
 
 describe("routePath / pointAlong (#598)", () => {

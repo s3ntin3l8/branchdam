@@ -214,6 +214,9 @@ function AuditRow({
           <span className="rounded bg-indigo-900 px-2 py-0.5 text-xs text-indigo-200 font-medium">
             {entry.relationshipType}
           </span>
+          {entry.reviewSource === "assistant" && (
+            <span className="rounded bg-violet-900 px-2 py-0.5 text-xs text-violet-200">AI</span>
+          )}
           <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">
             Tier {entry.tier}
           </span>
@@ -715,7 +718,9 @@ export default function AuditQueuePage() {
   const minConfParam = searchParams.get("minConfidence") || "";
   const minConfNum = Number(minConfParam);
   const minConfFilter = minConfParam && minConfNum > 0 && minConfNum <= 1 ? minConfParam : "";
-  const hasActiveFilters = Boolean(tierFilter || resolverFilter || relFilter || minConfFilter);
+  const reviewSourceParam = searchParams.get("reviewSource") || "";
+  const reviewSourceFilter = reviewSourceParam === "assistant" ? "assistant" : "";
+  const hasActiveFilters = Boolean(tierFilter || resolverFilter || relFilter || minConfFilter || reviewSourceFilter);
 
   // Keyset paging: `trail` is the stack of cursors (the last id of each
   // previous page) that led here, so Previous pops one instead of only
@@ -734,8 +739,9 @@ export default function AuditQueuePage() {
       resolver: resolverFilter || undefined,
       relationshipType: relFilter || undefined,
       minConfidence: minConfFilter ? Number(minConfFilter) : undefined,
+      reviewSource: reviewSourceFilter || undefined,
     }),
-    [tierFilter, resolverFilter, relFilter, minConfFilter]
+    [tierFilter, resolverFilter, relFilter, minConfFilter, reviewSourceFilter]
   );
   const { data, isLoading, isError, isFetching } = useAuditQueue({ limit: PAGE_SIZE, beforeId, ...filterParams });
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -952,10 +958,23 @@ export default function AuditQueuePage() {
               </select>
             </div>
 
+            <div>
+              <label htmlFor="review-source-filter" className="block text-neutral-400 mb-1">Reviewed by</label>
+              <select
+                id="review-source-filter"
+                value={reviewSourceFilter}
+                onChange={(e) => updateFilters({ reviewSource: e.target.value })}
+                className="rounded border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-neutral-200 focus:outline-none"
+              >
+                <option value="">Needs review</option>
+                <option value="assistant">Assistant-reviewed</option>
+              </select>
+            </div>
+
             {hasActiveFilters && (
               <button
                 type="button"
-                onClick={() => updateFilters({ tier: "", resolver: "", relationshipType: "", minConfidence: "" })}
+                onClick={() => updateFilters({ tier: "", resolver: "", relationshipType: "", minConfidence: "", reviewSource: "" })}
                 className="text-xs text-amber-400 hover:text-amber-300 border border-amber-800/60 rounded px-2.5 py-1.5 bg-amber-950/40"
               >
                 Clear Filters

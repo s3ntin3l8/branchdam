@@ -158,6 +158,64 @@ func (b mcpBackend) StorageHealth(ctx context.Context) (any, error) {
 	}, nil
 }
 
+func (b mcpBackend) ConfirmEdge(ctx context.Context, id int64) (any, error) {
+	if err := b.s.confirmEdge(ctx, id, reviewSourceAssistant); err != nil {
+		return nil, err
+	}
+	return struct {
+		OK bool `json:"ok"`
+	}{OK: true}, nil
+}
+
+func (b mcpBackend) RejectEdge(ctx context.Context, id int64) (any, error) {
+	if err := b.s.rejectEdge(ctx, id, reviewSourceAssistant); err != nil {
+		return nil, err
+	}
+	return struct {
+		OK bool `json:"ok"`
+	}{OK: true}, nil
+}
+
+func (b mcpBackend) ResetEdgeReview(ctx context.Context, id int64) (any, error) {
+	out, err := b.s.resetEdgeReview(ctx, id, reviewSourceAssistant)
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (b mcpBackend) CreateEdge(ctx context.Context, sourceNodeID, targetNodeID int64, relationshipType string) (any, error) {
+	out, err := b.s.createManualEdge(ctx, sourceNodeID, targetNodeID, relationshipType, reviewSourceAssistant)
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (b mcpBackend) TrashAsset(ctx context.Context, id int64) (any, error) {
+	out, err := b.s.doTrashAsset(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (b mcpBackend) RestoreAsset(ctx context.Context, id int64) (any, error) {
+	out, err := b.s.handleRestoreAsset(ctx, &AssetPathInput{ID: id})
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (b mcpBackend) RetrySync(ctx context.Context, id int64) (any, error) {
+	out, err := b.s.handleSyncRetry(ctx, &SyncRetryInput{ID: id})
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
 func pageLimit(v, def, max int64) (int64, error) {
 	if v == 0 {
 		return def, nil

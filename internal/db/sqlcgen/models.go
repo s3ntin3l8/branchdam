@@ -137,6 +137,7 @@ type MediaEdge struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 	IsActive         int64
+	ReviewSource     sql.NullString
 }
 
 type MediaNode struct {
@@ -342,6 +343,7 @@ type VMediaEdgesResolved struct {
 	ReviewState          string
 	ReviewedAt           sql.NullInt64
 	ReviewedBy           sql.NullString
+	ReviewSource         sql.NullString
 	CreatedAt            int64
 	UpdatedAt            int64
 	ParentLifecycleState string

@@ -82,7 +82,7 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
 WHERE media_edges.review_state NOT IN ('CONFIRMED', 'REJECTED')
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at, is_active;
+          created_at, updated_at, is_active, review_source;
 
 -- name: GetMediaEdgeBySourceTargetRel :one
 -- Used by internal/graph.Engine.ResolveAndCommit when UpsertMediaEdge
@@ -91,7 +91,7 @@ RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
 -- here rather than treating the no-row RETURNING as an error.
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3;
 
@@ -112,15 +112,35 @@ SELECT EXISTS(
 -- 200. The returned target_node_id is what the caller re-derives
 -- graph_status from -- see routes.go's recomputeGraphStatus.
 UPDATE media_edges
-SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
+SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2,
+    review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
+  -- An assistant must not overturn a human decision. That is review_source
+  -- human, or a CONFIRMED/REJECTED row whose source is NULL (written before
+  -- this column existed; the resolver path cannot reach those states).
+  -- A NULL bind is not assistant. IS is null-safe so a resolver row still matches.
+  AND NOT (
+    COALESCE(?3, '') = 'assistant'
+    AND (
+      review_source IS 'human'
+      OR (review_source IS NULL AND review_state IN ('CONFIRMED', 'REJECTED'))
+    )
+  )
 RETURNING target_node_id;
 
 -- name: RejectMediaEdge :one
 -- See ConfirmMediaEdge's comment -- same shape, same reasoning.
 UPDATE media_edges
-SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
+SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2,
+    review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
+  AND NOT (
+    COALESCE(?3, '') = 'assistant'
+    AND (
+      review_source IS 'human'
+      OR (review_source IS NULL AND review_state IN ('CONFIRMED', 'REJECTED'))
+    )
+  )
 RETURNING target_node_id;
 
 -- name: ResetMediaEdgeReview :one
@@ -129,11 +149,13 @@ RETURNING target_node_id;
 -- review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
 -- is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
 -- states, and only a human decision is a human's to undo. reviewed_at /
--- reviewed_by are cleared: the schema only requires them for
--- CONFIRMED/REJECTED, and keeping them would claim a review that no longer
--- stands (the actor_audit row written by the handler keeps the history).
+-- reviewed_by / review_source are cleared: the schema only requires
+-- reviewed_at for CONFIRMED/REJECTED, and keeping them would claim a
+-- review that no longer stands (the actor_audit row written by the
+-- handler keeps the history).
 UPDATE media_edges
-SET review_state = 'NEEDS_REVIEW', reviewed_at = NULL, reviewed_by = NULL, updated_at = unixepoch()
+SET review_state = 'NEEDS_REVIEW', reviewed_at = NULL, reviewed_by = NULL,
+    review_source = NULL, updated_at = unixepoch()
 WHERE id = ?1 AND review_state IN ('CONFIRMED', 'REJECTED')
 RETURNING target_node_id;
 
