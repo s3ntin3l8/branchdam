@@ -26,6 +26,16 @@ type jobsIn struct {
 	State string `json:"state,omitempty" jsonschema:"job state filter; blank means every state"`
 }
 
+type edgeIDIn struct {
+	ID int64 `json:"id" jsonschema:"edge id"`
+}
+
+type createEdgeIn struct {
+	SourceNodeID     int64  `json:"sourceNodeId" jsonschema:"parent asset id"`
+	TargetNodeID     int64  `json:"targetNodeId" jsonschema:"child asset id"`
+	RelationshipType string `json:"relationshipType" jsonschema:"DERIVED_FROM, FINAL_EXPORT, PROXY_OF, PROJECT_SIDECAR or DUPLICATE_OF"`
+}
+
 type viewOut struct {
 	Ready    bool   `json:"ready"`
 	MIMEType string `json:"mimeType,omitempty"`
@@ -37,6 +47,17 @@ func tool(name, description string) *sdkmcp.Tool {
 		Description: description + untrustedNote,
 		Annotations: &sdkmcp.ToolAnnotations{
 			ReadOnlyHint: true,
+			Title:        name,
+		},
+	}
+}
+
+func writeTool(name, description string) *sdkmcp.Tool {
+	return &sdkmcp.Tool{
+		Name:        name,
+		Description: description + " Acts only on the explicit id arguments." + untrustedNote,
+		Annotations: &sdkmcp.ToolAnnotations{
+			ReadOnlyHint: false,
 			Title:        name,
 		},
 	}
@@ -159,5 +180,89 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 				return nil, nil, err
 			}
 			return textResult("storage health"), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("confirm_edge", "Confirm one edge. The edge becomes CONFIRMED with review_source assistant, which is a weaker signal than a human confirm."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in edgeIDIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.ConfirmEdge(ctx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("confirmed edge %d", in.ID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("reject_edge", "Reject one edge. The edge becomes REJECTED with review_source assistant."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in edgeIDIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.RejectEdge(ctx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("rejected edge %d", in.ID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("reset_edge_review", "Return one CONFIRMED or REJECTED edge to NEEDS_REVIEW and clear its review source."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in edgeIDIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.ResetEdgeReview(ctx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("reset edge %d", in.ID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("create_edge", "Create a manual edge between two assets. Uses the same validation as creating an edge in the web UI, and stamps review_source assistant."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in createEdgeIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.CreateEdge(ctx, in.SourceNodeID, in.TargetNodeID, in.RelationshipType)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("created edge %d to %d", in.SourceNodeID, in.TargetNodeID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("trash_asset", "Move one asset to the trash. Linked exports are trashed with it."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in idIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.TrashAsset(ctx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("trashed asset %d", in.ID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("restore_asset", "Restore one trashed or archived asset."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in idIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.RestoreAsset(ctx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("restored asset %d", in.ID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("retry_sync", "Requeue failed remote sync rows for one asset."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in idIn) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireReview(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.RetrySync(ctx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(fmt.Sprintf("retried sync for asset %d", in.ID)), body, nil
 		})
 }

@@ -12,14 +12,16 @@ import (
 
 const confirmMediaEdge = `-- name: ConfirmMediaEdge :one
 UPDATE media_edges
-SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
+SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2,
+    review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
 RETURNING target_node_id
 `
 
 type ConfirmMediaEdgeParams struct {
-	ID         int64
-	ReviewedBy sql.NullString
+	ID           int64
+	ReviewedBy   sql.NullString
+	ReviewSource sql.NullString
 }
 
 // RETURNING target_node_id (rather than plain :exec) doubles as the
@@ -28,7 +30,7 @@ type ConfirmMediaEdgeParams struct {
 // 200. The returned target_node_id is what the caller re-derives
 // graph_status from -- see routes.go's recomputeGraphStatus.
 func (q *Queries) ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgeParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, confirmMediaEdge, arg.ID, arg.ReviewedBy)
+	row := q.db.QueryRowContext(ctx, confirmMediaEdge, arg.ID, arg.ReviewedBy, arg.ReviewSource)
 	var target_node_id int64
 	err := row.Scan(&target_node_id)
 	return target_node_id, err
@@ -37,7 +39,7 @@ func (q *Queries) ConfirmMediaEdge(ctx context.Context, arg ConfirmMediaEdgePara
 const getMediaEdgeBySourceTargetRel = `-- name: GetMediaEdgeBySourceTargetRel :one
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE source_node_id = ?1 AND target_node_id = ?2 AND relationship_type = ?3
 `
@@ -70,6 +72,7 @@ func (q *Queries) GetMediaEdgeBySourceTargetRel(ctx context.Context, arg GetMedi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.IsActive,
+		&i.ReviewSource,
 	)
 	return i, err
 }
@@ -100,19 +103,21 @@ func (q *Queries) MediaEdgeExists(ctx context.Context, arg MediaEdgeExistsParams
 
 const rejectMediaEdge = `-- name: RejectMediaEdge :one
 UPDATE media_edges
-SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2, updated_at = unixepoch()
+SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2,
+    review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
 RETURNING target_node_id
 `
 
 type RejectMediaEdgeParams struct {
-	ID         int64
-	ReviewedBy sql.NullString
+	ID           int64
+	ReviewedBy   sql.NullString
+	ReviewSource sql.NullString
 }
 
 // See ConfirmMediaEdge's comment -- same shape, same reasoning.
 func (q *Queries) RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, rejectMediaEdge, arg.ID, arg.ReviewedBy)
+	row := q.db.QueryRowContext(ctx, rejectMediaEdge, arg.ID, arg.ReviewedBy, arg.ReviewSource)
 	var target_node_id int64
 	err := row.Scan(&target_node_id)
 	return target_node_id, err
@@ -120,7 +125,8 @@ func (q *Queries) RejectMediaEdge(ctx context.Context, arg RejectMediaEdgeParams
 
 const resetMediaEdgeReview = `-- name: ResetMediaEdgeReview :one
 UPDATE media_edges
-SET review_state = 'NEEDS_REVIEW', reviewed_at = NULL, reviewed_by = NULL, updated_at = unixepoch()
+SET review_state = 'NEEDS_REVIEW', reviewed_at = NULL, reviewed_by = NULL,
+    review_source = NULL, updated_at = unixepoch()
 WHERE id = ?1 AND review_state IN ('CONFIRMED', 'REJECTED')
 RETURNING target_node_id
 `
@@ -130,9 +136,10 @@ RETURNING target_node_id
 // review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
 // is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
 // states, and only a human decision is a human's to undo. reviewed_at /
-// reviewed_by are cleared: the schema only requires them for
-// CONFIRMED/REJECTED, and keeping them would claim a review that no longer
-// stands (the actor_audit row written by the handler keeps the history).
+// reviewed_by / review_source are cleared: the schema only requires
+// reviewed_at for CONFIRMED/REJECTED, and keeping them would claim a
+// review that no longer stands (the actor_audit row written by the
+// handler keeps the history).
 func (q *Queries) ResetMediaEdgeReview(ctx context.Context, id int64) (int64, error) {
 	row := q.db.QueryRowContext(ctx, resetMediaEdgeReview, id)
 	var target_node_id int64
@@ -188,7 +195,7 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
 WHERE media_edges.review_state NOT IN ('CONFIRMED', 'REJECTED')
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at, is_active
+          created_at, updated_at, is_active, review_source
 `
 
 type UpsertMediaEdgeParams struct {
@@ -279,6 +286,7 @@ func (q *Queries) UpsertMediaEdge(ctx context.Context, arg UpsertMediaEdgeParams
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.IsActive,
+		&i.ReviewSource,
 	)
 	return i, err
 }

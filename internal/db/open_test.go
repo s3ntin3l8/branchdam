@@ -406,8 +406,9 @@ func assertTablesAbsent(t *testing.T, writerDB *sql.DB) {
 // widened media_nodes, the generated INSERT would otherwise reference
 // columns that don't exist yet at version 5, where these rows must
 // originate so migration 00006's UPDATE has pre-existing data to act on.
-// media_edges itself is unaffected by 00007, so CreateMediaEdge/GetMediaEdge
-// still use the normal generated helpers.
+// media_edges at version 5 is also missing columns the generated helpers
+// select. Those are added below; migration 00006 only updates confidence
+// and review_state.
 func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "downgrade.db")
@@ -470,12 +471,15 @@ func TestDowngradeIndexSuffixStemEdges(t *testing.T) {
 	}
 
 	// An index-suffix pair, mimicking a pre-#132 AUTO_ACCEPTED mesh edge:
-	// The current generated edge DTO includes is_active (migration 26),
-	// while this historical fixture intentionally stops at version 5.
-	// Add only that later column so generated edge queries can still seed
-	// and inspect the fixture without changing migration 6's behavior.
+	// The current generated edge DTO includes is_active (migration 26) and
+	// review_source (migration 47). This fixture stops at version 5, so add
+	// those later columns before the generated edge helpers run. Neither
+	// column changes what migration 6 updates.
 	if _, err := writerDB.Exec("ALTER TABLE media_edges ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1));"); err != nil {
 		t.Fatalf("alter table add is_active: %v", err)
+	}
+	if _, err := writerDB.Exec("ALTER TABLE media_edges ADD COLUMN review_source TEXT CHECK (review_source IN ('human','assistant'));"); err != nil {
+		t.Fatalf("alter table add review_source: %v", err)
 	}
 	// "photo.jpg" (anchor) -> "photo-2.jpg" (index-suffixed).
 	anchor := insertNode("0001", "/photo.jpg", "photo.jpg", "photo")

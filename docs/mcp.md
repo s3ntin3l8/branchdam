@@ -168,15 +168,19 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 
 ### Review tools (`mcp:review`)
 
-- **Tools:**
-  - `confirm_edge`, `reject_edge`, `reset_edge_review`
-  - `create_edge` (manual edge, same validation as `POST /api/v1/edges`)
-  - `trash_asset`, `restore_asset`
-  - `retry_sync`
-- **Explicit ids only.** Each takes ids (or UUIDs) as arguments. A
-  tool never acts on ids "found" in free text.
-- **Audit.** Each writes the same `actor_audit` event as its REST
-  counterpart, so phase 0b's attribution applies automatically.
+`mcp:read` does not satisfy these. Each takes explicit ids, calls the same function as its REST route, and writes the same `actor_audit` event (so an MCP confirm's row carries `pat_id`). Confirm, reject and manual-create set `review_source` to `assistant`. The REST routes set `human`. Reset clears `review_source` together with `reviewed_at` and `reviewed_by`. The REST reset route stays human-only (no PAT); `reset_edge_review` is the MCP caller and does not pass that gate.
+
+| Tool | Arguments | Effect |
+|---|---|---|
+| `confirm_edge` | `id` | `CONFIRMED`, `review_source=assistant` |
+| `reject_edge` | `id` | `REJECTED`, `review_source=assistant` |
+| `reset_edge_review` | `id` | back to `NEEDS_REVIEW`, `review_source` cleared |
+| `create_edge` | `sourceNodeId`, `targetNodeId`, `relationshipType` | same validation as `POST /api/v1/edges`, `review_source=assistant` |
+| `trash_asset` | `id` | trash the asset and its linked exports |
+| `restore_asset` | `id` | restore a trashed or archived asset |
+| `retry_sync` | `id` | requeue failed sync rows for the asset |
+
+`GET /api/v1/edges/audit?reviewSource=assistant` lists assistant-reviewed edges (they are not `NEEDS_REVIEW`, so this replaces the queue predicate rather than adding to it). Lineage and graph edges include `reviewSource`. The web queue has an assistant-reviewed filter, and an assistant decision is marked `AI` on the graph and in the queue.
 
 ### Assistant-confirmed edges
 

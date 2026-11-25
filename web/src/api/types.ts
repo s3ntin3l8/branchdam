@@ -183,6 +183,7 @@ export interface Edge {
   confidence: number;
   reviewState: "AUTO_ACCEPTED" | "NEEDS_REVIEW" | "CONFIRMED" | "REJECTED";
   resolver: string;
+  reviewSource?: "human" | "assistant";
 }
 
 export interface AssetGraph {
@@ -212,6 +213,7 @@ export interface EdgeAuditEntry {
   evidenceJson: string;
   parentAlive: boolean;
   parentMissing: boolean;
+  reviewSource?: "human" | "assistant";
   sourceNode: AuditNode;
   targetNode: AuditNode;
   captureDeltaSeconds?: number;
@@ -227,6 +229,7 @@ export interface AuditQueueParams {
   resolver?: string;
   relationshipType?: Edge["relationshipType"];
   minConfidence?: number;
+  reviewSource?: "assistant";
 }
 
 export interface AuditQueueResponse {

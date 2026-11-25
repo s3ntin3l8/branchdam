@@ -13,14 +13,14 @@ INSERT INTO media_edges (
 )
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at, is_active;
+          created_at, updated_at, is_active, review_source;
 
 -- name: CreateManualMediaEdge :one
 INSERT INTO media_edges (
     source_node_id, target_node_id, relationship_type, confidence, tier,
-    resolver, evidence_json, review_state, reviewed_by, reviewed_at
+    resolver, evidence_json, review_state, reviewed_by, reviewed_at, review_source
 ) VALUES (
-    ?1, ?2, ?3, 1.00, 1, 'manual', '{}', 'CONFIRMED', ?4, unixepoch()
+    ?1, ?2, ?3, 1.00, 1, 'manual', '{}', 'CONFIRMED', ?4, unixepoch(), ?5
 )
 ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     confidence = 1.00,
@@ -29,29 +29,30 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     review_state = 'CONFIRMED',
     reviewed_by = ?4,
     reviewed_at = unixepoch(),
+    review_source = ?5,
     is_active = 1,
     updated_at = unixepoch()
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at, is_active;
+          created_at, updated_at, is_active, review_source;
 
 -- name: GetMediaEdge :one
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE id = ?1;
 
 -- name: ListEdgesBySource :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE source_node_id = ?1 AND is_active = 1;
 
 -- name: ListEdgesByTarget :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE target_node_id = ?1 AND is_active = 1;

@@ -83,6 +83,37 @@ describe("AuditQueuePage", () => {
     expect(screen.getByText("2 bits")).toBeInTheDocument();
   });
 
+  it("marks an assistant-reviewed edge and can filter the queue to them", async () => {
+    vi.mocked(api.listAuditQueue).mockResolvedValue({
+      entries: [
+        {
+          id: 3,
+          sourceNodeId: 10,
+          targetNodeId: 20,
+          relationshipType: "DERIVED_FROM",
+          confidence: 0.9,
+          tier: 2,
+          resolver: "xmp_original_document_id",
+          evidenceJson: "{}",
+          parentAlive: true,
+          parentMissing: false,
+          reviewSource: "assistant",
+          sourceNode: { id: 10, nodeUuid: "uuid-10", fileName: "A.NEF", filePath: "/a", thumbState: "READY" },
+          targetNode: { id: 20, nodeUuid: "uuid-20", fileName: "A.JPG", filePath: "/b", thumbState: "READY" },
+        },
+      ],
+      total: 1,
+    });
+    const user = userEvent.setup();
+    renderWithClient(<AuditQueuePage />);
+
+    expect(await screen.findByText("AI")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Reviewed by"), "assistant");
+    await waitFor(() => {
+      expect(api.listAuditQueue).toHaveBeenCalledWith(expect.objectContaining({ reviewSource: "assistant" }));
+    });
+  });
+
   it("renders nested per-resolver evidence as labelled groups, never [object Object]", async () => {
     vi.mocked(api.listAuditQueue).mockResolvedValue({
       entries: [

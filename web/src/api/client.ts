@@ -308,6 +308,7 @@ export const api = {
     if (params.resolver) qs.set("resolver", params.resolver);
     if (params.relationshipType) qs.set("relationshipType", params.relationshipType);
     if (params.minConfidence) qs.set("minConfidence", String(params.minConfidence));
+    if (params.reviewSource) qs.set("reviewSource", params.reviewSource);
     return request<AuditQueueResponse>(`/api/v1/edges/audit?${qs}`);
   },
   confirmEdge: (id: number) => request<{ ok: boolean }>(`/api/v1/edges/${id}/confirm`, { method: "POST" }),
