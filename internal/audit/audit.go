@@ -132,8 +132,8 @@ type Entry struct {
 	// and for rows written before the column existed.
 	AuthProvider sql.NullString
 	// PatID / PatName identify the personal access token when one was
-	// used. PatName comes from user_pats.name and is empty when the
-	// token row is gone or PatID was never set.
+	// used. PatName comes from user_pats.name and is empty when pat_id
+	// was never set. A revoked token keeps its row, so the name still joins.
 	PatID   sql.NullInt64
 	PatName sql.NullString
 }
@@ -326,7 +326,7 @@ func (s *Service) ListActivity(ctx context.Context, f Filter, limit, offset int6
 // auditAuthProvider is the value stored in actor_audit.auth_provider.
 // A KindUser principal with an empty AuthProvider is forward-auth:
 // principal.go documents that empty means authentik, and the column
-// CHECK rejects ”. Machine, system and anonymous actors get NULL.
+// CHECK rejects ''. Machine, system and anonymous actors get NULL.
 func auditAuthProvider(p auth.Principal, kind string) sql.NullString {
 	if kind != ActorKindUser {
 		return sql.NullString{}
