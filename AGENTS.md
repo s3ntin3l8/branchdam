@@ -5,11 +5,46 @@ load-bearing invariants — the ones every agent needs before touching
 anything, regardless of which CLI you are. `CLAUDE.md` is a one-line
 `@AGENTS.md` import, so every CLI (Claude Code, Codex, opencode, agy) reads
 this file, natively or via that import. See [`CONTRIBUTING.md`](CONTRIBUTING.md)
-for the contributor workflow and [`docs/`](docs) for deeper architecture detail.
+for setup, the demo/screenshot tooling and CI details, and [`docs/`](docs) for deeper architecture detail.
 
 Self-hosted Digital Asset Management server. Models media assets as a version
 node graph with confidence-weighted lineage edges. Go backend (Huma v2, SQLite
 WAL, sqlc, goose) + React 19 SPA (Vite, @xyflow/react, TanStack Query, Tailwind).
+
+<!-- mullion:briefing:start -->
+This repo's non-obvious correctness invariants are in `.claude/skills/branchdam/SKILL.md`. They cover single-writer transactions, `storage.Guard`, `internal/clock` determinism, edge review precedence, prune hash provenance, agent input trust, sqlc traps and hand-synced wire contracts. Read it before changing anything under `internal/`, a migration or query, or a route DTO. For review, delegate to the `branchdam-reviewer` subagent (`.claude/agents/branchdam-reviewer.md`). It reads that skill first and checks your uncommitted diff or branch against it, section by section. Use it for the self-review pass before declaring a change done.
+
+## Workflow Conventions
+
+- Never commit directly to the default branch. Always branch and open a PR.
+- Branch off the latest remote default branch, never off your local one: `git fetch origin && git checkout -b <branch> origin/<default>`. A local default branch is routinely stale, which is what makes a PR show up as "out-of-date with the base branch" the moment it's opened.
+- Work in a dedicated worktree per branch, under `.wt/<name>` (the branch name with `/` replaced by `-`, so the directory stays flat), off the latest remote default branch: `git fetch origin && git worktree add .wt/<name> -b <branch> origin/<default>`. A fresh worktree does not inherit installed dependencies — reinstall them there before testing or building.
+- Commit and PR titles need a Conventional Commits prefix (`feat:`, `fix:`, `chore:`, ...).
+- Squash-merge PRs — the PR title becomes the commit message on the default branch.
+- Require green CI before merging.
+- Run a self-review pass on your own diff before declaring done.
+
+  Request an automated/bot review through the review relay (`mullion review`, or the `request_review` tool) — once after opening the pull request, and again per head commit after pushing fixes for a changes-requested review, then wait for it. A review comment that mentions the review bot is for humans, not agents; if no relay is set up, tell the human instead. One review per pull request at a time: a review that is already running is not re-requested — the request is refused with its run id, and that refusal is the answer, not an error to retry: wait for it, or stop it with stop_review. A review takes 10-30 minutes; check review_status once instead of asking again. After pushing fixes for a changes-requested review, ask again only when no review is in flight. Once the review bot has approved, apply its remaining suggestions and push without requesting another review, even though the head moved: small targeted fixes do not change the verdict, and re-reviewing them only breeds more nits. Never re-trigger a review with an @mention of the review bot: that path is for humans, and it queues another round behind the running one.
+- Fixing the code is not enough to address review feedback — reply to each inline comment via the GitHub API, then resolve the thread via the GraphQL `resolveReviewThread` mutation, rather than pushing a silent fix. Reply with `gh api repos/{owner}/{repo}/pulls/<pr>/comments/<comment_id>/replies -f body="…"`; resolve with `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'`, taking the thread id from a `reviewThreads` query on the pull request, not from the REST comment id.
+- File a tracked issue for anything a plan defers, blocks, or descopes, and link it from the PR (using the repository's issue template if it has one) — a footnote in a plan doc is not a durable record. Write each one as a spec an agent can implement on its own (scope, acceptance criteria), not as a note. Title it the way this repo titles commits and PRs, reusing its existing scope names rather than coining new ones; attach it as a sub-issue to the matching open epic when one exists; and set GitHub's `blocked_by` dependency where one issue cannot start before another closes.
+- After a merge, delete the local and remote branch and remove any associated worktree.
+- Before pushing, run the full lint/typecheck/test/format gate.
+<!-- mullion:briefing:end -->
+
+## Repo specifics
+
+- **Setup, including in a fresh worktree:** `make install-hooks` (pre-commit and pre-push hooks), then `cd web && npm ci`. The Go binary embeds `web/dist`. `make build`/`test`/`vet`/`golangci-lint` stub it if it's missing, and `make build-embed` builds the real SPA in.
+- **Pre-push gate:** `make check` for backend changes and `make check-web` for anything under `web/`. `make lint` (pre-commit hooks) rewrites files in the working tree, so re-check `git status` afterwards. It doesn't run `go test`, `govulncheck` or `golangci-lint`. `make check` covers everything except `govulncheck`, which runs from the pre-push hook or via `make vulncheck`.
+- **golangci-lint** is pinned (Makefile `GOLANGCI_LINT_VERSION`, v2 module path) to match the CI action. Bump both together. `forbidigo` rejects `time.Now` and `uuid.NewV7` outside `internal/clock`.
+- **CI has no codegen step.** A migration or query change without a committed `internal/db/sqlcgen/` breaks `go build ./...` on `main`.
+- **Hand-synced contracts:**
+  - Browser route DTOs (`internal/httpapi/routes.go`) → hand-update `web/src/api/types.ts` and `web/src/api/client.ts`.
+  - Agent API DTOs → `make contract-fixtures` (commit `docs/contract/fixtures`).
+  - New agent error codes → `docs/agent-api.md`'s table.
+- **PR titles feed release-please.** It reads the squash-merged PR title, so an unprefixed title drops out of the changelog. Existing scopes include `upload`, `uiux` and `ci`.
+- **Templates:** PR descriptions use `.github/pull_request_template.md` and issues use `.github/ISSUE_TEMPLATE/issue-blueprint.md`.
+- **Review bot:** Hermes (`s3ntin3l8-hermes[bot]`). `hermes.yml`'s `auto-review` job already reviews every non-draft, same-repo PR once on open (or once on `ready_for_review`). `main` has `required_conversation_resolution`, so any unresolved inline thread blocks merge.
+- **release-please PRs** never get CI checks reported (they are created with `GITHUB_TOKEN`). The owner merges them past the required checks. See CONTRIBUTING.md "Branch protection".
 
 ## Commands
 
@@ -25,6 +60,7 @@ make dev-all    # Both together
 
 # Codegen & Data Layer
 sqlc generate    # Run after editing migrations or queries; commit internal/db/sqlcgen/
+make contract-fixtures  # Regenerate docs/contract/fixtures after changing an agent API DTO
 
 # Demo, screenshots, visual checks (Docker, visual-kit; needs go, ffmpeg, exiftool)
 make demo                        # throwaway instance on :3975; DEMO_NOW=<ISO date-time> freezes its server clock
@@ -117,20 +153,4 @@ page or state needs a scene in `visual/scenes.json` (tags `check`, `audit`, `pre
 8. **Immich Supervisor**: Immich sync worker joins on graceful shutdown and refuses to start new workers once shutdown begins.
 9. **Process Re-exec on Restart**: `POST /api/v1/restart` re-execs the binary (`syscall.Exec`) after graceful HTTP drain, gated to admin groups.
 
-## Review thread resolution
-
-Hermes reviews automatically on open (`.github/workflows/hermes.yml`'s
-`auto-review` job) — don't also `@s3ntin3l8-hermes Review` right after
-opening the PR, or you'll trigger a redundant second review. A re-review
-can be requested the same way after pushing fixes, but keep it to a
-couple of rounds — don't loop on it indefinitely.
-
-Every review thread (Hermes or human) must be replied to and resolved before
-a PR is mergeable. This is a GraphQL-only concept, not a `gh pr` verb:
-
-```sh
-# 1. Reply to inline comment (REST)
-gh api repos/s3ntin3l8/branchdam/pulls/<PR>/comments/<comment_id>/replies -f body="Fixed in <sha>"
-# 2. Resolve thread (GraphQL)
-gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
-```
+For the non-obvious consequences of these (nested `InTx` deadlocks, hash provenance writes, `UpsertMediaEdge`'s `ErrNoRows`, agent UUID/ownership rules, contract sync), read `.claude/skills/branchdam/SKILL.md`.
