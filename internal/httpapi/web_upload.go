@@ -41,6 +41,9 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w, finishUpload := s.uploadTimeouts(w, r)
+	defer finishUpload()
+
 	mr, err := r.MultipartReader()
 	if err != nil {
 		s.writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("failed to parse multipart form: %v", err))

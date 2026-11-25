@@ -78,6 +78,9 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w, finishUpload := s.uploadTimeouts(w, r)
+	defer finishUpload()
+
 	// Resolve the paired user's ID for uploaded_by_user_id attribution.
 	// Agent principals are KindMachine with no ExternalUID, so the
 	// user_id comes from the device_pairings row keyed on agent_id.

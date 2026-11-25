@@ -512,6 +512,14 @@ Creates a virtual media node representing an integration project timeline (Resol
 
 ## 4. Direct Streaming Upload (`POST /api/v1/agent/upload`)
 
+After authorization, uploads have no total transfer deadline. `http.readTimeoutSecs`
+(default 15 seconds) bounds each body read while waiting for more data; it is
+refreshed for every read and suspended during storage/metadata processing. The
+ordinary write deadline is suspended until processing finishes. Reverse proxies
+can still enforce their own request deadlines; configure those for the largest
+clip and slowest supported link. The same policy applies to browser multipart
+uploads (`POST /api/v1/upload`).
+
 Mobile companion apps and modern workstation agents stream raw binary media directly to the
 server's Master Archive without intermediate staging mounts.
 
