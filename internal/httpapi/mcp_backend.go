@@ -177,7 +177,7 @@ func (b mcpBackend) RejectEdge(ctx context.Context, id int64) (any, error) {
 }
 
 func (b mcpBackend) ResetEdgeReview(ctx context.Context, id int64) (any, error) {
-	out, err := b.s.resetEdgeReview(ctx, id)
+	out, err := b.s.resetEdgeReview(ctx, id, reviewSourceAssistant)
 	if err != nil {
 		return nil, err
 	}

@@ -168,7 +168,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 
 ### Review tools (`mcp:review`)
 
-`mcp:read` does not satisfy these. Each takes explicit ids, calls the same function as its REST route, and writes the same `actor_audit` event (so an MCP confirm's row carries `pat_id`). Confirm, reject and manual-create set `review_source` to `assistant`. The REST routes set `human`. Reset clears `review_source` together with `reviewed_at` and `reviewed_by`. The REST reset route stays human-only (no PAT); `reset_edge_review` is the MCP caller and does not pass that gate.
+`mcp:read` does not satisfy these. Each takes explicit ids, calls the same function as its REST route, and writes the same `actor_audit` event (so an MCP confirm's row carries `pat_id`). Confirm, reject and manual-create set `review_source` to `assistant`. The REST routes set `human`. Reset clears `review_source` together with `reviewed_at` and `reviewed_by`. The REST reset route stays human-only (no PAT); `reset_edge_review` is the MCP caller and does not pass that gate. An assistant confirm, reject, manual create, or reset refuses a human decision: `review_source` is `human`, or the row is `CONFIRMED` or `REJECTED` with no source (a review written before the column existed). Resetting an assistant decision is allowed. A person on the REST routes can still overturn an assistant decision.
 
 | Tool | Arguments | Effect |
 |---|---|---|

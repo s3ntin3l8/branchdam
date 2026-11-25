@@ -27,7 +27,13 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     review_source = ?5,
     is_active = 1,
     updated_at = unixepoch()
-WHERE NOT (COALESCE(?5, '') = 'assistant' AND media_edges.review_source IS 'human')
+WHERE NOT (
+    COALESCE(?5, '') = 'assistant'
+    AND (
+      media_edges.review_source IS 'human'
+      OR (media_edges.review_source IS NULL AND media_edges.review_state IN ('CONFIRMED', 'REJECTED'))
+    )
+)
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
           created_at, updated_at, is_active, review_source

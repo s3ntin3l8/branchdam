@@ -1407,7 +1407,7 @@ func (s *Server) createManualEdge(ctx context.Context, sourceNodeID, targetNodeI
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		if hadPrior && reviewSource == reviewSourceAssistant && prior.ReviewSource.Valid && prior.ReviewSource.String == reviewSourceHuman {
+		if hadPrior && reviewSource == reviewSourceAssistant && assistantBlocked(prior) {
 			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
 		}
 
@@ -1689,6 +1689,21 @@ func reviewSourceValue(source string) sql.NullString {
 	return sql.NullString{String: source, Valid: true}
 }
 
+// assistantBlocked reports a decision an assistant must not undo: an
+// explicit human review_source, or a CONFIRMED/REJECTED row with no
+// source. The latter is a review written before review_source existed.
+// Resolver states (NEEDS_REVIEW, AUTO_ACCEPTED) and assistant decisions
+// are not blocked.
+func assistantBlocked(edge sqlcgen.MediaEdge) bool {
+	if edge.ReviewSource.Valid && edge.ReviewSource.String == reviewSourceHuman {
+		return true
+	}
+	if !edge.ReviewSource.Valid && (edge.ReviewState == "CONFIRMED" || edge.ReviewState == "REJECTED") {
+		return true
+	}
+	return false
+}
+
 func reviewSourceString(v sql.NullString) string {
 	if !v.Valid {
 		return ""
@@ -1812,7 +1827,7 @@ func (s *Server) confirmEdge(ctx context.Context, id int64, source string) error
 		if err != nil {
 			return err
 		}
-		if source == reviewSourceAssistant && edge.ReviewSource.Valid && edge.ReviewSource.String == reviewSourceHuman {
+		if source == reviewSourceAssistant && assistantBlocked(edge) {
 			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
 		}
 		targetNodeID, err = q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{
@@ -1874,7 +1889,7 @@ func (s *Server) rejectEdge(ctx context.Context, id int64, source string) error 
 		if err != nil {
 			return err
 		}
-		if source == reviewSourceAssistant && edge.ReviewSource.Valid && edge.ReviewSource.String == reviewSourceHuman {
+		if source == reviewSourceAssistant && assistantBlocked(edge) {
 			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
 		}
 		targetNodeID, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{
@@ -1931,7 +1946,11 @@ type EdgeResetReviewOutput struct {
 // route is human-only (invariant 6): an admin signed in through a browser
 // session, never a machine/agent principal and never a personal access
 // token. The MCP reset_edge_review tool calls resetEdgeReview directly and
-// is gated by mcp:review instead; it does not pass this REST check.
+// is gated by mcp:review instead of this REST check. It still cannot reset
+// a human decision: review_source human, or a CONFIRMED/REJECTED row with
+// no source (written before the column existed). Resetting an assistant
+// decision is allowed. An assistant reset-then-confirm is not a way around
+// the overwrite guard.
 // AUTO_ACCEPTED and NEEDS_REVIEW are resolver states, not a decision to
 // undo, and that is a 409. The reset is written to actor_audit with the
 // decision it undid.
@@ -1945,10 +1964,10 @@ func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput)
 	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindUser || !p.Authenticated || p.AuthProvider == auth.AuthProviderPAT {
 		return nil, huma.Error403Forbidden("only a person signed in to the web UI can reset a review decision")
 	}
-	return s.resetEdgeReview(ctx, in.ID)
+	return s.resetEdgeReview(ctx, in.ID, reviewSourceHuman)
 }
 
-func (s *Server) resetEdgeReview(ctx context.Context, id int64) (*EdgeResetReviewOutput, error) {
+func (s *Server) resetEdgeReview(ctx context.Context, id int64, source string) (*EdgeResetReviewOutput, error) {
 	errNotHumanReviewed := errors.New("edge is not human-reviewed")
 	var before sqlcgen.MediaEdge
 	err := s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
@@ -1957,6 +1976,9 @@ func (s *Server) resetEdgeReview(ctx context.Context, id int64) (*EdgeResetRevie
 			return err
 		}
 		before = edge
+		if source == reviewSourceAssistant && assistantBlocked(edge) {
+			return huma.Error409Conflict("a human review cannot be reset by an assistant")
+		}
 		targetNodeID, err := q.ResetMediaEdgeReview(ctx, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			// The edge exists (GetMediaEdge found it), so the state
@@ -1969,6 +1991,10 @@ func (s *Server) resetEdgeReview(ctx context.Context, id int64) (*EdgeResetRevie
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return nil, humaErr
+		}
 		switch {
 		case errors.Is(err, errNotHumanReviewed):
 			return nil, huma.Error409Conflict(fmt.Sprintf("edge %d is %s; only a CONFIRMED or REJECTED review can be reset", id, before.ReviewState))

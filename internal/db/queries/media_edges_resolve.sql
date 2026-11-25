@@ -115,10 +115,17 @@ UPDATE media_edges
 SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2,
     review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
-  -- An assistant decision must not overturn a human one. A human caller
-  -- (?3 = 'human', or the empty bind older callers leave) is not blocked.
-  -- COALESCE so a NULL bind is not treated as assistant.
-  AND NOT (COALESCE(?3, '') = 'assistant' AND review_source IS 'human')
+  -- An assistant must not overturn a human decision. That is review_source
+  -- human, or a CONFIRMED/REJECTED row whose source is NULL (written before
+  -- this column existed; the resolver path cannot reach those states).
+  -- A NULL bind is not assistant. IS is null-safe so a resolver row still matches.
+  AND NOT (
+    COALESCE(?3, '') = 'assistant'
+    AND (
+      review_source IS 'human'
+      OR (review_source IS NULL AND review_state IN ('CONFIRMED', 'REJECTED'))
+    )
+  )
 RETURNING target_node_id;
 
 -- name: RejectMediaEdge :one
@@ -127,7 +134,13 @@ UPDATE media_edges
 SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2,
     review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
-  AND NOT (COALESCE(?3, '') = 'assistant' AND review_source IS 'human')
+  AND NOT (
+    COALESCE(?3, '') = 'assistant'
+    AND (
+      review_source IS 'human'
+      OR (review_source IS NULL AND review_state IN ('CONFIRMED', 'REJECTED'))
+    )
+  )
 RETURNING target_node_id;
 
 -- name: ResetMediaEdgeReview :one
