@@ -215,3 +215,75 @@ func TestUploadEarlyResponseBoundsUnreadBody(t *testing.T) {
 		t.Fatal("handler still blocked draining an unread body")
 	}
 }
+
+func TestStalledHTTP2UploadsTimeOutAndRemovePartialFiles(t *testing.T) {
+	for _, route := range []string{"agent", "web"} {
+		t.Run(route, func(t *testing.T) {
+			ts, archive := uploadTimeoutServer(t, true)
+			template, body := uploadTimeoutRequest(t, route == "web", bytes.Repeat([]byte("footage"), 1024))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			rd, wr := io.Pipe()
+			defer rd.Close() //nolint:errcheck // test cleanup
+			defer wr.Close() //nolint:errcheck // test cleanup
+			stop := context.AfterFunc(ctx, func() { _ = rd.CloseWithError(ctx.Err()) })
+			defer stop()
+			go func() { _, _ = wr.Write(body[:len(body)/2]) }()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+template.URL.Path, rd)
+			require.NoError(t, err)
+			req.Header = template.Header
+			req.ContentLength = int64(len(body))
+			started := time.Now()
+			resp, err := ts.Client().Do(req)
+			require.NoError(t, ctx.Err(), "server must stop a stalled HTTP/2 upload before the client deadline")
+			require.GreaterOrEqual(t, time.Since(started), 900*time.Millisecond)
+			if err == nil {
+				defer resp.Body.Close() //nolint:errcheck // read-only response
+				require.Equal(t, 2, resp.ProtoMajor)
+				require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+			}
+			// A stream-level timeout may reach the client just before the handler
+			// has finished removing its partial file.
+			require.Eventually(t, func() bool {
+				err := filepath.WalkDir(archive, func(_ string, entry fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if !entry.IsDir() {
+						return fmt.Errorf("partial upload remains")
+					}
+					return nil
+				})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+func TestUploadFlushRestoresDeadlines(t *testing.T) {
+	for _, method := range []string{"Flush", "ResponseController"} {
+		t.Run(method, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			finished := false
+			w := &uploadResponseWriter{ResponseWriter: recorder, finish: func() { finished = true }}
+			if method == "Flush" {
+				w.Flush()
+			} else {
+				require.NoError(t, http.NewResponseController(w).Flush())
+			}
+			require.True(t, finished)
+			require.True(t, recorder.Flushed)
+		})
+	}
+}
+
+func TestUploadWithoutConfigRetainsServerDeadlines(t *testing.T) {
+	srv := &Server{}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte("footage")))
+	originalBody := req.Body
+	w, finish := srv.uploadTimeouts(recorder, req)
+	defer finish()
+	require.Same(t, recorder, w)
+	require.Equal(t, originalBody, req.Body)
+}

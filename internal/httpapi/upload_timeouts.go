@@ -17,11 +17,15 @@ import (
 // before the first response write so flushing and net/http's unread-body
 // drain are bounded again, including on pre-flight dedup and validation errors.
 func (s *Server) uploadTimeouts(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, func()) {
-	var readTimeout, writeTimeout time.Duration
-	if cfg := s.cfg(); cfg != nil {
-		readTimeout = time.Duration(cfg.HTTP.ReadTimeoutSecs) * time.Second
-		writeTimeout = time.Duration(cfg.HTTP.WriteTimeoutSecs) * time.Second
+	cfg := s.cfg()
+	if cfg == nil {
+		// Without config there is no idle/response budget to replace the
+		// server's deadlines with, so retain its ordinary protection.
+		return w, func() {}
 	}
+	readTimeout := time.Duration(cfg.HTTP.ReadTimeoutSecs) * time.Second
+	writeTimeout := time.Duration(cfg.HTTP.WriteTimeoutSecs) * time.Second
+
 	rc := http.NewResponseController(w)
 	// Like the SSE handler, tolerate writers without deadline support (e.g.
 	// httptest.ResponseRecorder). Real HTTP/1 and HTTP/2 writers support it.
@@ -76,3 +80,10 @@ func (w *uploadResponseWriter) Write(p []byte) (int, error) {
 }
 
 func (w *uploadResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *uploadResponseWriter) FlushError() error {
+	w.finish()
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *uploadResponseWriter) Flush() { _ = w.FlushError() }
