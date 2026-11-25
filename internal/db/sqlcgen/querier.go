@@ -244,11 +244,11 @@ type Querier interface {
 	// own <= 0 treatment) for the many test fixtures that don't care about it;
 	// pass it explicitly when a test needs a non-zero TTL persisted on the row.
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
-	// user_pats: per-user admin PATs for unattended operations. See
+	// user_pats: per-user PATs for unattended operations. See
 	// 00033_user_pats.sql's header comment for the rationale and storage
-	// shape. All queries here are admin-gated -- RequirePAT middleware
-	// sits on the route and rejects without a valid+scoped token before
-	// the handler runs.
+	// shape. Admin scopes stay behind RequirePAT; an MCP-only token
+	// (every scope starts with "mcp:") may belong to a live non-admin
+	// and is still rejected on every non-/mcp route.
 	//
 	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 	// "SQL Syntax Traps" note.
@@ -477,21 +477,24 @@ type Querier interface {
 	// password_hash. Index: users.username UNIQUE already covers this.
 	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
 	// Hot path: called on every authenticated PAT request. UNIQUE on
-	// hashed_key makes this an indexed lookup. Returns NULL when no row
-	// matches (caller distinguishes miss from error via the sql.ErrNoRows
-	// sentinel).
+	// hashed_key makes this an indexed lookup. Returns no row when nothing
+	// matches (caller distinguishes miss from error via sql.ErrNoRows).
 	//
-	// The JOIN on users is authority enforcement, not display: the WHERE
-	// requires the owner to be a live admin (is_admin = 1, disabled_at
-	// NULL), so demoting or disabling the owner invalidates every one of
-	// their tokens on the next request instead of freezing admin
-	// authority at mint time. A token whose owner fails the check
-	// surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
+	// The JOIN on users is authority enforcement, not display. The WHERE
+	// keeps a live owner (disabled_at IS NULL) and either a live admin
+	// (is_admin = 1) or an MCP-only token: a non-empty scopes_json array
+	// whose every element matches the case-sensitive glob 'mcp:*' (the
+	// same rule as auth.MCPOnlyScopes / strings.HasPrefix(scope, "mcp:")).
+	// Demoting an admin therefore invalidates their non-MCP tokens on the
+	// next request; disabling the owner invalidates every token, MCP or
+	// not. A token that fails the check surfaces as sql.ErrNoRows, which
+	// the middleware turns into 401, identical to a revoked token.
+	// Lookup repeats the admin-or-MCP-only check so a query change cannot
+	// silently widen it.
 	//
-	// owner_username / owner_email let the PAT middleware build a Principal
-	// that names the token's owner (actor_audit.actor_name, edge
-	// reviewed_by) without a second query; attribution itself keys on
-	// user_id, never on these display fields.
+	// owner_username / owner_email / owner_is_admin let the PAT middleware
+	// build a Principal and a LocalUserView without a second query.
+	// Attribution itself keys on user_id, never on the display fields.
 	GetUserPATByHash(ctx context.Context, hashedKey string) (GetUserPATByHashRow, error)
 	// Backs the fast-only pre-screen of GET /api/v1/agent/check-content:
 	// does any live (ACTIVE or HIDDEN) node carry this xxHash64 fast_hash

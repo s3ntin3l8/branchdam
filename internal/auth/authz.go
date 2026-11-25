@@ -35,8 +35,9 @@ func writeForbidden(w http.ResponseWriter, detail string) {
 //   - the session middleware (internal/auth/session) for cookie
 //     sessions -- the original and still the common case;
 //   - PATMiddleware.RequirePAT (issue #453 PR E) for Bearer-token
-//     admin PATs -- UserID is the token owner's users.id, IsAdmin is
-//     true (PATs are admin-only in this PR), MFAVerified is true (the
+//     PATs -- UserID is the token owner's users.id. IsAdmin is true
+//     for non-MCP tokens (lookup proved a live admin) and the owner's
+//     actual is_admin for an MCP-only token. MFAVerified is true (the
 //     token itself is the second factor).
 //
 // Absent means "no local session or PAT authenticated this request"

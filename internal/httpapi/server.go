@@ -432,6 +432,15 @@ func (s *Server) Handler() http.Handler {
 	// Web browser multipart upload
 	mux.HandleFunc("POST /api/v1/upload", s.handleWebUpload)
 	mux.Handle("GET /", s.spaHandler())
+	// The MCP server is a later change. Register the methods MCP
+	// uses so a token that passed the scope gate gets 404 from the
+	// router. "GET /" is the SPA catch-all; an unregistered POST
+	// on that path is 405, and an unregistered GET is the SPA
+	// shell. A later issue replaces these with the real handler.
+	mux.HandleFunc("GET /mcp", http.NotFound)
+	mux.HandleFunc("GET /mcp/", http.NotFound)
+	mux.HandleFunc("POST /mcp", http.NotFound)
+	mux.HandleFunc("POST /mcp/", http.NotFound)
 
 	var agentCfg auth.AgentConfig
 	if cfg := s.cfg(); cfg != nil {
@@ -523,9 +532,16 @@ func (s *Server) Handler() http.Handler {
 			"admin":          s.patService.Middleware("admin").RequirePAT(authzHandler),
 			"pats:write":     s.patService.Middleware("pats:write").RequirePAT(authzHandler),
 			"pairings:write": s.patService.Middleware("pairings:write").RequirePAT(authzHandler),
+			// Any one mcp:* grant (or "*") reaches /mcp. The per-tool
+			// checks live in the MCP layer; demanding mcp:read here
+			// would turn away an mcp:review-only token. The key is not
+			// the literal scope "mcp:*" -- scopeSatisfied is exact-match.
+			"mcp": s.patService.MiddlewareAnyOf("mcp:read", "mcp:review", "mcp:enrich").RequirePAT(authzHandler),
 		}
 		patScopeFor := func(path string) string {
 			switch {
+			case path == "/mcp" || strings.HasPrefix(path, "/mcp/"):
+				return "mcp"
 			case strings.HasPrefix(path, "/api/v1/users/me/pats"):
 				return "pats:write"
 			case strings.HasPrefix(path, "/api/v1/companion/pairings"):
@@ -605,6 +621,36 @@ func isLocalSelfService(r *http.Request, key string) bool {
 	return ok && view.UserID != 0
 }
 
+// isOwnPATManagement reports whether r is an authenticated user
+// managing their own PATs (mint, list, revoke). MCP-only tokens are
+// excluded so a non-admin assistant credential cannot slip past
+// RequireAdmin on this prefix.
+func isOwnPATManagement(r *http.Request) bool {
+	path := r.URL.Path
+	if path != "/api/v1/users/me/pats" && !strings.HasPrefix(path, "/api/v1/users/me/pats/") {
+		return false
+	}
+	p, ok := auth.From(r.Context())
+	if !ok || p.Kind != auth.KindUser || !p.Authenticated {
+		return false
+	}
+	if scopes, ok := auth.PATScopesFrom(r.Context()); ok && auth.MCPOnlyScopes(scopes) {
+		return false
+	}
+	return true
+}
+
+// isPATOnMCP reports whether this request is a PAT-authenticated call
+// to the MCP endpoint. The scope middleware has already admitted it.
+func isPATOnMCP(r *http.Request) bool {
+	path := r.URL.Path
+	if path != "/mcp" && !strings.HasPrefix(path, "/mcp/") {
+		return false
+	}
+	_, ok := auth.PATScopesFrom(r.Context())
+	return ok
+}
+
 func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Logger, next http.Handler) http.Handler {
 	requireAdmin := auth.RequireAdmin(allowedGroups, log)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -623,6 +669,27 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Log
 			return
 		}
 		if isLocalSelfService(r, key) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// A live non-admin may mint, list and revoke their own
+		// MCP-only tokens. RequireAdmin would 403 the POST. The
+		// handler still refuses a non-MCP scope list. MCP-only
+		// tokens themselves are not exempted: they must not pass
+		// RequireAdmin anywhere, and they lack pats:write so the
+		// route gate already 403s them before this runs.
+		if isOwnPATManagement(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// /mcp is not an admin route. The PAT scope gate (any mcp:*
+		// grant, or *) already ran. RequireAdmin would 403 a
+		// non-admin owner's token on POST before the router could
+		// 404, and the MCP handler (a later issue) would be
+		// unreachable. IsAdmin on the LocalUserView stays the
+		// owner's real flag, so the token still fails RequireAdmin
+		// on every other path.
+		if isPATOnMCP(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

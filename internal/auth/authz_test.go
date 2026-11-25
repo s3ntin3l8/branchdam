@@ -300,9 +300,11 @@ func TestIsAdmin_LocalPrincipalIgnoresGroupsPolicy(t *testing.T) {
 		{"forward, empty groups (unchanged)", forward, nil, LocalUserView{}, true},
 		{"forward-JIT non-admin row, empty groups (unchanged)", forward, nil, LocalUserView{UserID: 7}, true},
 		{"forward, matching group (unchanged)", Principal{Kind: KindUser, Authenticated: true, Groups: []string{"dam-admins"}}, []string{"dam-admins"}, LocalUserView{}, true},
-		// PAT principals carry no AuthProvider; RequirePAT attaches
-		// IsAdmin=true only after GetUserPATByHash proved the owner is a
-		// live admin, so the localView override is what admits them.
+		// PAT principals carry no AuthProvider. RequirePAT attaches
+		// IsAdmin=true for a non-MCP token only after lookup proved
+		// the owner is a live admin, so the localView override is
+		// what admits them. An MCP-only token copies the owner's
+		// actual is_admin instead (see pat.go).
 		{"PAT principal with admin owner view", Principal{Kind: KindUser, Authenticated: true, Name: "pat:1"}, []string{"dam-admins"}, LocalUserView{UserID: 1, IsAdmin: true, MFAVerified: true}, true},
 	}
 	for _, tt := range tests {
