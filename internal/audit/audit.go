@@ -326,7 +326,7 @@ func (s *Service) ListActivity(ctx context.Context, f Filter, limit, offset int6
 // auditAuthProvider is the value stored in actor_audit.auth_provider.
 // A KindUser principal with an empty AuthProvider is forward-auth:
 // principal.go documents that empty means authentik, and the column
-// CHECK rejects ''. Machine, system and anonymous actors get NULL.
+// CHECK rejects an empty string. Machine, system and anonymous actors get NULL.
 func auditAuthProvider(p auth.Principal, kind string) sql.NullString {
 	if kind != ActorKindUser {
 		return sql.NullString{}
