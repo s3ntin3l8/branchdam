@@ -557,3 +557,27 @@ func TestHasScope_AdminWildcard(t *testing.T) {
 	srv.Handler().ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNotFound, rr.Code, "* token must pass the /mcp gate, body: %s", rr.Body.String())
 }
+
+// TestMCPPAT_EveryGrantableMCPScopeReachesMCP pins the three lists that
+// have to agree: every mcp:-prefixed entry in PATGrantableScopes is
+// admitted by the /mcp any-of gate. A new grantable scope that is not
+// added to MiddlewareAnyOf would 403 here -- a dead grant.
+func TestMCPPAT_EveryGrantableMCPScopeReachesMCP(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	handler := srv.Handler()
+	var saw bool
+	for _, scope := range auth.PATGrantableScopes {
+		if !strings.HasPrefix(scope, "mcp:") {
+			continue
+		}
+		saw = true
+		token, _, err := patSvc.Mint(context.Background(), userID, scope, []string{scope}, 0)
+		require.NoError(t, err, "mint %s", scope)
+		req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusNotFound, rr.Code, "scope %s must pass the /mcp gate, body: %s", scope, rr.Body.String())
+	}
+	require.True(t, saw, "PATGrantableScopes has no mcp: entry to pin")
+}

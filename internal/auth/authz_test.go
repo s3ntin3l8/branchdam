@@ -305,7 +305,12 @@ func TestIsAdmin_LocalPrincipalIgnoresGroupsPolicy(t *testing.T) {
 		// the owner is a live admin, so the localView override is
 		// what admits them. An MCP-only token copies the owner's
 		// actual is_admin instead (see pat.go).
-		{"PAT principal with admin owner view", Principal{Kind: KindUser, Authenticated: true, Name: "pat:1"}, []string{"dam-admins"}, LocalUserView{UserID: 1, IsAdmin: true, MFAVerified: true}, true},
+		{"PAT principal with admin owner view", Principal{Kind: KindUser, Authenticated: true, Name: "pat:1", AuthProvider: AuthProviderPAT}, []string{"dam-admins"}, LocalUserView{UserID: 1, IsAdmin: true, MFAVerified: true}, true},
+		// Empty authz.groups must not promote a non-admin MCP token.
+		// A PAT principal is not local and has no groups, so without
+		// the AuthProviderPAT rule it would fall through to "everyone".
+		{"PAT non-admin, empty groups", Principal{Kind: KindUser, Authenticated: true, AuthProvider: AuthProviderPAT}, nil, LocalUserView{UserID: 2}, false},
+		{"PAT non-admin, non-empty groups", Principal{Kind: KindUser, Authenticated: true, AuthProvider: AuthProviderPAT}, []string{"dam-admins"}, LocalUserView{UserID: 2}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

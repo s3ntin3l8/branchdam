@@ -225,7 +225,7 @@ func (m *PATMiddleware) RequirePAT(next http.Handler) http.Handler {
 		}
 		if !scopeAdmitted(result.Scopes, m.Scope, m.AnyOf) {
 			if len(m.AnyOf) > 0 {
-				http.Error(w, fmt.Sprintf("token lacks any of scopes %q", m.AnyOf), http.StatusForbidden)
+				http.Error(w, "token lacks any of scopes "+strings.Join(m.AnyOf, ", "), http.StatusForbidden)
 				return
 			}
 			http.Error(w, fmt.Sprintf("token lacks scope %q", m.Scope), http.StatusForbidden)
