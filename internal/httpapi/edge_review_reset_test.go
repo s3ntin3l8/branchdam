@@ -276,11 +276,13 @@ func TestResetEdgeReview_AdminHumansOnly(t *testing.T) {
 		t.Errorf("machine principal: err = %v, want 403", err)
 	}
 
-	// Admin by group, so only the PAT check can refuse it.
-	pat := auth.WithPrincipal(ctx, auth.Principal{
+	// Admin owner, so only the PAT check inside the handler can refuse
+	// it. RequirePAT always attaches this view; IsAdmin decides a PAT
+	// principal and no longer falls through to group membership.
+	pat := auth.WithLocalUserView(auth.WithPrincipal(ctx, auth.Principal{
 		Kind: auth.KindUser, Name: "carol", Groups: []string{"dam-admins"},
 		AuthProvider: auth.AuthProviderPAT, UserID: 1, ExternalUID: "pat:abcd", Authenticated: true,
-	})
+	}), auth.LocalUserView{UserID: 1, IsAdmin: true, MFAVerified: true})
 	if err := srv.requireSettingsAdmin(pat); err != nil {
 		t.Fatalf("PAT principal fixture is not an admin: %v", err)
 	}
