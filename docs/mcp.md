@@ -52,11 +52,16 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
    PAT (or which PAT) was used. A PAT principal's `ExternalUID` carries
    `pat:<hash prefix>`, but it is not persisted.
 5. **Search.**
-   - `q` is a case-insensitive `LIKE` match on `file_name` only
+   - `q` is a case-insensitive substring match on `file_name`
+     (`instr(lower(file_name), lower(?))`, not `LIKE`, because sqlc
+     can't handle `LIKE ... ESCAPE`). It **also** matches an exact
+     `node_uuid`, so a pasted UUID finds its node
      (`internal/db/queries/media_nodes.sql`).
    - There is no FTS: `mattn/go-sqlite3` is built without the
      `sqlite_fts5` tag.
-   - The perceptual hash is only used inside the graph resolver.
+   - The perceptual hash is read only by the graph resolver and by
+     `GET /api/v1/edges/audit`, which shows `phashDistance` between an
+     edge's endpoints. There is no "find similar" query.
 6. **No editable tags or annotations.** `node_metadata` holds
    extracted values only (sources `exiftool|ffprobe|internal`).
 
@@ -67,7 +72,8 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 - **New grantable scopes:**
   - `mcp:read`: every read tool.
   - `mcp:review`: review and lifecycle tools. It does **not** imply
-    `mcp:read`; mint both.
+    `mcp:read`. Minting both is recommended, but not required: a token
+    holding only `mcp:review` can still call the review tools.
   - `mcp:enrich`: tag and annotation writes (phase 4).
 - **An "MCP-only token"** is one whose scopes are all `mcp:*`. A
   non-admin live user may mint one. Any token with a non-`mcp:*` scope
@@ -81,9 +87,13 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 - **`RequirePAT`** sets `LocalUserView.IsAdmin` to the owner's
   **actual** `is_admin` for MCP-only tokens. Today it hard-codes
   `true`; a non-admin MCP token must not pass `RequireAdmin` anywhere.
-- **`patScopeFor`** routes `/mcp` to the `mcp:read` middleware. An
-  MCP-only token presented on **any other path** gets a 403, because
-  its scopes never satisfy `admin`, `pats:write` or `pairings:write`.
+- **`patScopeFor`** routes `/mcp` to a middleware entry that admits
+  any token holding **at least one** `mcp:*` scope (or `*`). The
+  route gate does not demand `mcp:read`, because that would turn away
+  an `mcp:review`-only token before its tools run. The per-tool check
+  decides what each call may do. An MCP-only token presented on **any
+  other path** gets a 403, because its scopes never satisfy `admin`,
+  `pats:write` or `pairings:write`.
 - **Scope check helper:** `auth.PATScopesFrom(ctx)` already exposes
   the token's scopes to handlers. The MCP layer uses it (via
   `scopeSatisfied`, exported as `auth.HasScope`) for per-tool checks.
@@ -93,8 +103,9 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 ### 0b. Audit attribution
 
 - **Migration** `ALTER TABLE actor_audit ADD COLUMN`:
-  - `auth_provider TEXT` (nullable; `pat`, `forward`, `local`,
-    `oauth`)
+  - `auth_provider TEXT` (nullable), with
+    `CHECK (auth_provider IN ('authentik','local','pat','oauth'))`.
+    The values follow the existing `users.auth_provider` vocabulary.
   - `pat_id INTEGER REFERENCES user_pats(id)` (nullable)
 
   We chose columns over `details_json` so the audit view can filter
@@ -102,6 +113,11 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 - **Plumbing:** add `PATID int64` to `auth.PATLookupResult` and to the
   `auth.Principal`. `audit.Service.WriteActorAudit` persists both
   fields from the principal it already receives.
+- **Normalisation:** forward-auth principals carry
+  `Principal.AuthProvider == ""`. `principal.go` documents that empty
+  means `authentik`. `WriteActorAudit` must therefore write
+  `'authentik'` for a `KindUser` principal with an empty provider, never
+  `''`, and NULL for machine and system actors.
 - **Audit view:** `GET /api/v1/audit` returns them. The web activity
   log shows a token-name chip ("via PAT 'claude-desktop'").
 
@@ -112,7 +128,8 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
   - middlewares: `strip-identity` only (no Authentik)
 
   This mirrors the agent router. The PAT (and in phase 2 the OAuth
-  access token) is the only credential on that path.
+  access token) is the only credential on that path. Phase 2 extends
+  the rule to the discovery path (see below).
 - **Docs:** document the router in `docs/deploy.md` next to the agent
   router.
 - **Config:** a new `mcp.enabled` config key, default `false`. When it
@@ -131,7 +148,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 
 | Tool | Returns | Backed by |
 |---|---|---|
-| `search_assets` | Paged asset list. Inputs: `query`, `cameraModel`, `graphStatus`, `lifecycleState`, `storageLocationId`, `unlinkedOnly`, `sort`, `limit`, `cursor` | list query behind `GET /api/v1/assets` |
+| `search_assets` | Paged asset list. Inputs mirror `ListAssetsInput` (`routes.go`) one-to-one: `q`, `cameraModel`, `graphStatus`, `lifecycleState`, `storageLocationId`, `unlinkedOnly`, `uploadedByUserId`, `sort`, `limit`, `offset` (offset pagination; the list has no cursor) | list query behind `GET /api/v1/assets` |
 | `list_facets` | Filter values with counts | `/assets/facets` |
 | `get_asset` | Detail, extracted metadata and sync status in one call | `/assets/{id}`, `/metadata`, `/sync-status` |
 | `get_lineage` | `{rootId, nodes, edges}`, `depth` 1–5 | `/assets/{id}/lineage` |
@@ -210,8 +227,15 @@ To limit prompt injection:
 - **Re-check at implementation time:** the current MCP authorization
   spec revision and the claude.ai connector requirements. Both move.
 - **Ingress:** the `/mcp` router stays outside Authentik ForwardAuth.
-  It accepts a PAT or an OAuth access token. Public exposure follows
-  the operator's existing pattern for remote connectors.
+  It accepts a PAT or an OAuth access token.
+  - **Discovery path:** its rule must also cover the discovery path,
+    i.e.
+    ``PathPrefix(`/mcp`) || PathPrefix(`/.well-known/oauth-protected-resource`)``.
+    Otherwise the browser catch-all router (priority 10,
+    `authentik@file`) sends the client's first, credential-less
+    discovery request to a login redirect.
+  - **Public exposure** follows the operator's existing pattern for
+    remote connectors.
 
 ## Phase 3: search
 
@@ -233,6 +257,10 @@ To limit prompt injection:
 - **Query routing:** `q` on `GET /api/v1/assets` uses FTS when the
   table exists, so the web UI gains it too. `search_assets` uses the
   same path.
+- **Exact-UUID lookup must keep working.** A `q` that equals a node's
+  `node_uuid` must still return that node. Keep the `node_uuid = q`
+  branch alongside the FTS match (OR it in, or check it first), so
+  pasting a UUID doesn't silently stop working.
 
 **Find similar**
 
