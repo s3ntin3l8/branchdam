@@ -116,6 +116,15 @@ func TestMCPReviewTools(t *testing.T) {
 	require.True(t, rest.ReviewSource.Valid)
 	assert.Equal(t, "human", rest.ReviewSource.String)
 
+	overwrite := callMCP(t, reviewSession, "confirm_edge", map[string]any{"id": restEdge})
+	require.True(t, overwrite.IsError, mcpText(overwrite))
+	assert.Contains(t, mcpText(overwrite), "human")
+	rest, err = database.Reader.GetMediaEdge(ctx, restEdge)
+	require.NoError(t, err)
+	assert.Equal(t, "CONFIRMED", rest.ReviewState)
+	require.True(t, rest.ReviewSource.Valid)
+	assert.Equal(t, "human", rest.ReviewSource.String)
+
 	reset := callMCP(t, reviewSession, "reset_edge_review", map[string]any{"id": mcpEdge})
 	require.False(t, reset.IsError, mcpText(reset))
 	cleared, err := database.Reader.GetMediaEdge(ctx, mcpEdge)

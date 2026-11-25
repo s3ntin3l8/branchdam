@@ -1407,6 +1407,9 @@ func (s *Server) createManualEdge(ctx context.Context, sourceNodeID, targetNodeI
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
+		if hadPrior && reviewSource == reviewSourceAssistant && prior.ReviewSource.Valid && prior.ReviewSource.String == reviewSourceHuman {
+			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
+		}
 
 		edge, err := q.CreateManualMediaEdge(ctx, sqlcgen.CreateManualMediaEdgeParams{
 			SourceNodeID:     in.Body.SourceNodeID,
@@ -1448,6 +1451,9 @@ func (s *Server) createManualEdge(ctx context.Context, sourceNodeID, targetNodeI
 	if hadPrior {
 		details["previousState"] = prior.ReviewState
 		addPreviousReview(details, prior)
+		if prior.ReviewSource.Valid {
+			details["previousReviewSource"] = prior.ReviewSource.String
+		}
 	}
 	details["reviewState"] = createdEdge.ReviewState
 	if createdEdge.ReviewSource.Valid {
@@ -1806,6 +1812,9 @@ func (s *Server) confirmEdge(ctx context.Context, id int64, source string) error
 		if err != nil {
 			return err
 		}
+		if source == reviewSourceAssistant && edge.ReviewSource.Valid && edge.ReviewSource.String == reviewSourceHuman {
+			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
+		}
 		targetNodeID, err = q.ConfirmMediaEdge(ctx, sqlcgen.ConfirmMediaEdgeParams{
 			ID: id, ReviewedBy: reviewerName(ctx), ReviewSource: reviewSourceValue(source),
 		})
@@ -1821,6 +1830,10 @@ func (s *Server) confirmEdge(ctx context.Context, id int64, source string) error
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return humaErr
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return huma.Error404NotFound("edge not found")
 		}
@@ -1828,6 +1841,10 @@ func (s *Server) confirmEdge(ctx context.Context, id int64, source string) error
 	}
 	details := edgeAuditDetails(confirmedEdge)
 	details["previousState"] = confirmedEdge.ReviewState
+	addPreviousReview(details, confirmedEdge)
+	if confirmedEdge.ReviewSource.Valid {
+		details["previousReviewSource"] = confirmedEdge.ReviewSource.String
+	}
 	details["reviewState"] = afterEdge.ReviewState
 	if afterEdge.ReviewSource.Valid {
 		details["reviewSource"] = afterEdge.ReviewSource.String
@@ -1857,6 +1874,9 @@ func (s *Server) rejectEdge(ctx context.Context, id int64, source string) error 
 		if err != nil {
 			return err
 		}
+		if source == reviewSourceAssistant && edge.ReviewSource.Valid && edge.ReviewSource.String == reviewSourceHuman {
+			return huma.Error409Conflict("a human review cannot be overwritten by an assistant")
+		}
 		targetNodeID, err := q.RejectMediaEdge(ctx, sqlcgen.RejectMediaEdgeParams{
 			ID: id, ReviewedBy: reviewerName(ctx), ReviewSource: reviewSourceValue(source),
 		})
@@ -1871,6 +1891,10 @@ func (s *Server) rejectEdge(ctx context.Context, id int64, source string) error 
 		return recomputeGraphStatus(ctx, q, targetNodeID)
 	})
 	if err != nil {
+		var humaErr huma.StatusError
+		if errors.As(err, &humaErr) {
+			return humaErr
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return huma.Error404NotFound("edge not found")
 		}
@@ -1878,6 +1902,10 @@ func (s *Server) rejectEdge(ctx context.Context, id int64, source string) error 
 	}
 	details := edgeAuditDetails(rejectedEdge)
 	details["previousState"] = rejectedEdge.ReviewState
+	addPreviousReview(details, rejectedEdge)
+	if rejectedEdge.ReviewSource.Valid {
+		details["previousReviewSource"] = rejectedEdge.ReviewSource.String
+	}
 	details["reviewState"] = afterEdge.ReviewState
 	if afterEdge.ReviewSource.Valid {
 		details["reviewSource"] = afterEdge.ReviewSource.String
@@ -1955,7 +1983,7 @@ func (s *Server) resetEdgeReview(ctx context.Context, id int64) (*EdgeResetRevie
 	details["previousState"] = before.ReviewState
 	addPreviousReview(details, before)
 	if before.ReviewSource.Valid {
-		details["reviewSource"] = before.ReviewSource.String
+		details["previousReviewSource"] = before.ReviewSource.String
 	}
 	s.writeEdgeAudit(ctx, auditPkg.EventEdgeReviewReset, before.ID, details)
 

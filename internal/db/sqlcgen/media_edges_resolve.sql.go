@@ -15,6 +15,10 @@ UPDATE media_edges
 SET review_state = 'CONFIRMED', reviewed_at = unixepoch(), reviewed_by = ?2,
     review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
+  -- An assistant decision must not overturn a human one. A human caller
+  -- (?3 = 'human', or the empty bind older callers leave) is not blocked.
+  -- COALESCE so a NULL bind is not treated as assistant.
+  AND NOT (COALESCE(?3, '') = 'assistant' AND review_source IS 'human')
 RETURNING target_node_id
 `
 
@@ -106,6 +110,7 @@ UPDATE media_edges
 SET review_state = 'REJECTED', reviewed_at = unixepoch(), reviewed_by = ?2,
     review_source = ?3, updated_at = unixepoch()
 WHERE id = ?1
+  AND NOT (COALESCE(?3, '') = 'assistant' AND review_source IS 'human')
 RETURNING target_node_id
 `
 
