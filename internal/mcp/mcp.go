@@ -32,6 +32,18 @@ var errForbidden = errors.New("forbidden: mcp:read scope required")
 // mcp:read does not satisfy it.
 var errForbiddenReview = errors.New("forbidden: mcp:review scope required")
 
+// errForbiddenEnrich is the same shape for a call that needs mcp:enrich.
+// mcp:read and mcp:review do not satisfy it.
+var errForbiddenEnrich = errors.New("forbidden: mcp:enrich scope required")
+
+// TagBatchLimit is the maximum ids (and tags) on one tag_assets or
+// untag_assets call. TagPairLimit caps the product so one call cannot
+// open thousands of write transactions.
+const (
+	TagBatchLimit = 100
+	TagPairLimit  = 1000
+)
+
 // SearchAssetsInput mirrors ListAssetsInput. Zero Limit and Offset
 // mean the HTTP defaults (50 and 0). Zero UploadedByUserID and
 // StorageLocationID mean "no filter".
@@ -57,6 +69,20 @@ type FindSimilarInput struct {
 	MaxDistance *int64 `json:"maxDistance,omitempty" jsonschema:"maximum Hamming distance from 0 to 64; omitted means 12"`
 }
 
+// TagAssetsInput is tag_assets and untag_assets. At most TagBatchLimit
+// ids and TagBatchLimit tags.
+type TagAssetsInput struct {
+	IDs  []int64  `json:"ids" jsonschema:"asset ids, at most 100"`
+	Tags []string `json:"tags" jsonschema:"tags to add or remove, at most 100"`
+}
+
+// SetDescriptionInput is set_description. model is optional.
+type SetDescriptionInput struct {
+	ID    int64  `json:"id" jsonschema:"asset id"`
+	Text  string `json:"text" jsonschema:"description text, 1 to 4000 characters"`
+	Model string `json:"model,omitempty" jsonschema:"client model name, optional"`
+}
+
 // Backend is implemented by the HTTP layer so this package does not
 // import it. Each method returns the same body the named Huma handler
 // returns. ViewAsset reports ready=false when no JPEG is cached yet;
@@ -79,6 +105,10 @@ type Backend interface {
 	TrashAsset(ctx context.Context, id int64) (any, error)
 	RestoreAsset(ctx context.Context, id int64) (any, error)
 	RetrySync(ctx context.Context, id int64) (any, error)
+	ListTags(ctx context.Context) (any, error)
+	TagAssets(ctx context.Context, in TagAssetsInput) (any, error)
+	UntagAssets(ctx context.Context, in TagAssetsInput) (any, error)
+	SetDescription(ctx context.Context, in SetDescriptionInput) (any, error)
 }
 
 // Deps configures the MCP handler.
@@ -140,6 +170,13 @@ func requireRead(ctx context.Context) error {
 func requireReview(ctx context.Context) error {
 	if !auth.HasScope(ctx, "mcp:review") {
 		return errForbiddenReview
+	}
+	return nil
+}
+
+func requireEnrich(ctx context.Context) error {
+	if !auth.HasScope(ctx, "mcp:enrich") {
+		return errForbiddenEnrich
 	}
 	return nil
 }

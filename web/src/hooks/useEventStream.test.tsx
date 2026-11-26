@@ -96,6 +96,8 @@ describe("useEventStream", () => {
       ["asset-lineage"],
       ["asset-graph"],
       ["asset-similar"],
+      ["asset-tags"],
+      ["asset-annotations"],
       ["audit-entries"],
       ["companion-pairings"],
       ["users"],
@@ -132,8 +134,8 @@ describe("useEventStream", () => {
       vi.advanceTimersByTime(200);
     });
 
-    // Only 16 invalidation calls (one batch for the 16 query keys)
-    expect(spy).toHaveBeenCalledTimes(16);
+    // Only 18 invalidation calls (one batch for the 18 query keys)
+    expect(spy).toHaveBeenCalledTimes(18);
     const keys = spy.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
     expect(keys).toContain(JSON.stringify(["unlinked-count"]));
     expect(keys).toContain(JSON.stringify(["asset-facets"]));

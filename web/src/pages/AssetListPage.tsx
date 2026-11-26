@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, Link } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import { useAssetFacets, useAssets, useDeleteAsset, useMe, useRestoreAsset, useStorageLocations, useUsers } from "../hooks/queries";
+import { useAssetFacets, useAssets, useDeleteAsset, useMe, useRestoreAsset, useStorageLocations, useTagCounts, useUsers } from "../hooks/queries";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
 import type { Asset, AssetSort } from "../api/types";
@@ -51,6 +51,7 @@ export default function AssetListPage() {
   const unlinkedOnly = searchParams.get("unlinkedOnly") === "true";
   const myUploads = searchParams.get("myUploads") === "true";
   const q = searchParams.get("q") || "";
+  const tag = searchParams.get("tag") || "";
   const rawSort = searchParams.get("sort") || "newest";
   const sort: AssetSort = SORT_OPTIONS.some((o) => o.value === rawSort) ? (rawSort as AssetSort) : "newest";
   const parsedPage = Number(searchParams.get("page") || "1");
@@ -77,9 +78,12 @@ export default function AssetListPage() {
     unlinkedOnly: unlinkedOnly || undefined,
     uploadedByUserId: effectiveMyUploads ? myUserID : undefined,
     q: q || undefined,
+    tag: tag || undefined,
     sort: sort === "newest" ? undefined : sort,
   });
 
+  const { data: tagData } = useTagCounts();
+  const tagCounts = tagData?.tags ?? [];
   const cameraModels = facetsData?.cameraModels ?? [];
   const locations = locsData?.locations ?? [];
   const assets = useMemo(() => data?.assets ?? [], [data?.assets]);
@@ -336,7 +340,7 @@ export default function AssetListPage() {
   };
 
   const hasActiveFilters = Boolean(
-    q || cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState
+    q || tag || cameraModel || graphStatus || storageLocationId || unlinkedOnly || effectiveMyUploads || lifecycleState
   );
 
   return (
@@ -398,6 +402,29 @@ export default function AssetListPage() {
             </select>
           </div>
         </div>
+        {(tagCounts.length > 0 || tag) && (
+          <div className="mt-4 flex flex-wrap gap-2" aria-label="Tag filters">
+            {(tag && !tagCounts.some((row) => row.tag === tag) ? [{ tag, count: 0 }, ...tagCounts] : tagCounts).map((row) => {
+              const active = row.tag === tag;
+              return (
+                <button
+                  key={row.tag}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => updateFilters({ tag: active ? null : row.tag })}
+                  className={
+                    active
+                      ? "rounded-full border border-emerald-700 bg-emerald-950 px-2.5 py-1 text-xs text-emerald-300"
+                      : "rounded-full border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
+                  }
+                >
+                  {row.tag}
+                  {row.count > 0 ? ` ${row.count}` : ""}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
           {/* Camera Model */}
           <div>

@@ -165,7 +165,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 |---|---|---|
 | `search_assets` | Paged asset list. Inputs mirror `ListAssetsInput` (`routes.go`) one-to-one: `q`, `cameraModel`, `graphStatus`, `lifecycleState`, `storageLocationId`, `unlinkedOnly`, `uploadedByUserId`, `sort`, `tag`, `limit`, `offset` (offset pagination; the list has no cursor) | list query behind `GET /api/v1/assets` |
 | `list_facets` | Filter values with counts | `/assets/facets` |
-| `get_asset` | Detail, extracted metadata and sync status in one call | `/assets/{id}`, `/metadata`, `/sync-status` |
+| `get_asset` | Detail, extracted metadata, sync status, tags and annotations (each with `source`) | `/assets/{id}`, `/metadata`, `/sync-status`, `/tags`, `/annotations` |
 | `find_similar` | Other `ACTIVE`/`HIDDEN` assets ordered by perceptual-hash Hamming distance. `limit` defaults to 20 (max 100). `maxDistance` defaults to 12 (0-64). A source with no hash returns an empty list and `reason` `no_perceptual_hash` | `GET /api/v1/assets/{id}/similar` |
 | `get_lineage` | `{rootId, nodes, edges}`, `depth` 1–5 | `/assets/{id}/lineage` |
 | `view_asset` | MCP **image content** (the 512px JPEG thumbnail) | `internal/thumbs` cache. While the thumbnail is pending, return a text result saying "thumbnail not ready yet", not a tool error |
@@ -186,6 +186,19 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 | `trash_asset` | `id` | trash the asset and its linked exports |
 | `restore_asset` | `id` | restore a trashed or archived asset |
 | `retry_sync` | `id` | requeue failed sync rows for the asset |
+
+### Enrichment tools (`mcp:enrich`)
+
+`mcp:read` does not satisfy these. `list_tags` is a read tool (`mcp:read`); `mcp:enrich` alone cannot call it, even though `GET /api/v1/tags` accepts either. `tag_assets` and `untag_assets` take at most 100 ids, 100 tags and 1000 id-tag pairs. Duplicate ids and tags are collapsed first. Every id is checked before any write, so a missing or archived asset fails the call with nothing committed. They call the same functions as the REST routes. `source` is still derived on the server, so these writes are `assistant`. `untag_assets` removes only `source=assistant` tags; a user tag is reported as skipped. The removed and skipped tags are the normalised form.
+
+| Tool | Arguments | Effect |
+|---|---|---|
+| `list_tags` | none | tags with counts for live assets (`mcp:read`) |
+| `tag_assets` | `ids`, `tags` | add each tag to each asset |
+| `untag_assets` | `ids`, `tags` | remove assistant tags only |
+| `set_description` | `id`, `text`, `model?` | set the assistant description |
+
+`get_asset` also returns `tags` and `annotations`, each with `source`.
 
 `GET /api/v1/edges/audit?reviewSource=assistant` lists assistant-reviewed edges (they are not `NEEDS_REVIEW`, so this replaces the queue predicate rather than adding to it). Lineage and graph edges include `reviewSource`. The web queue has an assistant-reviewed filter, and an assistant decision is marked `AI` on the graph and in the queue.
 
@@ -215,6 +228,8 @@ The server exposes MCP prompts for the common workflows:
   propose confirm or reject with reasons, and act only on the user's
   go-ahead.
 - `explain-asset`: lineage plus metadata narrative for one asset.
+- `describe-assets`: search, view each result, propose tags and a
+  description, and write them only after the user agrees.
 
 ### Untrusted content
 
@@ -315,8 +330,8 @@ Claude's custom-connector docs.
 
 ## Phase 4: assistant enrichment
 
-REST for tags and descriptions is in place. MCP tools and the web UI
-(AI badges, tag editing, the revert action) are the next issue.
+REST, MCP tools and the web UI are in place. branchDAM still does not
+call a model itself.
 
 - **Schema:** `asset_tags` and `asset_annotations`, separate from
   extracted `node_metadata`. `source` is `user` or `assistant`.
@@ -343,11 +358,13 @@ REST for tags and descriptions is in place. MCP tools and the web UI
   - `GET /api/v1/assets?tag=` filters on an exact tag. `q` also matches
     tag and annotation text through `media_nodes_fts`.
 - **Audit:** add, remove, description and revert write `actor_audit`.
-- **MCP tools** (not built yet):
-  - `tag_assets` and `set_description` (scope `mcp:enrich`)
-  - `list_tags` (scope `mcp:read`)
-- **Web** (not built yet): asset detail shows tags and the description,
-  with an AI badge when `source` is `assistant`.
+- **MCP tools:** `tag_assets`, `untag_assets` and `set_description`
+  (`mcp:enrich`); `list_tags` (`mcp:read`). `get_asset` includes tags
+  and annotations. `untag_assets` cannot remove a user tag. At most
+  100 ids, 100 tags and 1000 id-tag pairs per call. The prompt is `describe-assets`.
+- **Web:** asset detail shows tags and the description, with an AI
+  badge when `source` is `assistant`. Users add and remove tags. Admins
+  revert assistant tags from settings. The asset list has a tag chip.
 
 ## Phase ordering
 

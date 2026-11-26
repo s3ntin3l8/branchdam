@@ -18,6 +18,7 @@ import AssetGraphCanvas from "../components/AssetGraphCanvas";
 import AssetMediaPreview from "../components/AssetMediaPreview";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
+import AssetTagsPanel from "../components/AssetTagsPanel";
 import type { Asset, InheritMetadataResponse } from "../api/types";
 import { formatBytes } from "../lib/formatBytes";
 
@@ -566,6 +567,8 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
           <AssetDeleteControl asset={asset} />
         </div>
       </div>
+
+      <AssetTagsPanel assetId={asset.id} />
 
       <section>
         <h2 className="mb-2 text-sm font-medium text-neutral-400">Media Preview</h2>
