@@ -306,3 +306,14 @@ lower is better), with exact UUID matches
 after FTS hits. Equal scores use `id DESC` for stable pagination. An explicit
 `sort=newest` or any other allowed sort overrides relevance; without `q`, the
 default remains `id DESC`.
+
+### Similar assets
+
+`GET /api/v1/assets/{id}/similar` returns other `ACTIVE` or `HIDDEN`
+nodes that have a perceptual hash, ordered by Hamming distance to the
+source hash, then by id. Defaults are `limit=20` (maximum 100) and
+`maxDistance=12` (0 through 64). The source node is excluded.
+`TRASHED`, `MISSING` and `ARCHIVED` nodes are not candidates. A source
+with no perceptual hash returns an empty `assets` list and
+`reason` `no_perceptual_hash`. The MCP `find_similar` tool calls the
+same handler.

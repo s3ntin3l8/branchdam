@@ -168,6 +168,20 @@ export interface Asset {
   supersededBy?: number;
 }
 
+export interface SimilarAsset {
+  id: number;
+  nodeUuid: string;
+  filePath: string;
+  fileName: string;
+  thumbState: ThumbState;
+  distance: number;
+}
+
+export interface SimilarAssetsResponse {
+  assets: SimilarAsset[];
+  reason?: string;
+}
+
 export interface NodeMetadatum {
   nodeId: number;
   source: string;
