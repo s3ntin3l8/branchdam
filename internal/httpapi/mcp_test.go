@@ -50,7 +50,7 @@ func TestMCPReadTools(t *testing.T) {
 			assert.Contains(t, tool.Description, "untrusted", tool.Name)
 		}
 		assert.ElementsMatch(t, []string{
-			"search_assets", "list_facets", "get_asset", "get_lineage", "view_asset",
+			"search_assets", "list_facets", "get_asset", "find_similar", "get_lineage", "view_asset",
 			"list_review_queue", "list_jobs", "get_scan_progress", "storage_health",
 			"confirm_edge", "reject_edge", "reset_edge_review", "create_edge",
 			"trash_asset", "restore_asset", "retry_sync",
@@ -120,7 +120,7 @@ func TestMCPReadTools(t *testing.T) {
 		session := dialMCP(t, handler, reviewToken)
 		listed, err := session.ListTools(context.Background(), nil)
 		require.NoError(t, err)
-		assert.Len(t, listed.Tools, 16)
+		assert.Len(t, listed.Tools, 17)
 		res := callMCP(t, session, "search_assets", map[string]any{"q": "lighthouse"})
 		require.True(t, res.IsError)
 		assert.Contains(t, mcpText(res), "mcp:read")

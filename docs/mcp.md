@@ -58,9 +58,10 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
      Input terms are quoted, never accepted as FTS query syntax. See
      [asset API search notes](schema.md#asset-api-q-and-sorting) for details.
    - `mattn/go-sqlite3` is built with the `sqlite_fts5` tag.
-   - The perceptual hash is read only by the graph resolver and by
-     `GET /api/v1/edges/audit`, which shows `phashDistance` between an
-     edge's endpoints. There is no "find similar" query.
+   - The perceptual hash is also exposed by
+     `GET /api/v1/assets/{id}/similar` and the `find_similar` tool.
+     `GET /api/v1/edges/audit` still shows `phashDistance` between an
+     edge's endpoints.
 6. **No editable tags or annotations.** `node_metadata` holds
    extracted values only (sources `exiftool|ffprobe|internal`).
 
@@ -160,6 +161,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 | `search_assets` | Paged asset list. Inputs mirror `ListAssetsInput` (`routes.go`) one-to-one: `q`, `cameraModel`, `graphStatus`, `lifecycleState`, `storageLocationId`, `unlinkedOnly`, `uploadedByUserId`, `sort`, `limit`, `offset` (offset pagination; the list has no cursor) | list query behind `GET /api/v1/assets` |
 | `list_facets` | Filter values with counts | `/assets/facets` |
 | `get_asset` | Detail, extracted metadata and sync status in one call | `/assets/{id}`, `/metadata`, `/sync-status` |
+| `find_similar` | Other `ACTIVE`/`HIDDEN` assets ordered by perceptual-hash Hamming distance. `limit` defaults to 20 (max 100). `maxDistance` defaults to 12 (0-64). A source with no hash returns an empty list and `reason` `no_perceptual_hash` | `GET /api/v1/assets/{id}/similar` |
 | `get_lineage` | `{rootId, nodes, edges}`, `depth` 1–5 | `/assets/{id}/lineage` |
 | `view_asset` | MCP **image content** (the 512px JPEG thumbnail) | `internal/thumbs` cache. While the thumbnail is pending, return a text result saying "thumbnail not ready yet", not a tool error |
 | `list_review_queue` | `NEEDS_REVIEW` edges with confidence, tier, resolver and evidence, plus both endpoints' names | `/edges/audit` |
@@ -291,11 +293,17 @@ Claude's custom-connector docs.
 
 **Find similar**
 
-- **API:** `GET /api/v1/assets/{id}/similar` and the
-  `find_similar` tool.
+- **API:** `GET /api/v1/assets/{id}/similar?limit=20&maxDistance=12`
+  and the `find_similar` tool, both calling the same handler.
+- **Candidates:** other `ACTIVE` or `HIDDEN` nodes that have a
+  perceptual hash. The source node is excluded. `TRASHED`, `MISSING`
+  and `ARCHIVED` nodes are not candidates.
 - **Ranking:** by perceptual-hash Hamming distance (64-bit DCT hash,
-  `hashing.PerceptualHash`), using the same distance computation the
-  spatial-temporal resolver uses.
+  `hashing.PerceptualHash` / `hashing.HammingDistance`), nearest
+  first, then ascending id. `maxDistance` defaults to 12 and cannot
+  exceed 64. `limit` defaults to 20 and cannot exceed 100.
+- **No hash:** a source node with no perceptual hash returns
+  `{assets: [], reason: "no_perceptual_hash"}`, not an error.
 - **Implementation:** a brute-force scan in Go is fine up to roughly
   1M nodes. Bucketing by hash prefix is a later optimisation.
 

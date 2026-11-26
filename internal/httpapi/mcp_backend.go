@@ -77,6 +77,29 @@ func (b mcpBackend) GetAsset(ctx context.Context, id int64) (any, error) {
 	}, nil
 }
 
+func (b mcpBackend) FindSimilar(ctx context.Context, in mcp.FindSimilarInput) (any, error) {
+	limit, err := pageLimit(in.Limit, 20, 100)
+	if err != nil {
+		return nil, err
+	}
+	dist := int64(12)
+	if in.MaxDistance != nil {
+		dist = *in.MaxDistance
+	}
+	if dist < 0 || dist > 64 {
+		return nil, fmt.Errorf("maxDistance must be between 0 and 64")
+	}
+	out, err := b.s.handleListSimilar(ctx, &SimilarAssetsInput{
+		ID:          in.ID,
+		Limit:       limit,
+		MaxDistance: dist,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
 func (b mcpBackend) GetLineage(ctx context.Context, id int64, depth int) (any, error) {
 	if depth == 0 {
 		depth = 2

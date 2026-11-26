@@ -100,6 +100,18 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 			return textResult(fmt.Sprintf("asset %d", in.ID)), body, nil
 		})
 
+	sdkmcp.AddTool(s, tool("find_similar", "Find live assets that look like this one, nearest perceptual-hash Hamming distance first. limit is 1 to 100 (omitted means 20). maxDistance is 0 to 64 (omitted means 12). A source with no hash returns an empty list and reason no_perceptual_hash."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in FindSimilarInput) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireRead(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.FindSimilar(ctx, in)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(countSummary(body, "assets", "asset", "assets", "find_similar")), body, nil
+		})
+
 	sdkmcp.AddTool(s, tool("get_lineage", "Bounded lineage around one asset. depth is 1 to 5. The body is rootId, nodes and edges."),
 		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in lineageIn) (*sdkmcp.CallToolResult, any, error) {
 			if err := requireRead(ctx); err != nil {

@@ -61,6 +61,7 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets", s.handleListAssets)
 	huma.Get(api, "/api/v1/assets/facets", s.handleListAssetFacets)
 	huma.Get(api, "/api/v1/assets/{id}", s.handleGetAsset)
+	huma.Get(api, "/api/v1/assets/{id}/similar", s.handleListSimilar)
 	huma.Delete(api, "/api/v1/assets/{id}", s.handleDeleteAsset)
 	huma.Post(api, "/api/v1/assets/{id}/trash", s.handleTrashAsset)
 	huma.Post(api, "/api/v1/assets/{id}/restore", s.handleRestoreAsset)

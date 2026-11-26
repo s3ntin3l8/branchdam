@@ -823,3 +823,11 @@ LIMIT 1;
 SELECT id FROM media_nodes
 WHERE file_path >= ?1 AND file_path < ?2
   AND lifecycle_state IN ('ACTIVE', 'HIDDEN');
+
+-- name: ListLivePhashes :many
+-- Backs GET /api/v1/assets/{id}/similar. Live means ACTIVE or HIDDEN.
+-- The caller drops the source id and ranks by Hamming distance.
+SELECT id, node_uuid, file_path, file_name, thumb_state, phash
+FROM media_nodes
+WHERE lifecycle_state IN ('ACTIVE', 'HIDDEN')
+  AND phash IS NOT NULL;

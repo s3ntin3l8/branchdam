@@ -28,6 +28,7 @@ import type {
   ListPatsResponse,
   ListUsersParams,
   ListUsersResponse,
+  SimilarAssetsResponse,
   LoginInput,
   LoginResponse,
   Me,
@@ -277,6 +278,7 @@ export const api = {
   },
   getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
+  getSimilarAssets: (id: number) => request<SimilarAssetsResponse>(`/api/v1/assets/${id}/similar`),
   deleteAsset: (id: number) => request<{ ok: boolean }>(`/api/v1/assets/${id}`, { method: "DELETE" }),
   trashAsset: (id: number, body: { keepExports: boolean }) =>
     request<{ ok: boolean }>(`/api/v1/assets/${id}/trash`, { method: "POST", body: JSON.stringify(body) }),

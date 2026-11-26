@@ -48,6 +48,14 @@ type SearchAssetsInput struct {
 	Offset            int64  `json:"offset,omitempty" jsonschema:"number of assets to skip; omitted means 0"`
 }
 
+// FindSimilarInput is the find_similar tool. A nil MaxDistance means
+// 12. Limit 0 means 20.
+type FindSimilarInput struct {
+	ID          int64  `json:"id" jsonschema:"asset id"`
+	Limit       int64  `json:"limit,omitempty" jsonschema:"page size from 1 to 100; omitted means 20"`
+	MaxDistance *int64 `json:"maxDistance,omitempty" jsonschema:"maximum Hamming distance from 0 to 64; omitted means 12"`
+}
+
 // Backend is implemented by the HTTP layer so this package does not
 // import it. Each method returns the same body the named Huma handler
 // returns. ViewAsset reports ready=false when no JPEG is cached yet;
@@ -56,6 +64,7 @@ type Backend interface {
 	SearchAssets(ctx context.Context, in SearchAssetsInput) (any, error)
 	ListFacets(ctx context.Context) (any, error)
 	GetAsset(ctx context.Context, id int64) (any, error)
+	FindSimilar(ctx context.Context, in FindSimilarInput) (any, error)
 	GetLineage(ctx context.Context, id int64, depth int) (any, error)
 	ViewAsset(ctx context.Context, id int64) (jpeg []byte, ready bool, err error)
 	ListReviewQueue(ctx context.Context, limit, beforeID int64) (any, error)
