@@ -106,21 +106,26 @@ WITH hits AS (
 SELECT COUNT(*)
 FROM media_nodes
 CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query,
-                   CAST(?2 AS TEXT) AS fts_query) AS p
+                   CAST(?2 AS TEXT) AS fts_query,
+                   CAST(?3 AS TEXT) AS tag_query) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
-WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
-  AND (camera_model = ?4 OR ?4 IS NULL)
-  AND (graph_status = ?5 OR ?5 IS NULL)
-  AND (storage_location_id = ?6 OR ?6 IS NULL)
-  AND (uploaded_by_user_id = ?7 OR ?7 IS NULL)
+WHERE (lifecycle_state = ?4 OR ?4 IS NULL)
+  AND (camera_model = ?5 OR ?5 IS NULL)
+  AND (graph_status = ?6 OR ?6 IS NULL)
+  AND (storage_location_id = ?7 OR ?7 IS NULL)
+  AND (uploaded_by_user_id = ?8 OR ?8 IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
        OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query))
 `
 
 type CountMediaNodesFilteredParams struct {
 	NameQuery         sql.NullString
 	FtsQuery          sql.NullString
+	Tag               sql.NullString
 	LifecycleState    sql.NullString
 	CameraModel       sql.NullString
 	GraphStatus       sql.NullString
@@ -138,6 +143,7 @@ func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNod
 	row := q.db.QueryRowContext(ctx, countMediaNodesFiltered,
 		arg.NameQuery,
 		arg.FtsQuery,
+		arg.Tag,
 		arg.LifecycleState,
 		arg.CameraModel,
 		arg.GraphStatus,
@@ -159,17 +165,22 @@ WITH hits AS (
 SELECT COUNT(*)
 FROM media_nodes
 CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query,
-                   CAST(?2 AS TEXT) AS fts_query) AS p
+                   CAST(?2 AS TEXT) AS fts_query,
+                   CAST(?3 AS TEXT) AS tag_query) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
        OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query))
 `
 
 type CountMediaNodesSearchParams struct {
 	NameQuery sql.NullString
 	FtsQuery  sql.NullString
+	Tag       sql.NullString
 }
 
 // Backs GET /api/v1/assets' search-aware total (q, no structural filter;
@@ -179,7 +190,7 @@ type CountMediaNodesSearchParams struct {
 // Materialize once: flattening this join makes MATCH/rank quadratic.
 // Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 func (q *Queries) CountMediaNodesSearch(ctx context.Context, arg CountMediaNodesSearchParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countMediaNodesSearch, arg.NameQuery, arg.FtsQuery)
+	row := q.db.QueryRowContext(ctx, countMediaNodesSearch, arg.NameQuery, arg.FtsQuery, arg.Tag)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -1168,12 +1179,16 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 FROM media_nodes
 CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
                    CAST(?4 AS TEXT) AS fts_query,
-                   CAST(?5 AS TEXT) AS sort_key) AS p
+                   CAST(?5 AS TEXT) AS tag_query,
+                   CAST(?6 AS TEXT) AS sort_key) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
        OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query))
 ORDER BY
   CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
     coalesce(h.score, 0.0) END ASC,
@@ -1196,6 +1211,7 @@ type ListMediaNodesParams struct {
 	Offset    int64
 	NameQuery sql.NullString
 	FtsQuery  sql.NullString
+	Tag       sql.NullString
 	Sort      string
 }
 
@@ -1216,6 +1232,7 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 		arg.Offset,
 		arg.NameQuery,
 		arg.FtsQuery,
+		arg.Tag,
 		arg.Sort,
 	)
 	if err != nil {
@@ -1289,16 +1306,20 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
 FROM media_nodes
 CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
                    CAST(?4 AS TEXT) AS fts_query,
-                   CAST(?5 AS TEXT) AS sort_key) AS p
+                   CAST(?5 AS TEXT) AS tag_query,
+                   CAST(?6 AS TEXT) AS sort_key) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
-WHERE (lifecycle_state = ?6 OR ?6 IS NULL)
-  AND (camera_model = ?7 OR ?7 IS NULL)
-  AND (graph_status = ?8 OR ?8 IS NULL)
-  AND (storage_location_id = ?9 OR ?9 IS NULL)
-  AND (uploaded_by_user_id = ?10 OR ?10 IS NULL)
+WHERE (lifecycle_state = ?7 OR ?7 IS NULL)
+  AND (camera_model = ?8 OR ?8 IS NULL)
+  AND (graph_status = ?9 OR ?9 IS NULL)
+  AND (storage_location_id = ?10 OR ?10 IS NULL)
+  AND (uploaded_by_user_id = ?11 OR ?11 IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
        OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query))
 ORDER BY
   CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
     coalesce(h.score, 0.0) END ASC,
@@ -1321,6 +1342,7 @@ type ListMediaNodesFilteredParams struct {
 	Offset            int64
 	NameQuery         sql.NullString
 	FtsQuery          sql.NullString
+	Tag               sql.NullString
 	Sort              string
 	LifecycleState    sql.NullString
 	CameraModel       sql.NullString
@@ -1347,6 +1369,7 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 		arg.Offset,
 		arg.NameQuery,
 		arg.FtsQuery,
+		arg.Tag,
 		arg.Sort,
 		arg.LifecycleState,
 		arg.CameraModel,

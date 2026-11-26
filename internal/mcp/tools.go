@@ -64,7 +64,7 @@ func writeTool(name, description string) *sdkmcp.Tool {
 }
 
 func registerTools(s *sdkmcp.Server, b Backend) {
-	sdkmcp.AddTool(s, tool("search_assets", "Search assets. Inputs match the asset list: q, cameraModel, graphStatus, lifecycleState, storageLocationId, unlinkedOnly, uploadedByUserId, sort, limit, offset. Offset pagination, no cursor."),
+	sdkmcp.AddTool(s, tool("search_assets", "Search assets. Inputs match the asset list: q, cameraModel, graphStatus, lifecycleState, storageLocationId, unlinkedOnly, uploadedByUserId, sort, tag, limit, offset. Offset pagination, no cursor."),
 		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in SearchAssetsInput) (*sdkmcp.CallToolResult, any, error) {
 			if err := requireRead(ctx); err != nil {
 				return nil, nil, err

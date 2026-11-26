@@ -424,8 +424,9 @@ func mintPATViaAPI(t *testing.T, handler http.Handler, cookie, body string) *htt
 }
 
 // TestMCPPAT_NonAdminScopes is the acceptance suite for mcp:* grants:
-// a non-admin mints them through the API, the tokens reach /mcp and
-// nowhere else, and a disabled owner fails closed.
+// a non-admin mints them through the API, the tokens reach /mcp, and
+// general admin routes stay closed. Tag routes are the enrichment
+// exception (see enrichmentPATScope). A disabled owner fails closed.
 func TestMCPPAT_NonAdminScopes(t *testing.T) {
 	srv, database, patSvc, userSvc := newMCPPATTestServer(t)
 	handler := srv.Handler()

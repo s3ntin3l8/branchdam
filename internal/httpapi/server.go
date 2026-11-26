@@ -572,8 +572,17 @@ func (s *Server) Handler() http.Handler {
 			// would turn away an mcp:review-only token. The key is not
 			// the literal scope "mcp:*" -- scopeSatisfied is exact-match.
 			"mcp": s.patService.MiddlewareAnyOf("mcp:read", "mcp:review", "mcp:enrich").RequirePAT(authzHandler),
+			// Tag routes are the one admin-path exception for MCP-only
+			// tokens. Reads admit mcp:read. Writes admit mcp:enrich.
+			// "*" and admin still pass because scopeSatisfied treats
+			// "*" as every listed scope.
+			"tags-read":  s.patService.MiddlewareAnyOf("admin", "mcp:read", "mcp:enrich").RequirePAT(authzHandler),
+			"tags-write": s.patService.MiddlewareAnyOf("admin", "mcp:enrich").RequirePAT(authzHandler),
 		}
-		patScopeFor := func(path string) string {
+		patScopeFor := func(method, path string) string {
+			if scope, ok := enrichmentPATScope(method, path); ok {
+				return scope
+			}
 			switch {
 			case path == "/mcp" || strings.HasPrefix(path, "/mcp/"):
 				return "mcp"
@@ -593,7 +602,7 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			if auth.PATPresented(r) && !strings.HasPrefix(r.URL.Path, auth.AgentPathPrefix) {
-				h := patHandlers[patScopeFor(r.URL.Path)]
+				h := patHandlers[patScopeFor(r.Method, r.URL.Path)]
 				if h == nil {
 					// patScopeFor drift guard: a future route group
 					// without a matching middleware entry falls back
@@ -697,6 +706,19 @@ func isOwnPATManagement(r *http.Request) bool {
 	return true
 }
 
+// isUserEnrichment reports whether r is an authenticated user writing
+// or reading tags and annotations, other than the admin-only revert.
+// GET already bypasses RequireAdmin; the skip matters for POST, PUT
+// and DELETE, which a non-admin session and a non-admin mcp:enrich
+// token must be able to perform.
+func isUserEnrichment(r *http.Request) bool {
+	if r.URL.Path == "/api/v1/tags/revert" || !isEnrichmentAPI(r.URL.Path) {
+		return false
+	}
+	p, ok := auth.From(r.Context())
+	return ok && p.Kind == auth.KindUser && p.Authenticated
+}
+
 // isPATOnMCP reports whether this request is a PAT-authenticated call
 // to the MCP endpoint. The scope middleware has already admitted it.
 func isPATOnMCP(r *http.Request) bool {
@@ -769,6 +791,15 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, oauth *auth.O
 		// RequireAdmin anywhere, and they lack pats:write so the
 		// route gate already 403s them before this runs.
 		if isOwnPATManagement(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Tag and annotation writes are user self-service, same idea as
+		// own-PAT management. RequireAdmin would 403 a non-admin session
+		// and a non-admin mcp:enrich token (IsAdmin stays the owner's
+		// real flag). Revert is not in this set: it stays admin-only,
+		// and the handler also calls requireSettingsAdmin.
+		if isUserEnrichment(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

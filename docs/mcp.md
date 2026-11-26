@@ -62,8 +62,11 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
      `GET /api/v1/assets/{id}/similar` and the `find_similar` tool.
      `GET /api/v1/edges/audit` still shows `phashDistance` between an
      edge's endpoints.
-6. **No editable tags or annotations.** `node_metadata` holds
-   extracted values only (sources `exiftool|ffprobe|internal`).
+6. **Tags and annotations are separate from extracted metadata.**
+   `asset_tags` and `asset_annotations` hold user and assistant text.
+   `node_metadata` stays extracted values only
+   (sources `exiftool|ffprobe|internal`). `q` searches tags and
+   annotation text along with filename, path and the selected metadata.
 
 ## Phase 0: auth, audit and ingress
 
@@ -85,8 +88,9 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
   - Any other token keeps the live-admin predicate.
   - Disabled users still fail closed.
 - **`RequirePAT`** sets `LocalUserView.IsAdmin` to the owner's
-  **actual** `is_admin` for MCP-only tokens. Today it hard-codes
-  `true`; a non-admin MCP token must not pass `RequireAdmin` anywhere.
+  **actual** `is_admin` for MCP-only tokens. A non-admin MCP token must
+  not pass `RequireAdmin`. `/mcp`, and tag or annotation routes other
+  than revert, skip that middleware; they do not flip `IsAdmin`.
 - **`patScopeFor`** routes `/mcp` to a middleware entry that admits
   any token holding **at least one** `mcp:*` scope (or `*`). The
   route gate does not demand `mcp:read`, because that would turn away
@@ -100,8 +104,9 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
     scope, and the `/mcp` entry in `patHandlers` uses it.
 
   The per-tool check decides what each call may do. An MCP-only token
-  presented on **any other path** gets a 403, because its scopes never
-  satisfy `admin`, `pats:write` or `pairings:write`.
+  presented on any other path gets a 403, except the tag and annotation
+  routes: `GET` admits `mcp:read` and `mcp:enrich`, and writes admit
+  `mcp:enrich`. Those routes still do not accept `mcp:review` alone.
 - **Scope check helper:** `auth.PATScopesFrom(ctx)` already exposes
   the token's scopes to handlers. The MCP layer uses it (via
   `scopeSatisfied`, exported as `auth.HasScope`) for per-tool checks.
@@ -158,7 +163,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 
 | Tool | Returns | Backed by |
 |---|---|---|
-| `search_assets` | Paged asset list. Inputs mirror `ListAssetsInput` (`routes.go`) one-to-one: `q`, `cameraModel`, `graphStatus`, `lifecycleState`, `storageLocationId`, `unlinkedOnly`, `uploadedByUserId`, `sort`, `limit`, `offset` (offset pagination; the list has no cursor) | list query behind `GET /api/v1/assets` |
+| `search_assets` | Paged asset list. Inputs mirror `ListAssetsInput` (`routes.go`) one-to-one: `q`, `cameraModel`, `graphStatus`, `lifecycleState`, `storageLocationId`, `unlinkedOnly`, `uploadedByUserId`, `sort`, `tag`, `limit`, `offset` (offset pagination; the list has no cursor) | list query behind `GET /api/v1/assets` |
 | `list_facets` | Filter values with counts | `/assets/facets` |
 | `get_asset` | Detail, extracted metadata and sync status in one call | `/assets/{id}`, `/metadata`, `/sync-status` |
 | `find_similar` | Other `ACTIVE`/`HIDDEN` assets ordered by perceptual-hash Hamming distance. `limit` defaults to 20 (max 100). `maxDistance` defaults to 12 (0-64). A source with no hash returns an empty list and `reason` `no_perceptual_hash` | `GET /api/v1/assets/{id}/similar` |
@@ -310,19 +315,36 @@ Claude's custom-connector docs.
 
 ## Phase 4: assistant enrichment
 
-- **Schema:** two new tables, separate from extracted `node_metadata`:
-  - `asset_tags(node_id, tag, source, created_by_user_id, pat_id, created_at)`
-  - `asset_annotations(node_id, kind, text, source, model, created_by_user_id, pat_id, created_at)`
+REST for tags and descriptions is in place. MCP tools and the web UI
+(AI badges, tag editing, the revert action) are the next issue.
 
-  `source IN ('user','assistant')`, so assistant-written data can
-  always be filtered out or bulk-reverted.
-- **API:** Huma routes to list, add and remove tags and annotations.
-  The web asset detail shows them with an "AI" badge for
-  `source = 'assistant'`.
-- **MCP tools:**
+- **Schema:** `asset_tags` and `asset_annotations`, separate from
+  extracted `node_metadata`. `source` is `user` or `assistant`.
+  Tags are trimmed and lowercased, at most 64 characters, unique per
+  node. At most one `description` per node and source.
+- **Who wrote it:** `source` is derived on the server. An MCP-only PAT
+  or an OAuth access token is `assistant`. A browser session, and any
+  other credential, is `user`. A `source` field on the request body is
+  ignored.
+- **Auth:** any authenticated user may read and write tags and
+  descriptions, including a non-admin session and a non-admin
+  `mcp:enrich` token. Those routes skip `RequireAdmin`. Revert does
+  not.
+- **API:**
+  - `GET` and `POST /api/v1/assets/{id}/tags`, `DELETE .../tags/{tag}`
+  - `GET /api/v1/assets/{id}/annotations`, `PUT .../annotations/description`
+  - `GET /api/v1/tags` lists tags with counts
+  - `POST /api/v1/tags/revert` with `{source: "assistant", patId?, since?}`
+    removes assistant tags and annotations. Admins only. `patId` and
+    `since` (unix seconds) narrow the delete.
+  - `GET /api/v1/assets?tag=` filters on an exact tag. `q` also matches
+    tag and annotation text through `media_nodes_fts`.
+- **Audit:** add, remove, description and revert write `actor_audit`.
+- **MCP tools** (not built yet):
   - `tag_assets` and `set_description` (scope `mcp:enrich`)
   - `list_tags` (scope `mcp:read`)
-- **Search:** both feed `media_nodes_fts`.
+- **Web** (not built yet): asset detail shows tags and the description,
+  with an AI badge when `source` is `assistant`.
 
 ## Phase ordering
 

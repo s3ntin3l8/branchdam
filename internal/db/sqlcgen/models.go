@@ -49,6 +49,29 @@ type AppSetting struct {
 	UpdatedBy string
 }
 
+type AssetAnnotation struct {
+	ID              int64
+	NodeID          int64
+	Kind            string
+	Text            string
+	Source          string
+	Model           sql.NullString
+	CreatedByUserID int64
+	PatID           sql.NullInt64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
+type AssetTag struct {
+	ID              int64
+	NodeID          int64
+	Tag             string
+	Source          string
+	CreatedByUserID int64
+	PatID           sql.NullInt64
+	CreatedAt       int64
+}
+
 type CompanionPairingAudit struct {
 	ID        int64
 	PairingID int64

@@ -280,6 +280,9 @@ type Querier interface {
 	// "Revert to config" deletes the row -- this is what makes provenance
 	// recoverable rather than merely resettable to some other stored value.
 	DeleteAppSetting(ctx context.Context, key string) error
+	DeleteAssetTag(ctx context.Context, arg DeleteAssetTagParams) (int64, error)
+	DeleteAssistantAnnotations(ctx context.Context, arg DeleteAssistantAnnotationsParams) (int64, error)
+	DeleteAssistantTags(ctx context.Context, arg DeleteAssistantTagsParams) (int64, error)
 	DeleteDevicePairing(ctx context.Context, id int64) error
 	// Removes the provenance row of node ?1 when it names the hash ?2 the
 	// server has just disproved.
@@ -360,6 +363,7 @@ type Querier interface {
 	GetAgentEventByUUID(ctx context.Context, eventUuid string) (GetAgentEventByUUIDRow, error)
 	GetAgentEventByUUIDAndAgent(ctx context.Context, arg GetAgentEventByUUIDAndAgentParams) (GetAgentEventByUUIDAndAgentRow, error)
 	GetAgentScratchTelemetry(ctx context.Context, agentID string) (AgentScratchTelemetry, error)
+	GetAssetTag(ctx context.Context, arg GetAssetTagParams) (AssetTag, error)
 	// users: one row per human principal that has ever authenticated via
 	// Authentik ForwardAuth. Lazily provisioned on first sight by
 	// internal/users.Service.ResolveOrCreate, keyed on the stable
@@ -529,6 +533,7 @@ type Querier interface {
 	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 	// "SQL Syntax Traps" note.
 	InsertActorAudit(ctx context.Context, arg InsertActorAuditParams) error
+	InsertAssetTag(ctx context.Context, arg InsertAssetTagParams) (AssetTag, error)
 	// Append-only. The two indexes on (user_id, created_at) and (ip, created_at)
 	// cover the admin UI's tail queries without a sort.
 	InsertLoginAudit(ctx context.Context, arg InsertLoginAuditParams) error
@@ -582,6 +587,8 @@ type Querier interface {
 	// and on every PUT; the table is expected to stay small (one row per
 	// overridden field, never one row per node), so no pagination.
 	ListAppSettings(ctx context.Context) ([]AppSetting, error)
+	ListAssetAnnotations(ctx context.Context, nodeID int64) ([]AssetAnnotation, error)
+	ListAssetTags(ctx context.Context, nodeID int64) ([]AssetTag, error)
 	// Backs GET /api/v1/users (admin-only). Used by the pairing UI's
 	// "Owned by" selector (when it lands -- today defaults to the creating
 	// admin, see internal/pairing's CreatePairing). Capped at 200 rows in
@@ -888,6 +895,7 @@ type Querier interface {
 	ListResolveTimelineScopes(ctx context.Context, arg ListResolveTimelineScopesParams) ([]int64, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
+	ListTagCounts(ctx context.Context) ([]ListTagCountsRow, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
 	// camera_serial with captured_at_unix within +/-2 seconds of a target timestamp,
 	// excluding a given node ID.
@@ -1388,6 +1396,7 @@ type Querier interface {
 	// set via unixepoch() here, not passed from Go, matching every other
 	// UPDATE/upsert in this package (docs/schema.md fix #5).
 	UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) (AppSetting, error)
+	UpsertAssetDescription(ctx context.Context, arg UpsertAssetDescriptionParams) (AssetAnnotation, error)
 	UpsertMFACredentials(ctx context.Context, arg UpsertMFACredentialsParams) error
 	// A human decision outranks any resolver, permanently: the UPDATE branch is
 	// gated by a WHERE that skips rows already CONFIRMED or REJECTED entirely.

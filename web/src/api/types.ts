@@ -599,9 +599,11 @@ export interface AssetQueryParams {
   // The "My uploads" filter passes the request's own id; 0 / undefined
   // disables the filter.
   uploadedByUserId?: number;
-  // q is a case-insensitive file_name substring, matched server-side
-  // across the whole table (not just the loaded page).
+  // q searches filename, path, selected metadata, tags and annotation
+  // text (FTS). Blank disables it.
   q?: string;
+  // tag is an exact tag. The server trims and lowercases it.
+  tag?: string;
   // sort is one of the server's whitelisted orders; omitted = "newest"
   // (id DESC, the historical order).
   sort?: AssetSort;
@@ -615,6 +617,41 @@ export type AssetSort =
   | "created_desc"
   | "captured_asc"
   | "captured_desc";
+
+export type TagSource = "user" | "assistant";
+
+export interface AssetTag {
+  id: number;
+  nodeId: number;
+  tag: string;
+  source: TagSource;
+  createdByUserId: number;
+  patId?: number;
+  createdAt: number;
+}
+
+export interface AssetAnnotation {
+  id: number;
+  nodeId: number;
+  kind: "description" | "note";
+  text: string;
+  source: TagSource;
+  model?: string;
+  createdByUserId: number;
+  patId?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
+export interface RevertAssistantTagsResult {
+  tagsRemoved: number;
+  annotationsRemoved: number;
+}
 
 export interface JobsQueryParams {
   limit?: number;

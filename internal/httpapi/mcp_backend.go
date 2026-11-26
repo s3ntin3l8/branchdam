@@ -37,6 +37,7 @@ func (b mcpBackend) SearchAssets(ctx context.Context, in mcp.SearchAssetsInput) 
 		UnlinkedOnly:      in.UnlinkedOnly,
 		UploadedByUserID:  in.UploadedByUserID,
 		Q:                 in.Q,
+		Tag:               in.Tag,
 		Sort:              in.Sort,
 	})
 	if err != nil {

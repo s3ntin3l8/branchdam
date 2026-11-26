@@ -71,6 +71,13 @@ func (s *Server) registerRoutes(api huma.API) {
 	huma.Get(api, "/api/v1/assets/{id}/sync-status", s.handleAssetSyncStatus)
 	huma.Post(api, "/api/v1/assets/{id}/sync/retry", s.handleSyncRetry)
 	huma.Post(api, "/api/v1/assets/{id}/inherit-metadata", s.handleInheritMetadata)
+	huma.Get(api, "/api/v1/assets/{id}/tags", s.handleListAssetTags)
+	huma.Post(api, "/api/v1/assets/{id}/tags", s.handleAddAssetTag)
+	huma.Delete(api, "/api/v1/assets/{id}/tags/{tag}", s.handleDeleteAssetTag)
+	huma.Get(api, "/api/v1/assets/{id}/annotations", s.handleListAssetAnnotations)
+	huma.Put(api, "/api/v1/assets/{id}/annotations/description", s.handlePutAssetDescription)
+	huma.Get(api, "/api/v1/tags", s.handleListTags)
+	huma.Post(api, "/api/v1/tags/revert", s.handleRevertAssistantTags)
 
 	huma.Get(api, "/api/v1/jobs", s.handleListJobs)
 	huma.Register(api, huma.Operation{
@@ -417,10 +424,13 @@ type ListAssetsInput struct {
 	// "My uploads" filter pins it to the request's own id via the
 	// /api/v1/me + /api/v1/users round-trip. 0 disables the filter.
 	UploadedByUserID int64 `query:"uploadedByUserId" default:"0"`
-	// Q searches filename, relative path and selected camera/project metadata.
-	// Tokens are quoted FTS5 prefixes combined with AND.
-	// Exact UUIDs also match; blank disables q.
+	// Q searches filename, relative path, selected camera/project metadata,
+	// tags and annotation text. Tokens are quoted FTS5 prefixes combined
+	// with AND. Exact UUIDs also match; blank disables q.
 	Q string `query:"q" maxLength:"256"`
+	// Tag is an exact normalised tag. Blank disables the filter.
+	// It combines with q and the other filters.
+	Tag string `query:"tag" maxLength:"64"`
 	// Sort picks the list order from a fixed whitelist; anything else is
 	// a 422 from Huma's enum validation before the handler runs. The
 	// default uses bm25 for q, otherwise id DESC; explicit newest uses id DESC.
@@ -501,6 +511,10 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 	// to the filtered path's "every lifecycle state" semantics.
 	nameQuery := nameQueryParam(in.Q)
 	ftsQuery := assetFTSQuery(in.Q)
+	tagQuery, err := tagQueryParam(in.Tag)
+	if err != nil {
+		return nil, err
+	}
 	sortKey := in.Sort
 	if sortKey == "" && !nameQuery.Valid {
 		sortKey = "newest"
@@ -508,17 +522,16 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 
 	var rows []sqlcgen.MediaNode
 	var total int64
-	var err error
 
 	if !hasFilters {
 		rows, err = s.db.Reader.ListMediaNodes(ctx, sqlcgen.ListMediaNodesParams{
-			Limit: in.Limit, Offset: in.Offset, NameQuery: nameQuery, FtsQuery: ftsQuery, Sort: sortKey,
+			Limit: in.Limit, Offset: in.Offset, NameQuery: nameQuery, FtsQuery: ftsQuery, Tag: tagQuery, Sort: sortKey,
 		})
 		if err != nil {
 			return nil, huma.Error500InternalServerError("list assets", err)
 		}
 		total, err = s.db.Reader.CountMediaNodesSearch(ctx, sqlcgen.CountMediaNodesSearchParams{
-			NameQuery: nameQuery, FtsQuery: ftsQuery,
+			NameQuery: nameQuery, FtsQuery: ftsQuery, Tag: tagQuery,
 		})
 		if err != nil {
 			total = int64(len(rows))
@@ -529,6 +542,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 			Offset:            in.Offset,
 			NameQuery:         nameQuery,
 			FtsQuery:          ftsQuery,
+			Tag:               tagQuery,
 			Sort:              sortKey,
 			LifecycleState:    lifecycleState,
 			CameraModel:       cameraModel,
@@ -543,6 +557,7 @@ func (s *Server) handleListAssets(ctx context.Context, in *ListAssetsInput) (*Li
 		total, err = s.db.Reader.CountMediaNodesFiltered(ctx, sqlcgen.CountMediaNodesFilteredParams{
 			NameQuery:         nameQuery,
 			FtsQuery:          ftsQuery,
+			Tag:               tagQuery,
 			LifecycleState:    lifecycleState,
 			CameraModel:       cameraModel,
 			GraphStatus:       graphStatus,

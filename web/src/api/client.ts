@@ -2,9 +2,11 @@ import type {
   AdminResetPasswordInput,
   AdminResetPasswordResponse,
   Asset,
+  AssetAnnotation,
   AssetGraph,
   AssetQueryParams,
   AssetSyncStatus,
+  AssetTag,
   AuditEntry,
   AuditQueryParams,
   AuditQueueParams,
@@ -54,6 +56,7 @@ import type {
   RenameCompanionPairingRequest,
   RenameCompanionPairingResponse,
   ResetEdgeReviewResponse,
+  RevertAssistantTagsResult,
   RevokeCompanionPairingResponse,
   RevokeUserSessionsResponse,
   RotateCompanionPairingRequest,
@@ -66,6 +69,7 @@ import type {
   StartScanRequest,
   StorageHealth,
   StorageLocation,
+  TagCount,
   UpdateUserInput,
   UpdateUserResponse,
   UploadOptions,
@@ -273,9 +277,31 @@ export const api = {
     if (params.unlinkedOnly) qs.set("unlinkedOnly", "true");
     if (params.uploadedByUserId) qs.set("uploadedByUserId", String(params.uploadedByUserId));
     if (params.q?.trim()) qs.set("q", params.q.trim());
+    if (params.tag?.trim()) qs.set("tag", params.tag.trim());
     if (params.sort && params.sort !== "newest") qs.set("sort", params.sort);
     return request<{ assets: Asset[]; total: number }>(`/api/v1/assets?${qs.toString()}`);
   },
+  listAssetTags: (id: number) => request<{ tags: AssetTag[] }>(`/api/v1/assets/${id}/tags`),
+  addAssetTag: (id: number, tag: string) =>
+    request<AssetTag>(`/api/v1/assets/${id}/tags`, {
+      method: "POST",
+      body: JSON.stringify({ tag }),
+    }),
+  deleteAssetTag: (id: number, tag: string) =>
+    request<{ ok: boolean }>(`/api/v1/assets/${id}/tags/${encodeURIComponent(tag)}`, { method: "DELETE" }),
+  listAssetAnnotations: (id: number) =>
+    request<{ annotations: AssetAnnotation[] }>(`/api/v1/assets/${id}/annotations`),
+  putAssetDescription: (id: number, text: string, model?: string) =>
+    request<AssetAnnotation>(`/api/v1/assets/${id}/annotations/description`, {
+      method: "PUT",
+      body: JSON.stringify(model ? { text, model } : { text }),
+    }),
+  listTags: () => request<{ tags: TagCount[] }>("/api/v1/tags"),
+  revertAssistantTags: (body: { source: "assistant"; patId?: number; since?: number }) =>
+    request<RevertAssistantTagsResult>("/api/v1/tags/revert", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getAssetFacets: () => request<{ cameraModels: string[] }>("/api/v1/assets/facets"),
   getAsset: (id: number) => request<Asset>(`/api/v1/assets/${id}`),
   getSimilarAssets: (id: number) => request<SimilarAssetsResponse>(`/api/v1/assets/${id}/similar`),

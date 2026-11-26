@@ -54,9 +54,10 @@ describe("api client", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await api.listAssets({ limit: 25 });
+    await api.listAssets({ limit: 25, tag: "Zebra" });
     const calledUrl = fetchMock.mock.calls[0][0] as string;
     expect(calledUrl).toContain("limit=25");
+    expect(calledUrl).toContain("tag=Zebra");
     expect(calledUrl).not.toContain("offset");
   });
 

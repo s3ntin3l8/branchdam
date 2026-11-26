@@ -86,6 +86,10 @@ const (
 	// edge.review_confirmed, with details.source = "manual".
 	EventEdgeReviewConfirmed = "edge.review_confirmed"
 	EventEdgeReviewRejected  = "edge.review_rejected"
+	EventTagAdded            = "tag.added"
+	EventTagRemoved          = "tag.removed"
+	EventDescriptionSet      = "annotation.description_set"
+	EventTagsReverted        = "tags.reverted"
 )
 
 // Event is a typed event name. Anything that wants to write a new kind
