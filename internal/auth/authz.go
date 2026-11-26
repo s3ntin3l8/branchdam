@@ -149,10 +149,12 @@ func RequireAdmin(allowedGroups []string, log *slog.Logger) func(http.Handler) h
 // A PAT principal is decided by localView.IsAdmin alone, the same way a
 // local login is: RequirePAT sets that flag from the owner's real
 // is_admin for an MCP-only token and to true for every other token.
-// Without this, an empty authz.groups list (the solo-homelab default)
-// would treat a non-admin MCP token as an admin on any route that
-// reached RequireAdmin, because a PAT principal is not AuthProviderLocal
-// and carries no groups of its own.
+// An OAuth access token on /mcp is the same shape: localView.IsAdmin is
+// the user's row, not the groups named in the token. Without this, an
+// empty authz.groups list (the solo-homelab default) would treat a
+// non-admin MCP token as an admin on any route that reached
+// RequireAdmin, because a PAT or OAuth principal is not
+// AuthProviderLocal.
 //
 // This does NOT reproduce RequireAdmin's GET/HEAD/OPTIONS bypass or its
 // unconditional pass for KindMachine -- those are properties of *which
@@ -168,7 +170,7 @@ func IsAdmin(p Principal, allowedGroups []string, localView LocalUserView) bool 
 	if localView.IsAdmin {
 		return true
 	}
-	if p.AuthProvider == AuthProviderLocal || p.AuthProvider == AuthProviderPAT {
+	if p.AuthProvider == AuthProviderLocal || p.AuthProvider == AuthProviderPAT || p.AuthProvider == AuthProviderOAuth {
 		return false
 	}
 	if len(allowedGroups) == 0 {

@@ -1943,9 +1943,11 @@ type EdgeResetReviewOutput struct {
 // handleResetEdgeReview undoes a review decision: a CONFIRMED or REJECTED
 // edge goes back to NEEDS_REVIEW (and so back into the audit queue) and
 // review_source is cleared with reviewed_at and reviewed_by. The REST
-// route is human-only (invariant 6): an admin signed in through a browser
-// session, never a machine/agent principal and never a personal access
-// token. The MCP reset_edge_review tool calls resetEdgeReview directly and
+// route is human-only (invariant 6): an admin signed in through the
+// web UI. That is a local session or a forward-auth identity (empty
+// auth provider). A personal access token and an OAuth access token
+// are not that person, even if the principal is an admin. The MCP
+// reset_edge_review tool calls resetEdgeReview directly and
 // is gated by mcp:review instead of this REST check. It still cannot reset
 // a human decision: review_source human, or a CONFIRMED/REJECTED row with
 // no source (written before the column existed). Resetting an assistant
@@ -1961,10 +1963,20 @@ func (s *Server) handleResetEdgeReview(ctx context.Context, in *EdgeReviewInput)
 	if err := s.requireSettingsAdmin(ctx); err != nil {
 		return nil, err
 	}
-	if p, ok := auth.From(ctx); !ok || p.Kind != auth.KindUser || !p.Authenticated || p.AuthProvider == auth.AuthProviderPAT {
+	if p, ok := auth.From(ctx); !ok || !humanWebSession(p) {
 		return nil, huma.Error403Forbidden("only a person signed in to the web UI can reset a review decision")
 	}
 	return s.resetEdgeReview(ctx, in.ID, reviewSourceHuman)
+}
+
+// humanWebSession is the REST reset allowlist: a local session, or a
+// forward-auth user whose auth provider was left empty. PAT and OAuth
+// are machine credentials even when they belong to an admin.
+func humanWebSession(p auth.Principal) bool {
+	if p.Kind != auth.KindUser || !p.Authenticated {
+		return false
+	}
+	return p.AuthProvider == "" || p.AuthProvider == auth.AuthProviderLocal
 }
 
 func (s *Server) resetEdgeReview(ctx context.Context, id int64, source string) (*EdgeResetReviewOutput, error) {

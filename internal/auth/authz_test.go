@@ -311,6 +311,8 @@ func TestIsAdmin_LocalPrincipalIgnoresGroupsPolicy(t *testing.T) {
 		// the AuthProviderPAT rule it would fall through to "everyone".
 		{"PAT non-admin, empty groups", Principal{Kind: KindUser, Authenticated: true, AuthProvider: AuthProviderPAT}, nil, LocalUserView{UserID: 2}, false},
 		{"PAT non-admin, non-empty groups", Principal{Kind: KindUser, Authenticated: true, AuthProvider: AuthProviderPAT}, []string{"dam-admins"}, LocalUserView{UserID: 2}, false},
+		{"OAuth non-admin, empty groups", Principal{Kind: KindUser, Authenticated: true, AuthProvider: AuthProviderOAuth, Groups: []string{"dam-admins"}}, nil, LocalUserView{UserID: 2}, false},
+		{"OAuth admin view", Principal{Kind: KindUser, Authenticated: true, AuthProvider: AuthProviderOAuth}, nil, LocalUserView{UserID: 1, IsAdmin: true}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

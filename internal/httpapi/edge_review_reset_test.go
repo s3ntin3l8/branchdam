@@ -296,6 +296,29 @@ func TestResetEdgeReview_AdminHumansOnly(t *testing.T) {
 	}
 }
 
+func TestResetEdgeReview_OAuthPrincipalIsNotTheWebUI(t *testing.T) {
+	srv, database, _ := newReviewTestServer(t)
+	ctx := context.Background()
+	locID := seedAuditLocation(t, database)
+	edgeID, _ := seedReviewEdge(t, database, locID, reviewEdgeSeed{tier: 2, resolver: "stem", confidence: 0.7, state: "CONFIRMED"})
+
+	oauthCtx := auth.ContextWithOAuth(ctx, auth.Principal{
+		Kind: auth.KindUser, Name: "alice", ExternalUID: "uid-alice",
+		AuthProvider: auth.AuthProviderOAuth, UserID: 1, Authenticated: true,
+	}, []string{"mcp:review"}, true)
+	if err := srv.requireSettingsAdmin(oauthCtx); err != nil {
+		t.Fatalf("oauth admin fixture: %v", err)
+	}
+	_, err := srv.handleResetEdgeReview(oauthCtx, &EdgeReviewInput{ID: edgeID})
+	var se huma.StatusError
+	if !errors.As(err, &se) || se.GetStatus() != http.StatusForbidden {
+		t.Fatalf("oauth principal: err = %v, want 403", err)
+	}
+	if e, _ := database.Reader.GetMediaEdge(ctx, edgeID); e.ReviewState != "CONFIRMED" {
+		t.Errorf("review_state = %s, want CONFIRMED", e.ReviewState)
+	}
+}
+
 type auditQueueBody struct {
 	Entries []struct {
 		ID               int64   `json:"id"`

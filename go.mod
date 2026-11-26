@@ -8,6 +8,7 @@ require (
 	github.com/corona10/goimagehash v1.1.0
 	github.com/danielgtaylor/huma/v2 v2.41.0
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/modelcontextprotocol/go-sdk v1.8.0

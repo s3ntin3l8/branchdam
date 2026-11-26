@@ -48,15 +48,25 @@ bypass Authentik by design, so nothing upstream of branchDAM would otherwise str
 client-forged `X-Authentik-Username` header on that path.
 
 The MCP router is the same shape as the agent router, at priority 150, middleware
-`strip-identity` only. The rule is `Path(\`/mcp\`) || PathPrefix(\`/mcp/\`)` rather than a
-bare `PathPrefix(\`/mcp\`)`, so a path that only starts with those letters (and is not
-the MCP endpoint) still goes through Authentik. It does not attach `authentik`.
-Assistants authenticate with a bearer personal access token (`mcp.enabled` must also
-be true; see [`configuration.md`](configuration.md)):
+`strip-identity` only. The rule is exact for `/mcp` and for the two OAuth discovery paths (`/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`, each with and without a trailing slash). It is not a prefix, so a different path that only begins with those letters still goes through Authentik. Discovery has no credential; if it hit the browser catch-all, Authentik would answer with a login redirect. The router does not attach `authentik`.
+Assistants authenticate with a bearer personal access token, or, when `mcp.oauth` is set, an OAuth access token (`mcp.enabled` must also be true; see [`configuration.md`](configuration.md)):
 
 ```sh
 claude mcp add --transport http branchdam https://<host>/mcp --header "Authorization: Bearer bdam_pat_..."
 ```
+
+### OAuth connector (claude.ai)
+
+`/mcp` can also be an OAuth 2.1 protected resource in front of an Authentik OAuth2/OIDC provider. branchDAM does not run an authorization server. Checked against MCP authorization 2026-07-28 and Claude's connector dialog: use a pre-registered client. Authentik's dynamic registration needs an admin bearer token, and it does not publish a Client ID Metadata Document, so Claude's "Register automatically" and "Use Claude's published identity" options do not apply. Choose "Use your own OAuth client".
+
+1. In Authentik, create an OAuth2/OIDC provider (separate from the proxy provider used for the web UI). Select a signing key so access tokens are asymmetric JWTs. With no signing key Authentik uses HS256 and the client secret, and branchDAM rejects those tokens.
+2. Set the token audience to the public MCP URL (`https://dam.example.com/mcp`). Copy the provider's OpenID `issuer` into `mcp.oauth.issuer` and that URL into `mcp.oauth.audience`.
+3. Put group names in the access token (Authentik's `groups` scope mapping). Map them under `mcp.oauth.scopeClaims`. The user's `sub` must already match `users.external_uid` for `auth_provider=authentik` (the same id `X-Authentik-Uid` uses). Signing in through the web UI once creates that row. OAuth does not create users.
+4. Create a public or confidential client. Redirect URI for claude.ai, Desktop, mobile and Cowork: `https://claude.ai/api/mcp/auth_callback`. Authentik must advertise S256 PKCE, which it does. Claude Code uses a loopback redirect and its own client identity; keep using a PAT for it.
+5. Expose both `https://<dam-host>/mcp` and the Authentik issuer to the public internet. Claude's servers, not the browser, call the token endpoint.
+6. In Claude, add a custom connector whose URL is the MCP URL. Authentication: sign in now. OAuth client: use your own, and paste the client id (and the secret only if the client is confidential).
+
+The discovery document is `https://<dam-host>/.well-known/oauth-protected-resource`. A 401 from `/mcp` points at it. There is no manual claude.ai login in CI; the automated tests sign tokens against a local JWKS.
 
 ## 3. `compose.override.yaml`
 
@@ -69,7 +79,7 @@ services:
   branchdam:
     labels:
       traefik.http.routers.branchdam-agent.rule: "Host(`dam.yourdomain.example`) && PathPrefix(`/api/v1/agent`)"
-      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.yourdomain.example`) && (Path(`/mcp`) || PathPrefix(`/mcp/`))"
+      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.yourdomain.example`) && (Path(`/mcp`) || PathPrefix(`/mcp/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp/`))"
       traefik.http.routers.branchdam.rule: "Host(`dam.yourdomain.example`)"
       traefik.http.routers.branchdam-outpost.rule: "Host(`dam.yourdomain.example`) && PathPrefix(`/outpost.goauthentik.io/`)"
     volumes:
