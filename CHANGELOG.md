@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.29.0](https://github.com/s3ntin3l8/branchdam/compare/v0.28.0...v0.29.0) (2026-11-26)
+
+
+### Features
+
+* **api:** user and assistant tags and annotations ([#667](https://github.com/s3ntin3l8/branchdam/issues/667)) ([7da21c8](https://github.com/s3ntin3l8/branchdam/commit/7da21c81bc757b5eb47d9a4c73cd94a699d21381))
+* **audit:** record auth provider and PAT id on actor_audit ([#662](https://github.com/s3ntin3l8/branchdam/issues/662)) ([e1c7ba6](https://github.com/s3ntin3l8/branchdam/commit/e1c7ba6b626bc977997c117a65192d3c0025a504))
+* **auth:** let non-admins mint mcp:* PATs ([#661](https://github.com/s3ntin3l8/branchdam/issues/661)) ([4ab8d3a](https://github.com/s3ntin3l8/branchdam/commit/4ab8d3a6a76c7e830f939da2bcb49cbbb7a75edc))
+* **db:** FTS5 full-text search for asset queries ([ad92b08](https://github.com/s3ntin3l8/branchdam/commit/ad92b08ff8be22209eeae33b192a5e53c55d9244))
+* **mcp:** find similar assets by perceptual hash ([#666](https://github.com/s3ntin3l8/branchdam/issues/666)) ([2a5e10f](https://github.com/s3ntin3l8/branchdam/commit/2a5e10f927e99fdbcfbabe594850e9ea11a88e9c))
+* **mcp:** MCP server at /mcp with read tools ([#663](https://github.com/s3ntin3l8/branchdam/issues/663)) ([a20c3e3](https://github.com/s3ntin3l8/branchdam/commit/a20c3e350907fa9fd1576897ee9e4f5d3e855145)), closes [#650](https://github.com/s3ntin3l8/branchdam/issues/650)
+* **mcp:** OAuth 2.1 remote connector via Authentik ([#665](https://github.com/s3ntin3l8/branchdam/issues/665)) ([28af242](https://github.com/s3ntin3l8/branchdam/commit/28af242159e6a3a8eabbeab49dc6c45fd92b36c7))
+* **mcp:** review tools and assistant review_source on edges ([#664](https://github.com/s3ntin3l8/branchdam/issues/664)) ([381764f](https://github.com/s3ntin3l8/branchdam/commit/381764fa2a79020a9a86c2e69482dfadb4cffda8))
+* **mcp:** tagging tools and AI badges in the web UI ([#668](https://github.com/s3ntin3l8/branchdam/issues/668)) ([fa7ebae](https://github.com/s3ntin3l8/branchdam/commit/fa7ebae4a0df2b2227add9f7ffb390c42846ee54))
+
+
+### Bug Fixes
+
+* **upload:** use idle deadlines for streaming media ([#645](https://github.com/s3ntin3l8/branchdam/issues/645)) ([d0b92c8](https://github.com/s3ntin3l8/branchdam/commit/d0b92c8f305300259df0a20746de1186b0fe03ab))
+
 ## [0.28.0](https://github.com/s3ntin3l8/branchdam/compare/v0.27.1...v0.28.0) (2026-11-24)
 
 
