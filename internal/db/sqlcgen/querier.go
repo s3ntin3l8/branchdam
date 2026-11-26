@@ -713,9 +713,6 @@ type Querier interface {
 	// (the Immich export mount) that have NO remote_sync_state row for the given
 	// remote yet. Once pushed, a row exists and the node drops out of this set.
 	ListLiveNodesForSync(ctx context.Context, arg ListLiveNodesForSyncParams) ([]ListLiveNodesForSyncRow, error)
-	// Backs GET /api/v1/assets/{id}/similar. Live means ACTIVE or HIDDEN.
-	// The caller drops the source id and ranks by Hamming distance.
-	ListLivePhashes(ctx context.Context) ([]ListLivePhashesRow, error)
 	// login_audit: append-only log of authentication events (PR #407).
 	// Read by /api/v1/audit?type=login alongside /api/v1/audit?type=activity
 	// (which reads actor_audit). login_audit is owned by internal/auth/users;

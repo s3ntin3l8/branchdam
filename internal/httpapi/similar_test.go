@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -49,6 +50,10 @@ func TestListSimilarOrdersByHammingDistance(t *testing.T) {
 	handler.ServeHTTP(missing, withSessionCookie(http.MethodGet, "/api/v1/assets/999999/similar", cookie, nil))
 	assert.Equal(t, http.StatusNotFound, missing.Code)
 
+	archived := httptest.NewRecorder()
+	handler.ServeHTTP(archived, withSessionCookie(http.MethodGet, "/api/v1/assets/"+strconv.FormatInt(ids.archived, 10)+"/similar", cookie, nil))
+	assert.Equal(t, http.StatusNotFound, archived.Code, "body: %s", archived.Body.String())
+
 	session := dialMCP(t, handler, readToken)
 	res := callMCP(t, session, "find_similar", map[string]any{"id": ids.source, "limit": 20, "maxDistance": 12})
 	require.False(t, res.IsError, "find_similar: %s", mcpText(res))
@@ -66,7 +71,7 @@ func TestListSimilarOrdersByHammingDistance(t *testing.T) {
 }
 
 type similarIDsSet struct {
-	source, exact, hidden, close, mid, unhashed int64
+	source, exact, hidden, close, mid, unhashed, archived int64
 }
 
 func seedSimilarNodes(t *testing.T, database *db.DB) similarIDsSet {
@@ -118,6 +123,10 @@ func seedSimilarNodes(t *testing.T, database *db.DB) similarIDsSet {
 			return err
 		}
 		ids.unhashed, err = insert("0198cccc-0000-7000-8000-000000000009", "unhashed.jpg", "ACTIVE", sql.NullInt64{})
+		if err != nil {
+			return err
+		}
+		ids.archived, err = insert("0198cccc-0000-7000-8000-00000000000a", "archived.jpg", "ARCHIVED", hash(0))
 		return err
 	})
 	require.NoError(t, err)
@@ -153,4 +162,16 @@ func similarDistances(assets []similarAssetDTO) []int {
 		out[i] = a.Distance
 	}
 	return out
+}
+
+func TestSimilarBoundsMatchHandlerTags(t *testing.T) {
+	typ := reflect.TypeOf(SimilarAssetsInput{})
+	limit, ok := typ.FieldByName("Limit")
+	require.True(t, ok)
+	dist, ok := typ.FieldByName("MaxDistance")
+	require.True(t, ok)
+	assert.Equal(t, strconv.Itoa(SimilarDefaultLimit), limit.Tag.Get("default"))
+	assert.Equal(t, strconv.Itoa(SimilarMaxLimit), limit.Tag.Get("maximum"))
+	assert.Equal(t, strconv.Itoa(SimilarDefaultDistance), dist.Tag.Get("default"))
+	assert.Equal(t, strconv.Itoa(SimilarMaxDistance), dist.Tag.Get("maximum"))
 }

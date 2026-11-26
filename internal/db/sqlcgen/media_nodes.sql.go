@@ -1097,54 +1097,6 @@ func (q *Queries) ListLiveNodesByFilenameStem(ctx context.Context, arg ListLiveN
 	return items, nil
 }
 
-const listLivePhashes = `-- name: ListLivePhashes :many
-SELECT id, node_uuid, file_path, file_name, thumb_state, phash
-FROM media_nodes
-WHERE lifecycle_state IN ('ACTIVE', 'HIDDEN')
-  AND phash IS NOT NULL
-`
-
-type ListLivePhashesRow struct {
-	ID         int64
-	NodeUuid   string
-	FilePath   string
-	FileName   string
-	ThumbState string
-	Phash      sql.NullInt64
-}
-
-// Backs GET /api/v1/assets/{id}/similar. Live means ACTIVE or HIDDEN.
-// The caller drops the source id and ranks by Hamming distance.
-func (q *Queries) ListLivePhashes(ctx context.Context) ([]ListLivePhashesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listLivePhashes)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListLivePhashesRow{}
-	for rows.Next() {
-		var i ListLivePhashesRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.NodeUuid,
-			&i.FilePath,
-			&i.FileName,
-			&i.ThumbState,
-			&i.Phash,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listMediaNodeStatusesByUUIDs = `-- name: ListMediaNodeStatusesByUUIDs :many
 SELECT n.node_uuid, n.lifecycle_state, n.full_hash, s.tier,
        CAST(EXISTS (

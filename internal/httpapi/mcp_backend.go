@@ -78,15 +78,15 @@ func (b mcpBackend) GetAsset(ctx context.Context, id int64) (any, error) {
 }
 
 func (b mcpBackend) FindSimilar(ctx context.Context, in mcp.FindSimilarInput) (any, error) {
-	limit, err := pageLimit(in.Limit, 20, 100)
+	limit, err := pageLimit(in.Limit, SimilarDefaultLimit, SimilarMaxLimit)
 	if err != nil {
 		return nil, err
 	}
-	dist := int64(12)
+	dist := int64(SimilarDefaultDistance)
 	if in.MaxDistance != nil {
 		dist = *in.MaxDistance
 	}
-	if dist < 0 || dist > 64 {
+	if dist < 0 || dist > SimilarMaxDistance {
 		return nil, fmt.Errorf("maxDistance must be between 0 and 64")
 	}
 	out, err := b.s.handleListSimilar(ctx, &SimilarAssetsInput{

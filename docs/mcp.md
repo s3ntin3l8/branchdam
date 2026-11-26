@@ -305,7 +305,8 @@ Claude's custom-connector docs.
 - **No hash:** a source node with no perceptual hash returns
   `{assets: [], reason: "no_perceptual_hash"}`, not an error.
 - **Implementation:** a brute-force scan in Go is fine up to roughly
-  1M nodes. Bucketing by hash prefix is a later optimisation.
+  1M nodes. Rows are streamed and only the nearest `limit` are kept.
+  Bucketing by hash prefix is a later optimisation.
 
 ## Phase 4: assistant enrichment
 

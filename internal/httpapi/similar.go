@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"errors"
@@ -8,15 +9,27 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
-	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
+	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/hashing"
 )
 
-const noPerceptualHashReason = "no_perceptual_hash"
+const (
+	// SimilarDefaultLimit and SimilarMaxLimit are the page size for
+	// GET /api/v1/assets/{id}/similar. The huma tags on
+	// SimilarAssetsInput repeat these numbers; TestSimilarBoundsMatchHandlerTags
+	// fails if they drift. A struct tag cannot reference a const.
+	SimilarDefaultLimit = 20
+	SimilarMaxLimit     = 100
+	// SimilarDefaultDistance and SimilarMaxDistance bound the Hamming
+	// filter. 0 is a real value (identical hashes only), so the HTTP
+	// default has to live in the tag, not in a zero-value check.
+	SimilarDefaultDistance = 12
+	SimilarMaxDistance     = 64
+
+	noPerceptualHashReason = "no_perceptual_hash"
+)
 
 // SimilarAssetsInput is GET /api/v1/assets/{id}/similar.
-// Limit defaults to 20. MaxDistance defaults to 12; 0 means identical
-// hashes only.
 type SimilarAssetsInput struct {
 	ID          int64 `path:"id"`
 	Limit       int64 `query:"limit" default:"20" minimum:"1" maximum:"100"`
@@ -47,49 +60,92 @@ func (s *Server) handleListSimilar(ctx context.Context, in *SimilarAssetsInput) 
 	if err != nil {
 		return nil, huma.Error500InternalServerError("get asset", err)
 	}
+	// Same as the other /assets/{id} sub-resources: an ARCHIVED node is
+	// not a live asset to search from.
+	if node.LifecycleState == "ARCHIVED" {
+		return nil, huma.Error404NotFound("asset not found")
+	}
 	out := &SimilarAssetsOutput{}
 	out.Body.Assets = []similarAssetDTO{}
 	if !node.Phash.Valid {
 		out.Body.Reason = noPerceptualHashReason
 		return out, nil
 	}
-	rows, err := s.db.Reader.ListLivePhashes(ctx)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("list similar", err)
-	}
-	out.Body.Assets = rankSimilar(node.ID, node.Phash.Int64, rows, int(in.MaxDistance), int(in.Limit))
-	return out, nil
-}
-
-// rankSimilar keeps other live nodes within maxDistance of sourceHash,
-// nearest first. Equal distances break ties by ascending id.
-func rankSimilar(sourceID, sourceHash int64, rows []sqlcgen.ListLivePhashesRow, maxDistance, limit int) []similarAssetDTO {
-	hits := make([]similarAssetDTO, 0)
-	for _, row := range rows {
-		if !row.Phash.Valid || row.ID == sourceID {
-			continue
+	best := &similarHeap{}
+	heap.Init(best)
+	err = s.db.ForEachLivePhash(ctx, func(row db.LivePhash) error {
+		if row.ID == node.ID {
+			return nil
 		}
-		dist := hashing.HammingDistance(sourceHash, row.Phash.Int64)
-		if dist > maxDistance {
-			continue
+		dist := hashing.HammingDistance(node.Phash.Int64, row.Phash)
+		if dist > int(in.MaxDistance) {
+			return nil
 		}
-		hits = append(hits, similarAssetDTO{
+		considerSimilar(best, similarAssetDTO{
 			ID:         row.ID,
-			NodeUUID:   row.NodeUuid,
+			NodeUUID:   row.NodeUUID,
 			FilePath:   row.FilePath,
 			FileName:   row.FileName,
 			ThumbState: row.ThumbState,
 			Distance:   dist,
-		})
-	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].Distance != hits[j].Distance {
-			return hits[i].Distance < hits[j].Distance
-		}
-		return hits[i].ID < hits[j].ID
+		}, int(in.Limit))
+		return nil
 	})
-	if limit < len(hits) {
-		hits = hits[:limit]
+	if err != nil {
+		return nil, huma.Error500InternalServerError("list similar", err)
 	}
-	return hits
+	out.Body.Assets = best.sorted()
+	return out, nil
+}
+
+// considerSimilar keeps at most limit nearest candidates. The heap's
+// root is the worst of those, so a closer row replaces it.
+func considerSimilar(h *similarHeap, row similarAssetDTO, limit int) {
+	if limit < 1 {
+		return
+	}
+	if h.Len() < limit {
+		heap.Push(h, row)
+		return
+	}
+	worst := (*h)[0]
+	if row.Distance < worst.Distance || (row.Distance == worst.Distance && row.ID < worst.ID) {
+		heap.Pop(h)
+		heap.Push(h, row)
+	}
+}
+
+// similarHeap is a max-heap of the nearest matches: higher distance,
+// then higher id, is worse and sits at the root.
+type similarHeap []similarAssetDTO
+
+func (h similarHeap) Len() int { return len(h) }
+func (h similarHeap) Less(i, j int) bool {
+	if h[i].Distance != h[j].Distance {
+		return h[i].Distance > h[j].Distance
+	}
+	return h[i].ID > h[j].ID
+}
+func (h similarHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *similarHeap) Push(x any)   { *h = append(*h, x.(similarAssetDTO)) }
+func (h *similarHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+func (h similarHeap) sorted() []similarAssetDTO {
+	out := append([]similarAssetDTO(nil), h...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Distance != out[j].Distance {
+			return out[i].Distance < out[j].Distance
+		}
+		return out[i].ID < out[j].ID
+	})
+	if out == nil {
+		return []similarAssetDTO{}
+	}
+	return out
 }
