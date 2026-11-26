@@ -59,8 +59,10 @@ compose.override.yml
 # Pre-commit
 .pre-commit-config.yaml.backup
 
-# Claude Code project state (plans, worktrees, local settings)
-.claude/
+# Claude Code: local state (plans, settings.local.json, worktrees) stays ignored; shared skills/agents are committed
+.claude/*
+!.claude/skills/
+!.claude/agents/
 
 # Git worktrees (feature isolation)
 .worktrees/
@@ -69,7 +71,7 @@ compose.override.yml
 /docs/superpowers/
 .superpowers/
 
-# Developer worktrees (per AGENTS.md make wt convention; existing .worktrees/ line untouched)
+# Agent worktrees: one per branch under .wt/<name> (AGENTS.md Workflow Conventions)
 .wt/
 landing-shots/
 

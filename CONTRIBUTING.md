@@ -7,72 +7,32 @@ make install-hooks    # pre-commit + pre-push git hooks (see below -- do this be
 cd web && npm ci
 ```
 
-The Go binary embeds `web/dist` via `//go:embed`. If `web/dist` doesn't exist, backend builds
-and tests fail. `make build`/`make test`/`make vet`/`make golangci-lint` all depend on the
-`web-stub` target, which runs `.github/ci-prebuild.sh` to create a placeholder if none exists yet.
-`make dev`/`make dev-api`/`make dev-all` instead depend on `web-ensure`, which auto-runs
-`npm ci && npm run build` when `web/src` is newer than `web/dist` (or when `web/dist` is missing).
-For the backend-only CI lane and any contributor without Node, `web-ensure` is harmless: it writes
-the stub and moves on. Use `make build-embed` when you want a locally-built Go binary with a real
-embedded SPA (`make build` alone keeps whatever `web/dist` already has).
+The Go binary embeds `web/dist` via `//go:embed`. `make build`/`test`/`vet`/`golangci-lint` create a placeholder
+when it's missing (`web-stub`), `make dev*` rebuild it when `web/src` is newer (`web-ensure`), and `make build-embed`
+builds a binary with the real SPA embedded.
 
-Run `npm run build` in `web/` first if you want the real SPA embedded instead of the stub.
-
-See [`AGENTS.md`](AGENTS.md) for the full architecture and package tour.
+Agent and process rules (branching, worktrees, PR titles, review threads) live in [`AGENTS.md`](AGENTS.md)'s
+Workflow Conventions; architecture and invariants are there too.
 
 ## Before opening a PR
 
-`make install-hooks` wires up local git hooks: the `pre-commit` stage runs gofmt, `go vet`,
-`go mod tidy`, and `sqlc-diff` on every commit; the `pre-push` stage additionally runs
-`go test -tags sqlite_fts5 -race` and `govulncheck`. Run the same checks manually before opening a PR:
-
 ```bash
-make check
+make check       # lint + test + test-demo + build + golangci-lint
+make check-web   # frontend: cd web && lint + typecheck + test + build
 ```
 
-which is exactly `make lint && make test && make test-demo && make build && make golangci-lint` --
-`golangci-lint` is `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run`
-(see the Makefile's `GOLANGCI_LINT_VERSION`). The `/v2` module path and the version pin both
-matter -- `.golangci.yml` declares `version: "2"`, and a floating `@latest` install could
-resolve v3+ and fail against a v2 config. CI pins the same version via
-`golangci/golangci-lint-action@v9`; bump both together.
-
-Be precise about what each of these does and doesn't cover:
-
-- `make lint` is `pre-commit run --all-files` -- it only runs the `pre-commit`-staged hooks
-  (gofmt, go vet, go mod tidy, sqlc-diff), **not** `go test` or `govulncheck` (those are
-  `pre-push`-staged), and **not** `golangci-lint`. `make check` covers everything but
-  `govulncheck` (`lint` + `test` + `test-demo` + `build` + `golangci-lint`); `make lint` alone does not.
-  `test-demo` runs the demo instance's isolation tests (`node --test scripts/demo/*.test.mjs`).
-  `govulncheck` runs only from the `pre-push` hook or manually via `make vulncheck` (both
-  install `govulncheck@latest`). Note `make lint`'s pre-commit hooks (`trailing-whitespace`,
-  `end-of-file-fixer`, `mixed-line-ending`, `gofmt`) rewrite files in your working tree.
-- `sqlc-diff` is a no-op if the `sqlc` binary isn't installed on your machine. If you changed
-  `internal/db/migrations/*.sql` or `internal/db/queries/*.sql`, run `sqlc generate` yourself
-  and commit `internal/db/sqlcgen/` in the same PR -- CI has no codegen step, so a stale
-  `sqlcgen/` breaks `go build -tags sqlite_fts5 ./...` on `main`, not just your branch.
-
-If you changed a route DTO in `internal/httpapi/routes.go`, hand-update
-`web/src/api/types.ts` and `web/src/api/client.ts` to match -- there's no generated client yet.
-
-If you're writing a recursive CTE against `internal/db/queries/*.sql`, see the sqlc risk note in
-[`docs/schema.md`](docs/schema.md): every column in the anchor `SELECT` must be explicitly named
-or aliased (`SELECT sqlc.arg(x) AS id`, not `SELECT sqlc.arg(x)`), or sqlc's SQLite parser fails
-with `*ast.ResTarget has nil name`.
-
-Frontend changes:
-
-```bash
-make check-web
-```
-
-which is `cd web && npm run lint && npm run typecheck && npm run test && npm run build`. The vitest
-suite runs single-process both locally (~30-40s on a warm cache) and inline in CI as
-`test:coverage` in the `Web (typecheck · build) / lint-and-test` job. `ci-node.yml` supports
-splitting tests across a `test-shard` matrix with a `test-merge` coverage job, but that only
-activates when a caller passes `test-shards > 1` -- this repo does not, so the sharded jobs are
-skipped. New contract tests added under `web/src/styles/` (theme, hardcoded-token ban) run on
-every push, so prefer focused fixtures over heavy `render()` trees when adding new contracts.
+- `make install-hooks` wires up git hooks: `pre-commit` runs gofmt, `go vet`, `go mod tidy` and `sqlc-diff`;
+  `pre-push` adds `go test -tags sqlite_fts5 -race` and `govulncheck`. `make lint` (= `pre-commit run --all-files`) rewrites files in
+  your working tree and does not run tests, `govulncheck` or golangci-lint. `govulncheck` is only in the pre-push hook
+  and `make vulncheck`.
+- golangci-lint is pinned by the Makefile's `GOLANGCI_LINT_VERSION` (v2 module path, matching `.golangci.yml`'s
+  `version: "2"`) and by `golangci/golangci-lint-action` in CI. Bump both together.
+- `sqlc-diff` is a no-op without the `sqlc` binary. After changing a migration or query, run `sqlc generate` and
+  commit `internal/db/sqlcgen/` in the same PR: CI has no codegen step, so a stale `sqlcgen/` breaks
+  `go build -tags sqlite_fts5 ./...` on `main`. See [`docs/schema.md`](docs/schema.md) for
+  the sqlc traps (ASCII-only query files, aliased recursive-CTE anchors).
+- A browser DTO change in `internal/httpapi/*.go` needs a hand update of `web/src/api/types.ts` and
+  `web/src/api/client.ts`; there's no generated client.
 
 ## Demo instance and screenshots
 
@@ -106,25 +66,21 @@ The screenshots and the per-change visual check run in a pinned
 - **`/refresh-screenshots`**: comment it on a pull request (write access) to run that same refresh on demand, so a
   stale refresh pull request can be regenerated without waiting for Monday. The refresh pull requests carry this
   reminder in their description.
+- **`baseHarness`** renders the base with the head's `scripts/demo` and the merge base's server and web app, so a PR
+  that fixes the demo isn't compared against the bug it fixes. A PR that changes `scripts/demo` together with code it
+  depends on can fail to start its base demo; then every scene reports "new" (the reason is only a stderr line).
+- The `storage-health` page shows the host's real disk usage, so it is in `check` and `audit` (masked) but not in the
+  README or landing set. The landing loop re-encodes differently on every run, so `make screenshots` doesn't keep it
+  in `docs/screenshots`.
 - The asset paths in the captures read `/tmp/branchdam-demo/...`; if your shell sets `TMPDIR` to something else, run
   `TMPDIR=/tmp make screenshots` so your images match what CI renders.
 
-## PR title
+## PR titles and branching
 
-Must use a [Conventional Commits](https://www.conventionalcommits.org/) prefix (`feat:`,
-`fix:`, `chore:`, `docs:`, ...). This repo squash-merges PRs and release-please parses the
-**PR title**, not the individual commits, to cut versions and changelog entries -- an
-unprefixed title silently drops from the changelog.
-
-## Branching
-
-Branch off the latest `origin/main`, not a possibly-stale local `main`:
-
-```bash
-git fetch origin && git checkout -b <branch> origin/main
-```
-
-No direct commits to `main`. One issue = one PR.
+Branch off the latest `origin/main` (`git fetch origin && git checkout -b <branch> origin/main`); no direct commits to
+`main`, one issue = one PR. PR titles need a [Conventional Commits](https://www.conventionalcommits.org/) prefix:
+this repo squash-merges and release-please reads the **PR title** to cut versions and changelog entries, so an
+unprefixed title silently drops out of the changelog.
 
 ## Branch protection
 
@@ -142,18 +98,17 @@ it via the "merge without waiting for requirements" path, which `enforce_admins:
 available to the repo owner.
 
 `required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
-be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
-[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for the exact commands (thread
-resolution is a GraphQL-only concept, not a `gh pr` verb).
+be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. Thread resolution is
+GraphQL-only (`resolveReviewThread`), not a `gh pr` verb; [`AGENTS.md`](AGENTS.md)'s Workflow Conventions have the
+exact commands.
 
 ## Automated review
 
 Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` GitHub App,
 posted once on `opened` (or once on `ready_for_review` if the PR started as a draft). Ask for
 another look at any point -- including after addressing feedback -- by commenting
-`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). See
-[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for replying to and resolving
-Hermes's inline comments.
+`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). Agents request reviews
+through the Mullion review relay instead (see [`AGENTS.md`](AGENTS.md)).
 
 Because `required_conversation_resolution` is on, any inline comment Hermes (or a human
 reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
