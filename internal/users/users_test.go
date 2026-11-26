@@ -872,3 +872,35 @@ func TestResolveOrCreate_PATPrincipalWithoutOwnerIsInvalid(t *testing.T) {
 		t.Errorf("unknown owner: err = %v, want ErrInvalidPrincipal", err)
 	}
 }
+
+func TestResolveOrCreate_OAuthDoesNotProvision(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	owner, err := svc.ResolveOrCreate(ctx, auth.Principal{
+		Kind: auth.KindUser, Name: "alice", ExternalUID: "uid-alice", Authenticated: true,
+	})
+	if err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+	got, err := svc.ResolveOrCreate(ctx, auth.Principal{
+		Kind: auth.KindUser, Name: "alice", ExternalUID: "uid-alice",
+		AuthProvider: auth.AuthProviderOAuth, Authenticated: true,
+	})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate(oauth): %v", err)
+	}
+	if got.ID != owner.ID || got.AuthProvider != AuthProviderAuthentik {
+		t.Errorf("oauth principal = %+v, want the authentik row %d", got, owner.ID)
+	}
+	if _, err := svc.ResolveOrCreate(ctx, auth.Principal{
+		Kind: auth.KindUser, Name: "ghost", ExternalUID: "uid-missing",
+		AuthProvider: auth.AuthProviderOAuth, Authenticated: true,
+	}); !errors.Is(err, ErrInvalidPrincipal) {
+		t.Fatalf("missing subject err = %v, want ErrInvalidPrincipal", err)
+	}
+	if _, err := svc.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+		AuthProvider: "oauth", ExternalUid: "uid-alice",
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("oauth users row lookup err = %v, want sql.ErrNoRows", err)
+	}
+}

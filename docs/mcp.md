@@ -222,33 +222,46 @@ To limit prompt injection:
 
 ## Phase 2: OAuth remote connector
 
-- **Resource server:** `/mcp` becomes an OAuth 2.1 protected resource
-  per the MCP authorization spec:
-  - protected-resource metadata (RFC 9728) at
-    `/.well-known/oauth-protected-resource`
+Checked 2026-11-25 against MCP authorization revision 2026-07-28 and
+Claude's custom-connector docs.
+
+- The MCP server is only a resource server. It must publish RFC 9728
+  protected-resource metadata and reject tokens that are not
+  audience-bound to it. PKCE S256 is required of the client and the
+  authorization server, not of this process.
+- Client registration prefers a pre-registered client, then a Client
+  ID Metadata Document. Dynamic client registration is deprecated in
+  the spec and kept only for authorization servers that still offer
+  it. Claude's connector dialog offers all three: "Use Claude's
+  published identity" (CIMD), "Register automatically" (open DCR),
+  and "Use your own OAuth client" (client id, and a secret only if
+  the provider is confidential). The hosted redirect is
+  `https://claude.ai/api/mcp/auth_callback`. Claude sends PKCE S256
+  on every authorization request.
+- Authentik already supports PKCE and asymmetric JWT access tokens
+  (select a signing key; otherwise it signs HS256 with the client
+  secret, which this server will not accept). Its DCR endpoint
+  requires a bearer token with the DCR scope, so it is not Claude's
+  open registration, and it does not advertise CIMD. A pre-registered
+  client is enough. This repo does not ship an authorization server.
+- **Resource server:** `/mcp` accepts a PAT or an OAuth access token.
+  - protected-resource metadata at
+    `/.well-known/oauth-protected-resource`, no credential
   - `WWW-Authenticate` with `resource_metadata` on 401
-  - audience-bound access tokens, validated as JWTs against the
-    issuer's JWKS
-- **Authorization server:** Authentik's OAuth2/OIDC provider, which is
-  already deployed.
-  - Authentik groups map to `mcp:read`, `mcp:review` and `mcp:enrich`.
-  - Token subjects map to `users` rows through the existing
-    forward-auth identity, i.e. the same user, not a new one.
-  - A built-in authorization server is a fallback, only if Authentik
-    can't satisfy what claude.ai custom connectors need (client
-    registration in particular).
-- **Re-check at implementation time:** the current MCP authorization
-  spec revision and the claude.ai connector requirements. Both move.
+  - JWTs checked against the issuer's JWKS (asymmetric algs only),
+    with issuer, audience, expiry and a required `sub`
+- **Identity:** `sub` must already be a forward-auth `users` row
+  (`auth_provider=authentik`, `external_uid=sub`). No row is created.
+  `mcp.oauth.scopeClaims` maps claim values (Authentik groups) to
+  `mcp:read`, `mcp:review` and `mcp:enrich`. Anything else in the
+  mapping is ignored. `auth.HasScope` reads those grants. An audit
+  row for the action has `auth_provider=oauth`.
 - **Ingress:** the `/mcp` router stays outside Authentik ForwardAuth.
-  It accepts a PAT or an OAuth access token.
-  - **Discovery path:** its rule must also cover the discovery path,
-    i.e.
-    ``PathPrefix(`/mcp`) || PathPrefix(`/.well-known/oauth-protected-resource`)``.
-    Otherwise the browser catch-all router (priority 10,
-    `authentik@file`) sends the client's first, credential-less
-    discovery request to a login redirect.
-  - **Public exposure** follows the operator's existing pattern for
-    remote connectors.
+  Its rule is
+  ``Path(`/mcp`) || PathPrefix(`/mcp/`) || PathPrefix(`/.well-known/oauth-protected-resource`)``.
+  A bare `PathPrefix(`/mcp`)` would also match unrelated paths. The
+  well-known prefix is what keeps the credential-less discovery
+  request off the browser catch-all (priority 10, `authentik@file`).
 
 ## Phase 3: search
 

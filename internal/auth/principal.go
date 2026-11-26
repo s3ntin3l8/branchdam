@@ -47,6 +47,11 @@ const AuthProviderLocal = "local"
 // attributed to that phantom instead of the token's owner.
 const AuthProviderPAT = "pat"
 
+// AuthProviderOAuth marks a Principal authenticated by an OAuth 2.1
+// access token on /mcp. The subject is an existing forward-auth user.
+// The token does not provision a users row, and it is not a PAT.
+const AuthProviderOAuth = "oauth"
+
 // Principal is what a request is authenticated as. A machine Principal
 // after #companion-pairing carries Name = agent_id (the device that owns
 // the API key) for device-paired sessions. Email and Groups are always

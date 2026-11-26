@@ -61,6 +61,34 @@ func TestLoadMCPEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadMCPOAuth(t *testing.T) {
+	path := writeConfig(t, `
+mcp:
+  enabled: true
+  oauth:
+    issuer: https://auth.example.com/application/o/branchdam/
+    audience: https://dam.example.com/mcp
+    scopeClaims:
+      groups:
+        dam-mcp-read: [mcp:read]
+        dam-mcp-review: [mcp:review]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.MCP.OAuthConfigured() {
+		t.Fatal("OAuthConfigured = false")
+	}
+	if cfg.MCP.OAuth.Audience != "https://dam.example.com/mcp" {
+		t.Errorf("audience = %q", cfg.MCP.OAuth.Audience)
+	}
+	got := cfg.MCP.OAuth.ScopeClaims["groups"]["dam-mcp-review"]
+	if len(got) != 1 || got[0] != "mcp:review" {
+		t.Errorf("scopeClaims = %#v", cfg.MCP.OAuth.ScopeClaims)
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml")); err == nil {
 		t.Fatal("Load with missing file: want error, got nil")

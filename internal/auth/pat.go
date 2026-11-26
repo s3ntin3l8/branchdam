@@ -315,12 +315,13 @@ func PATScopesFrom(ctx context.Context) ([]string, bool) {
 	return scopes, ok
 }
 
-// HasScope reports whether the PAT that authenticated this request
-// satisfies scope. It is false when no PAT is on the context (a
-// session or forward-auth principal), so callers cannot treat a human
-// click as an assistant grant. "*" on the token satisfies every scope,
-// matching scopeSatisfied; the helper does not treat "mcp:*" as a
-// prefix match.
+// HasScope reports whether the PAT or OAuth token that authenticated
+// this request satisfies scope. It is false when no such token is on
+// the context (a session or forward-auth principal), so callers cannot
+// treat a human click as an assistant grant. "*" on a PAT satisfies
+// every scope, matching scopeSatisfied; the helper does not treat
+// "mcp:*" as a prefix match. OAuth scopes are stored on the same
+// context key and are only ever mcp:read, mcp:review or mcp:enrich.
 func HasScope(ctx context.Context, scope string) bool {
 	scopes, ok := PATScopesFrom(ctx)
 	if !ok {

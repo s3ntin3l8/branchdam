@@ -238,6 +238,9 @@ type Server struct {
 	// patService wires admin Personal Access Tokens (issue #453 PR E).
 	// Nil-safe: the HTTP layer skips PAT middleware wiring when nil.
 	patService *auth.PATService
+	// mcpOAuth validates OAuth access tokens on /mcp when mcp.oauth
+	// has an issuer and audience. Nil keeps /mcp PAT-only.
+	mcpOAuth *auth.OAuthValidator
 
 	// localAuth is the bundle the local-auth endpoints depend on.
 	// Nil when auth.mode is "forward" -- see registerLocalAuthRoutes
@@ -345,6 +348,14 @@ func New(d Deps) *Server {
 		attribution:    d.Attribution,
 		audit:          d.Audit,
 	}
+	if cfg := cfgProvider.Effective(); cfg != nil && cfg.MCP.OAuthConfigured() {
+		v, err := auth.NewOAuthValidator(cfg.MCP.OAuth.Issuer, cfg.MCP.OAuth.Audience, cfg.MCP.OAuth.ScopeClaims)
+		if err != nil {
+			log.Error("mcp oauth disabled: invalid issuer or audience", "error", err)
+		} else {
+			s.mcpOAuth = v
+		}
+	}
 	if d.LocalAuth != nil {
 		s.localAuth = &localAuthHandlers{
 			users:               d.LocalAuth.Users,
@@ -449,6 +460,10 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST /mcp/", mcpHandler)
 		mux.Handle("DELETE /mcp", mcpHandler)
 		mux.Handle("DELETE /mcp/", mcpHandler)
+		if s.mcpOAuth != nil {
+			mux.HandleFunc("GET "+oauthProtectedResourcePath, s.handleOAuthProtectedResource)
+			mux.HandleFunc("GET "+oauthProtectedResourcePath+"/", s.handleOAuthProtectedResource)
+		}
 	} else {
 		mux.HandleFunc("GET /mcp", http.NotFound)
 		mux.HandleFunc("GET /mcp/", http.NotFound)
@@ -500,7 +515,7 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 
-	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.log, mux)
+	authzHandler := openAPIMiddleware(exposeOpenAPI, allowedGroups, s.mcpOAuth, s.log, mux)
 	// MFA gate (Issue 1) wraps authzHandler so a half-authed user
 	// gets the SPA-actionable 403 with mfaChallengeRequired:true
 	// instead of the generic "admin authorization required" 403 that
@@ -565,7 +580,12 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		inner := routed
+		oauthOn := s.mcpOAuth != nil && s.cfg() != nil && s.cfg().MCP.Enabled
 		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isOAuthMetadataPath(r.URL.Path) {
+				inner.ServeHTTP(w, r)
+				return
+			}
 			if auth.PATPresented(r) && !strings.HasPrefix(r.URL.Path, auth.AgentPathPrefix) {
 				h := patHandlers[patScopeFor(r.URL.Path)]
 				if h == nil {
@@ -576,6 +596,23 @@ func (s *Server) Handler() http.Handler {
 					h = patHandlers["admin"]
 				}
 				h.ServeHTTP(w, r)
+				return
+			}
+			if oauthOn && isMCPPath(r.URL.Path) {
+				s.authenticateMCPOAuth(w, r, authzHandler)
+				return
+			}
+			inner.ServeHTTP(w, r)
+		})
+	} else if s.mcpOAuth != nil && s.cfg() != nil && s.cfg().MCP.Enabled {
+		inner := routed
+		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isOAuthMetadataPath(r.URL.Path) {
+				inner.ServeHTTP(w, r)
+				return
+			}
+			if isMCPPath(r.URL.Path) {
+				s.authenticateMCPOAuth(w, r, authzHandler)
 				return
 			}
 			inner.ServeHTTP(w, r)
@@ -657,15 +694,38 @@ func isOwnPATManagement(r *http.Request) bool {
 // isPATOnMCP reports whether this request is a PAT-authenticated call
 // to the MCP endpoint. The scope middleware has already admitted it.
 func isPATOnMCP(r *http.Request) bool {
-	path := r.URL.Path
-	if path != "/mcp" && !strings.HasPrefix(path, "/mcp/") {
+	if !isMCPPath(r.URL.Path) {
 		return false
 	}
-	_, ok := auth.PATScopesFrom(r.Context())
+	p, ok := auth.From(r.Context())
+	if !ok || p.AuthProvider != auth.AuthProviderPAT {
+		return false
+	}
+	_, ok = auth.PATScopesFrom(r.Context())
 	return ok
 }
 
-func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Logger, next http.Handler) http.Handler {
+func isOAuthOnMCP(r *http.Request) bool {
+	if !isMCPPath(r.URL.Path) {
+		return false
+	}
+	p, ok := auth.From(r.Context())
+	if !ok || !p.Authenticated || p.AuthProvider != auth.AuthProviderOAuth {
+		return false
+	}
+	_, ok = auth.PATScopesFrom(r.Context())
+	return ok
+}
+
+func isMCPPath(path string) bool {
+	return path == "/mcp" || strings.HasPrefix(path, "/mcp/")
+}
+
+func isOAuthMetadataPath(path string) bool {
+	return path == oauthProtectedResourcePath || path == oauthProtectedResourcePath+"/"
+}
+
+func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, oauth *auth.OAuthValidator, log *slog.Logger, next http.Handler) http.Handler {
 	requireAdmin := auth.RequireAdmin(allowedGroups, log)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -679,6 +739,10 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Log
 		// no-op without a cookie).
 		key := r.Method + " " + path
 		if _, ok := noAuthLocalAuthPaths[key]; ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isOAuthMetadataPath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -704,12 +768,16 @@ func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, log *slog.Log
 		// the rest of the API. IsAdmin on the LocalUserView stays the
 		// owner's real flag, so the token still fails RequireAdmin
 		// on every other path.
-		if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
-			if !isPATOnMCP(r) {
-				http.Error(w, "personal access token required", http.StatusUnauthorized)
+		if isMCPPath(path) {
+			if isPATOnMCP(r) || isOAuthOnMCP(r) {
+				next.ServeHTTP(w, r)
 				return
 			}
-			next.ServeHTTP(w, r)
+			if oauth != nil {
+				auth.OAuthUnauthorized(w, oauth.MetadataURL(), false)
+				return
+			}
+			http.Error(w, "personal access token required", http.StatusUnauthorized)
 			return
 		}
 		if isOpenAPI {

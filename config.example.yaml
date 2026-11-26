@@ -84,9 +84,17 @@ agent:
 mcp:
   # In-process MCP server at /mcp (Streamable HTTP). Off by default:
   # the path 404s until this is true, and changing it needs a restart.
-  # Clients must present a personal access token; see docs/deploy.md
-  # for the Traefik router and the claude mcp add example.
+  # Clients must present a personal access token, or an OAuth access
+  # token when oauth is set. See docs/deploy.md.
   enabled: false
+  # oauth:
+  #   issuer: https://auth.example.com/application/o/branchdam/
+  #   audience: https://dam.example.com/mcp
+  #   scopeClaims:
+  #     groups:
+  #       dam-mcp-read: [mcp:read]
+  #       dam-mcp-review: [mcp:review]
+  #       dam-mcp-enrich: [mcp:enrich]
 
 authz:
   # Groups permitted admin (write) access on browser-routed endpoints.

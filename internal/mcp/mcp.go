@@ -90,9 +90,9 @@ type Deps struct {
 // which the streamable-HTTP spec allows. There is no session to
 // delete; a client that sends DELETE is answered with 405 as well.
 //
-// The handler itself rejects anything that is not a PAT principal.
-// The route gate is what returns 401 before this runs; the check
-// here is so a future mount cannot skip it.
+// The handler itself rejects anything that is not a PAT or OAuth
+// principal. The route gate is what returns 401 before this runs; the
+// check here is so a future mount cannot skip it.
 func New(deps Deps) http.Handler {
 	if deps.Backend == nil {
 		panic("mcp: nil Backend")
@@ -112,8 +112,8 @@ func New(deps Deps) http.Handler {
 	}, &sdkmcp.StreamableHTTPOptions{Stateless: true})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := auth.From(r.Context())
-		if !ok || !p.Authenticated || p.AuthProvider != auth.AuthProviderPAT {
-			http.Error(w, "personal access token required", http.StatusUnauthorized)
+		if !ok || !p.Authenticated || (p.AuthProvider != auth.AuthProviderPAT && p.AuthProvider != auth.AuthProviderOAuth) {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
 		inner.ServeHTTP(w, r)
