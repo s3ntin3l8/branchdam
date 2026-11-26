@@ -27,12 +27,16 @@ FROM media_nodes
 -- an unknown value falls through every CASE to the id DESC tiebreak.
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
                    CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query,
+                   CAST(sqlc.narg('tag') AS TEXT) AS tag_query,
                    CAST(sqlc.arg('sort') AS TEXT) AS sort_key) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
        OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query))
 ORDER BY
   CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
     coalesce(h.score, 0.0) END ASC,
@@ -73,12 +77,16 @@ WITH hits AS (
 SELECT COUNT(*)
 FROM media_nodes
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
-                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query) AS p
+                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query,
+                   CAST(sqlc.narg('tag') AS TEXT) AS tag_query) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
-       OR h.rid IS NOT NULL);
+       OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query));
 
 -- name: ListMediaNodesFiltered :many
 -- Materialize once: flattening this join makes MATCH/rank quadratic.
@@ -106,6 +114,7 @@ FROM media_nodes
 -- an unknown value falls through every CASE to the id DESC tiebreak.
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
                    CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query,
+                   CAST(sqlc.narg('tag') AS TEXT) AS tag_query,
                    CAST(sqlc.arg('sort') AS TEXT) AS sort_key) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
 -- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
@@ -120,6 +129,9 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
        OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query))
 ORDER BY
   CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
     coalesce(h.score, 0.0) END ASC,
@@ -148,7 +160,8 @@ WITH hits AS (
 SELECT COUNT(*)
 FROM media_nodes
 CROSS JOIN (SELECT CAST(sqlc.narg('name_query') AS TEXT) AS name_query,
-                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query) AS p
+                   CAST(sqlc.narg('fts_query') AS TEXT) AS fts_query,
+                   CAST(sqlc.narg('tag') AS TEXT) AS tag_query) AS p
 LEFT JOIN hits AS h ON h.rid = media_nodes.id
 -- Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 -- sqlc's SQLite type inference only picks up the column's own (nullable)
@@ -161,7 +174,10 @@ WHERE (lifecycle_state = sqlc.narg('lifecycle_state') OR sqlc.narg('lifecycle_st
   AND (uploaded_by_user_id = sqlc.narg('uploaded_by_user_id') OR sqlc.narg('uploaded_by_user_id') IS NULL)
   AND superseded_by IS NULL
   AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
-       OR h.rid IS NOT NULL);
+       OR h.rid IS NOT NULL)
+  AND (p.tag_query IS NULL OR EXISTS (
+       SELECT 1 FROM asset_tags
+       WHERE asset_tags.node_id = media_nodes.id AND asset_tags.tag = p.tag_query));
 
 -- name: ListCameraModelFacets :many
 -- COALESCE is not a null-guard here -- the WHERE clause already excludes

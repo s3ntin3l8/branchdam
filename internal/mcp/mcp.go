@@ -44,6 +44,7 @@ type SearchAssetsInput struct {
 	UnlinkedOnly      bool   `json:"unlinkedOnly,omitempty" jsonschema:"when true, only assets with no live edge"`
 	UploadedByUserID  int64  `json:"uploadedByUserId,omitempty" jsonschema:"uploader user id; omitted means all uploaders"`
 	Sort              string `json:"sort,omitempty" jsonschema:"newest, name_asc, name_desc, created_asc, created_desc, captured_asc or captured_desc"`
+	Tag               string `json:"tag,omitempty" jsonschema:"exact tag filter; omitted means every tag"`
 	Limit             int64  `json:"limit,omitempty" jsonschema:"page size from 1 to 500; omitted means 50"`
 	Offset            int64  `json:"offset,omitempty" jsonschema:"number of assets to skip; omitted means 0"`
 }
