@@ -414,7 +414,7 @@ export default function AssetListPage() {
                   onClick={() => updateFilters({ tag: active ? null : row.tag })}
                   className={
                     active
-                      ? "rounded-full border border-emerald-700 bg-emerald-950 px-2.5 py-1 text-xs text-emerald-200"
+                      ? "rounded-full border border-emerald-700 bg-emerald-950 px-2.5 py-1 text-xs text-emerald-300"
                       : "rounded-full border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-xs text-neutral-300 hover:border-neutral-500"
                   }
                 >
