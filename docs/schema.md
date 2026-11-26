@@ -196,6 +196,8 @@ Every migration after `00001_init.sql`, in order:
 | `00042_rehash_mismatch_backoff.sql` | `full_hash_provenance.rehash_mismatches INTEGER NOT NULL DEFAULT 0`, `rehash_retry_at INTEGER` | `internal/rehash` re-reads a `MISMATCH` row on a doubling backoff (1, 2, 4 ... days, capped at 30). `rehash_attempts` counts every attempt, including hourly `ERROR` retries while a share is unmounted, so it can't drive that; `rehash_mismatches` counts only mismatches for the current asserted value and `rehash_retry_at` (set by the worker) is when the row may be read again, which the claim query filters on. Both reset with the rest of the bookkeeping. Backfill: an existing `MISMATCH` counts as the first and is due a day after it was checked |
 | `00043_pairing_key_rotation_delivery.sql` | `device_pairing_keys` gains `rotation_sealed_key TEXT`, `awaiting_adoption INTEGER NOT NULL DEFAULT 0` (0/1), `adopted_at INTEGER` | Delivers a rotated key through the handshake. A rotation-minted key's plaintext is kept sealed with `secrets.Box` (only with `BRANCHDAM_SECRET_KEY`; NULL otherwise) until it is adopted, superseded by a later rotation, or revoked with its pairing; the handshake re-seals it under a key derived from the device's current key. The first request authenticated with a key `awaiting_adoption` stamps `adopted_at` and revokes the pairing's older active keys, audited as `KEY_ADOPTED` -- the one `companion_pairing_audit` row whose `actor` is the device's `agent_id` rather than an admin username, because the device performed it. Rows are updated, never deleted. Lands after `00038`-`00042` |
 | `00044_live_node_lookup_indexes.sql` | `idx_media_nodes_file_name ON media_nodes(file_name)`, `idx_media_nodes_document_id ON media_nodes(document_id)` | Two live-node lookups had no supporting index and did a full table scan on `media_nodes` on every lineage resolution: `ListLiveNodesByFileName` (`file_name = ?1`) and `ListLiveNodesByDocumentID` (`document_id = ?1`). `document_id` sat next to `ix_media_nodes_origdocid`, but that index is on `original_document_id` -- a different column. Both queries are also now row-capped (500) like the filename-stem lookup; the cap keeps the project-sidecar resolver's "exactly one node" filename match intact, because a truncated group is still "more than one" and is still skipped as ambiguous. Plain (not partial) indexes: the live-state predicate leaves nearly every row live, so a partial index would not be meaningfully smaller. Index-only, no data change |
+| `00046_actor_audit_auth_provider.sql` | `actor_audit.auth_provider` (nullable, CHECK `authentik`/`local`/`pat`/`oauth`), `actor_audit.pat_id` (nullable FK to `user_pats`, ON DELETE RESTRICT) | A PAT request and the owner's own click used to look identical. `auth_provider` is NULL for machine/system/anonymous actors and for rows written before this migration; an empty forward-auth provider is stored as `authentik`. `pat_id` names the token. `oauth` is reserved and unused |
+| `00047_media_edges_review_source.sql` | `media_edges.review_source` (nullable, CHECK `human`/`assistant`); `v_media_edges_resolved` recreated to expose it | An assistant confirm stays `CONFIRMED`. The column records who decided: `human` from the REST confirm, reject and manual-create routes, `assistant` from the MCP review tools. NULL is a resolver row or a reset decision. Down drops the column and restores the previous view |
 
 ### Issue #39 (Tier-3 EXIF Fields Migration)
 - Promoted `camera_serial` (TEXT) and `lens_model` (TEXT) onto `media_nodes` from `node_metadata` overflow key-values so Tier-3 heuristic spatial-temporal queries can run efficiently in SQL without metadata joins.
@@ -243,3 +245,75 @@ Every migration after `00001_init.sql`, in order:
   additionally `os.Lstat`s the candidate file immediately before `guard.Remove`, aborting with
   `ErrFileChangedSincePlan` on an `(mtime, size)` mismatch against what `Plan` recorded. A file
   already gone on its own is treated as success (nothing left to remove; node still lands in `MISSING`).
+
+## Asset full-text search (migration 00045)
+
+`media_nodes_fts` is an FTS5 contentless-delete table keyed by the node's integer
+`id` (`rowid`). It stores tokens for `file_name`, `relative_path` and `meta`,
+without duplicating the original text. `v_media_nodes_search` assembles the text
+for backfill and trigger maintenance. Relative paths omit the storage location's
+root and leading separator; paths outside that root retain their stored value.
+
+`meta` combines the promoted `media_nodes.camera_model` and `lens_model` with
+these selected `node_metadata.key` values (all sources):
+
+| Keys | Contents |
+|---|---|
+| `EXIF:Make`, `EXIF:Model` | Camera make/model |
+| `EXIF:LensModel` | Lens |
+| `EXIF:DateTimeOriginal` | Raw capture date/time |
+| `project_name`, `timeline_name` | Project/timeline names, when present |
+
+`internal/metadata` plans the EXIF inheritance keys; `internal/pipeline` persists
+make, lens and raw capture date as metadata, but camera model normally lives in
+the promoted column. Current project parsers do not persist project/timeline
+names into `node_metadata`; the two name keys are indexed when supplied, without
+adding parser behavior here. Tags, descriptions and annotations are excluded.
+
+Migration 00045 is a narrow exception to the no-triggers rule: triggers maintain
+only this derived search index, never lifecycle, lineage or audit timestamps.
+Node inserts, relevant column updates and deletes update the index; selected
+metadata inserts, updates (including key/node changes) and deletes reindex the
+affected nodes. Storage-root changes also refresh relative paths. All updates
+share the writer's transaction, so a rollback also rolls back the search index.
+The migration backfills existing nodes and its Down removes all search objects.
+
+The `unicode61` tokenizer folds case and diacritics, with `%` retained as a
+token character to preserve literal filename searches. Underscores separate tokens,
+so `q=0001` matches `DSC_0001.ARW`. Prefix indexes cover
+lengths 2, 3 and 4 (other prefix lengths still work). FTS5 is required:
+all Go build/test/vet entry points use `-tags sqlite_fts5`, golangci-lint sets
+`build-tags`, and the shared Go CI workflow receives the tag through
+`.github/ci-prebuild.sh` and `GITHUB_ENV`. `TestFTS5CompiledIn` deliberately fails
+when tests are built without the tag.
+
+### Asset API `q` and sorting
+
+`GET /api/v1/assets?q=sony` searches filenames, relative paths and the selected
+metadata. Each token is quoted (embedded quotes doubled)
+and suffixed with `*`; terms combine with `AND`. User input never becomes FTS5
+operators: `NEAR`, `-`, quotes and `*` are literal input to the tokenizer.
+Punctuation, including underscores, separates tokens except for the literal `%`
+token character. Empty/whitespace `q` disables search. The maximum is 256 characters.
+
+An exact `node_uuid` (case-insensitive for ASCII UUIDs) also matches. `%` and `_` are not
+wildcards. Existing structural filters combine with search and the total uses
+the same predicate as the result list. Default lifecycle/supersession exclusions
+are unchanged.
+
+With `q` and no `sort`, results use ascending FTS5 `rank` (the default bm25 score;
+lower is better), with exact UUID matches
+after FTS hits. Equal scores use `id DESC` for stable pagination. An explicit
+`sort=newest` or any other allowed sort overrides relevance; without `q`, the
+default remains `id DESC`.
+
+### Similar assets
+
+`GET /api/v1/assets/{id}/similar` returns other `ACTIVE` or `HIDDEN`
+nodes that have a perceptual hash, ordered by Hamming distance to the
+source hash, then by id. Defaults are `limit=20` (maximum 100) and
+`maxDistance=12` (0 through 64). The source node is excluded.
+`TRASHED`, `MISSING` and `ARCHIVED` nodes are not candidates. A source
+with no perceptual hash returns an empty `assets` list and
+`reason` `no_perceptual_hash`. The MCP `find_similar` tool calls the
+same handler.

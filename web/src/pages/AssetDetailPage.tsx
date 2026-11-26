@@ -11,6 +11,7 @@ import {
   usePruneCache,
   useRestoreAsset,
   useRetrySync,
+  useSimilarAssets,
   useStorageLocations,
 } from "../hooks/queries";
 import AssetGraphCanvas from "../components/AssetGraphCanvas";
@@ -502,6 +503,7 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
   const { data: asset, isLoading, isError, error, refetch, isFetching } = useAsset(assetId);
   const { data: lineage, isLoading: isLineageLoading } = useAssetLineage(assetId, depth);
   const { data: sync, isLoading: isSyncLoading } = useAssetSyncStatus(assetId);
+  const { data: similar, isLoading: isSimilarLoading, isError: isSimilarError } = useSimilarAssets(assetId);
   const retrySync = useRetrySync();
 
   if (assetId === undefined) {
@@ -568,6 +570,39 @@ function AssetDetailPageForAsset({ id }: { id: string | undefined }) {
       <section>
         <h2 className="mb-2 text-sm font-medium text-neutral-400">Media Preview</h2>
         <AssetMediaPreview asset={asset} lineage={lineage} />
+      </section>
+
+      <section>
+        <h2 className="mb-2 text-sm font-medium text-neutral-400">Similar</h2>
+        {isSimilarLoading ? (
+          <p className="text-sm text-neutral-500">Loading similar assets…</p>
+        ) : isSimilarError ? (
+          <p className="text-sm text-neutral-500">Couldn't load similar assets.</p>
+        ) : similar?.reason === "no_perceptual_hash" ? (
+          <p className="text-sm text-neutral-500">This asset has no perceptual hash.</p>
+        ) : similar && similar.assets.length > 0 ? (
+          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            {similar.assets.map((item) => (
+              <li key={item.id}>
+                <Link
+                  to={`/assets/${item.id}`}
+                  className="block rounded border border-neutral-800 p-2 hover:border-neutral-600"
+                >
+                  <Thumbnail
+                    assetId={item.id}
+                    thumbState={item.thumbState}
+                    alt={item.fileName}
+                    className="h-20 w-full rounded object-cover"
+                  />
+                  <span className="mt-1 block truncate text-xs text-neutral-200">{item.fileName}</span>
+                  <span className="text-xs text-neutral-500">distance {item.distance}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-neutral-500">No similar assets.</p>
+        )}
       </section>
 
       <section>

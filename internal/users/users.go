@@ -274,6 +274,9 @@ func (s *Service) ResolveOrCreate(ctx context.Context, p auth.Principal) (Attrib
 	if provider == auth.AuthProviderPAT {
 		return s.resolvePAT(ctx, p)
 	}
+	if provider == auth.AuthProviderOAuth {
+		return s.resolveOAuth(ctx, p)
+	}
 
 	// Sync is_admin to the same policy live request authorization
 	// applies (auth.IsAdmin), so GET /api/v1/users' Role column matches
@@ -342,6 +345,30 @@ func (s *Service) resolvePAT(ctx context.Context, p auth.Principal) (Attribution
 			return Attribution{}, fmt.Errorf("resolve PAT owner %d: %w", p.UserID, ErrInvalidPrincipal)
 		}
 		return Attribution{}, fmt.Errorf("resolve PAT owner %d: %w", p.UserID, err)
+	}
+	return Attribution{
+		ID:           row.ID,
+		AuthProvider: row.AuthProvider,
+		ExternalUID:  row.ExternalUid,
+		Username:     row.Username,
+		Email:        row.Email,
+		IsAdmin:      row.IsAdmin != 0,
+	}, nil
+}
+
+// resolveOAuth looks up the forward-auth user an access token's sub
+// already names. It does not insert. An OAuth principal that is not
+// already an authentik user is ErrInvalidPrincipal.
+func (s *Service) resolveOAuth(ctx context.Context, p auth.Principal) (Attribution, error) {
+	row, err := s.db.Reader.GetAttributionUserByExternalUID(ctx, sqlcgen.GetAttributionUserByExternalUIDParams{
+		AuthProvider: AuthProviderAuthentik,
+		ExternalUid:  p.ExternalUID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Attribution{}, ErrInvalidPrincipal
+		}
+		return Attribution{}, fmt.Errorf("resolve oauth subject: %w", err)
 	}
 	return Attribution{
 		ID:           row.ID,

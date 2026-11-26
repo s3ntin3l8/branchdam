@@ -90,7 +90,8 @@ type Querier interface {
 	// it was once valid.
 	ConsumePasswordResetToken(ctx context.Context, arg ConsumePasswordResetTokenParams) (PasswordResetToken, error)
 	// Counterpart to ListActorAudit -- must apply identical WHERE so
-	// pagination totals match the visible rows.
+	// pagination totals match the visible rows. No join: the filters only
+	// touch actor_audit columns, and the LEFT JOIN does not drop rows.
 	CountActorAudit(ctx context.Context, arg CountActorAuditParams) (int64, error)
 	CountAttributionUsers(ctx context.Context) (int64, error)
 	CountDevicePairings(ctx context.Context) (int64, error)
@@ -103,6 +104,8 @@ type Querier interface {
 	// Count of live nodes, matching ListMediaNodes' ARCHIVED/TRASHED and
 	// superseded exclusions with no search applied.
 	CountMediaNodes(ctx context.Context) (int64, error)
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
 	// type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -112,7 +115,9 @@ type Querier interface {
 	// the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 	// by excluding ARCHIVED and superseded rows and applying the same optional
 	// name_query (NULL = no search).
-	CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error)
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+	CountMediaNodesSearch(ctx context.Context, arg CountMediaNodesSearchParams) (int64, error)
 	// Last-admin guard for DisableUser / SetAdmin(false): the number of
 	// enabled source='local' admins other than ?1. Only source='local' rows
 	// count -- they are the accounts that can log in with a password and
@@ -244,11 +249,11 @@ type Querier interface {
 	// own <= 0 treatment) for the many test fixtures that don't care about it;
 	// pass it explicitly when a test needs a non-zero TTL persisted on the row.
 	CreateStorageLocation(ctx context.Context, arg CreateStorageLocationParams) (StorageLocation, error)
-	// user_pats: per-user admin PATs for unattended operations. See
+	// user_pats: per-user PATs for unattended operations. See
 	// 00033_user_pats.sql's header comment for the rationale and storage
-	// shape. All queries here are admin-gated -- RequirePAT middleware
-	// sits on the route and rejects without a valid+scoped token before
-	// the handler runs.
+	// shape. Admin scopes stay behind RequirePAT; an MCP-only token
+	// (every scope starts with "mcp:") may belong to a live non-admin
+	// and is still rejected on every non-/mcp route.
 	//
 	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 	// "SQL Syntax Traps" note.
@@ -477,21 +482,24 @@ type Querier interface {
 	// password_hash. Index: users.username UNIQUE already covers this.
 	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
 	// Hot path: called on every authenticated PAT request. UNIQUE on
-	// hashed_key makes this an indexed lookup. Returns NULL when no row
-	// matches (caller distinguishes miss from error via the sql.ErrNoRows
-	// sentinel).
+	// hashed_key makes this an indexed lookup. Returns no row when nothing
+	// matches (caller distinguishes miss from error via sql.ErrNoRows).
 	//
-	// The JOIN on users is authority enforcement, not display: the WHERE
-	// requires the owner to be a live admin (is_admin = 1, disabled_at
-	// NULL), so demoting or disabling the owner invalidates every one of
-	// their tokens on the next request instead of freezing admin
-	// authority at mint time. A token whose owner fails the check
-	// surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
+	// The JOIN on users is authority enforcement, not display. The WHERE
+	// keeps a live owner (disabled_at IS NULL) and either a live admin
+	// (is_admin = 1) or an MCP-only token: a non-empty scopes_json array
+	// whose every element matches the case-sensitive glob 'mcp:*' (the
+	// same rule as auth.MCPOnlyScopes / strings.HasPrefix(scope, "mcp:")).
+	// Demoting an admin therefore invalidates their non-MCP tokens on the
+	// next request; disabling the owner invalidates every token, MCP or
+	// not. A token that fails the check surfaces as sql.ErrNoRows, which
+	// the middleware turns into 401, identical to a revoked token.
+	// Lookup repeats the admin-or-MCP-only check so a query change cannot
+	// silently widen it.
 	//
-	// owner_username / owner_email let the PAT middleware build a Principal
-	// that names the token's owner (actor_audit.actor_name, edge
-	// reviewed_by) without a second query; attribution itself keys on
-	// user_id, never on these display fields.
+	// owner_username / owner_email / owner_is_admin let the PAT middleware
+	// build a Principal and a LocalUserView without a second query.
+	// Attribution itself keys on user_id, never on the display fields.
 	GetUserPATByHash(ctx context.Context, hashedKey string) (GetUserPATByHashRow, error)
 	// Backs the fast-only pre-screen of GET /api/v1/agent/check-content:
 	// does any live (ACTIVE or HIDDEN) node carry this xxHash64 fast_hash
@@ -512,6 +520,11 @@ type Querier interface {
 	// (nullable) carries the FK to users when one exists, so admin/audit
 	// views can filter "everything by user X" or "everything the system did"
 	// without parsing the name string.
+	//
+	// auth_provider + pat_id record the credential. auth_provider is NULL
+	// for machine/system/anonymous actors and for rows written before the
+	// columns existed. pat_id is the user_pats row when a token acted.
+	// pat_name is that token's display name (LEFT JOIN; NULL when pat_id is).
 	//
 	// All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 	// "SQL Syntax Traps" note.
@@ -550,7 +563,8 @@ type Querier interface {
 	// table hazard it would be for a per-row event stream like audit_queue.
 	// Filters are all sqlc.narg so a caller can filter on any subset
 	// (a user-scoped "what did I do" view is actor_user_id + maybe event).
-	ListActorAudit(ctx context.Context, arg ListActorAuditParams) ([]ActorAudit, error)
+	// Columns are qualified: user_pats also has id and created_at.
+	ListActorAudit(ctx context.Context, arg ListActorAuditParams) ([]ListActorAuditRow, error)
 	ListAgentScratchTelemetry(ctx context.Context) ([]AgentScratchTelemetry, error)
 	// Global pending list -- used by the admin-UI pending-resets panel
 	// (PR #408). The query is intentionally cheap: the
@@ -612,10 +626,14 @@ type Querier interface {
 	// in the outer WHERE, correctly collapses to a single BeforeID field.)
 	//
 	// Optional server-side filters (tier, resolver, relationship_type,
-	// min_confidence) are resolved once in the f CTE -- each CAST so sqlc types
-	// the param -- and applied identically to total_rows and the page, so
-	// total is the size of the FILTERED queue and keyset paging walks only
-	// the filtered rows. NULL means "no filter".
+	// min_confidence, review_source) are resolved once in the f CTE -- each
+	// CAST so sqlc types the param -- and applied identically to total_rows
+	// and the page, so total is the size of the FILTERED queue and keyset
+	// paging walks only the filtered rows. NULL means "no filter".
+	// review_source is the exception: when it is set, the page is edges with
+	// that source (an assistant confirm is CONFIRMED, so it has left
+	// NEEDS_REVIEW) instead of the NEEDS_REVIEW queue. When it is NULL the
+	// queue predicate is unchanged.
 	ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error)
 	// Distinct resolvers across the whole NEEDS_REVIEW queue, for the audit
 	// page's resolver filter -- the options must come from the server now that
@@ -720,20 +738,22 @@ type Querier interface {
 	// Backs GET /api/v1/assets. Excludes archived rows by default -- an
 	// archived node is reachable via its successor's superseded history, not
 	// the main asset list.
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 	// p carries the search/sort params as a one-row derived table: sqlc's
 	// SQLite engine neither rewrites a param inside ORDER BY nor survives a
 	// LIKE ... ESCAPE clause, so both go through p's columns instead.
-	// name_query is a plain case-insensitive substring of file_name (instr, so
-	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-	// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+	// sort is whitelisted by the handler;
 	// an unknown value falls through every CASE to the id DESC tiebreak.
 	ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error)
+	// Materialize once: flattening this join makes MATCH/rank quadratic.
+	// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 	// p carries the search/sort params as a one-row derived table: sqlc's
 	// SQLite engine neither rewrites a param inside ORDER BY nor survives a
 	// LIKE ... ESCAPE clause, so both go through p's columns instead.
-	// name_query is a plain case-insensitive substring of file_name (instr, so
-	// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-	// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+	// fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+	// sort is whitelisted by the handler;
 	// an unknown value falls through every CASE to the id DESC tiebreak.
 	// Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 	// sqlc's SQLite type inference only picks up the column's own (nullable)
@@ -1165,9 +1185,10 @@ type Querier interface {
 	// review_state guard makes this a no-op (sql.ErrNoRows) for an edge that
 	// is not human-reviewed -- AUTO_ACCEPTED and NEEDS_REVIEW are resolver
 	// states, and only a human decision is a human's to undo. reviewed_at /
-	// reviewed_by are cleared: the schema only requires them for
-	// CONFIRMED/REJECTED, and keeping them would claim a review that no longer
-	// stands (the actor_audit row written by the handler keeps the history).
+	// reviewed_by / review_source are cleared: the schema only requires
+	// reviewed_at for CONFIRMED/REJECTED, and keeping them would claim a
+	// review that no longer stands (the actor_audit row written by the
+	// handler keeps the history).
 	ResetMediaEdgeReview(ctx context.Context, id int64) (int64, error)
 	// #55/#182: worker-level retry. PUSH_FAILED rows whose last attempt is older
 	// than the retry window AND whose retry_count hasn't yet reached the bound

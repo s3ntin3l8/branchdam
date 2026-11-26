@@ -1,8 +1,8 @@
--- user_pats: per-user admin PATs for unattended operations. See
+-- user_pats: per-user PATs for unattended operations. See
 -- 00033_user_pats.sql's header comment for the rationale and storage
--- shape. All queries here are admin-gated -- RequirePAT middleware
--- sits on the route and rejects without a valid+scoped token before
--- the handler runs.
+-- shape. Admin scopes stay behind RequirePAT; an MCP-only token
+-- (every scope starts with "mcp:") may belong to a live non-admin
+-- and is still rejected on every non-/mcp route.
 --
 -- All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 -- "SQL Syntax Traps" note.
@@ -19,29 +19,43 @@ RETURNING id, user_id, name, hashed_key, scopes_json, created_at, last_used_at, 
 
 -- name: GetUserPATByHash :one
 -- Hot path: called on every authenticated PAT request. UNIQUE on
--- hashed_key makes this an indexed lookup. Returns NULL when no row
--- matches (caller distinguishes miss from error via the sql.ErrNoRows
--- sentinel).
+-- hashed_key makes this an indexed lookup. Returns no row when nothing
+-- matches (caller distinguishes miss from error via sql.ErrNoRows).
 --
--- The JOIN on users is authority enforcement, not display: the WHERE
--- requires the owner to be a live admin (is_admin = 1, disabled_at
--- NULL), so demoting or disabling the owner invalidates every one of
--- their tokens on the next request instead of freezing admin
--- authority at mint time. A token whose owner fails the check
--- surfaces as sql.ErrNoRows -> 401, identical to a revoked token.
+-- The JOIN on users is authority enforcement, not display. The WHERE
+-- keeps a live owner (disabled_at IS NULL) and either a live admin
+-- (is_admin = 1) or an MCP-only token: a non-empty scopes_json array
+-- whose every element matches the case-sensitive glob 'mcp:*' (the
+-- same rule as auth.MCPOnlyScopes / strings.HasPrefix(scope, "mcp:")).
+-- Demoting an admin therefore invalidates their non-MCP tokens on the
+-- next request; disabling the owner invalidates every token, MCP or
+-- not. A token that fails the check surfaces as sql.ErrNoRows, which
+-- the middleware turns into 401, identical to a revoked token.
+-- Lookup repeats the admin-or-MCP-only check so a query change cannot
+-- silently widen it.
 --
--- owner_username / owner_email let the PAT middleware build a Principal
--- that names the token's owner (actor_audit.actor_name, edge
--- reviewed_by) without a second query; attribution itself keys on
--- user_id, never on these display fields.
+-- owner_username / owner_email / owner_is_admin let the PAT middleware
+-- build a Principal and a LocalUserView without a second query.
+-- Attribution itself keys on user_id, never on the display fields.
 SELECT up.id AS id, up.user_id AS user_id, up.name AS name, up.hashed_key AS hashed_key,
        up.scopes_json AS scopes_json, up.created_at AS created_at, up.last_used_at AS last_used_at,
        up.expires_at AS expires_at, up.revoked_at AS revoked_at,
-       u.username AS owner_username, u.email AS owner_email
+       u.username AS owner_username, u.email AS owner_email,
+       u.is_admin AS owner_is_admin
 FROM user_pats AS up
 JOIN users AS u ON u.id = up.user_id
 WHERE up.hashed_key = ?1 AND up.revoked_at IS NULL
-  AND u.is_admin = 1 AND u.disabled_at IS NULL;
+  AND u.disabled_at IS NULL
+  AND (
+    u.is_admin = 1
+    OR (
+      json_array_length(up.scopes_json) > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(up.scopes_json) AS scope
+        WHERE scope.value NOT GLOB 'mcp:*'
+      )
+    )
+  );
 
 -- name: ListUserPATs :many
 -- Backs GET /api/v1/users/me/pats -- lists all the calling user's

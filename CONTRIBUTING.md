@@ -22,13 +22,14 @@ make check-web   # frontend: cd web && lint + typecheck + test + build
 ```
 
 - `make install-hooks` wires up git hooks: `pre-commit` runs gofmt, `go vet`, `go mod tidy` and `sqlc-diff`;
-  `pre-push` adds `go test -race` and `govulncheck`. `make lint` (= `pre-commit run --all-files`) rewrites files in
+  `pre-push` adds `go test -tags sqlite_fts5 -race` and `govulncheck`. `make lint` (= `pre-commit run --all-files`) rewrites files in
   your working tree and does not run tests, `govulncheck` or golangci-lint. `govulncheck` is only in the pre-push hook
   and `make vulncheck`.
 - golangci-lint is pinned by the Makefile's `GOLANGCI_LINT_VERSION` (v2 module path, matching `.golangci.yml`'s
   `version: "2"`) and by `golangci/golangci-lint-action` in CI. Bump both together.
 - `sqlc-diff` is a no-op without the `sqlc` binary. After changing a migration or query, run `sqlc generate` and
-  commit `internal/db/sqlcgen/` in the same PR: CI has no codegen step. See [`docs/schema.md`](docs/schema.md) for
+  commit `internal/db/sqlcgen/` in the same PR: CI has no codegen step, so a stale `sqlcgen/` breaks
+  `go build -tags sqlite_fts5 ./...` on `main`. See [`docs/schema.md`](docs/schema.md) for
   the sqlc traps (ASCII-only query files, aliased recursive-CTE anchors).
 - A browser DTO change in `internal/httpapi/*.go` needs a hand update of `web/src/api/types.ts` and
   `web/src/api/client.ts`; there's no generated client.

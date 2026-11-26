@@ -13,9 +13,9 @@ import (
 const createManualMediaEdge = `-- name: CreateManualMediaEdge :one
 INSERT INTO media_edges (
     source_node_id, target_node_id, relationship_type, confidence, tier,
-    resolver, evidence_json, review_state, reviewed_by, reviewed_at
+    resolver, evidence_json, review_state, reviewed_by, reviewed_at, review_source
 ) VALUES (
-    ?1, ?2, ?3, 1.00, 1, 'manual', '{}', 'CONFIRMED', ?4, unixepoch()
+    ?1, ?2, ?3, 1.00, 1, 'manual', '{}', 'CONFIRMED', ?4, unixepoch(), ?5
 )
 ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     confidence = 1.00,
@@ -24,11 +24,19 @@ ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE SET
     review_state = 'CONFIRMED',
     reviewed_by = ?4,
     reviewed_at = unixepoch(),
+    review_source = ?5,
     is_active = 1,
     updated_at = unixepoch()
+WHERE NOT (
+    COALESCE(?5, '') = 'assistant'
+    AND (
+      media_edges.review_source IS 'human'
+      OR (media_edges.review_source IS NULL AND media_edges.review_state IN ('CONFIRMED', 'REJECTED'))
+    )
+)
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at, is_active
+          created_at, updated_at, is_active, review_source
 `
 
 type CreateManualMediaEdgeParams struct {
@@ -36,6 +44,7 @@ type CreateManualMediaEdgeParams struct {
 	TargetNodeID     int64
 	RelationshipType string
 	ReviewedBy       sql.NullString
+	ReviewSource     sql.NullString
 }
 
 func (q *Queries) CreateManualMediaEdge(ctx context.Context, arg CreateManualMediaEdgeParams) (MediaEdge, error) {
@@ -44,6 +53,7 @@ func (q *Queries) CreateManualMediaEdge(ctx context.Context, arg CreateManualMed
 		arg.TargetNodeID,
 		arg.RelationshipType,
 		arg.ReviewedBy,
+		arg.ReviewSource,
 	)
 	var i MediaEdge
 	err := row.Scan(
@@ -61,6 +71,7 @@ func (q *Queries) CreateManualMediaEdge(ctx context.Context, arg CreateManualMed
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.IsActive,
+		&i.ReviewSource,
 	)
 	return i, err
 }
@@ -74,7 +85,7 @@ INSERT INTO media_edges (
 )
 RETURNING id, source_node_id, target_node_id, relationship_type, confidence,
           tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-          created_at, updated_at, is_active
+          created_at, updated_at, is_active, review_source
 `
 
 type CreateMediaEdgeParams struct {
@@ -121,6 +132,7 @@ func (q *Queries) CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.IsActive,
+		&i.ReviewSource,
 	)
 	return i, err
 }
@@ -128,7 +140,7 @@ func (q *Queries) CreateMediaEdge(ctx context.Context, arg CreateMediaEdgeParams
 const getMediaEdge = `-- name: GetMediaEdge :one
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE id = ?1
 `
@@ -151,6 +163,7 @@ func (q *Queries) GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.IsActive,
+		&i.ReviewSource,
 	)
 	return i, err
 }
@@ -158,7 +171,7 @@ func (q *Queries) GetMediaEdge(ctx context.Context, id int64) (MediaEdge, error)
 const listEdgesBySource = `-- name: ListEdgesBySource :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE source_node_id = ?1 AND is_active = 1
 `
@@ -187,6 +200,7 @@ func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.IsActive,
+			&i.ReviewSource,
 		); err != nil {
 			return nil, err
 		}
@@ -204,7 +218,7 @@ func (q *Queries) ListEdgesBySource(ctx context.Context, sourceNodeID int64) ([]
 const listEdgesByTarget = `-- name: ListEdgesByTarget :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE target_node_id = ?1 AND is_active = 1
 `
@@ -233,6 +247,7 @@ func (q *Queries) ListEdgesByTarget(ctx context.Context, targetNodeID int64) ([]
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.IsActive,
+			&i.ReviewSource,
 		); err != nil {
 			return nil, err
 		}

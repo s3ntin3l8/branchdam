@@ -10,6 +10,7 @@ import type { Asset, StorageLocation } from "../api/types";
 vi.mock("../api/client", () => ({
   api: {
     getAsset: vi.fn(),
+    getSimilarAssets: vi.fn().mockResolvedValue({ assets: [] }),
     getAssetLineage: vi.fn(),
     getAssetSyncStatus: vi.fn().mockResolvedValue({ sync: [] }),
     retrySync: vi.fn(),
@@ -740,3 +741,30 @@ describe("AssetDetailPage load errors", () => {
     expect(size).toHaveAttribute("title", `${(12345).toLocaleString()} bytes`);
   });
 });
+
+describe("AssetDetailPage similar", () => {
+  it("renders similar thumbnails with distance", async () => {
+    vi.mocked(api.getAsset).mockResolvedValue(asset);
+    vi.mocked(api.getAssetLineage).mockResolvedValue({ rootId: 42, nodes: [asset], edges: [] });
+    vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
+    vi.mocked(api.getSimilarAssets).mockResolvedValue({
+      assets: [
+        {
+          id: 7,
+          nodeUuid: "uuid-7",
+          filePath: "/mnt/scratch/twin.jpg",
+          fileName: "twin.jpg",
+          thumbState: "PENDING",
+          distance: 3,
+        },
+      ],
+    });
+
+    renderWithClient();
+
+    const link = await screen.findByRole("link", { name: /twin\.jpg/i });
+    expect(link).toHaveAttribute("href", "/assets/7");
+    expect(screen.getByText("distance 3")).toBeInTheDocument();
+  });
+});
+

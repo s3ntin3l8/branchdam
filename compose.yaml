@@ -56,7 +56,7 @@ services:
     # for the original spec's compose defect -- two traefik.http.services.*
     # blocks on one container while NEITHER router set .service=, which
     # leaves Traefik unable to resolve either router to a backend. One
-    # service, three routers, each with an explicit .service= and an
+    # service, four routers, each with an explicit .service= and an
     # explicit priority (never rely on rule-length ordering).
     labels:
       traefik.enable: "true"
@@ -74,6 +74,24 @@ services:
       traefik.http.routers.branchdam-agent.priority: "100"
       traefik.http.routers.branchdam-agent.service: "branchdam"
       traefik.http.routers.branchdam-agent.middlewares: "strip-identity@file"
+
+      # --- Router: MCP. Bypasses Authentik ForwardAuth. Assistants
+      # authenticate with a bearer personal access token, not a browser
+      # session. strip-identity only, for the same reason as the agent
+      # router: this path never reaches the outpost. Priority 150 sits
+      # under the outpost (200) and above the agent API (100) and the
+      # browser catch-all (10). Path(`/mcp`) || PathPrefix(`/mcp/`)
+      # matches the mounted routes and does not also match a
+      # different path that merely begins with the letters mcp.
+      # Discovery is the exact well-known paths only (root and the
+      # RFC 9728 path for /mcp), not a prefix, so it stays off Authentik
+      # without exposing every other path under that prefix.
+      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.example.com`) && (Path(`/mcp`) || PathPrefix(`/mcp/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp/`))"
+      traefik.http.routers.branchdam-mcp.entrypoints: "websecure"
+      traefik.http.routers.branchdam-mcp.tls: "true"
+      traefik.http.routers.branchdam-mcp.priority: "150"
+      traefik.http.routers.branchdam-mcp.service: "branchdam"
+      traefik.http.routers.branchdam-mcp.middlewares: "strip-identity@file"
 
       # --- Router 2: browser UI, behind Authentik ForwardAuth. Strip
       # client-supplied identity headers FIRST, then let the outpost set

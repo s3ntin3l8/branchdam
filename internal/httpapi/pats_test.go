@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,11 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/s3ntin3l8/branchdam/internal/auth"
+	"github.com/s3ntin3l8/branchdam/internal/auth/session"
+	"github.com/s3ntin3l8/branchdam/internal/auth/users"
 	"github.com/s3ntin3l8/branchdam/internal/config"
 	"github.com/s3ntin3l8/branchdam/internal/db"
 	"github.com/s3ntin3l8/branchdam/internal/db/sqlcgen"
@@ -376,4 +380,204 @@ func TestDecodeScopesFromJSONNeverNil(t *testing.T) {
 	if err != nil || len(got) != 2 || got[0] != "admin" || got[1] != "pats:write" {
 		t.Errorf("decodeScopesFromJSON(valid) = %v, %v", got, err)
 	}
+}
+
+// newMCPPATTestServer is newPATTestServer plus a local session stack, so
+// a non-admin user can mint through Server.Handler() the way the API
+// allows (there is no web UI for that yet).
+func newMCPPATTestServer(t *testing.T) (*Server, *db.DB, *auth.PATService, *users.Service) {
+	t.Helper()
+	root := t.TempDir()
+	database, err := db.Open(context.Background(), filepath.Join(root, "mcp-pats.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+
+	svc := users.NewService(database, usersCookieTestBase64, users.ServiceOptions{
+		CookieKey: usersCookieTestKey,
+	})
+	sessionMw := session.New(svc, session.Config{CookieName: "branchdam_session"})
+	patSvc := auth.NewPATService(database, patTestPepper)
+	srv := New(Deps{
+		Config: &config.Config{
+			Agent: config.Agent{},
+			Auth:  config.Auth{Mode: string(auth.AuthModeLocal)},
+		},
+		DB:      database,
+		Version: "test",
+		PAT:     patSvc,
+		LocalAuth: &LocalAuthDeps{
+			Users:     svc,
+			SessionMw: sessionMw,
+			AuthMode:  auth.AuthModeLocal,
+		},
+		agentKeyLookup: DefaultTestAgentKeyLookup(routeTestAgentKey),
+	})
+	return srv, database, patSvc, svc
+}
+
+func mintPATViaAPI(t *testing.T, handler http.Handler, cookie, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := withSessionCookie(http.MethodPost, "/api/v1/users/me/pats", cookie, []byte(body))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestMCPPAT_NonAdminScopes is the acceptance suite for mcp:* grants:
+// a non-admin mints them through the API, the tokens reach /mcp and
+// nowhere else, and a disabled owner fails closed.
+func TestMCPPAT_NonAdminScopes(t *testing.T) {
+	srv, database, patSvc, userSvc := newMCPPATTestServer(t)
+	handler := srv.Handler()
+	ctx := context.Background()
+
+	adminCookie, adminID := mintSessionForUser(t, database, userSvc, "admin", true, "local")
+	userCookie, userID := mintSessionForUser(t, database, userSvc, "bob", false, "local")
+
+	rr := mintPATViaAPI(t, handler, userCookie, `{"name":"escalation","scopes":["admin"]}`)
+	assert.Equal(t, http.StatusForbidden, rr.Code, "admin scope body: %s", rr.Body.String())
+
+	rr = mintPATViaAPI(t, handler, userCookie, `{"name":"mixed","scopes":["mcp:read","admin"]}`)
+	assert.Equal(t, http.StatusForbidden, rr.Code, "mixed scope body: %s", rr.Body.String())
+
+	rr = mintPATViaAPI(t, handler, adminCookie, `{"name":"admin-enrich","scopes":["mcp:enrich"]}`)
+	require.Equal(t, http.StatusOK, rr.Code, "admin mcp mint body: %s", rr.Body.String())
+
+	var minted struct {
+		Plaintext string   `json:"plaintext"`
+		Scopes    []string `json:"scopes"`
+	}
+	rr = mintPATViaAPI(t, handler, userCookie, `{"name":"read","scopes":["mcp:read"]}`)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &minted))
+	require.True(t, strings.HasPrefix(minted.Plaintext, auth.PATPrefix))
+	assert.Equal(t, []string{"mcp:read"}, minted.Scopes)
+	readToken := minted.Plaintext
+
+	rr = mintPATViaAPI(t, handler, userCookie, `{"name":"review","scopes":["mcp:review"]}`)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &minted))
+	reviewToken := minted.Plaintext
+
+	rr = mintPATViaAPI(t, handler, userCookie, `{"name":"both","scopes":["mcp:read","mcp:review"]}`)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &minted))
+	assert.Equal(t, []string{"mcp:read", "mcp:review"}, minted.Scopes)
+	bothToken := minted.Plaintext
+
+	// pairings:write is not MCP-only, so a non-admin cannot hold one.
+	// The admin mints it; it must still be turned away at /mcp.
+	pairingsToken, _, err := patSvc.Mint(ctx, adminID, "pairings-only", []string{"pairings:write"}, 0)
+	require.NoError(t, err)
+	_ = adminCookie
+
+	hit := func(method, path, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		var body *strings.Reader
+		if method == http.MethodPut || method == http.MethodPost {
+			body = strings.NewReader(`{}`)
+		} else {
+			body = strings.NewReader("")
+		}
+		req := httptest.NewRequest(method, path, body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	t.Run("mcp tokens reach /mcp", func(t *testing.T) {
+		for _, token := range []string{readToken, reviewToken} {
+			rr := hit(http.MethodGet, "/mcp", token)
+			assert.Equal(t, http.StatusNotFound, rr.Code, "GET /mcp body: %s", rr.Body.String())
+			rr = hit(http.MethodPost, "/mcp", token)
+			assert.Equal(t, http.StatusNotFound, rr.Code, "POST /mcp body: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("pairings token is forbidden on /mcp", func(t *testing.T) {
+		rr := hit(http.MethodGet, "/mcp", pairingsToken)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+	})
+
+	t.Run("mcp token is forbidden off /mcp", func(t *testing.T) {
+		rr := hit(http.MethodGet, "/api/v1/assets", readToken)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "assets body: %s", rr.Body.String())
+
+		rr = hit(http.MethodPut, "/api/v1/settings", readToken)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "settings body: %s", rr.Body.String())
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/pats", strings.NewReader(`{"name":"nope","scopes":["admin"]}`))
+		req.Header.Set("Authorization", "Bearer "+readToken)
+		req.Header.Set("Content-Type", "application/json")
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "mint admin body: %s", rr.Body.String())
+	})
+
+	t.Run("disabled owner fails closed", func(t *testing.T) {
+		require.NoError(t, database.InTx(ctx, func(q *sqlcgen.Queries) error {
+			return q.DisableUser(ctx, sqlcgen.DisableUserParams{
+				ID:         userID,
+				DisabledAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true},
+			})
+		}))
+		rr := hit(http.MethodGet, "/mcp", bothToken)
+		assert.Equal(t, http.StatusUnauthorized, rr.Code, "disabled owner body: %s", rr.Body.String())
+	})
+}
+
+// TestHasScope_AdminWildcard pins the exported per-tool check: an
+// admin "*" token satisfies mcp:review, and a request with no PAT does
+// not. The token is presented through the same middleware Server.Handler
+// wires; the status assertions go through Server.Handler itself.
+func TestHasScope_AdminWildcard(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	token, _, err := patSvc.Mint(context.Background(), userID, "bootstrap", []string{"*"}, 0)
+	require.NoError(t, err)
+
+	var got bool
+	mw := patSvc.MiddlewareAnyOf("mcp:read", "mcp:review", "mcp:enrich")
+	inner := mw.RequirePAT(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = auth.HasScope(r.Context(), "mcp:review")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	inner.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusNoContent, rr.Code)
+	assert.True(t, got, "admin * token must satisfy auth.HasScope(ctx, mcp:review)")
+	assert.False(t, auth.HasScope(context.Background(), "mcp:review"))
+
+	req = httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code, "* token must pass the /mcp gate, body: %s", rr.Body.String())
+}
+
+// TestMCPPAT_EveryGrantableMCPScopeReachesMCP pins the three lists that
+// have to agree: every mcp:-prefixed entry in PATGrantableScopes is
+// admitted by the /mcp any-of gate. A new grantable scope that is not
+// added to MiddlewareAnyOf would 403 here -- a dead grant.
+func TestMCPPAT_EveryGrantableMCPScopeReachesMCP(t *testing.T) {
+	srv, _, patSvc, userID := newPATTestServer(t)
+	handler := srv.Handler()
+	var saw bool
+	for _, scope := range auth.PATGrantableScopes {
+		if !strings.HasPrefix(scope, "mcp:") {
+			continue
+		}
+		saw = true
+		token, _, err := patSvc.Mint(context.Background(), userID, scope, []string{scope}, 0)
+		require.NoError(t, err, "mint %s", scope)
+		req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusNotFound, rr.Code, "scope %s must pass the /mcp gate, body: %s", scope, rr.Body.String())
+	}
+	require.True(t, saw, "PATGrantableScopes has no mcp: entry to pin")
 }

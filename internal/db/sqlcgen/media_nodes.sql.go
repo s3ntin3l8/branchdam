@@ -97,21 +97,30 @@ func (q *Queries) CountMediaNodes(ctx context.Context) (int64, error) {
 }
 
 const countMediaNodesFiltered = `-- name: CountMediaNodesFiltered :one
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(?2, '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT COUNT(*)
 FROM media_nodes
-CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query) AS p
-WHERE (lifecycle_state = ?2 OR ?2 IS NULL)
-  AND (camera_model = ?3 OR ?3 IS NULL)
-  AND (graph_status = ?4 OR ?4 IS NULL)
-  AND (storage_location_id = ?5 OR ?5 IS NULL)
-  AND (uploaded_by_user_id = ?6 OR ?6 IS NULL)
+CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query,
+                   CAST(?2 AS TEXT) AS fts_query) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
+WHERE (lifecycle_state = ?3 OR ?3 IS NULL)
+  AND (camera_model = ?4 OR ?4 IS NULL)
+  AND (graph_status = ?5 OR ?5 IS NULL)
+  AND (storage_location_id = ?6 OR ?6 IS NULL)
+  AND (uploaded_by_user_id = ?7 OR ?7 IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL)
 `
 
 type CountMediaNodesFilteredParams struct {
 	NameQuery         sql.NullString
+	FtsQuery          sql.NullString
 	LifecycleState    sql.NullString
 	CameraModel       sql.NullString
 	GraphStatus       sql.NullString
@@ -119,6 +128,8 @@ type CountMediaNodesFilteredParams struct {
 	UploadedByUserID  sql.NullInt64
 }
 
+// Materialize once: flattening this join makes MATCH/rank quadratic.
+// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 // Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 // sqlc's SQLite type inference only picks up the column's own (nullable)
 // type off the `col = sqlc.narg(...)` comparison; leading with `IS NULL`
@@ -126,6 +137,7 @@ type CountMediaNodesFilteredParams struct {
 func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNodesFilteredParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countMediaNodesFiltered,
 		arg.NameQuery,
+		arg.FtsQuery,
 		arg.LifecycleState,
 		arg.CameraModel,
 		arg.GraphStatus,
@@ -138,21 +150,36 @@ func (q *Queries) CountMediaNodesFiltered(ctx context.Context, arg CountMediaNod
 }
 
 const countMediaNodesSearch = `-- name: CountMediaNodesSearch :one
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(?2, '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT COUNT(*)
 FROM media_nodes
-CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query) AS p
+CROSS JOIN (SELECT CAST(?1 AS TEXT) AS name_query,
+                   CAST(?2 AS TEXT) AS fts_query) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL)
 `
+
+type CountMediaNodesSearchParams struct {
+	NameQuery sql.NullString
+	FtsQuery  sql.NullString
+}
 
 // Backs GET /api/v1/assets' search-aware total (q, no structural filter;
 // the plain unfiltered count is CountMediaNodes). Matches ListMediaNodes
 // by excluding ARCHIVED and superseded rows and applying the same optional
 // name_query (NULL = no search).
-func (q *Queries) CountMediaNodesSearch(ctx context.Context, nameQuery sql.NullString) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countMediaNodesSearch, nameQuery)
+// Materialize once: flattening this join makes MATCH/rank quadratic.
+// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
+func (q *Queries) CountMediaNodesSearch(ctx context.Context, arg CountMediaNodesSearchParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMediaNodesSearch, arg.NameQuery, arg.FtsQuery)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -1124,6 +1151,12 @@ func (q *Queries) ListMediaNodeStatusesByUUIDs(ctx context.Context, nodeUuids st
 }
 
 const listMediaNodes = `-- name: ListMediaNodes :many
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(?4, '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -1134,12 +1167,16 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
-                   CAST(?4 AS TEXT) AS sort_key) AS p
+                   CAST(?4 AS TEXT) AS fts_query,
+                   CAST(?5 AS TEXT) AS sort_key) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
 WHERE lifecycle_state NOT IN ('ARCHIVED','TRASHED')
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL)
 ORDER BY
+  CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
+    coalesce(h.score, 0.0) END ASC,
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
   CASE WHEN p.sort_key IN ('captured_asc', 'captured_desc') THEN captured_at_unix IS NULL END ASC,
@@ -1158,24 +1195,27 @@ type ListMediaNodesParams struct {
 	Limit     int64
 	Offset    int64
 	NameQuery sql.NullString
+	FtsQuery  sql.NullString
 	Sort      string
 }
 
 // Backs GET /api/v1/assets. Excludes archived rows by default -- an
 // archived node is reachable via its successor's superseded history, not
 // the main asset list.
+// Materialize once: flattening this join makes MATCH/rank quadratic.
+// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 // p carries the search/sort params as a one-row derived table: sqlc's
 // SQLite engine neither rewrites a param inside ORDER BY nor survives a
 // LIKE ... ESCAPE clause, so both go through p's columns instead.
-// name_query is a plain case-insensitive substring of file_name (instr, so
-// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+// fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+// sort is whitelisted by the handler;
 // an unknown value falls through every CASE to the id DESC tiebreak.
 func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) ([]MediaNode, error) {
 	rows, err := q.db.QueryContext(ctx, listMediaNodes,
 		arg.Limit,
 		arg.Offset,
 		arg.NameQuery,
+		arg.FtsQuery,
 		arg.Sort,
 	)
 	if err != nil {
@@ -1232,6 +1272,12 @@ func (q *Queries) ListMediaNodes(ctx context.Context, arg ListMediaNodesParams) 
 }
 
 const listMediaNodesFiltered = `-- name: ListMediaNodesFiltered :many
+WITH hits AS (
+    SELECT CAST(media_nodes_fts.rowid AS INTEGER) AS rid,
+           CAST(media_nodes_fts.rank AS REAL) AS score
+    FROM media_nodes_fts WHERE media_nodes_fts MATCH coalesce(?4, '""')
+    LIMIT -1 -- Prevent flattening (sqlc does not support AS MATERIALIZED).
+)
 SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        size_bytes, mtime_unix, fast_hash, full_hash, phash,
        indexing_status, graph_status, lifecycle_state, superseded_by,
@@ -1242,16 +1288,20 @@ SELECT id, node_uuid, storage_location_id, file_path, file_name, file_ext,
        uploaded_by_user_id
 FROM media_nodes
 CROSS JOIN (SELECT CAST(?3 AS TEXT) AS name_query,
-                   CAST(?4 AS TEXT) AS sort_key) AS p
-WHERE (lifecycle_state = ?5 OR ?5 IS NULL)
-  AND (camera_model = ?6 OR ?6 IS NULL)
-  AND (graph_status = ?7 OR ?7 IS NULL)
-  AND (storage_location_id = ?8 OR ?8 IS NULL)
-  AND (uploaded_by_user_id = ?9 OR ?9 IS NULL)
+                   CAST(?4 AS TEXT) AS fts_query,
+                   CAST(?5 AS TEXT) AS sort_key) AS p
+LEFT JOIN hits AS h ON h.rid = media_nodes.id
+WHERE (lifecycle_state = ?6 OR ?6 IS NULL)
+  AND (camera_model = ?7 OR ?7 IS NULL)
+  AND (graph_status = ?8 OR ?8 IS NULL)
+  AND (storage_location_id = ?9 OR ?9 IS NULL)
+  AND (uploaded_by_user_id = ?10 OR ?10 IS NULL)
   AND superseded_by IS NULL
-  AND (p.name_query IS NULL OR instr(lower(file_name), lower(p.name_query)) > 0
-       OR node_uuid = p.name_query OR node_uuid = lower(p.name_query))
+  AND (p.name_query IS NULL OR node_uuid = p.name_query OR node_uuid = lower(p.name_query)
+       OR h.rid IS NOT NULL)
 ORDER BY
+  CASE WHEN p.sort_key = '' AND p.fts_query IS NOT NULL THEN
+    coalesce(h.score, 0.0) END ASC,
   -- Each CASE yields NULL for every other sort, so only one key is live.
   -- captured_at_unix NULLs sort last in both directions.
   CASE WHEN p.sort_key IN ('captured_asc', 'captured_desc') THEN captured_at_unix IS NULL END ASC,
@@ -1270,6 +1320,7 @@ type ListMediaNodesFilteredParams struct {
 	Limit             int64
 	Offset            int64
 	NameQuery         sql.NullString
+	FtsQuery          sql.NullString
 	Sort              string
 	LifecycleState    sql.NullString
 	CameraModel       sql.NullString
@@ -1278,12 +1329,13 @@ type ListMediaNodesFilteredParams struct {
 	UploadedByUserID  sql.NullInt64
 }
 
+// Materialize once: flattening this join makes MATCH/rank quadratic.
+// Casts expose FTS5 hidden columns to sqlc; NULL uses a valid empty phrase.
 // p carries the search/sort params as a one-row derived table: sqlc's
 // SQLite engine neither rewrites a param inside ORDER BY nor survives a
 // LIKE ... ESCAPE clause, so both go through p's columns instead.
-// name_query is a plain case-insensitive substring of file_name (instr, so
-// the user's % and _ are literal, not LIKE wildcards; lower() folds ASCII
-// only), or an exact node_uuid, so a pasted UUID finds its node. sort is whitelisted by the handler (ListAssetsInput's enum tag);
+// fts_query is escaped prefix syntax; name_query retains exact UUID lookup.
+// sort is whitelisted by the handler;
 // an unknown value falls through every CASE to the id DESC tiebreak.
 // Comparison before IS NULL in each clause (not the reverse) is load-bearing:
 // sqlc's SQLite type inference only picks up the column's own (nullable)
@@ -1294,6 +1346,7 @@ func (q *Queries) ListMediaNodesFiltered(ctx context.Context, arg ListMediaNodes
 		arg.Limit,
 		arg.Offset,
 		arg.NameQuery,
+		arg.FtsQuery,
 		arg.Sort,
 		arg.LifecycleState,
 		arg.CameraModel,

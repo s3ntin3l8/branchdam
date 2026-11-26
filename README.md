@@ -130,6 +130,7 @@ For detailed bring-up instructions and reverse proxy configurations, see [`docs/
 - [`docs/schema.md`](docs/schema.md) — SQLite schema design decisions and invariants.
 - [`docs/agent-api.md`](docs/agent-api.md) — Workstation & mobile agent REST wire format and behavioral caveats.
 - [`docs/google-photos.md`](docs/google-photos.md) — Google Photos API feasibility spike and no-go verdict.
+- [`docs/mcp.md`](docs/mcp.md) — AI assistant support (MCP server) design: scopes, tools, OAuth connector, search and enrichment phases.
 
 ---
 

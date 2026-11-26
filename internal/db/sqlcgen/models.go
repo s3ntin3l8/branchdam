@@ -18,6 +18,8 @@ type ActorAudit struct {
 	ResourceID   sql.NullString
 	DetailsJson  string
 	CreatedAt    int64
+	AuthProvider sql.NullString
+	PatID        sql.NullInt64
 }
 
 type AgentScratchTelemetry struct {
@@ -135,6 +137,7 @@ type MediaEdge struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 	IsActive         int64
+	ReviewSource     sql.NullString
 }
 
 type MediaNode struct {
@@ -169,6 +172,12 @@ type MediaNode struct {
 	ThumbAttempts      int64
 	SourcePathHash     *string
 	UploadedByUserID   sql.NullInt64
+}
+
+type MediaNodesFt struct {
+	FileName     string
+	RelativePath string
+	Meta         string
 }
 
 type MfaCredential struct {
@@ -334,10 +343,18 @@ type VMediaEdgesResolved struct {
 	ReviewState          string
 	ReviewedAt           sql.NullInt64
 	ReviewedBy           sql.NullString
+	ReviewSource         sql.NullString
 	CreatedAt            int64
 	UpdatedAt            int64
 	ParentLifecycleState string
 	ChildLifecycleState  string
 	ParentAlive          bool
 	ParentMissing        bool
+}
+
+type VMediaNodesSearch struct {
+	Rowid        int64
+	FileName     string
+	RelativePath interface{}
+	Meta         interface{}
 }

@@ -62,14 +62,18 @@ consume-once sentinel.
 
 ## API endpoints
 
-All endpoints require an admin identity (session cookie, forward-auth,
-or a PAT). A PAT-authenticated request carries its owner's `users.id`,
-so the endpoints work identically regardless of which identity path
-authenticated the request. Mint additionally requires the resolved
-owner to be a **live admin** (`users.is_admin = 1`, `disabled_at`
-NULL) — the same predicate the token lookup enforces — and returns
-403 otherwise, rather than issuing a well-formed token that would
-401 on first use.
+All endpoints require an authenticated identity (session cookie,
+forward-auth, or a PAT). A PAT-authenticated request carries its
+owner's `users.id`, so the endpoints work identically regardless of
+which identity path authenticated the request.
+
+Mint requires a live owner (`disabled_at` NULL). A **live admin**
+(`users.is_admin = 1`) may mint any grantable scope list. A **live
+non-admin** may mint, list and revoke only their own **MCP-only**
+tokens (every scope starts with `mcp:`). Any other list — `admin`,
+or a mix such as `mcp:read` plus `admin` — is 403, rather than a
+token that would 401 on first use. A disabled owner is 403 at mint
+and 401 on the next use of a token they already hold.
 
 | Method | Path | Description |
 |---|---|---|
@@ -98,26 +102,45 @@ wrapper (`patScopeFor` in `internal/httpapi/server.go`):
 
 | Route group | Required scope |
 |---|---|
+| `/mcp` | any of `mcp:read`, `mcp:review`, `mcp:enrich` (or `*`) |
 | `/api/v1/users/me/pats*` | `pats:write` |
 | `/api/v1/companion/pairings*` | `pairings:write` |
 | everything else (non-agent) | `admin` |
 
+`/mcp` uses an any-of gate (`PATService.MiddlewareAnyOf`). The
+underlying scope check is still exact-match-or-wildcard, so a token
+must hold one of those three scopes (or `*`). `mcp:review` does not
+imply `mcp:read`. An `mcp:review`-only token reaches `/mcp`; each read
+tool checks `mcp:read` and returns a forbidden tool error without it.
+When `mcp.enabled` is false, `/mcp` answers 404 after that gate. A
+request with no PAT is 401, including a valid session cookie.
+
+An MCP-only token on any other path gets 403: its scopes satisfy
+neither `admin`, `pats:write` nor `pairings:write`.
+
 So a `["pairings:write"]` token drives the pairing API but gets 403 at
-the PAT-management endpoints, and the bootstrap PAT's `["*"]` passes
-everywhere. A new route group gains its own scope by adding a prefix
-to `patScopeFor` and an entry in the handler map.
+the PAT-management endpoints and at `/mcp`, and the bootstrap PAT's
+`["*"]` passes everywhere. A new route group gains its own scope by
+adding a prefix to `patScopeFor` and an entry in the handler map.
 
 Minting is scope-capped: a PAT-authenticated caller can only mint a
 token whose scopes are a subset of its own, unless it carries `"*"` —
 a `pats:write` token can't mint itself a wildcard. Session and
 forward-auth admins are unrestricted at mint time (their authority is
-`RequireAdmin`'s model, not a token grant).
+the admin model, not a token grant). A non-admin session may mint
+only an MCP-only list; the scope cap still applies when the caller is
+itself a PAT.
 
-`is_admin` on a PAT principal is not frozen at mint time: the lookup
-query joins the owner's `users` row and filters on `is_admin = 1 AND
-disabled_at IS NULL`. Demoting or disabling the owner invalidates all
-of their live tokens on the next request (401, identical to a revoked
-token) — the same live-authority posture the session middleware takes.
+`is_admin` on a PAT principal is not frozen at mint time. The lookup
+joins the owner's `users` row and requires `disabled_at IS NULL`, plus
+either `is_admin = 1` or an MCP-only scope list (the same rule as
+mint). Demoting the owner invalidates their non-MCP tokens on the
+next request (401, identical to a revoked token). Disabling the owner
+invalidates every token. For an MCP-only token, `LocalUserView.IsAdmin`
+is the owner's actual `is_admin`, so a non-admin assistant credential
+does not pass `RequireAdmin` on admin routes. Every other token keeps
+`IsAdmin=true`, which the lookup's live-admin predicate already
+guaranteed.
 
 **Attribution.** A PAT-authenticated request acts *as the token's
 owner*: the request Principal carries the owner's `users.id` and

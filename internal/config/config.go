@@ -102,6 +102,7 @@ type Config struct {
 	Ingest     Ingest     `yaml:"ingest"`
 	Trash      Trash      `yaml:"trash"`
 	Metadata   Metadata   `yaml:"metadata"`
+	MCP        MCP        `yaml:"mcp"`
 }
 
 // Metadata configures EXIF/XMP identity metadata inheritance.
@@ -109,6 +110,39 @@ type Metadata struct {
 	// AutoInherit enables automated metadata inheritance (EXIF/XMP tags)
 	// from winning parent edge to child on edge confirmation or auto-acceptance (default true).
 	AutoInherit bool `yaml:"autoInherit"`
+}
+
+// MCP configures the in-process Model Context Protocol server.
+// Changing it requires a process restart: the HTTP mux mounts /mcp
+// once, from the config loaded at startup.
+type MCP struct {
+	// Enabled mounts the Streamable HTTP MCP server at /mcp.
+	// Default false: /mcp stays 404 until an operator turns it on.
+	// Clients authenticate with a personal access token. When oauth
+	// is set they may also present an OAuth access token. A browser
+	// session or forward-auth identity is not accepted on its own.
+	Enabled bool `yaml:"enabled"`
+	// OAuth is the resource-server half of an Authentik provider.
+	// Empty issuer or audience leaves /mcp PAT-only.
+	OAuth MCPOAuth `yaml:"oauth"`
+}
+
+// MCPOAuth configures JWT checks for /mcp. Issuer is copied from the
+// provider's OpenID discovery document. Audience is the public MCP
+// URL tokens must be bound to, and the resource value published in
+// protected-resource metadata.
+type MCPOAuth struct {
+	Issuer   string `yaml:"issuer"`
+	Audience string `yaml:"audience"`
+	// ScopeClaims maps a token claim (Authentik's groups claim, by
+	// convention) to claim-value to mcp scopes. Only mcp:read,
+	// mcp:review and mcp:enrich are kept.
+	ScopeClaims map[string]map[string][]string `yaml:"scopeClaims"`
+}
+
+// OAuthConfigured reports whether both issuer and audience are set.
+func (m MCP) OAuthConfigured() bool {
+	return strings.TrimSpace(m.OAuth.Issuer) != "" && strings.TrimSpace(m.OAuth.Audience) != ""
 }
 
 // Trash configures the soft-delete trash buffer and automated retention.

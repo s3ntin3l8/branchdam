@@ -117,6 +117,15 @@ Demo instances only (`scripts/demo`, `make demo`).
 
 Agent authentication is per-device pairing only — no shared `apiKey` field exists. Each paired device gets its own key via `POST /api/v1/companion/pairings` (see [`agent-api.md`](agent-api.md)).
 
+## `mcp`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `enabled` | bool | `false` | Mounts the in-process MCP server (Streamable HTTP) at `/mcp`. Off, that path stays 404. On, it accepts a personal access token (`mcp:read` for the read tools; `mcp:review` can connect but those tools refuse). When `oauth` is set it also accepts an OAuth access token. A browser session or Authentik forward-auth identity alone is 401, even a valid admin one. Restart to change: the route is registered once at startup. See [`deploy.md`](deploy.md) and [`mcp.md`](mcp.md). |
+| `oauth.issuer` | string | empty | Issuer URL copied from the Authentik provider's OpenID discovery `issuer`, including a trailing slash if the document has one. Empty (or an empty audience) leaves `/mcp` PAT-only. |
+| `oauth.audience` | string | empty | Absolute public MCP URL, for example `https://dam.example.com/mcp`. Tokens must carry this `aud`. It is also the `resource` value in protected-resource metadata. The `WWW-Authenticate` `resource_metadata` URL is this origin plus `/.well-known/oauth-protected-resource`. |
+| `oauth.scopeClaims` | map | empty | Claim name, then claim value, then a list of `mcp:read`, `mcp:review`, `mcp:enrich`. Other strings in the list are ignored. A token with no mapped value is 403. A subject that is not already an Authentik user is 403 and is not created. |
+
 ## `authz`
 
 | Key | Type | Default | Effect |

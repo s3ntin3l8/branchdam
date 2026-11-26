@@ -33,7 +33,8 @@ type CountActorAuditParams struct {
 }
 
 // Counterpart to ListActorAudit -- must apply identical WHERE so
-// pagination totals match the visible rows.
+// pagination totals match the visible rows. No join: the filters only
+// touch actor_audit columns, and the LEFT JOIN does not drop rows.
 func (q *Queries) CountActorAudit(ctx context.Context, arg CountActorAuditParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countActorAudit,
 		arg.ActorUserID,
@@ -53,10 +54,12 @@ const insertActorAudit = `-- name: InsertActorAudit :exec
 
 INSERT INTO actor_audit (
     actor_user_id, actor_kind, actor_name,
-    event, resource_type, resource_id, details_json
+    event, resource_type, resource_id, details_json,
+    auth_provider, pat_id
 ) VALUES (
     ?1, ?2, ?3,
-    ?4, ?5, ?6, ?7
+    ?4, ?5, ?6, ?7,
+    ?8, ?9
 )
 `
 
@@ -68,6 +71,8 @@ type InsertActorAuditParams struct {
 	ResourceType string
 	ResourceID   sql.NullString
 	DetailsJson  string
+	AuthProvider sql.NullString
+	PatID        sql.NullInt64
 }
 
 // actor_audit: append-only event log for admin actions that aren't
@@ -80,6 +85,11 @@ type InsertActorAuditParams struct {
 // views can filter "everything by user X" or "everything the system did"
 // without parsing the name string.
 //
+// auth_provider + pat_id record the credential. auth_provider is NULL
+// for machine/system/anonymous actors and for rows written before the
+// columns existed. pat_id is the user_pats row when a token acted.
+// pat_name is that token's display name (LEFT JOIN; NULL when pat_id is).
+//
 // All positional params use bare ?1/?2 (not sqlc.arg) per AGENTS.md's
 // "SQL Syntax Traps" note.
 func (q *Queries) InsertActorAudit(ctx context.Context, arg InsertActorAuditParams) error {
@@ -91,22 +101,28 @@ func (q *Queries) InsertActorAudit(ctx context.Context, arg InsertActorAuditPara
 		arg.ResourceType,
 		arg.ResourceID,
 		arg.DetailsJson,
+		arg.AuthProvider,
+		arg.PatID,
 	)
 	return err
 }
 
 const listActorAudit = `-- name: ListActorAudit :many
-SELECT id, actor_user_id, actor_kind, actor_name,
-       event, resource_type, resource_id, details_json, created_at
+SELECT actor_audit.id, actor_audit.actor_user_id, actor_audit.actor_kind, actor_audit.actor_name,
+       actor_audit.event, actor_audit.resource_type, actor_audit.resource_id,
+       actor_audit.details_json, actor_audit.created_at,
+       actor_audit.auth_provider, actor_audit.pat_id,
+       user_pats.name AS pat_name
 FROM actor_audit
-WHERE (?3 IS NULL OR actor_user_id = ?3)
-  AND (?4 IS NULL OR actor_kind = ?4)
-  AND (?5 IS NULL OR event = ?5)
-  AND (?6 IS NULL OR resource_type = ?6)
-  AND (?7 IS NULL OR resource_id = ?7)
-  AND (?8 IS NULL OR created_at >= ?8)
-  AND (?9 IS NULL OR created_at < ?9)
-ORDER BY created_at DESC, id DESC
+LEFT JOIN user_pats ON user_pats.id = actor_audit.pat_id
+WHERE (?3 IS NULL OR actor_audit.actor_user_id = ?3)
+  AND (?4 IS NULL OR actor_audit.actor_kind = ?4)
+  AND (?5 IS NULL OR actor_audit.event = ?5)
+  AND (?6 IS NULL OR actor_audit.resource_type = ?6)
+  AND (?7 IS NULL OR actor_audit.resource_id = ?7)
+  AND (?8 IS NULL OR actor_audit.created_at >= ?8)
+  AND (?9 IS NULL OR actor_audit.created_at < ?9)
+ORDER BY actor_audit.created_at DESC, actor_audit.id DESC
 LIMIT ?1 OFFSET ?2
 `
 
@@ -122,12 +138,28 @@ type ListActorAuditParams struct {
 	UntilUnix    interface{}
 }
 
+type ListActorAuditRow struct {
+	ID           int64
+	ActorUserID  sql.NullInt64
+	ActorKind    string
+	ActorName    string
+	Event        string
+	ResourceType string
+	ResourceID   sql.NullString
+	DetailsJson  string
+	CreatedAt    int64
+	AuthProvider sql.NullString
+	PatID        sql.NullInt64
+	PatName      sql.NullString
+}
+
 // Admin/audit list view. Offset pagination -- audit volume is bounded
 // (one entry per admin action), so pagination drift isn't the unbounded-
 // table hazard it would be for a per-row event stream like audit_queue.
 // Filters are all sqlc.narg so a caller can filter on any subset
 // (a user-scoped "what did I do" view is actor_user_id + maybe event).
-func (q *Queries) ListActorAudit(ctx context.Context, arg ListActorAuditParams) ([]ActorAudit, error) {
+// Columns are qualified: user_pats also has id and created_at.
+func (q *Queries) ListActorAudit(ctx context.Context, arg ListActorAuditParams) ([]ListActorAuditRow, error) {
 	rows, err := q.db.QueryContext(ctx, listActorAudit,
 		arg.Limit,
 		arg.Offset,
@@ -143,9 +175,9 @@ func (q *Queries) ListActorAudit(ctx context.Context, arg ListActorAuditParams) 
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ActorAudit{}
+	items := []ListActorAuditRow{}
 	for rows.Next() {
-		var i ActorAudit
+		var i ListActorAuditRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ActorUserID,
@@ -156,6 +188,9 @@ func (q *Queries) ListActorAudit(ctx context.Context, arg ListActorAuditParams) 
 			&i.ResourceID,
 			&i.DetailsJson,
 			&i.CreatedAt,
+			&i.AuthProvider,
+			&i.PatID,
+			&i.PatName,
 		); err != nil {
 			return nil, err
 		}

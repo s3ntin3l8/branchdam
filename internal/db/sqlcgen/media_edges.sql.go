@@ -162,11 +162,12 @@ func (q *Queries) ListAuditQueue(ctx context.Context, arg ListAuditQueueParams) 
 }
 
 const listAuditQueueDetailed = `-- name: ListAuditQueueDetailed :many
-WITH f(tier, resolver, relationship_type, min_confidence) AS (
+WITH f(tier, resolver, relationship_type, min_confidence, review_source) AS (
   SELECT CAST(?3 AS INTEGER) AS tier,
          CAST(?4 AS TEXT) AS resolver,
          CAST(?5 AS TEXT) AS relationship_type,
-         CAST(?6 AS REAL) AS min_confidence
+         CAST(?6 AS REAL) AS min_confidence,
+         CAST(?7 AS TEXT) AS review_source
 ),
 cursor(cd, id) AS (
   SELECT confidence, id FROM media_edges WHERE id = CAST(?2 AS INTEGER)
@@ -174,14 +175,15 @@ cursor(cd, id) AS (
 total_rows AS (
   SELECT COUNT(*) AS n
   FROM v_media_edges_resolved e, f
-  WHERE e.review_state = 'NEEDS_REVIEW'
+  WHERE ((f.review_source IS NULL AND e.review_state = 'NEEDS_REVIEW')
+         OR (f.review_source IS NOT NULL AND e.review_source = f.review_source))
     AND (f.tier IS NULL OR e.tier = f.tier)
     AND (f.resolver IS NULL OR e.resolver = f.resolver)
     AND (f.relationship_type IS NULL OR e.relationship_type = f.relationship_type)
     AND (f.min_confidence IS NULL OR e.confidence >= f.min_confidence)
 )
 SELECT e.id, e.source_node_id, e.target_node_id, e.relationship_type, e.confidence,
-       e.tier, e.resolver, e.evidence_json, e.parent_alive, e.parent_missing,
+       e.tier, e.resolver, e.evidence_json, e.review_source, e.parent_alive, e.parent_missing,
        sn.node_uuid AS source_node_uuid, sn.file_name AS source_file_name, sn.file_path AS source_file_path,
        sn.captured_at_unix AS source_captured_at_unix, sn.camera_model AS source_camera_model,
        sn.phash AS source_phash, sn.thumb_state AS source_thumb_state,
@@ -193,7 +195,8 @@ FROM v_media_edges_resolved e
 JOIN media_nodes sn ON e.source_node_id = sn.id
 JOIN media_nodes tn ON e.target_node_id = tn.id
 CROSS JOIN f
-WHERE e.review_state = 'NEEDS_REVIEW'
+WHERE ((f.review_source IS NULL AND e.review_state = 'NEEDS_REVIEW')
+       OR (f.review_source IS NOT NULL AND e.review_source = f.review_source))
   AND (f.tier IS NULL OR e.tier = f.tier)
   AND (f.resolver IS NULL OR e.resolver = f.resolver)
   AND (f.relationship_type IS NULL OR e.relationship_type = f.relationship_type)
@@ -211,6 +214,7 @@ type ListAuditQueueDetailedParams struct {
 	Resolver         sql.NullString
 	RelationshipType sql.NullString
 	MinConfidence    sql.NullFloat64
+	ReviewSource     sql.NullString
 }
 
 type ListAuditQueueDetailedRow struct {
@@ -222,6 +226,7 @@ type ListAuditQueueDetailedRow struct {
 	Tier                 int64
 	Resolver             string
 	EvidenceJson         string
+	ReviewSource         sql.NullString
 	ParentAlive          bool
 	ParentMissing        bool
 	SourceNodeUuid       string
@@ -274,10 +279,14 @@ type ListAuditQueueDetailedRow struct {
 // in the outer WHERE, correctly collapses to a single BeforeID field.)
 //
 // Optional server-side filters (tier, resolver, relationship_type,
-// min_confidence) are resolved once in the f CTE -- each CAST so sqlc types
-// the param -- and applied identically to total_rows and the page, so
-// total is the size of the FILTERED queue and keyset paging walks only
-// the filtered rows. NULL means "no filter".
+// min_confidence, review_source) are resolved once in the f CTE -- each
+// CAST so sqlc types the param -- and applied identically to total_rows
+// and the page, so total is the size of the FILTERED queue and keyset
+// paging walks only the filtered rows. NULL means "no filter".
+// review_source is the exception: when it is set, the page is edges with
+// that source (an assistant confirm is CONFIRMED, so it has left
+// NEEDS_REVIEW) instead of the NEEDS_REVIEW queue. When it is NULL the
+// queue predicate is unchanged.
 func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueueDetailedParams) ([]ListAuditQueueDetailedRow, error) {
 	rows, err := q.db.QueryContext(ctx, listAuditQueueDetailed,
 		arg.Limit,
@@ -286,6 +295,7 @@ func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueue
 		arg.Resolver,
 		arg.RelationshipType,
 		arg.MinConfidence,
+		arg.ReviewSource,
 	)
 	if err != nil {
 		return nil, err
@@ -303,6 +313,7 @@ func (q *Queries) ListAuditQueueDetailed(ctx context.Context, arg ListAuditQueue
 			&i.Tier,
 			&i.Resolver,
 			&i.EvidenceJson,
+			&i.ReviewSource,
 			&i.ParentAlive,
 			&i.ParentMissing,
 			&i.SourceNodeUuid,
@@ -413,7 +424,7 @@ func (q *Queries) ListDescendants(ctx context.Context, rootID int64) ([]int64, e
 const listEdgesByMultipleSources = `-- name: ListEdgesByMultipleSources :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND review_state <> 'REJECTED' AND is_active = 1
@@ -445,6 +456,7 @@ func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, dollar_1 strin
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.IsActive,
+			&i.ReviewSource,
 		); err != nil {
 			return nil, err
 		}
@@ -462,7 +474,7 @@ func (q *Queries) ListEdgesByMultipleSources(ctx context.Context, dollar_1 strin
 const listEdgesByMultipleTargets = `-- name: ListEdgesByMultipleTargets :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
        tier, resolver, evidence_json, review_state, reviewed_at, reviewed_by,
-       created_at, updated_at, is_active
+       created_at, updated_at, is_active, review_source
 FROM media_edges
 WHERE target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND review_state <> 'REJECTED' AND is_active = 1
@@ -497,6 +509,7 @@ func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, dollar_1 strin
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.IsActive,
+			&i.ReviewSource,
 		); err != nil {
 			return nil, err
 		}
@@ -513,7 +526,7 @@ func (q *Queries) ListEdgesByMultipleTargets(ctx context.Context, dollar_1 strin
 
 const listEdgesForNodes = `-- name: ListEdgesForNodes :many
 SELECT id, source_node_id, target_node_id, relationship_type, confidence,
-       review_state, resolver
+       review_state, resolver, review_source
 FROM media_edges
 WHERE source_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
   AND target_node_id IN (SELECT value FROM json_each(CAST(?1 AS TEXT)))
@@ -528,6 +541,7 @@ type ListEdgesForNodesRow struct {
 	Confidence       float64
 	ReviewState      string
 	Resolver         string
+	ReviewSource     sql.NullString
 }
 
 func (q *Queries) ListEdgesForNodes(ctx context.Context, dollar_1 string) ([]ListEdgesForNodesRow, error) {
@@ -547,6 +561,7 @@ func (q *Queries) ListEdgesForNodes(ctx context.Context, dollar_1 string) ([]Lis
 			&i.Confidence,
 			&i.ReviewState,
 			&i.Resolver,
+			&i.ReviewSource,
 		); err != nil {
 			return nil, err
 		}

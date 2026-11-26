@@ -47,6 +47,11 @@ const AuthProviderLocal = "local"
 // attributed to that phantom instead of the token's owner.
 const AuthProviderPAT = "pat"
 
+// AuthProviderOAuth marks a Principal authenticated by an OAuth 2.1
+// access token on /mcp. The subject is an existing forward-auth user.
+// The token does not provision a users row, and it is not a PAT.
+const AuthProviderOAuth = "oauth"
+
 // Principal is what a request is authenticated as. A machine Principal
 // after #companion-pairing carries Name = agent_id (the device that owns
 // the API key) for device-paired sessions. Email and Groups are always
@@ -86,6 +91,11 @@ const AuthProviderPAT = "pat"
 // PAT chain sets it (AuthProvider == AuthProviderPAT); zero everywhere
 // else, where internal/users.ResolveOrCreate derives the id from
 // (AuthProvider, ExternalUID) instead.
+//
+// PATID is the user_pats.id of the token that authenticated this
+// request. Set only by RequirePAT; zero for sessions, forward-auth,
+// machines and system actors. WriteActorAudit persists a non-zero
+// value so a token's actions can be told apart from the owner's.
 type Principal struct {
 	Kind          Kind
 	Name          string
@@ -94,6 +104,7 @@ type Principal struct {
 	ExternalUID   string
 	AuthProvider  string
 	UserID        int64
+	PATID         int64
 	Authenticated bool
 }
 
