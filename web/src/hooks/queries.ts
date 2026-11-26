@@ -243,6 +243,63 @@ export function useSimilarAssets(id: number | undefined) {
   });
 }
 
+export function useAssetTags(id: number | undefined) {
+  return useQuery({
+    queryKey: ["asset-tags", id],
+    queryFn: () => api.listAssetTags(id as number),
+    enabled: id !== undefined,
+  });
+}
+
+export function useAssetAnnotations(id: number | undefined) {
+  return useQuery({
+    queryKey: ["asset-annotations", id],
+    queryFn: () => api.listAssetAnnotations(id as number),
+    enabled: id !== undefined,
+  });
+}
+
+export function useAddAssetTag(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (tag: string) => api.addAssetTag(id, tag),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["asset-tags", id] });
+      queryClient.invalidateQueries({ queryKey: ["tags"] });
+    },
+  });
+}
+
+export function useDeleteAssetTag(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (tag: string) => api.deleteAssetTag(id, tag),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["asset-tags", id] });
+      queryClient.invalidateQueries({ queryKey: ["tags"] });
+    },
+  });
+}
+
+export function useTagCounts() {
+  return useQuery({
+    queryKey: ["tags"],
+    queryFn: api.listTags,
+  });
+}
+
+export function useRevertAssistantTags() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.revertAssistantTags({ source: "assistant" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tags"] });
+      queryClient.invalidateQueries({ queryKey: ["asset-tags"] });
+      queryClient.invalidateQueries({ queryKey: ["asset-annotations"] });
+    },
+  });
+}
+
 export function useAssetGraph(id: number | undefined) {
   return useQuery({
     queryKey: ["asset-graph", id],

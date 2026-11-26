@@ -18,6 +18,8 @@ vi.mock("../api/client", async (importOriginal) => {
       getSettings: vi.fn(),
       putSettings: vi.fn(),
       postRestart: vi.fn(),
+      me: vi.fn().mockResolvedValue({ kind: "user", authenticated: true, isAdmin: false }),
+      revertAssistantTags: vi.fn(),
     },
   };
 });

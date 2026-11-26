@@ -313,34 +313,66 @@ type DeleteAssetTagOutput struct {
 }
 
 func (s *Server) handleDeleteAssetTag(ctx context.Context, in *DeleteAssetTagInput) (*DeleteAssetTagOutput, error) {
-	tag, err := normalizeTag(in.Tag)
+	removed, _, err := s.removeAssetTag(ctx, in.ID, in.Tag, false)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.enrichmentNode(ctx, in.ID); err != nil {
-		return nil, err
-	}
-	if _, err := s.enrichmentActor(ctx); err != nil {
-		return nil, err
-	}
-	var n int64
-	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
-		var err error
-		n, err = q.DeleteAssetTag(ctx, sqlcgen.DeleteAssetTagParams{NodeID: in.ID, Tag: tag})
-		return err
-	})
-	if err != nil {
-		return nil, huma.Error500InternalServerError("delete tag", err)
-	}
-	if n == 0 {
+	if !removed {
 		return nil, huma.Error404NotFound("tag not found")
-	}
-	if err := s.writeEnrichmentAudit(ctx, audit.EventTagRemoved, in.ID, map[string]any{"tag": tag}); err != nil {
-		return nil, err
 	}
 	return &DeleteAssetTagOutput{Body: struct {
 		OK bool `json:"ok"`
 	}{OK: true}}, nil
+}
+
+// removeAssetTag deletes one tag. assistantOnly leaves a user tag in
+// place and reports reason "not_assistant". A missing tag reports
+// "missing" and removed=false. The caller turns that into a 404.
+func (s *Server) removeAssetTag(ctx context.Context, id int64, raw string, assistantOnly bool) (bool, string, error) {
+	tag, err := normalizeTag(raw)
+	if err != nil {
+		return false, "", err
+	}
+	if err := s.enrichmentNode(ctx, id); err != nil {
+		return false, "", err
+	}
+	if _, err := s.enrichmentActor(ctx); err != nil {
+		return false, "", err
+	}
+	var removed bool
+	reason := "missing"
+	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
+		existing, err := q.GetAssetTag(ctx, sqlcgen.GetAssetTagParams{NodeID: id, Tag: tag})
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if assistantOnly && existing.Source != "assistant" {
+			reason = "not_assistant"
+			return nil
+		}
+		n, err := q.DeleteAssetTag(ctx, sqlcgen.DeleteAssetTagParams{NodeID: id, Tag: tag})
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			removed = true
+			reason = ""
+		}
+		return nil
+	})
+	if err != nil {
+		return false, "", huma.Error500InternalServerError("delete tag", err)
+	}
+	if !removed {
+		return false, reason, nil
+	}
+	if err := s.writeEnrichmentAudit(ctx, audit.EventTagRemoved, id, map[string]any{"tag": tag}); err != nil {
+		return false, "", err
+	}
+	return true, "", nil
 }
 
 type ListAnnotationsOutput struct {

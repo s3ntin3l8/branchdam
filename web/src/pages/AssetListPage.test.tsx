@@ -12,6 +12,7 @@ vi.mock("../api/client", () => ({
     listAssets: vi.fn(),
     getAssetFacets: vi.fn(),
     listStorageLocations: vi.fn(),
+    listTags: vi.fn().mockResolvedValue({ tags: [] }),
     thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
     deleteAsset: vi.fn(),
     restoreAsset: vi.fn(),

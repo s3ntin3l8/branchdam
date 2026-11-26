@@ -16,6 +16,7 @@ import type { SettingsCategory } from "../components/settings/SettingsLayout";
 import { AppearanceSettings } from "../components/settings/AppearanceSettings";
 import { useConfig, usePutSettings, useSettings } from "../hooks/queries";
 import Dialog from "../components/Dialog";
+import AssistantTagRevert from "../components/AssistantTagRevert";
 
 // The registry's Field.Validate enum choices (internal/settings/registry.go)
 // aren't part of the wire DTO -- there's no generated client here (see
@@ -550,6 +551,7 @@ export default function SettingsPage() {
     <DirtyFormContext.Provider value={dirtyContextValue}>
     <div className="p-6">
       <h1 className="mb-6 text-xl font-semibold text-neutral-100">System Settings</h1>
+      <AssistantTagRevert />
 
       {settings && (settings.pendingRestart?.length ?? 0) > 0 && (
         <div className="mb-6 rounded-lg border border-amber-800/60 bg-amber-950/30 p-4 text-sm text-amber-300">

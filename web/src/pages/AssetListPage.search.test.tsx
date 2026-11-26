@@ -14,6 +14,7 @@ vi.mock("../api/client", () => ({
     listAssets: vi.fn(),
     getAssetFacets: vi.fn(),
     listStorageLocations: vi.fn(),
+    listTags: vi.fn(),
     thumbnailUrl: vi.fn((id: number) => `/api/v1/assets/${id}/thumbnail`),
     deleteAsset: vi.fn(),
     restoreAsset: vi.fn(),
@@ -66,6 +67,7 @@ beforeEach(() => {
   vi.mocked(api.listStorageLocations).mockResolvedValue({ locations: [] });
   vi.mocked(api.listAssets).mockResolvedValue({ assets: [asset({})], total: 1 });
   vi.mocked(api.listUsers).mockResolvedValue({ users: [], total: 0 });
+  vi.mocked(api.listTags).mockResolvedValue({ tags: [] });
 });
 
 describe("AssetListPage search and sort", () => {
@@ -95,6 +97,16 @@ describe("AssetListPage search and sort", () => {
     await userEvent.selectOptions(screen.getByLabelText("Sort"), "name_asc");
     await waitFor(() =>
       expect(api.listAssets).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "name_asc", offset: 0 }))
+    );
+  });
+
+  it("filters the list from a tag chip", async () => {
+    vi.mocked(api.listTags).mockResolvedValue({ tags: [{ tag: "night", count: 3 }] });
+    renderAt("/assets");
+    await screen.findByText("/scratch/photo1.jpg");
+    await userEvent.click(await screen.findByRole("button", { name: "night 3" }));
+    await waitFor(() =>
+      expect(api.listAssets).toHaveBeenLastCalledWith(expect.objectContaining({ tag: "night", offset: 0 }))
     );
   });
 

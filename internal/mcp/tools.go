@@ -88,7 +88,7 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 			return textResult(countSummary(body, "cameraModels", "camera model", "camera models", "list_facets")), body, nil
 		})
 
-	sdkmcp.AddTool(s, tool("get_asset", "Fetch one asset: detail, extracted metadata and sync status together."),
+	sdkmcp.AddTool(s, tool("get_asset", "Fetch one asset: detail, extracted metadata, sync status, tags and annotations. Tags and annotations include source (user or assistant)."),
 		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in idIn) (*sdkmcp.CallToolResult, any, error) {
 			if err := requireRead(ctx); err != nil {
 				return nil, nil, err
@@ -276,5 +276,53 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 				return nil, nil, err
 			}
 			return textResult(fmt.Sprintf("retried sync for asset %d", in.ID)), body, nil
+		})
+
+	sdkmcp.AddTool(s, tool("list_tags", "List tags with counts. Counts cover live assets only (not archived, trashed or superseded)."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, _ struct{}) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireRead(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.ListTags(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(countSummary(body, "tags", "tag", "tags", "list_tags")), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("tag_assets", "Add tags to assets. At most 100 ids and 100 tags. source is assistant. A tag a person already owns is left unchanged."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in TagAssetsInput) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireEnrich(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.TagAssets(ctx, in)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(countSummary(body, "tags", "tag", "tags", "tag_assets")), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("untag_assets", "Remove assistant tags from assets. At most 100 ids and 100 tags. A user tag is not removed."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in TagAssetsInput) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireEnrich(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.UntagAssets(ctx, in)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult(countSummary(body, "removed", "tag", "tags", "untag_assets")), body, nil
+		})
+
+	sdkmcp.AddTool(s, writeTool("set_description", "Set the assistant description on one asset. Replaces the previous assistant description. A user description is left unchanged."),
+		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in SetDescriptionInput) (*sdkmcp.CallToolResult, any, error) {
+			if err := requireEnrich(ctx); err != nil {
+				return nil, nil, err
+			}
+			body, err := b.SetDescription(ctx, in)
+			if err != nil {
+				return nil, nil, err
+			}
+			return textResult("description set"), body, nil
 		})
 }

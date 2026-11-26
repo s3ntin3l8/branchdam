@@ -54,6 +54,7 @@ func TestMCPReadTools(t *testing.T) {
 			"list_review_queue", "list_jobs", "get_scan_progress", "storage_health",
 			"confirm_edge", "reject_edge", "reset_edge_review", "create_edge",
 			"trash_asset", "restore_asset", "retry_sync",
+			"list_tags", "tag_assets", "untag_assets", "set_description",
 		}, got)
 
 		search := callMCP(t, session, "search_assets", map[string]any{"q": "lighthouse"})
@@ -120,7 +121,7 @@ func TestMCPReadTools(t *testing.T) {
 		session := dialMCP(t, handler, reviewToken)
 		listed, err := session.ListTools(context.Background(), nil)
 		require.NoError(t, err)
-		assert.Len(t, listed.Tools, 17)
+		assert.Len(t, listed.Tools, 21)
 		res := callMCP(t, session, "search_assets", map[string]any{"q": "lighthouse"})
 		require.True(t, res.IsError)
 		assert.Contains(t, mcpText(res), "mcp:read")

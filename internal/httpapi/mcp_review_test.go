@@ -196,7 +196,7 @@ func TestMCPReviewTools(t *testing.T) {
 	for _, p := range prompts.Prompts {
 		names = append(names, p.Name)
 	}
-	assert.ElementsMatch(t, []string{"triage-review-queue", "explain-asset"}, names)
+	assert.ElementsMatch(t, []string{"triage-review-queue", "explain-asset", "describe-assets"}, names)
 
 	explain, err := reviewSession.GetPrompt(ctx, &sdkmcp.GetPromptParams{
 		Name:      "explain-asset",

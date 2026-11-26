@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+
+	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/s3ntin3l8/branchdam/internal/mcp"
 )
@@ -67,14 +70,34 @@ func (b mcpBackend) GetAsset(ctx context.Context, id int64) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	tags, err := b.s.handleListAssetTags(ctx, &AssetPathInput{ID: id})
+	if err != nil && !humaNotFound(err) {
+		return nil, err
+	}
+	notes, err := b.s.handleListAssetAnnotations(ctx, &AssetPathInput{ID: id})
+	if err != nil && !humaNotFound(err) {
+		return nil, err
+	}
+	tagRows := []tagDTO{}
+	if tags != nil {
+		tagRows = tags.Body.Tags
+	}
+	noteRows := []annotationDTO{}
+	if notes != nil {
+		noteRows = notes.Body.Annotations
+	}
 	return struct {
-		Asset    assetDTO           `json:"asset"`
-		Metadata []nodeMetadatumDTO `json:"metadata"`
-		Sync     []syncStateDTO     `json:"sync"`
+		Asset       assetDTO           `json:"asset"`
+		Metadata    []nodeMetadatumDTO `json:"metadata"`
+		Sync        []syncStateDTO     `json:"sync"`
+		Tags        []tagDTO           `json:"tags"`
+		Annotations []annotationDTO    `json:"annotations"`
 	}{
-		Asset:    asset.Body,
-		Metadata: meta.Body.Metadata,
-		Sync:     syncStatus.Body.Sync,
+		Asset:       asset.Body,
+		Metadata:    meta.Body.Metadata,
+		Sync:        syncStatus.Body.Sync,
+		Tags:        tagRows,
+		Annotations: noteRows,
 	}, nil
 }
 
@@ -238,6 +261,97 @@ func (b mcpBackend) RetrySync(ctx context.Context, id int64) (any, error) {
 		return nil, err
 	}
 	return out.Body, nil
+}
+
+func (b mcpBackend) ListTags(ctx context.Context) (any, error) {
+	out, err := b.s.handleListTags(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (b mcpBackend) TagAssets(ctx context.Context, in mcp.TagAssetsInput) (any, error) {
+	if err := checkTagBatch(in); err != nil {
+		return nil, err
+	}
+	tagged := make([]tagDTO, 0, len(in.IDs)*len(in.Tags))
+	for _, id := range in.IDs {
+		for _, tag := range in.Tags {
+			var input AddAssetTagInput
+			input.ID = id
+			input.Body.Tag = tag
+			out, err := b.s.handleAddAssetTag(ctx, &input)
+			if err != nil {
+				return nil, err
+			}
+			tagged = append(tagged, out.Body)
+		}
+	}
+	return struct {
+		Tags []tagDTO `json:"tags"`
+	}{Tags: tagged}, nil
+}
+
+func (b mcpBackend) UntagAssets(ctx context.Context, in mcp.TagAssetsInput) (any, error) {
+	if err := checkTagBatch(in); err != nil {
+		return nil, err
+	}
+	type skipped struct {
+		ID     int64  `json:"id"`
+		Tag    string `json:"tag"`
+		Reason string `json:"reason"`
+	}
+	removed := make([]tagDTO, 0)
+	skippedRows := make([]skipped, 0)
+	for _, id := range in.IDs {
+		for _, tag := range in.Tags {
+			ok, reason, err := b.s.removeAssetTag(ctx, id, tag, true)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				norm := tag
+				if cleaned, nerr := normalizeTag(tag); nerr == nil {
+					norm = cleaned
+				}
+				skippedRows = append(skippedRows, skipped{ID: id, Tag: norm, Reason: reason})
+				continue
+			}
+			removed = append(removed, tagDTO{NodeID: id, Tag: tag})
+		}
+	}
+	return struct {
+		Removed []tagDTO  `json:"removed"`
+		Skipped []skipped `json:"skipped"`
+	}{Removed: removed, Skipped: skippedRows}, nil
+}
+
+func (b mcpBackend) SetDescription(ctx context.Context, in mcp.SetDescriptionInput) (any, error) {
+	var input PutDescriptionInput
+	input.ID = in.ID
+	input.Body.Text = in.Text
+	input.Body.Model = in.Model
+	out, err := b.s.handlePutAssetDescription(ctx, &input)
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func checkTagBatch(in mcp.TagAssetsInput) error {
+	if len(in.IDs) < 1 || len(in.IDs) > mcp.TagBatchLimit {
+		return fmt.Errorf("ids must contain 1 to %d assets", mcp.TagBatchLimit)
+	}
+	if len(in.Tags) < 1 || len(in.Tags) > mcp.TagBatchLimit {
+		return fmt.Errorf("tags must contain 1 to %d values", mcp.TagBatchLimit)
+	}
+	return nil
+}
+
+func humaNotFound(err error) bool {
+	var model *huma.ErrorModel
+	return errors.As(err, &model) && model.Status == 404
 }
 
 func pageLimit(v, def, max int64) (int64, error) {

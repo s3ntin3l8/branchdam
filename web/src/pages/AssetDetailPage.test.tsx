@@ -11,6 +11,10 @@ vi.mock("../api/client", () => ({
   api: {
     getAsset: vi.fn(),
     getSimilarAssets: vi.fn().mockResolvedValue({ assets: [] }),
+    listAssetTags: vi.fn().mockResolvedValue({ tags: [] }),
+    listAssetAnnotations: vi.fn().mockResolvedValue({ annotations: [] }),
+    addAssetTag: vi.fn(),
+    deleteAssetTag: vi.fn(),
     getAssetLineage: vi.fn(),
     getAssetSyncStatus: vi.fn().mockResolvedValue({ sync: [] }),
     retrySync: vi.fn(),
