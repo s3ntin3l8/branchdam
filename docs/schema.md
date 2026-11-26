@@ -313,9 +313,12 @@ default remains `id DESC`.
 person or an assistant wrote. They are not `node_metadata`. A tag is
 trimmed and lowercased, 1 to 64 characters, and unique per node.
 `source` is `user` or `assistant`. A node has at most one `description`
-per source. Both feed the `meta` column of `media_nodes_fts`, so `q`
-matches them. `GET /api/v1/assets?tag=` is an exact tag filter on top
-of the other list filters. `POST /api/v1/tags/revert` deletes assistant
+per source. A person re-adding an assistant tag takes that row
+(`source` becomes `user`). Both feed the `meta` column of
+`media_nodes_fts`, so `q` matches them. `GET /api/v1/assets?tag=` is
+an exact tag filter on top of the other list filters.
+`GET /api/v1/tags` counts tags on live nodes only (not archived,
+trashed, or superseded). `POST /api/v1/tags/revert` deletes assistant
 rows (optional `patId` and `since`) and is admin-only.
 
 ### Similar assets

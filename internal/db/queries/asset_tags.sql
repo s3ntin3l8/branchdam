@@ -17,11 +17,24 @@ RETURNING id, node_id, tag, source, created_by_user_id, pat_id, created_at;
 -- name: DeleteAssetTag :execrows
 DELETE FROM asset_tags WHERE node_id = ?1 AND tag = ?2;
 
+-- name: ClaimAssetTag :one
+-- A person re-adding an assistant tag takes the row. source becomes
+-- user and pat_id is cleared so a later revert cannot delete it.
+UPDATE asset_tags
+SET source = 'user', created_by_user_id = ?3, pat_id = NULL
+WHERE node_id = ?1 AND tag = ?2 AND source = 'assistant'
+RETURNING id, node_id, tag, source, created_by_user_id, pat_id, created_at;
+
 -- name: ListTagCounts :many
-SELECT tag, COUNT(*) AS count
-FROM asset_tags
-GROUP BY tag
-ORDER BY tag ASC;
+-- Same live-node predicate as ListMediaNodes: not archived, not
+-- trashed, not superseded.
+SELECT t.tag, COUNT(*) AS count
+FROM asset_tags t
+JOIN media_nodes n ON n.id = t.node_id
+WHERE n.lifecycle_state NOT IN ('ARCHIVED', 'TRASHED')
+  AND n.superseded_by IS NULL
+GROUP BY t.tag
+ORDER BY t.tag ASC;
 
 -- name: DeleteAssistantTags :execrows
 DELETE FROM asset_tags

@@ -29,6 +29,7 @@ CREATE TABLE asset_annotations (
 -- One description per node and source. Notes are not unique.
 CREATE UNIQUE INDEX ux_asset_annotations_description
     ON asset_annotations (node_id, source) WHERE kind = 'description';
+CREATE INDEX idx_asset_annotations_node ON asset_annotations (node_id);
 CREATE INDEX idx_asset_annotations_revert ON asset_annotations (source, pat_id, created_at);
 
 -- The search view gains tags and annotation text. Triggers that read

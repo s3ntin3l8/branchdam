@@ -252,10 +252,20 @@ func (s *Server) handleAddAssetTag(ctx context.Context, in *AddAssetTagInput) (*
 		return nil, err
 	}
 	var row sqlcgen.AssetTag
-	inserted := false
+	action := ""
 	err = s.db.InTx(ctx, func(q *sqlcgen.Queries) error {
 		existing, err := q.GetAssetTag(ctx, sqlcgen.GetAssetTagParams{NodeID: in.ID, Tag: tag})
 		if err == nil {
+			if existing.Source == "assistant" && actor.Source == "user" {
+				row, err = q.ClaimAssetTag(ctx, sqlcgen.ClaimAssetTagParams{
+					NodeID: in.ID, Tag: tag, CreatedByUserID: actor.UserID,
+				})
+				if err != nil {
+					return err
+				}
+				action = "claim"
+				return nil
+			}
 			row = existing
 			return nil
 		}
@@ -273,16 +283,18 @@ func (s *Server) handleAddAssetTag(ctx context.Context, in *AddAssetTagInput) (*
 			}
 			return err
 		}
-		inserted = true
+		action = "insert"
 		return nil
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("add tag", err)
 	}
-	if inserted {
-		if err := s.writeEnrichmentAudit(ctx, audit.EventTagAdded, in.ID, map[string]any{
-			"tag": tag, "source": row.Source,
-		}); err != nil {
+	if action != "" {
+		details := map[string]any{"tag": tag, "source": row.Source}
+		if action == "claim" {
+			details["promoted"] = true
+		}
+		if err := s.writeEnrichmentAudit(ctx, audit.EventTagAdded, in.ID, details); err != nil {
 			return nil, err
 		}
 	}
@@ -507,5 +519,5 @@ func (s *Server) writeEnrichmentAudit(ctx context.Context, event string, nodeID 
 
 func isUniqueViolation(err error) bool {
 	var se sqlite3.Error
-	return errors.As(err, &se) && (se.ExtendedCode == sqlite3.ErrConstraintUnique || se.Code == sqlite3.ErrConstraint)
+	return errors.As(err, &se) && se.ExtendedCode == sqlite3.ErrConstraintUnique
 }

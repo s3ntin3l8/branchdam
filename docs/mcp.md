@@ -325,7 +325,9 @@ REST for tags and descriptions is in place. MCP tools and the web UI
 - **Who wrote it:** `source` is derived on the server. An MCP-only PAT
   or an OAuth access token is `assistant`. A browser session, and any
   other credential, is `user`. A `source` field on the request body is
-  ignored.
+  ignored. A person re-adding an assistant tag takes the row
+  (`source` becomes `user`, `pat_id` cleared) so revert cannot delete
+  it. An assistant re-adding a user tag leaves the row alone.
 - **Auth:** any authenticated user may read and write tags and
   descriptions, including a non-admin session and a non-admin
   `mcp:enrich` token. Those routes skip `RequireAdmin`. Revert does
@@ -333,7 +335,8 @@ REST for tags and descriptions is in place. MCP tools and the web UI
 - **API:**
   - `GET` and `POST /api/v1/assets/{id}/tags`, `DELETE .../tags/{tag}`
   - `GET /api/v1/assets/{id}/annotations`, `PUT .../annotations/description`
-  - `GET /api/v1/tags` lists tags with counts
+  - `GET /api/v1/tags` lists tags with counts for live nodes only
+    (not archived, trashed, or superseded)
   - `POST /api/v1/tags/revert` with `{source: "assistant", patId?, since?}`
     removes assistant tags and annotations. Admins only. `patId` and
     `since` (unix seconds) narrow the delete.

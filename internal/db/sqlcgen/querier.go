@@ -35,6 +35,9 @@ type Querier interface {
 	// Phase 1 (#32): a WATCH job torn down by a clean shutdown ends CANCELLED,
 	// not FAILED -- only a watcher that died on its own is a failure.
 	CancelScanJob(ctx context.Context, id int64) error
+	// A person re-adding an assistant tag takes the row. source becomes
+	// user and pat_id is cleared so a later revert cannot delete it.
+	ClaimAssetTag(ctx context.Context, arg ClaimAssetTagParams) (AssetTag, error)
 	ClearMFAPendingSecret(ctx context.Context, id int64) error
 	// The counterpart of UpdateMediaNodeFullHash, which cannot express the
 	// clearing case: it always writes a hash and always sets
@@ -895,6 +898,8 @@ type Querier interface {
 	ListResolveTimelineScopes(ctx context.Context, arg ListResolveTimelineScopesParams) ([]int64, error)
 	ListScanJobsFiltered(ctx context.Context, arg ListScanJobsFilteredParams) ([]ScanJob, error)
 	ListStorageLocations(ctx context.Context) ([]StorageLocation, error)
+	// Same live-node predicate as ListMediaNodes: not archived, not
+	// trashed, not superseded.
 	ListTagCounts(ctx context.Context) ([]ListTagCountsRow, error)
 	// Tier-3 spatial-temporal resolver candidate lookup: live nodes sharing
 	// camera_serial with captured_at_unix within +/-2 seconds of a target timestamp,

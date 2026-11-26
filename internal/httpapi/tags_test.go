@@ -30,7 +30,7 @@ func TestAssetTagsAndAnnotations(t *testing.T) {
 	readToken, _, err := patSvc.Mint(ctx, bobID, "read", []string{"mcp:read"}, 0)
 	require.NoError(t, err)
 
-	var nodeID int64
+	var nodeID, locID int64
 	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
 		loc, err := q.CreateStorageLocation(ctx, sqlcgen.CreateStorageLocationParams{
 			Name: "tags", RootPath: t.TempDir(), Tier: "TIER2_EXPORTS",
@@ -38,6 +38,7 @@ func TestAssetTagsAndAnnotations(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		locID = loc.ID
 		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
 			NodeUuid: "0198dddd-0000-7000-8000-000000000001", StorageLocationID: loc.ID,
 			FilePath: "/archive/plain.jpg", FileName: "plain.jpg", FileExt: "jpg",
@@ -114,6 +115,19 @@ func TestAssetTagsAndAnnotations(t *testing.T) {
 	handler.ServeHTTP(rr, otherAdd)
 	require.Equal(t, http.StatusOK, rr.Code, "other pat tag body: %s", rr.Body.String())
 
+	sharedAdd := bearerJSON(http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/tags", nodeID), enrichToken, `{"tag":"shared"}`)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, sharedAdd)
+	require.Equal(t, http.StatusOK, rr.Code, "shared tag body: %s", rr.Body.String())
+	claim := withSessionCookie(http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/tags", nodeID), userCookie, []byte(`{"tag":"shared"}`))
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, claim)
+	require.Equal(t, http.StatusOK, rr.Code, "claim tag body: %s", rr.Body.String())
+	var claimed tagDTO
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &claimed))
+	assert.Equal(t, "user", claimed.Source, "a person re-adding an assistant tag takes the row")
+	assert.Nil(t, claimed.PatID)
+
 	readPost := bearerJSON(http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/tags", nodeID), readToken, `{"tag":"nope"}`)
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, readPost)
@@ -144,7 +158,7 @@ func TestAssetTagsAndAnnotations(t *testing.T) {
 	for _, tag := range left.Tags {
 		names[tag.Tag] = tag.Source
 	}
-	assert.Equal(t, map[string]string{"zebrastripe": "user", "otherassistant": "assistant"}, names)
+	assert.Equal(t, map[string]string{"zebrastripe": "user", "otherassistant": "assistant", "shared": "user"}, names)
 
 	ann := getJSON[struct {
 		Annotations []annotationDTO `json:"annotations"`
@@ -175,8 +189,32 @@ func TestAssetTagsAndAnnotations(t *testing.T) {
 			patAdds++
 		}
 	}
-	assert.Equal(t, 1, localAdds)
-	assert.Equal(t, 1, patAdds)
+	assert.Equal(t, 2, localAdds)
+	assert.Equal(t, 2, patAdds)
+
+	var archivedID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "0198dddd-0000-7000-8000-000000000002", StorageLocationID: locID,
+			FilePath: "/archive/gone.jpg", FileName: "gone.jpg", FileExt: "jpg",
+			IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		archivedID = node.ID
+		return nil
+	})
+	require.NoError(t, err)
+	archivedAdd := withSessionCookie(http.MethodPost, fmt.Sprintf("/api/v1/assets/%d/tags", archivedID), userCookie,
+		[]byte(`{"tag":"archivedonly"}`))
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, archivedAdd)
+	require.Equal(t, http.StatusOK, rr.Code, "archived tag body: %s", rr.Body.String())
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		return q.ArchiveMediaNode(ctx, archivedID)
+	})
+	require.NoError(t, err)
 
 	counts := getJSON[struct {
 		Tags []struct {
@@ -184,7 +222,15 @@ func TestAssetTagsAndAnnotations(t *testing.T) {
 			Count int64  `json:"count"`
 		} `json:"tags"`
 	}](t, handler, withSessionCookie(http.MethodGet, "/api/v1/tags", adminCookie, nil))
-	assert.Len(t, counts.Tags, 2)
+	countNames := map[string]int64{}
+	for _, tag := range counts.Tags {
+		countNames[tag.Tag] = tag.Count
+	}
+	assert.Equal(t, map[string]int64{"zebrastripe": 1, "otherassistant": 1, "shared": 1}, countNames)
+	hidden := getJSON[struct {
+		Total int64 `json:"total"`
+	}](t, handler, withSessionCookie(http.MethodGet, "/api/v1/assets?tag=archivedonly", adminCookie, nil))
+	assert.Equal(t, int64(0), hidden.Total)
 
 	del := withSessionCookie(http.MethodDelete, fmt.Sprintf("/api/v1/assets/%d/tags/zebrastripe", nodeID), userCookie, nil)
 	rr = httptest.NewRecorder()
