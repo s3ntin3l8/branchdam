@@ -313,7 +313,7 @@ type DeleteAssetTagOutput struct {
 }
 
 func (s *Server) handleDeleteAssetTag(ctx context.Context, in *DeleteAssetTagInput) (*DeleteAssetTagOutput, error) {
-	removed, _, err := s.removeAssetTag(ctx, in.ID, in.Tag, false)
+	removed, _, _, err := s.removeAssetTag(ctx, in.ID, in.Tag, false)
 	if err != nil {
 		return nil, err
 	}
@@ -325,19 +325,19 @@ func (s *Server) handleDeleteAssetTag(ctx context.Context, in *DeleteAssetTagInp
 	}{OK: true}}, nil
 }
 
-// removeAssetTag deletes one tag. assistantOnly leaves a user tag in
-// place and reports reason "not_assistant". A missing tag reports
-// "missing" and removed=false. The caller turns that into a 404.
-func (s *Server) removeAssetTag(ctx context.Context, id int64, raw string, assistantOnly bool) (bool, string, error) {
+// removeAssetTag deletes one tag. The returned tag is the normalised
+// form. assistantOnly leaves a user tag in place and reports reason
+// "not_assistant". A missing tag reports "missing" and removed=false.
+func (s *Server) removeAssetTag(ctx context.Context, id int64, raw string, assistantOnly bool) (bool, string, string, error) {
 	tag, err := normalizeTag(raw)
 	if err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
 	if err := s.enrichmentNode(ctx, id); err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
 	if _, err := s.enrichmentActor(ctx); err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
 	var removed bool
 	reason := "missing"
@@ -364,15 +364,15 @@ func (s *Server) removeAssetTag(ctx context.Context, id int64, raw string, assis
 		return nil
 	})
 	if err != nil {
-		return false, "", huma.Error500InternalServerError("delete tag", err)
+		return false, "", "", huma.Error500InternalServerError("delete tag", err)
 	}
 	if !removed {
-		return false, reason, nil
+		return false, tag, reason, nil
 	}
 	if err := s.writeEnrichmentAudit(ctx, audit.EventTagRemoved, id, map[string]any{"tag": tag}); err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
-	return true, "", nil
+	return true, tag, "", nil
 }
 
 type ListAnnotationsOutput struct {
@@ -536,15 +536,17 @@ func (s *Server) handleRevertAssistantTags(ctx context.Context, in *RevertAssist
 }
 
 func (s *Server) writeEnrichmentAudit(ctx context.Context, event string, nodeID int64, details map[string]any) error {
-	if s.audit == nil {
-		return nil
+	if s.audit != nil {
+		resourceID := ""
+		if nodeID != 0 {
+			resourceID = strconv.FormatInt(nodeID, 10)
+		}
+		if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), event, "asset", resourceID, details); err != nil {
+			return huma.Error500InternalServerError("write audit", err)
+		}
 	}
-	resourceID := ""
-	if nodeID != 0 {
-		resourceID = strconv.FormatInt(nodeID, 10)
-	}
-	if err := s.audit.WriteActorAudit(ctx, principalFromCtx(ctx), event, "asset", resourceID, details); err != nil {
-		return huma.Error500InternalServerError("write audit", err)
+	if s.hub != nil {
+		s.hub.Broadcast()
 	}
 	return nil
 }

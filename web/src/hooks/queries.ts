@@ -7,7 +7,7 @@ import { ApiError, api } from "../api/client";
 // NOT also cover these. Shared between invalidateEdgeReviewQueries below
 // (the mutation-triggered path) and useEventStream's SSE-nudge path so the
 // two invalidation lists can't drift apart the way they did before #153.
-export const ASSET_DETAIL_QUERY_KEYS = ["asset", "asset-lineage", "asset-graph", "asset-similar"] as const;
+export const ASSET_DETAIL_QUERY_KEYS = ["asset", "asset-lineage", "asset-graph", "asset-similar", "asset-tags", "asset-annotations"] as const;
 
 export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: api.me });

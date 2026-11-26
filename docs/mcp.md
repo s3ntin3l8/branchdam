@@ -189,7 +189,7 @@ The protocol is the [Model Context Protocol](https://modelcontextprotocol.io)
 
 ### Enrichment tools (`mcp:enrich`)
 
-`mcp:read` does not satisfy these. `list_tags` is a read tool (`mcp:read`). `tag_assets` and `untag_assets` take at most 100 ids and 100 tags. They call the same functions as the REST routes. `source` is still derived on the server, so these writes are `assistant`. `untag_assets` removes only `source=assistant` tags; a user tag is reported as skipped.
+`mcp:read` does not satisfy these. `list_tags` is a read tool (`mcp:read`); `mcp:enrich` alone cannot call it, even though `GET /api/v1/tags` accepts either. `tag_assets` and `untag_assets` take at most 100 ids, 100 tags and 1000 id-tag pairs. Duplicate ids and tags are collapsed first. Every id is checked before any write, so a missing or archived asset fails the call with nothing committed. They call the same functions as the REST routes. `source` is still derived on the server, so these writes are `assistant`. `untag_assets` removes only `source=assistant` tags; a user tag is reported as skipped. The removed and skipped tags are the normalised form.
 
 | Tool | Arguments | Effect |
 |---|---|---|
@@ -361,7 +361,7 @@ call a model itself.
 - **MCP tools:** `tag_assets`, `untag_assets` and `set_description`
   (`mcp:enrich`); `list_tags` (`mcp:read`). `get_asset` includes tags
   and annotations. `untag_assets` cannot remove a user tag. At most
-  100 ids per call. The prompt is `describe-assets`.
+  100 ids, 100 tags and 1000 id-tag pairs per call. The prompt is `describe-assets`.
 - **Web:** asset detail shows tags and the description, with an AI
   badge when `source` is `assistant`. Users add and remove tags. Admins
   revert assistant tags from settings. The asset list has a tag chip.

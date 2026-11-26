@@ -43,6 +43,16 @@ describe("AssetTagsPanel", () => {
           createdAt: 1,
           updatedAt: 1,
         },
+        {
+          id: 5,
+          nodeId: 7,
+          kind: "description",
+          text: "my note",
+          source: "user",
+          createdByUserId: 3,
+          createdAt: 2,
+          updatedAt: 2,
+        },
       ],
     });
     vi.mocked(api.addAssetTag).mockResolvedValue({
@@ -53,6 +63,7 @@ describe("AssetTagsPanel", () => {
     renderPanel();
     expect(await screen.findByText("night")).toBeInTheDocument();
     expect(screen.getByText("a dark pier")).toBeInTheDocument();
+    expect(screen.getByText("my note")).toBeInTheDocument();
     expect(screen.getAllByText("AI")).toHaveLength(2);
 
     await userEvent.type(screen.getByLabelText("Add tag"), "dawn");

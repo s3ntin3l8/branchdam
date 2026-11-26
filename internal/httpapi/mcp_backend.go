@@ -272,12 +272,13 @@ func (b mcpBackend) ListTags(ctx context.Context) (any, error) {
 }
 
 func (b mcpBackend) TagAssets(ctx context.Context, in mcp.TagAssetsInput) (any, error) {
-	if err := checkTagBatch(in); err != nil {
+	ids, tags, err := prepareTagBatch(ctx, b.s, in)
+	if err != nil {
 		return nil, err
 	}
-	tagged := make([]tagDTO, 0, len(in.IDs)*len(in.Tags))
-	for _, id := range in.IDs {
-		for _, tag := range in.Tags {
+	tagged := make([]tagDTO, 0, len(ids)*len(tags))
+	for _, id := range ids {
+		for _, tag := range tags {
 			var input AddAssetTagInput
 			input.ID = id
 			input.Body.Tag = tag
@@ -294,7 +295,8 @@ func (b mcpBackend) TagAssets(ctx context.Context, in mcp.TagAssetsInput) (any, 
 }
 
 func (b mcpBackend) UntagAssets(ctx context.Context, in mcp.TagAssetsInput) (any, error) {
-	if err := checkTagBatch(in); err != nil {
+	ids, tags, err := prepareTagBatch(ctx, b.s, in)
+	if err != nil {
 		return nil, err
 	}
 	type skipped struct {
@@ -304,21 +306,17 @@ func (b mcpBackend) UntagAssets(ctx context.Context, in mcp.TagAssetsInput) (any
 	}
 	removed := make([]tagDTO, 0)
 	skippedRows := make([]skipped, 0)
-	for _, id := range in.IDs {
-		for _, tag := range in.Tags {
-			ok, reason, err := b.s.removeAssetTag(ctx, id, tag, true)
+	for _, id := range ids {
+		for _, tag := range tags {
+			ok, norm, reason, err := b.s.removeAssetTag(ctx, id, tag, true)
 			if err != nil {
 				return nil, err
 			}
 			if !ok {
-				norm := tag
-				if cleaned, nerr := normalizeTag(tag); nerr == nil {
-					norm = cleaned
-				}
 				skippedRows = append(skippedRows, skipped{ID: id, Tag: norm, Reason: reason})
 				continue
 			}
-			removed = append(removed, tagDTO{NodeID: id, Tag: tag})
+			removed = append(removed, tagDTO{NodeID: id, Tag: norm})
 		}
 	}
 	return struct {
@@ -339,14 +337,60 @@ func (b mcpBackend) SetDescription(ctx context.Context, in mcp.SetDescriptionInp
 	return out.Body, nil
 }
 
-func checkTagBatch(in mcp.TagAssetsInput) error {
-	if len(in.IDs) < 1 || len(in.IDs) > mcp.TagBatchLimit {
-		return fmt.Errorf("ids must contain 1 to %d assets", mcp.TagBatchLimit)
+// prepareTagBatch dedupes, then rejects an axis over TagBatchLimit or a
+// product over TagPairLimit, then checks every id. A missing or archived
+// asset fails the call before any write.
+func prepareTagBatch(ctx context.Context, s *Server, in mcp.TagAssetsInput) ([]int64, []string, error) {
+	ids := uniqueInt64(in.IDs)
+	tags, err := uniqueTags(in.Tags)
+	if err != nil {
+		return nil, nil, err
 	}
-	if len(in.Tags) < 1 || len(in.Tags) > mcp.TagBatchLimit {
-		return fmt.Errorf("tags must contain 1 to %d values", mcp.TagBatchLimit)
+	if len(ids) < 1 || len(ids) > mcp.TagBatchLimit {
+		return nil, nil, fmt.Errorf("ids must contain 1 to %d assets", mcp.TagBatchLimit)
 	}
-	return nil
+	if len(tags) < 1 || len(tags) > mcp.TagBatchLimit {
+		return nil, nil, fmt.Errorf("tags must contain 1 to %d values", mcp.TagBatchLimit)
+	}
+	if len(ids)*len(tags) > mcp.TagPairLimit {
+		return nil, nil, fmt.Errorf("ids and tags together must be at most %d pairs", mcp.TagPairLimit)
+	}
+	for _, id := range ids {
+		if err := s.enrichmentNode(ctx, id); err != nil {
+			return nil, nil, err
+		}
+	}
+	return ids, tags, nil
+}
+
+func uniqueInt64(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func uniqueTags(raw []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, tag := range raw {
+		norm, err := normalizeTag(tag)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	return out, nil
 }
 
 func humaNotFound(err error) bool {

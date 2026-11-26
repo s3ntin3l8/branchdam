@@ -101,8 +101,60 @@ func TestMCPTagTools(t *testing.T) {
 
 	ids := make([]any, 101)
 	for i := range ids {
-		ids[i] = nodeID
+		ids[i] = int64(i + 1)
 	}
 	tooMany := callMCP(t, enrich, "tag_assets", map[string]any{"ids": ids, "tags": []any{"x"}})
 	assert.True(t, tooMany.IsError, mcpText(tooMany))
+
+	pairIDs := make([]any, 11)
+	pairTags := make([]any, 100)
+	for i := range pairIDs {
+		pairIDs[i] = int64(i + 1)
+	}
+	for i := range pairTags {
+		pairTags[i] = fmt.Sprintf("t%d", i)
+	}
+	tooManyPairs := callMCP(t, enrich, "tag_assets", map[string]any{"ids": pairIDs, "tags": pairTags})
+	assert.True(t, tooManyPairs.IsError, mcpText(tooManyPairs))
+	assert.Contains(t, mcpText(tooManyPairs), "1000")
+
+	live, err := database.Reader.GetMediaNodeByID(ctx, nodeID)
+	require.NoError(t, err)
+	var archivedID int64
+	err = database.InTx(ctx, func(q *sqlcgen.Queries) error {
+		node, err := q.InsertMediaNode(ctx, sqlcgen.InsertMediaNodeParams{
+			NodeUuid: "0198eeee-0000-7000-8000-000000000002", StorageLocationID: live.StorageLocationID,
+			FilePath: "/archive/old.jpg", FileName: "old.jpg", FileExt: "jpg",
+			IndexingStatus: "INDEXED_FULL", GraphStatus: "UNLINKED", LifecycleState: "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		archivedID = node.ID
+		return q.ArchiveMediaNode(ctx, node.ID)
+	})
+	require.NoError(t, err)
+
+	mixed := callMCP(t, enrich, "tag_assets", map[string]any{
+		"ids": []any{nodeID, archivedID}, "tags": []any{"beacon"},
+	})
+	assert.True(t, mixed.IsError, mcpText(mixed))
+	after := callMCP(t, read, "get_asset", map[string]any{"id": nodeID})
+	require.False(t, after.IsError, mcpText(after))
+	afterTags := structuredMap(t, after)["tags"].([]any)
+	require.Len(t, afterTags, 1)
+	assert.Equal(t, "kept", afterTags[0].(map[string]any)["tag"])
+
+	cased := callMCP(t, enrich, "tag_assets", map[string]any{"ids": []any{nodeID}, "tags": []any{" Night "}})
+	require.False(t, cased.IsError, mcpText(cased))
+	casedRows := structuredSlice(t, cased, "tags")
+	require.Len(t, casedRows, 1)
+	assert.Equal(t, "night", casedRows[0]["tag"])
+	untagCased := callMCP(t, enrich, "untag_assets", map[string]any{
+		"ids": []any{nodeID}, "tags": []any{" NIGHT "},
+	})
+	require.False(t, untagCased.IsError, mcpText(untagCased))
+	untagRows := structuredSlice(t, untagCased, "removed")
+	require.Len(t, untagRows, 1)
+	assert.Equal(t, "night", untagRows[0]["tag"])
 }

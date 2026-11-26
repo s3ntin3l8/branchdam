@@ -18,7 +18,7 @@ export default function AssetTagsPanel({ assetId }: { assetId: number }) {
   const removeTag = useDeleteAssetTag(assetId);
   const [draft, setDraft] = useState("");
 
-  const description = notes?.annotations.find((row) => row.kind === "description");
+  const descriptions = (notes?.annotations ?? []).filter((row) => row.kind === "description");
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -35,11 +35,15 @@ export default function AssetTagsPanel({ assetId }: { assetId: number }) {
           <p className="text-sm text-neutral-500">Loading description…</p>
         ) : notesError ? (
           <p className="text-sm text-red-400">Failed to load the description.</p>
-        ) : description ? (
-          <p className="flex flex-wrap items-center gap-2 text-sm text-neutral-200">
-            <span>{description.text}</span>
-            <SourceBadge source={description.source} />
-          </p>
+        ) : descriptions.length > 0 ? (
+          <ul className="space-y-2" aria-label="Asset descriptions">
+            {descriptions.map((row) => (
+              <li key={row.id} className="flex flex-wrap items-center gap-2 text-sm text-neutral-200">
+                <span>{row.text}</span>
+                <SourceBadge source={row.source} />
+              </li>
+            ))}
+          </ul>
         ) : (
           <p className="text-sm text-neutral-500">No description.</p>
         )}
@@ -59,8 +63,9 @@ export default function AssetTagsPanel({ assetId }: { assetId: number }) {
                 <button
                   type="button"
                   aria-label={`Remove tag ${row.tag}`}
+                  disabled={removeTag.isPending}
                   onClick={() => removeTag.mutate(row.tag)}
-                  className="text-neutral-500 hover:text-neutral-200"
+                  className="text-neutral-500 hover:text-neutral-200 disabled:opacity-50"
                 >
                   ×
                 </button>
@@ -89,6 +94,7 @@ export default function AssetTagsPanel({ assetId }: { assetId: number }) {
           </button>
         </form>
         {addTag.isError && <p className="mt-1 text-xs text-red-400">Could not add that tag.</p>}
+        {removeTag.isError && <p className="mt-1 text-xs text-red-400">Could not remove that tag.</p>}
       </div>
     </section>
   );

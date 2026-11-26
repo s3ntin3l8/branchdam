@@ -37,8 +37,12 @@ var errForbiddenReview = errors.New("forbidden: mcp:review scope required")
 var errForbiddenEnrich = errors.New("forbidden: mcp:enrich scope required")
 
 // TagBatchLimit is the maximum ids (and tags) on one tag_assets or
-// untag_assets call.
-const TagBatchLimit = 100
+// untag_assets call. TagPairLimit caps the product so one call cannot
+// open thousands of write transactions.
+const (
+	TagBatchLimit = 100
+	TagPairLimit  = 1000
+)
 
 // SearchAssetsInput mirrors ListAssetsInput. Zero Limit and Offset
 // mean the HTTP defaults (50 and 0). Zero UploadedByUserID and

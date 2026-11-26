@@ -290,7 +290,7 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 			return textResult(countSummary(body, "tags", "tag", "tags", "list_tags")), body, nil
 		})
 
-	sdkmcp.AddTool(s, writeTool("tag_assets", "Add tags to assets. At most 100 ids and 100 tags. source is assistant. A tag a person already owns is left unchanged."),
+	sdkmcp.AddTool(s, writeTool("tag_assets", "Add tags to assets. At most 100 ids, 100 tags and 1000 id-tag pairs. source is assistant. A tag a person already owns is left unchanged."),
 		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in TagAssetsInput) (*sdkmcp.CallToolResult, any, error) {
 			if err := requireEnrich(ctx); err != nil {
 				return nil, nil, err
@@ -302,7 +302,7 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 			return textResult(countSummary(body, "tags", "tag", "tags", "tag_assets")), body, nil
 		})
 
-	sdkmcp.AddTool(s, writeTool("untag_assets", "Remove assistant tags from assets. At most 100 ids and 100 tags. A user tag is not removed."),
+	sdkmcp.AddTool(s, writeTool("untag_assets", "Remove assistant tags from assets. At most 100 ids, 100 tags and 1000 id-tag pairs. A user tag is not removed."),
 		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in TagAssetsInput) (*sdkmcp.CallToolResult, any, error) {
 			if err := requireEnrich(ctx); err != nil {
 				return nil, nil, err
@@ -311,7 +311,9 @@ func registerTools(s *sdkmcp.Server, b Backend) {
 			if err != nil {
 				return nil, nil, err
 			}
-			return textResult(countSummary(body, "removed", "tag", "tags", "untag_assets")), body, nil
+			removed, _ := sliceLen(body, "removed")
+			skipped, _ := sliceLen(body, "skipped")
+			return textResult(counted(removed, "tag", "tags") + " removed, " + counted(skipped, "tag", "tags") + " skipped"), body, nil
 		})
 
 	sdkmcp.AddTool(s, writeTool("set_description", "Set the assistant description on one asset. Replaces the previous assistant description. A user description is left unchanged."),
