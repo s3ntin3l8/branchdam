@@ -83,10 +83,10 @@ services:
       # browser catch-all (10). Path(`/mcp`) || PathPrefix(`/mcp/`)
       # matches the mounted routes and does not also match a
       # different path that merely begins with the letters mcp.
-      # The well-known prefix is OAuth protected-resource metadata.
-      # It has no credential, so it must not hit the Authentik
-      # catch-all or discovery becomes a login redirect.
-      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.example.com`) && (Path(`/mcp`) || PathPrefix(`/mcp/`) || PathPrefix(`/.well-known/oauth-protected-resource`))"
+      # Discovery is the exact well-known paths only (root and the
+      # RFC 9728 path for /mcp), not a prefix, so it stays off Authentik
+      # without exposing every other path under that prefix.
+      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.example.com`) && (Path(`/mcp`) || PathPrefix(`/mcp/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp/`))"
       traefik.http.routers.branchdam-mcp.entrypoints: "websecure"
       traefik.http.routers.branchdam-mcp.tls: "true"
       traefik.http.routers.branchdam-mcp.priority: "150"

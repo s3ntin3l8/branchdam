@@ -30,7 +30,12 @@ var oauthAllowedAlgs = []jose.SignatureAlgorithm{
 }
 
 const (
-	oauthKeyTTL    = 5 * time.Minute
+	oauthKeyTTL          = 5 * time.Minute
+	oauthRefreshCooldown = 30 * time.Second
+	// oauthKeyStale is how long a previously fetched key set may still
+	// verify tokens when the issuer cannot be reached. A successful
+	// refresh drops a removed key immediately. A failed refresh does
+	// not, for at most this long.
 	oauthKeyStale  = time.Hour
 	oauthBodyLimit = 1 << 20
 )
@@ -61,9 +66,11 @@ type OAuthValidator struct {
 	scopeClaims map[string]map[string][]string
 	client      *http.Client
 
-	mu     sync.Mutex
-	keys   jose.JSONWebKeySet
-	keysAt time.Time
+	mu        sync.Mutex
+	fetchWait *sync.Cond
+	fetching  bool
+	keys      jose.JSONWebKeySet
+	keysAt    time.Time
 }
 
 // NewOAuthValidator rejects an issuer or audience that is not an
@@ -80,13 +87,23 @@ func NewOAuthValidator(issuer, audience string, scopeClaims map[string]map[strin
 	if err != nil || !httpURL(iss) {
 		return nil, errors.New("oauth: issuer must be an absolute http(s) url")
 	}
-	return &OAuthValidator{
+	v := &OAuthValidator{
 		issuer:      issuer,
 		audience:    audience,
 		metadataURL: meta,
 		scopeClaims: scopeClaims,
-		client:      &http.Client{Timeout: 5 * time.Second},
-	}, nil
+		client: &http.Client{
+			Timeout: 5 * time.Second,
+			// A redirect would let the issuer point sameHost at itself
+			// and then hop to an attacker's key set. Discovery and JWKS
+			// are fetched only at the URLs we already checked.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("oauth: redirects are not followed")
+			},
+		},
+	}
+	v.fetchWait = sync.NewCond(&v.mu)
+	return v, nil
 }
 
 func (v *OAuthValidator) Issuer() string      { return v.issuer }
@@ -134,7 +151,7 @@ func (v *OAuthValidator) Validate(ctx context.Context, raw string, now time.Time
 		return OAuthIdentity{}, fmt.Errorf("oauth: parse token: %w", err)
 	}
 	ident, err := v.claims(ctx, tok, false)
-	if err != nil {
+	if err != nil && errors.Is(err, jose.ErrJWKSKidNotFound) {
 		ident, err = v.claims(ctx, tok, true)
 	}
 	if err != nil {
@@ -176,21 +193,51 @@ func (v *OAuthValidator) claims(ctx context.Context, tok *jwt.JSONWebToken, forc
 
 func (v *OAuthValidator) keySet(ctx context.Context, force bool) (jose.JSONWebKeySet, error) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	fresh := !v.keysAt.IsZero() && time.Since(v.keysAt) < oauthKeyTTL
-	if !force && fresh {
-		return v.keys, nil
-	}
-	set, err := v.fetchKeys(ctx)
-	if err != nil {
-		if !v.keysAt.IsZero() && time.Since(v.keysAt) < oauthKeyStale {
-			return v.keys, nil
+	for {
+		age := time.Duration(0)
+		if !v.keysAt.IsZero() {
+			age = clock.Real().Sub(v.keysAt)
 		}
-		return jose.JSONWebKeySet{}, err
+		fresh := !v.keysAt.IsZero() && age < oauthKeyTTL
+		if !force && fresh {
+			set := v.keys
+			v.mu.Unlock()
+			return set, nil
+		}
+		// An unknown kid may refresh, but not more than once per cooldown,
+		// and never for a bad signature. The HTTP fetch is not under mu.
+		if force && !v.keysAt.IsZero() && age < oauthRefreshCooldown {
+			set := v.keys
+			v.mu.Unlock()
+			return set, nil
+		}
+		if v.fetching {
+			v.fetchWait.Wait()
+			force = false
+			continue
+		}
+		v.fetching = true
+		v.mu.Unlock()
+		set, err := v.fetchKeys(ctx)
+		v.mu.Lock()
+		v.fetching = false
+		if err != nil {
+			staleOK := !v.keysAt.IsZero() && clock.Real().Sub(v.keysAt) < oauthKeyStale
+			v.fetchWait.Broadcast()
+			if staleOK {
+				cached := v.keys
+				v.mu.Unlock()
+				return cached, nil
+			}
+			v.mu.Unlock()
+			return jose.JSONWebKeySet{}, err
+		}
+		v.keys = set
+		v.keysAt = clock.Real()
+		v.fetchWait.Broadcast()
+		v.mu.Unlock()
+		return set, nil
 	}
-	v.keys = set
-	v.keysAt = clock.Real()
-	return v.keys, nil
 }
 
 func (v *OAuthValidator) fetchKeys(ctx context.Context) (jose.JSONWebKeySet, error) {
@@ -224,7 +271,7 @@ func sameHost(issuer, raw string) bool {
 	if errA != nil || errB != nil || !httpURL(a) || !httpURL(b) {
 		return false
 	}
-	return strings.EqualFold(a.Host, b.Host)
+	return strings.EqualFold(a.Host, b.Host) && a.Scheme == b.Scheme
 }
 
 func (v *OAuthValidator) getJSON(ctx context.Context, rawURL string, dest any) error {
@@ -233,10 +280,12 @@ func (v *OAuthValidator) getJSON(ctx context.Context, rawURL string, dest any) e
 		return err
 	}
 	resp, err := v.client.Do(req)
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 	if err != nil {
 		return fmt.Errorf("oauth: get %s: %w", rawURL, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("oauth: get %s: status %d", rawURL, resp.StatusCode)
 	}

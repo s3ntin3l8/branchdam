@@ -89,6 +89,12 @@ func TestMCPOAuthResourceServer(t *testing.T) {
 		require.Equal(t, []string{issuer}, doc.AuthorizationServers)
 		assert.NotContains(t, rr.Body.String(), "secret")
 		assert.Empty(t, rr.Header().Get("WWW-Authenticate"))
+
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &doc))
+		assert.Equal(t, audience, doc.Resource)
 	})
 
 	t.Run("missing token challenges", func(t *testing.T) {
@@ -97,6 +103,14 @@ func TestMCPOAuthResourceServer(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, rr.Code)
 		assert.Contains(t, rr.Header().Get("WWW-Authenticate"), `resource_metadata="https://dam.example.com/.well-known/oauth-protected-resource"`)
 		assert.NotContains(t, rr.Header().Get("WWW-Authenticate"), "invalid_token")
+	})
+
+	t.Run("session cookie is still 401", func(t *testing.T) {
+		cookie, _ := mintSessionForUser(t, database, srv.localAuth.users, "carol", true, "local")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, withSessionCookie(http.MethodPost, "/mcp", cookie, nil))
+		require.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+		assert.Contains(t, rr.Header().Get("WWW-Authenticate"), "resource_metadata=")
 	})
 
 	reject := func(t *testing.T, name, raw string) {
@@ -201,6 +215,19 @@ func TestMCPOAuthResourceServer(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, listed.Tools)
 	})
+}
+
+func TestMCPOAuthMetadataDisabledIs404(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/off.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+	srv := New(Deps{Config: &config.Config{}, DB: database, Hub: sse.New()})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil))
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil))
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
 }
 
 func postBearer(handler http.Handler, raw string) *httptest.ResponseRecorder {

@@ -460,15 +460,21 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST /mcp/", mcpHandler)
 		mux.Handle("DELETE /mcp", mcpHandler)
 		mux.Handle("DELETE /mcp/", mcpHandler)
-		if s.mcpOAuth != nil {
-			mux.HandleFunc("GET "+oauthProtectedResourcePath, s.handleOAuthProtectedResource)
-			mux.HandleFunc("GET "+oauthProtectedResourcePath+"/", s.handleOAuthProtectedResource)
+		metadata := s.handleOAuthProtectedResource
+		if s.mcpOAuth == nil {
+			metadata = http.NotFound
+		}
+		for _, path := range oauthMetadataPaths() {
+			mux.HandleFunc("GET "+path, metadata)
 		}
 	} else {
 		mux.HandleFunc("GET /mcp", http.NotFound)
 		mux.HandleFunc("GET /mcp/", http.NotFound)
 		mux.HandleFunc("POST /mcp", http.NotFound)
 		mux.HandleFunc("POST /mcp/", http.NotFound)
+		for _, path := range oauthMetadataPaths() {
+			mux.HandleFunc("GET "+path, http.NotFound)
+		}
 	}
 
 	var agentCfg auth.AgentConfig
@@ -722,7 +728,13 @@ func isMCPPath(path string) bool {
 }
 
 func isOAuthMetadataPath(path string) bool {
-	return path == oauthProtectedResourcePath || path == oauthProtectedResourcePath+"/"
+	switch path {
+	case oauthProtectedResourcePath, oauthProtectedResourcePath + "/",
+		oauthProtectedResourcePath + "/mcp", oauthProtectedResourcePath + "/mcp/":
+		return true
+	default:
+		return false
+	}
 }
 
 func openAPIMiddleware(exposeOpenAPI bool, allowedGroups []string, oauth *auth.OAuthValidator, log *slog.Logger, next http.Handler) http.Handler {

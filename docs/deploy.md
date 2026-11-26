@@ -48,8 +48,7 @@ bypass Authentik by design, so nothing upstream of branchDAM would otherwise str
 client-forged `X-Authentik-Username` header on that path.
 
 The MCP router is the same shape as the agent router, at priority 150, middleware
-`strip-identity` only. The rule is `Path(\`/mcp\`) || PathPrefix(\`/mcp/\`) || PathPrefix(\`/.well-known/oauth-protected-resource\`)`.
-The `/mcp` match stays exact so a different path that only begins with those letters still goes through Authentik. The well-known prefix is the OAuth discovery document, which has no credential; if it hit the browser catch-all, Authentik would answer with a login redirect and a remote connector could not start. The router does not attach `authentik`.
+`strip-identity` only. The rule is exact for `/mcp` and for the two OAuth discovery paths (`/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`, each with and without a trailing slash). It is not a prefix, so a different path that only begins with those letters still goes through Authentik. Discovery has no credential; if it hit the browser catch-all, Authentik would answer with a login redirect. The router does not attach `authentik`.
 Assistants authenticate with a bearer personal access token, or, when `mcp.oauth` is set, an OAuth access token (`mcp.enabled` must also be true; see [`configuration.md`](configuration.md)):
 
 ```sh
@@ -80,7 +79,7 @@ services:
   branchdam:
     labels:
       traefik.http.routers.branchdam-agent.rule: "Host(`dam.yourdomain.example`) && PathPrefix(`/api/v1/agent`)"
-      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.yourdomain.example`) && (Path(`/mcp`) || PathPrefix(`/mcp/`) || PathPrefix(`/.well-known/oauth-protected-resource`))"
+      traefik.http.routers.branchdam-mcp.rule: "Host(`dam.yourdomain.example`) && (Path(`/mcp`) || PathPrefix(`/mcp/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp/`))"
       traefik.http.routers.branchdam.rule: "Host(`dam.yourdomain.example`)"
       traefik.http.routers.branchdam-outpost.rule: "Host(`dam.yourdomain.example`) && PathPrefix(`/outpost.goauthentik.io/`)"
     volumes:

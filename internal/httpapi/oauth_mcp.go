@@ -15,6 +15,18 @@ import (
 
 const oauthProtectedResourcePath = "/.well-known/oauth-protected-resource"
 
+// oauthMetadataPaths are the exact documents this process serves.
+// The path-inserted form (RFC 9728) for the /mcp resource is the
+// third and fourth. Nothing else under the well-known prefix is public.
+func oauthMetadataPaths() []string {
+	return []string{
+		oauthProtectedResourcePath,
+		oauthProtectedResourcePath + "/",
+		oauthProtectedResourcePath + "/mcp",
+		oauthProtectedResourcePath + "/mcp/",
+	}
+}
+
 func (s *Server) handleOAuthProtectedResource(w http.ResponseWriter, r *http.Request) {
 	if s.mcpOAuth == nil {
 		http.NotFound(w, r)

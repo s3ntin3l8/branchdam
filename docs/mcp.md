@@ -257,11 +257,12 @@ Claude's custom-connector docs.
   mapping is ignored. `auth.HasScope` reads those grants. An audit
   row for the action has `auth_provider=oauth`.
 - **Ingress:** the `/mcp` router stays outside Authentik ForwardAuth.
-  Its rule is
-  ``Path(`/mcp`) || PathPrefix(`/mcp/`) || PathPrefix(`/.well-known/oauth-protected-resource`)``.
-  A bare `PathPrefix(`/mcp`)` would also match unrelated paths. The
-  well-known prefix is what keeps the credential-less discovery
-  request off the browser catch-all (priority 10, `authentik@file`).
+  Its rule matches `/mcp` and the exact discovery paths
+  `/.well-known/oauth-protected-resource` and
+  `/.well-known/oauth-protected-resource/mcp` (with and without a
+  trailing slash). It is not a prefix. The well-known paths are what
+  keep the credential-less discovery request off the browser
+  catch-all (priority 10, `authentik@file`).
 
 ## Phase 3: search
 
